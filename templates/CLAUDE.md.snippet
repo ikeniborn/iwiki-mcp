@@ -1,0 +1,15 @@
+## iwiki (shared wiki via MCP)
+
+This project is bound to a shared wiki base (see `.iwiki.toml`: `read` = domains to
+search, `write` = domain to author into). Use the `iwiki` MCP tools:
+
+- **Before starting a task:** call `wiki_search` with the topic to recall existing
+  knowledge (scope `project` for the read-set, `all` for the whole base).
+- **Bootstrapping a new write-target:** detect source areas (entry points; immediate
+  subdirs of `src/`/`lib/`/`app/`/`packages/`/`cmd/`/`internal/`; skip
+  `node_modules`/`dist`/`.venv`/tests). For each area, fetch `iwiki://authoring-rules`,
+  then `wiki_write_page(<write-target>, <slug>, <markdown>, source=<path>)`.
+- **After changing functionality:** update the relevant page with `wiki_write_page`.
+- **Periodically / at end of session:** call `wiki_sync` to pull/push the base.
+- Editing an existing page is guarded -- `wiki_write_page` refuses to overwrite; confirm
+  with the user and proceed deliberately.
