@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from iwiki_mcp import base
 
@@ -61,3 +63,9 @@ def test_write_project_config_roundtrip(tmp_path, monkeypatch):
     bind = base.resolve_binding(str(proj))
     assert bind.write == "x"
     assert bind.read == ("x",)
+
+
+def test_index_path_uses_jsonl_index():
+    assert base.index_path("/wiki", "backend").endswith(
+        os.path.join(".iwiki", "index.jsonl")
+    )

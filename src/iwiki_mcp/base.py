@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 class BaseError(RuntimeError):
@@ -81,7 +85,7 @@ def pages_dir(base: str, domain: str) -> str:
 
 
 def index_path(base: str, domain: str) -> str:
-    return os.path.join(domain_dir(base, domain), ".iwiki", "index.json")
+    return os.path.join(domain_dir(base, domain), ".iwiki", "index.jsonl")
 
 
 def log_path(base: str, domain: str) -> str:
