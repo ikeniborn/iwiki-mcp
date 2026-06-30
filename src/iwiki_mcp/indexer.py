@@ -63,10 +63,10 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
 
 
 def append_log(base: str, domain: str, op: str, source: str, page: str,
-               src_hash_val: str | None) -> None:
+               src_hash: str | None) -> None:
     path = log_path(base, domain)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     rec = {"op": op, "source": source, "page": page,
-           "date": _dt.date.today().isoformat(), "src_hash": src_hash_val}
+           "date": _dt.date.today().isoformat(), "src_hash": src_hash}
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")

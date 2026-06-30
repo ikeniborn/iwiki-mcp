@@ -25,7 +25,9 @@ def test_index_domain_stores_relative_paths(tmp_path, monkeypatch):
 def test_append_log_writes_record(tmp_path):
     b = tmp_path / "wiki"
     (b / "backend" / ".iwiki").mkdir(parents=True)
-    indexer.append_log(str(b), "backend", "ingest", "src/auth.py", "auth.md", "abc123")
+    indexer.append_log(
+        str(b), "backend", "ingest", "src/auth.py", "auth.md", src_hash="abc123"
+    )
     line = open(base.log_path(str(b), "backend")).read().strip()
     rec = __import__("json").loads(line)
     assert rec["op"] == "ingest" and rec["page"] == "auth.md" and rec["src_hash"] == "abc123"
