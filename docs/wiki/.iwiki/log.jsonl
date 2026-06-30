@@ -1,0 +1,7 @@
+{"op":"init","source":"src/iwiki_mcp","page":"architecture.md","date":"2026-06-30"}
+{"op":"init","source":"src/iwiki_mcp/server.py","page":"mcp-server.md","date":"2026-06-30"}
+{"op":"init","source":"src/iwiki_mcp/base.py","page":"base-binding.md","date":"2026-06-30"}
+{"op":"init","source":"src/iwiki_mcp/indexer.py","page":"indexing.md","date":"2026-06-30"}
+{"op":"init","source":"src/iwiki_mcp/retrieval.py","page":"retrieval.md","date":"2026-06-30"}
+{"op":"init","source":"src/iwiki_mcp/resources.py","page":"authoring-and-linting.md","date":"2026-06-30"}
+{"op":"init","source":"src/iwiki_mcp/sync.py","page":"git-sync.md","date":"2026-06-30"}
