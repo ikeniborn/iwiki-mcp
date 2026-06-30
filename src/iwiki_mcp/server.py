@@ -6,6 +6,7 @@ exceptions become {"error","hint"} structures.
 from __future__ import annotations
 
 import functools
+import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -205,6 +206,29 @@ def wiki_related(domain: str, section_id: str) -> dict:
 _BLOCKING = {"deep_heading", "pre_h2_text"}
 
 
+def _rollback_last_ingest_log(
+    b: str, domain: str, page: str, source: str, src_hash: str | None
+) -> None:
+    path = base.log_path(b, domain)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        if not lines:
+            return
+        rec = json.loads(lines[-1])
+        if (
+            rec.get("op") != "ingest"
+            or rec.get("page") != page
+            or rec.get("source") != source
+            or rec.get("src_hash") != src_hash
+        ):
+            return
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(lines[:-1])
+    except Exception:
+        return
+
+
 @_safe
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None
@@ -232,6 +256,9 @@ def wiki_write_page(
         }
     cfg = Config.load()
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    log_source = source or ""
+    log_src_hash = indexer.src_hash(source) if source else None
+    log_appended = False
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -240,16 +267,21 @@ def wiki_write_page(
             bind.base,
             valid_domain,
             "ingest",
-            source or "",
+            log_source,
             page_file,
-            indexer.src_hash(source) if source else None,
+            log_src_hash,
         )
+        log_appended = True
         stats = indexer.index_domain(cfg, bind.base, valid_domain)
     except Exception:
         try:
             os.remove(path)
         except OSError:
             pass
+        if log_appended:
+            _rollback_last_ingest_log(
+                bind.base, valid_domain, page_file, log_source, log_src_hash
+            )
         raise
     page_rel = f"{valid_domain}/{page_file}"
     commit = sync.auto_commit(bind.base, f"iwiki: ingest {page_rel}")

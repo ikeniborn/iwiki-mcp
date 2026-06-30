@@ -86,8 +86,13 @@ def test_write_page_removes_new_file_when_indexing_fails(tmp_path, monkeypatch):
         "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n",
     )
 
+    log_path = base.log_path(b, "backend")
+    log_text = (
+        open(log_path, encoding="utf-8").read() if os.path.exists(log_path) else ""
+    )
     assert "error" in out
     assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+    assert "auth.md" not in log_text
 
 
 def test_write_page_does_not_leave_index_record_when_logging_fails(
