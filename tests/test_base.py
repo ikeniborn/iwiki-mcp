@@ -65,6 +65,28 @@ def test_write_project_config_roundtrip(tmp_path, monkeypatch):
     assert bind.read == ("x",)
 
 
+def test_write_project_config_preserves_fields_on_partial_updates(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "a", "b")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
+    (proj / ".iwiki.toml").write_text(
+        f'base = "{b}"\nread = ["a"]\nwrite = "a"\n'
+    )
+
+    base.write_project_config(str(proj), write="b")
+    bind = base.resolve_binding(str(proj))
+    assert bind.base == b
+    assert bind.read == ("a",)
+    assert bind.write == "b"
+
+    base.write_project_config(str(proj), read=["b"])
+    bind = base.resolve_binding(str(proj))
+    assert bind.base == b
+    assert bind.read == ("b",)
+    assert bind.write == "b"
+
+
 def test_index_path_uses_jsonl_index():
     assert base.index_path("/wiki", "backend").endswith(
         os.path.join(".iwiki", "index.jsonl")

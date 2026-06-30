@@ -133,16 +133,22 @@ def write_project_config(
 ) -> None:
     resolved_project_dir = resolve_project_dir(project_dir)
     os.makedirs(resolved_project_dir, exist_ok=True)
-    existing = load_project_config(resolved_project_dir)
+    config = dict(load_project_config(resolved_project_dir))
+    if read is not None:
+        config["read"] = list(_as_str_tuple(read))
+    if write is not None:
+        config["write"] = write
 
     lines: list[str] = []
-    base_value = existing.get("base")
-    if base_value:
+    if "base" in config and config["base"] is not None:
+        base_value = config["base"]
         lines.append(f"base = {_toml_string(str(base_value))}")
-    if read is not None:
-        lines.append(f"read = {_toml_string_list(_as_str_tuple(read))}")
-    if write is not None:
-        lines.append(f"write = {_toml_string(write)}")
+    if "read" in config:
+        read_value = _as_str_tuple(config.get("read"))
+        lines.append(f"read = {_toml_string_list(read_value)}")
+    if "write" in config and config["write"] is not None:
+        write_value = config["write"]
+        lines.append(f"write = {_toml_string(str(write_value))}")
 
     config_path = os.path.join(resolved_project_dir, ".iwiki.toml")
     with open(config_path, "w", encoding="utf-8") as fh:
