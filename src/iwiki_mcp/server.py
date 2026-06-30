@@ -190,8 +190,15 @@ def wiki_related(domain: str, section_id: str) -> dict:
 
     bind = base.resolve_binding()
     cfg = Config.load()
-    recs = VectorStore(base.index_path(bind.base, _validate_domain(domain))).load()
-    return related(section_id, recs, cfg.top_k, cfg.graph_depth)
+    valid_domain = _validate_domain(domain)
+    dom_path = _domain_path(bind.base, valid_domain)
+    recs = VectorStore(base.index_path(bind.base, valid_domain)).load()
+    cwd = os.getcwd()
+    try:
+        os.chdir(dom_path)
+        return related(section_id, recs, cfg.top_k, cfg.graph_depth)
+    finally:
+        os.chdir(cwd)
 
 
 # Thin MCP wrappers; implementation functions above stay unit-testable.

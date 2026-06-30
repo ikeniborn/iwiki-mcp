@@ -61,6 +61,20 @@ def test_related_returns_vector_and_graph_keys(tmp_path, monkeypatch):
     assert "graph" in out
 
 
+def test_related_graph_fallback_reads_domain_relative_files(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    backend = tmp_path / "wiki" / "backend"
+    (backend / "auth.md").write_text(
+        "# Auth\n## Overview\no\n## Token\nrefresh_token rotates [[other.md]]\n"
+    )
+    (backend / "other.md").write_text("# Other\n")
+
+    out = server.wiki_related("backend", "auth.md#Token")
+
+    assert out["vector"] == []
+    assert "other.md" in out["graph"]
+
+
 def test_related_rejects_hidden_domain(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     out = server.wiki_related(".secret", "hidden.md#Token")
