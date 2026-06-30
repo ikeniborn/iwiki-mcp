@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from mcp.server.fastmcp import FastMCP
 
-from . import base, indexer, retrieval, sync
+from . import base, ignore, indexer, retrieval, sync
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
 from .engine.validate import validate_page
@@ -249,6 +249,14 @@ def wiki_write_page(
             "findings": blocking,
             "hint": "use only ## headings; no text before the first ##",
         }
+    if source:
+        spec = ignore.load_project_ignore(bind.project_dir)
+        if ignore.is_ignored(spec, source, bind.project_dir):
+            return {
+                "error": "source matches .iwikiignore",
+                "hint": f"'{source}' is excluded by .iwikiignore; "
+                        "remove the pattern to ingest, or omit source",
+            }
     path = _page_path(bind.base, valid_domain, slug)
     if os.path.exists(path):
         return {
@@ -285,7 +293,8 @@ def wiki_write_page(
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    commit = sync.auto_commit(bind.base, f"iwiki: ingest {page_rel}")
+    commit = sync.auto_commit(bind.base, f"iwiki: ingest {page_rel}",
+                             pathspec=valid_domain)
     return {
         "page": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
@@ -324,7 +333,9 @@ def wiki_create_domain(name: str) -> dict:
     if dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' already exists"}
     os.makedirs(dom_path / ".iwiki", exist_ok=True)
-    commit = sync.auto_commit(bind.base, f"iwiki: create domain {valid_domain}")
+    ignore.ensure_iwikiignore(bind.project_dir)
+    commit = sync.auto_commit(bind.base, f"iwiki: create domain {valid_domain}",
+                              pathspec=valid_domain)
     return {"created": valid_domain, "committed": commit.get("committed", False)}
 
 
@@ -345,6 +356,7 @@ def wiki_bind(read: list[str] | None = None, write: str | None = None) -> dict:
             "hint": "create it with wiki_create_domain",
         }
     base.write_project_config(bind.project_dir, read=valid_read, write=valid_write)
+    ignore.ensure_iwikiignore(bind.project_dir)
     new = base.resolve_binding()
     return {"read": list(new.read), "write": new.write, "project_dir": new.project_dir}
 
