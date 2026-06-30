@@ -16,6 +16,7 @@ from . import base, indexer, retrieval, sync
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
 from .engine.validate import validate_page
+from .resources import AUTHORING_RULES
 
 mcp = FastMCP("iwiki")
 
@@ -380,6 +381,11 @@ mcp.tool()(wiki_create_domain)
 mcp.tool()(wiki_bind)
 mcp.tool()(wiki_lint)
 mcp.tool()(wiki_sync)
+
+
+@mcp.resource("iwiki://authoring-rules")
+def authoring_rules() -> str:
+    return AUTHORING_RULES
 
 
 def main() -> None:
