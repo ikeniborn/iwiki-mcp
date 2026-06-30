@@ -64,3 +64,21 @@ def cosine(a: list[float], b: list[float]) -> float:
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
     return dot / (na * nb) if na and nb else 0.0
+
+
+class VectorStore:
+    """Thin per-index store over the JSONL backend. The seam for a later
+    SQLite/sqlite-vec swap: callers depend only on load/save/query."""
+
+    def __init__(self, index_path: str):
+        self.index_path = index_path
+
+    def load(self) -> list[Record]:
+        return load_index(self.index_path)
+
+    def save(self, recs: list[Record]) -> None:
+        save_index(self.index_path, recs)
+
+    def query(self, query_vec: list[float], top_k: int, threshold: float) -> list[dict]:
+        from .search import search
+        return search(query_vec, self.load(), top_k, threshold)
