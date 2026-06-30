@@ -34,7 +34,7 @@ def test_auto_commit_pathspec_excludes_sibling_domain(tmp_path):
     porcelain = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=tmp_path, capture_output=True, text=True).stdout
-    assert "beta" in porcelain
+    assert "beta/b.md" in porcelain
 
 
 def test_sync_push_retry_on_non_fast_forward(tmp_path):

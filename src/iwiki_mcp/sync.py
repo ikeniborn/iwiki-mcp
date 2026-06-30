@@ -98,6 +98,7 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                 if _is_non_ff(push) and attempt < push_retries - 1:
                     continue
                 return {"pulled": True, "pushed": False, "warning": push.stderr.strip()}
+            # only reachable if push_retries <= 0; loop otherwise always returns inside
             return {"pulled": True, "pushed": False, "warning": "push retries exhausted"}
     except Timeout:
         return {"pulled": False, "pushed": False, "warning": "base busy: lock timeout"}

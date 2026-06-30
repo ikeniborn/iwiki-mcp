@@ -294,7 +294,7 @@ def wiki_write_page(
         raise
     page_rel = f"{valid_domain}/{page_file}"
     commit = sync.auto_commit(bind.base, f"iwiki: ingest {page_rel}",
-                             pathspec=valid_domain)
+                              pathspec=valid_domain)
     return {
         "page": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
