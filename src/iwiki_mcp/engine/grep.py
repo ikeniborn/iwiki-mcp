@@ -3,8 +3,7 @@ scoring. Complements vector search by catching exact symbol/identifier matches
 that embeddings blur. Returns the same section-shaped hits for merging."""
 from __future__ import annotations
 
-import glob
-import os
+from pathlib import Path
 import re
 
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
@@ -15,18 +14,22 @@ def _terms(query: str) -> list[str]:
 
 
 def grep_sections(domain_dir: str, query: str, top_k: int) -> list[dict]:
+    if top_k <= 0:
+        return []
     terms = _terms(query)
     if not terms:
         return []
+    root = Path(domain_dir)
     out: list[dict] = []
-    for md in glob.glob(os.path.join(domain_dir, "**", "*.md"), recursive=True):
-        if "/.iwiki/" in md:
+    for md in sorted(root.rglob("*.md")):
+        rel_path = md.relative_to(root)
+        if ".iwiki" in rel_path.parts:
             continue
         try:
-            content = open(md, encoding="utf-8").read()
+            content = md.read_text(encoding="utf-8")
         except OSError:
             continue
-        rel = os.path.relpath(md, domain_dir)
+        rel = rel_path.as_posix()
         ms = list(_H2.finditer(content))
         for i, m in enumerate(ms):
             heading = m.group(1).strip()
@@ -36,5 +39,5 @@ def grep_sections(domain_dir: str, query: str, top_k: int) -> list[dict]:
             if score > 0:
                 out.append({"file": rel, "heading": heading, "chunk": 0,
                             "score": score, "hit": "lexical"})
-    out.sort(key=lambda d: d["score"], reverse=True)
+    out.sort(key=lambda h: (-h["score"], h["file"], h["heading"]))
     return out[:top_k]
