@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import functools
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from mcp.server.fastmcp import FastMCP
 
@@ -36,15 +36,61 @@ def _safe(fn):
     return wrap
 
 
+def _validate_domain(domain: str) -> str:
+    if not domain:
+        raise ValueError("invalid domain: empty")
+    if "/" in domain or "\\" in domain:
+        raise ValueError(f"invalid domain '{domain}'")
+    if domain in (".", ".."):
+        raise ValueError(f"invalid domain '{domain}'")
+    if Path(domain).is_absolute() or PureWindowsPath(domain).is_absolute():
+        raise ValueError(f"invalid domain '{domain}'")
+    if PureWindowsPath(domain).drive:
+        raise ValueError(f"invalid domain '{domain}'")
+    return domain
+
+
+def _contains(parent: Path, child: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _domain_path(b: str, domain: str) -> Path:
+    base_path = Path(b).resolve()
+    dom = Path(base.domain_dir(str(base_path), _validate_domain(domain)))
+    if not _contains(base_path, dom):
+        raise ValueError(f"invalid domain '{domain}'")
+    return dom
+
+
 def _slug_parts(slug: str) -> tuple[str, ...]:
+    if not slug:
+        raise ValueError("invalid page slug: empty")
+    if "\\" in slug:
+        raise ValueError(f"invalid page slug '{slug}'")
     path = PurePosixPath(slug)
-    if path.is_absolute() or not path.parts or any(part in (".", "..") for part in path.parts):
+    win_path = PureWindowsPath(slug)
+    if (
+        path.is_absolute()
+        or win_path.is_absolute()
+        or win_path.drive
+        or not path.parts
+        or any(part in (".", "..") for part in path.parts)
+    ):
         raise ValueError(f"invalid page slug '{slug}'")
     return path.parts
 
 
 def _page_path(b: str, domain: str, slug: str) -> str:
-    return os.path.join(base.domain_dir(b, domain), *_slug_parts(slug)) + ".md"
+    dom = _domain_path(b, domain)
+    parts = _slug_parts(slug)
+    path = dom.joinpath(*parts[:-1], parts[-1] + ".md")
+    if not _contains(dom, path):
+        raise ValueError(f"invalid page slug '{slug}'")
+    return str(path)
 
 
 @_safe
@@ -77,14 +123,13 @@ def _index_bytes(path: str) -> int:
 @_safe
 def wiki_list_pages(domain: str) -> dict:
     bind = base.resolve_binding()
-    dom = base.domain_dir(bind.base, domain)
-    if not os.path.isdir(dom):
+    dom_path = _domain_path(bind.base, domain)
+    if not dom_path.is_dir():
         return {
             "error": f"domain '{domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
     pages = []
-    dom_path = Path(dom)
     for path in sorted(dom_path.rglob("*.md")):
         rel_path = path.relative_to(dom_path)
         if ".iwiki" in rel_path.parts:
