@@ -6,6 +6,7 @@ dist/
 build/
 *.egg-info/
 docs/superpower/*
+docs/bug-*.md
 .superpowers/*
 .DS_Store
 Thumbs.db
