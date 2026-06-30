@@ -39,6 +39,8 @@ def _safe(fn):
 def _validate_domain(domain: str) -> str:
     if not domain:
         raise ValueError("invalid domain: empty")
+    if domain.startswith("."):
+        raise ValueError(f"invalid domain '{domain}'")
     if "/" in domain or "\\" in domain:
         raise ValueError(f"invalid domain '{domain}'")
     if domain in (".", ".."):

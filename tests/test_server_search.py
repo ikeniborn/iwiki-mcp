@@ -36,3 +36,38 @@ def test_search_lexical_mode(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     out = server.wiki_search("refresh_token", mode="lexical")
     assert any(r["hit"] == "lexical" for r in out["results"])
+
+
+def test_search_rejects_hidden_explicit_domain(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    hidden = tmp_path / "wiki" / ".secret"
+    hidden.mkdir()
+    (hidden / "hidden.md").write_text("# Hidden\n## Token\nhidden_token\n")
+
+    out = server.wiki_search(
+        "hidden_token",
+        mode="lexical",
+        domains=[".secret"],
+    )
+
+    assert "error" in out
+    assert "results" not in out
+
+
+def test_related_returns_vector_and_graph_keys(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_related("backend", "auth.md#Token")
+    assert "vector" in out
+    assert "graph" in out
+
+
+def test_related_rejects_hidden_domain(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_related(".secret", "hidden.md#Token")
+    assert "error" in out
+
+
+def test_search_preserves_explicit_zero_k(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_search("token", scope="project", k=0, threshold=0.0)
+    assert out["results"] == []
