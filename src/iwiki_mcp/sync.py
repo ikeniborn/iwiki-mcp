@@ -4,6 +4,7 @@ to a warning, never an exception."""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 
 def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -43,20 +44,37 @@ def _has_remote(base: str) -> bool:
     return bool(r.stdout.strip())
 
 
+def _has_rebase_state(base: str) -> bool:
+    for name in ("rebase-merge", "rebase-apply"):
+        r = _run(base, "rev-parse", "--git-path", name)
+        path = Path(r.stdout.strip())
+        if not path.is_absolute():
+            path = Path(base) / path
+        if r.returncode == 0 and path.exists():
+            return True
+    return False
+
+
+def _output(r: subprocess.CompletedProcess) -> str:
+    return r.stderr.strip() or r.stdout.strip() or "git command failed"
+
+
 def sync(base: str) -> dict:
     if not is_git_repo(base):
         return {"pulled": False, "pushed": False, "error": "base is not a git repo"}
-    if not _has_remote(base):
-        return {"pulled": False, "pushed": False,
-                "warning": "no git remote configured; commits stay local"}
     try:
+        if not _has_remote(base):
+            return {"pulled": False, "pushed": False,
+                    "warning": "no git remote configured; commits stay local"}
         pull = _run(base, "pull", "--rebase")
         if pull.returncode != 0:
-            _run(base, "rebase", "--abort")
-            return {"pulled": False, "pushed": False,
-                    "error": "pull --rebase conflict (aborted)",
-                    "hint": "resolve in the base repo, or re-run index to regenerate "
-                            "a conflicted .iwiki/index.jsonl, then sync again"}
+            if _has_rebase_state(base):
+                _run(base, "rebase", "--abort")
+                return {"pulled": False, "pushed": False,
+                        "error": "pull --rebase conflict (aborted)",
+                        "hint": "resolve in the base repo, or re-run index to regenerate "
+                                "a conflicted .iwiki/index.jsonl, then sync again"}
+            return {"pulled": False, "pushed": False, "error": _output(pull)}
         push = _run(base, "push")
         return {"pulled": True, "pushed": push.returncode == 0,
                 **({} if push.returncode == 0 else {"warning": push.stderr.strip()})}

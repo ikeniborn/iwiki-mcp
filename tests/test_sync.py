@@ -38,3 +38,16 @@ def test_sync_no_remote_warns(tmp_path):
     res = sync.sync(str(tmp_path))
     assert res.get("pushed") is False
     assert "warning" in res or "error" in res
+
+
+def test_sync_pull_failure_preserves_non_conflict_error(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / "x.md").write_text("hi")
+    sync.auto_commit(str(tmp_path), "iwiki: c")
+    _git(tmp_path, "remote", "add", "origin", str(tmp_path / "missing-remote.git"))
+
+    res = sync.sync(str(tmp_path))
+
+    assert res["pushed"] is False
+    assert "error" in res
+    assert res["error"] != "pull --rebase conflict (aborted)"
