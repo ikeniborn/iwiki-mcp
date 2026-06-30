@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 5037f61231841383
+  spec_hash: 416bdf66544dc25a
   last_run: 2026-06-30
   phases:
     structure:    { status: passed }
@@ -26,8 +26,8 @@ review:
         Add one sentence either in the Concurrency design or Out of scope explicitly
         noting that symptom #4 is neutralized by the per-domain isolation assumption
         (each project writes its own <domain>/.iwiki/index.jsonl), or otherwise covered.
-      verdict: open
-      verdict_at: null
+      verdict: fixed
+      verdict_at: 2026-06-30
 chain:
   intent: null
 ---

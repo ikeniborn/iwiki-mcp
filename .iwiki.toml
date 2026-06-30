@@ -1,0 +1,2 @@
+read = ["iwiki-mcp"]
+write = "iwiki-mcp"
