@@ -6,6 +6,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from filelock import Timeout
+
+from .lock import base_lock
+
 
 def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", base, *args], capture_output=True,
@@ -20,21 +24,26 @@ def is_git_repo(base: str) -> bool:
         return False
 
 
-def auto_commit(base: str, message: str) -> dict:
+def auto_commit(base: str, message: str, pathspec: str | None = None,
+                timeout: float = 15.0) -> dict:
     if not is_git_repo(base):
         return {"committed": False, "warning": "base is not a git repo; not committing"}
+    scope = ("--", pathspec) if pathspec else ()
     try:
-        add = _run(base, "add", "-A")
-        if add.returncode != 0:
-            return {"committed": False, "warning": add.stderr.strip()}
-        status = _run(base, "status", "--porcelain")
-        if status.returncode != 0:
-            return {"committed": False, "warning": status.stderr.strip()}
-        if not status.stdout.strip():
-            return {"committed": False, "warning": "nothing to commit"}
-        r = _run(base, "commit", "-m", message)
-        return {"committed": r.returncode == 0,
-                **({} if r.returncode == 0 else {"warning": r.stderr.strip()})}
+        with base_lock(base, timeout):
+            add = _run(base, "add", *(("--", pathspec) if pathspec else ("-A",)))
+            if add.returncode != 0:
+                return {"committed": False, "warning": add.stderr.strip()}
+            status = _run(base, "status", "--porcelain", *scope)
+            if status.returncode != 0:
+                return {"committed": False, "warning": status.stderr.strip()}
+            if not status.stdout.strip():
+                return {"committed": False, "warning": "nothing to commit"}
+            r = _run(base, "commit", "-m", message)
+            return {"committed": r.returncode == 0,
+                    **({} if r.returncode == 0 else {"warning": r.stderr.strip()})}
+    except Timeout:
+        return {"committed": False, "warning": "base busy: lock timeout"}
     except Exception as e:
         return {"committed": False, "warning": str(e)}
 
