@@ -2,7 +2,7 @@
 writing. Ported from the iwiki-ingest skill's section-formation rules.
 """
 
-AUTHORING_RULES = """\
+AUTHORING_RULES: str = """\
 # iwiki page authoring rules
 
 - Use **only `##`** for sections -- never `###` or deeper. Deeper headings are not
