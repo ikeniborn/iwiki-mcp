@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import datetime as _dt
-import glob
 import hashlib
 import json
 import os
+from pathlib import Path
 
 from .base import index_path, log_path
 from .engine.chunk import chunk_markdown
@@ -25,20 +25,18 @@ def src_hash(path: str) -> str | None:
         return None
 
 
-def _is_iwiki_path(path: str) -> bool:
-    return ".iwiki" in os.path.normpath(path).split(os.sep)
-
-
 def index_domain(cfg: Config, base: str, domain: str) -> dict:
-    dom_dir = os.path.join(base, domain)
+    dom_path = Path(base) / domain
     idx = index_path(base, domain)
     store = VectorStore(idx)
     existing = {f"{r.id}#{r.chunk}": r for r in store.load()}
-    files = sorted(glob.glob(os.path.join(dom_dir, "**", "*.md"), recursive=True))
-    files = [f for f in files if not _is_iwiki_path(os.path.relpath(f, dom_dir))]
+    files = sorted(
+        path for path in dom_path.rglob("*.md")
+        if ".iwiki" not in path.relative_to(dom_path).parts
+    )
     chunks = []
     for md in files:
-        rel = os.path.relpath(md, dom_dir)
+        rel = md.relative_to(dom_path).as_posix()
         with open(md, encoding="utf-8") as fh:
             content = fh.read()
         chunks.extend(chunk_markdown(rel, content, cfg.chunk_size,
@@ -47,7 +45,7 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
     for c in chunks:
         key = f"{c.id}#{c.chunk}"
         prev = existing.get(key)
-        if prev and prev.hash == c.hash:
+        if prev and prev.hash == c.hash and prev.dim == cfg.dimensions:
             fresh.append(prev)
             reused += 1
         else:
