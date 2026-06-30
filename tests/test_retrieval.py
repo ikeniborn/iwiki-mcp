@@ -1,3 +1,5 @@
+import pytest
+
 from iwiki_mcp import retrieval, indexer, base
 from iwiki_mcp.engine.config import Config
 
@@ -29,6 +31,17 @@ def test_vector_search_merges_domains(tmp_path, monkeypatch):
     assert all(h["hit"] == "vector" for h in hits)
 
 
+def test_vector_search_empty_domains_does_not_embed(monkeypatch):
+    monkeypatch.setattr(
+        retrieval, "embed_texts",
+        lambda cfg, texts: (_ for _ in ()).throw(AssertionError("embedded query")),
+    )
+
+    assert retrieval.vector_search(
+        _cfg(), "base", [], "q", top_k=10, threshold=0.0
+    ) == []
+
+
 def test_hybrid_adds_lexical(tmp_path, monkeypatch):
     b = _seed(tmp_path, monkeypatch)
     monkeypatch.setattr(retrieval, "embed_texts",
@@ -36,3 +49,33 @@ def test_hybrid_adds_lexical(tmp_path, monkeypatch):
     hits = retrieval.hybrid_search(_cfg(), b, ["a", "b"], "refresh_token",
                                    top_k=10, threshold=0.99, mode="hybrid")
     assert any(h["hit"] == "lexical" and h["domain"] == "a" for h in hits)
+
+
+def test_hybrid_preserves_best_vector_duplicate(monkeypatch):
+    monkeypatch.setattr(
+        retrieval, "vector_search",
+        lambda cfg, base, domains, query, top_k, threshold: [
+            {"domain": "a", "file": "p.md", "heading": "S", "chunk": 1,
+             "score": 0.9, "hit": "vector"},
+            {"domain": "a", "file": "p.md", "heading": "S", "chunk": 2,
+             "score": 0.4, "hit": "vector"},
+        ],
+    )
+    monkeypatch.setattr(
+        retrieval, "lexical_search",
+        lambda base, domains, query, top_k: [],
+    )
+
+    hits = retrieval.hybrid_search(
+        _cfg(), "base", ["a"], "q", top_k=10, threshold=0.0, mode="hybrid"
+    )
+
+    assert hits[0]["score"] == 0.9
+    assert hits[0]["chunk"] == 1
+
+
+def test_hybrid_rejects_invalid_mode():
+    with pytest.raises(ValueError, match="invalid search mode: bogus"):
+        retrieval.hybrid_search(
+            _cfg(), "base", ["a"], "q", top_k=10, threshold=0.0, mode="bogus"
+        )

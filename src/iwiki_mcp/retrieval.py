@@ -15,10 +15,12 @@ from .engine.embed import embed_texts
 from .engine.grep import grep_sections
 from .engine.store import VectorStore, dequantize
 
+_VALID_MODES = {"hybrid", "vector", "lexical"}
+
 
 def vector_search(cfg: Config, base: str, domains: list[str], query: str,
                   top_k: int, threshold: float) -> list[dict]:
-    if top_k <= 0:
+    if top_k <= 0 or not domains:
         return []
     qv = np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32)
     qnorm = float(np.linalg.norm(qv)) or 1.0
@@ -58,6 +60,8 @@ def lexical_search(base: str, domains: list[str], query: str,
 
 def hybrid_search(cfg: Config, base: str, domains: list[str], query: str,
                   top_k: int, threshold: float, mode: str = "hybrid") -> list[dict]:
+    if mode not in _VALID_MODES:
+        raise ValueError(f"invalid search mode: {mode}")
     if top_k <= 0:
         return []
     vec = (vector_search(cfg, base, domains, query, top_k, threshold)
@@ -66,7 +70,9 @@ def hybrid_search(cfg: Config, base: str, domains: list[str], query: str,
            if mode in ("hybrid", "lexical") else [])
     merged: dict[tuple, dict] = {}
     for h in vec:
-        merged[(h["domain"], h["file"], h["heading"])] = h
+        key = (h["domain"], h["file"], h["heading"])
+        if key not in merged or h["score"] > merged[key]["score"]:
+            merged[key] = h
     for h in lex:
         key = (h["domain"], h["file"], h["heading"])
         if key in merged:
