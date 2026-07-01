@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Цепочка IDD→SDD: wiki-update-page</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg);
+  transition:background .3s, color .3s;
+}
+.theme-btn{
+  position:sticky; top:.5rem; float:right; z-index:5;
+  cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px;
+  background:var(--surface);
+}
+header h1{ font-size:1.5rem; margin:.2rem 0 .1rem; }
+header .sub{ color:var(--muted); font-size:.9rem; margin:0 0 1rem; }
+h2{ font-size:1.2rem; border-bottom:2px solid var(--border); padding-bottom:.25rem; margin-top:2rem; }
+h3{ font-size:1.02rem; color:var(--accent-2); margin-top:1.4rem; }
+code{ background:var(--zebra); padding:.05rem .3rem; border-radius:4px; font-size:.88em; }
+table{ border-collapse:collapse; width:100%; margin:.8rem 0; font-size:.9rem; box-shadow:0 1px 3px var(--shadow); }
+th,td{ border:1px solid var(--border); padding:.45rem .6rem; text-align:left; vertical-align:top; }
+th{ background:color-mix(in srgb,var(--accent) 14%, var(--surface)); color:var(--fg); }
+tbody tr:nth-child(even){ background:var(--zebra); }
+.note{ background:color-mix(in srgb,var(--accent) 12%, var(--surface)); border-left:4px solid var(--accent);
+  padding:.6rem .9rem; border-radius:0 6px 6px 0; margin:1rem 0; }
+.badge{ display:inline-block; padding:.08rem .5rem; border-radius:999px; font-size:.78rem; font-weight:600; }
+.b-ok{ background:color-mix(in srgb,var(--ok) 22%, var(--surface)); color:var(--ok-2); border:1px solid var(--ok); }
+.b-warn{ background:color-mix(in srgb,var(--warn) 22%, var(--surface)); color:var(--warn-2); border:1px solid var(--warn); }
+.b-danger{ background:color-mix(in srgb,var(--danger) 22%, var(--surface)); color:var(--danger-2); border:1px solid var(--danger); }
+.b-info{ background:color-mix(in srgb,var(--accent) 18%, var(--surface)); color:var(--accent-2); border:1px solid var(--accent); }
+.b-fixed{ background:color-mix(in srgb,var(--ok) 20%, var(--surface)); color:var(--ok-2); border:1px solid var(--ok); }
+/* flow blocks */
+.flow{ display:flex; flex-wrap:wrap; gap:.6rem; align-items:stretch; margin:1rem 0; }
+.fcard{ background:var(--surface); border:1px solid var(--accent); border-radius:8px; padding:.5rem .7rem;
+  box-shadow:0 1px 3px var(--shadow); min-width:120px; font-size:.85rem; }
+.fcard .t{ font-weight:600; color:var(--accent-2); display:block; }
+.fcard .d{ color:var(--muted); font-size:.8rem; }
+.arrow{ align-self:center; color:var(--line); font-size:1.3rem; }
+figure{ margin:1rem 0; }
+figcaption{ color:var(--muted); font-size:.82rem; margin-top:.3rem; }
+.legend{ font-size:.8rem; color:var(--muted); }
+/* tabs */
+.tab-pane{ display:none; }
+body:has(#tab-intent:checked) #pane-intent,
+body:has(#tab-spec:checked)   #pane-spec,
+body:has(#tab-plan:checked)   #pane-plan,
+body:has(#tab-result:checked) #pane-result{ display:block; }
+.chain-tabs{ display:flex; gap:.3rem; margin-top:1rem; border-bottom:2px solid var(--border); }
+.chain-tabs label{ cursor:pointer; padding:.4rem .9rem; border:1px solid var(--border); border-bottom:none;
+  border-radius:8px 8px 0 0; background:var(--surface); color:var(--muted); }
+body:has(#tab-intent:checked) label[for="tab-intent"],
+body:has(#tab-spec:checked)   label[for="tab-spec"],
+body:has(#tab-plan:checked)   label[for="tab-plan"],
+body:has(#tab-result:checked) label[for="tab-result"]{ color:var(--accent); border-color:var(--accent); font-weight:600; }
+.graph{ width:100%; height:auto; background:var(--surface); border:1px solid var(--border); border-radius:8px; }
+.graph .gnode{ fill:var(--surface); stroke:var(--accent); stroke-width:1.5; }
+.graph .gnode.hub{ stroke:var(--accent-2); stroke-width:2.5; }
+.graph .glabel{ fill:var(--fg); font:12px system-ui, sans-serif; }
+.graph .gsub{ fill:var(--muted); font:10px system-ui, sans-serif; }
+.graph .gedge{ stroke:var(--line); stroke-width:1.5; fill:none; }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden checked>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+<label for="theme-toggle" class="theme-btn" title="Переключить тему">🌙 / ☀️</label>
+<header>
+  <h1>Цепочка IDD→SDD: wiki-update-page</h1>
+  <p class="sub">Объединённый отчёт цепочки (Intent → Spec → Plan → Result). Текущий шаг: проверка спецификации.</p>
+</header>
+<nav class="chain-tabs">
+  <label for="tab-intent">Intent</label>
+  <label for="tab-spec">Spec</label>
+  <label for="tab-plan">Plan</label>
+  <label for="tab-result">Result</label>
+</nav>
+
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:intent END -->
+
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+
+  <h2>1. Резюме спецификации</h2>
+  <p class="legend">Файл: <code>docs/superpowers/specs/2026-07-01-wiki-update-page-design.md</code> &nbsp;·&nbsp; spec_hash: <code>bc5b2b4fb600122d</code> &nbsp;·&nbsp; первичная проверка (intent-стадии нет)</p>
+
+  <h3>Требования по разделам</h3>
+  <table>
+    <thead><tr><th style="width:26%">Раздел</th><th>Требование</th></tr></thead>
+    <tbody>
+      <tr><td>§Problem · R1</td><td>Добавить MCP-тул, который правит <strong>один</strong> <code>##</code> раздел существующей страницы, переиндексирует только затронутый раздел, коммитит и пушит в git. Сегодня править контент можно лишь ручной правкой <code>.md</code> + <code>wiki_index</code> или delete-recreate.</td></tr>
+      <tr><td>§Problem · R2</td><td><strong>Любая</strong> мутация вики коммитится <strong>и</strong> пушится. Сейчас <code>write_page</code>/<code>create_domain</code> коммитят локально; <code>wiki_index</code> не коммитит; push только через <code>wiki_sync</code>.</td></tr>
+      <tr><td>§Key existing behavior</td><td>Проверенные факты о коде (не переизобретать): инкрементальный эмбеддинг (<code>index_domain</code> переэмбедит только изменённые чанки); chunk режет по <code>##</code>, id = <code>file#heading</code>, <code>## Overview</code> исключён из индекса и префиксится в каждый чанк; <code>_stale</code> берёт первую лог-запись по странице; git fail-soft.</td></tr>
+      <tr><td>§Approach</td><td>Выбран in-place section splice. Отклонены: delete + recreate (двухфазно, не атомарно, теряет историю лога); overwrite всей страницы (splice ложится на caller).</td></tr>
+      <tr><td>§Components/1 · wiki_update_page</td><td><code>wiki_update_page(domain, slug, heading, new_body, source=None)</code>; <code>heading</code> — текст без <code>##</code>. Транзакция с откатом: read original → <code>replace_section</code> → <code>validate_page</code> (блок при <code>deep_heading</code>/<code>pre_h2_text</code>) → write → upsert лога (если source) → <code>index_domain</code> → <code>commit_and_push</code>. Откат: восстановить файл и байты лога. Возврат: page/heading/indexed_chunks/reused/embedded/bytes/over_cap/committed/pushed.</td></tr>
+      <tr><td>§Components/2 · engine/section.py</td><td>Новый stdlib-модуль: <code>replace_section(content, heading, new_body)</code> + <code>SectionError</code>. Тот же <code>_H2</code> regex (keep-in-sync). Матч по <code>heading.strip()</code>; not-found и duplicate → <code>SectionError</code>. Правка <code>## Overview</code> перечанкует всю статью (допустимо).</td></tr>
+      <tr><td>§Components/3 · ingest-log upsert</td><td>При <code>source</code> — переписать <code>log.jsonl</code>, убрав прежние ingest-записи страницы, добавив свежую с новым <code>src_hash</code> (иначе <code>_stale</code> first-hit-wins проигнорирует). Rollback caveat: <strong>не</strong> переиспользовать <code>_rollback_last_ingest_log</code> (только последняя строка) — нужен полный snapshot байтов лога.</td></tr>
+      <tr><td>§Components/4 · commit_and_push</td><td><code>commit_and_push(base, message, pathspec)</code> = <code>auto_commit</code> → если committed, <code>sync(base)</code>. Маппинг: не committed → <code>{committed:False, pushed:False}</code>, sync не вызывается; committed → <code>pushed = sync().get("pushed", False)</code>, warning прокинут. Ретрофит: <code>write_page</code>, <code>update_page</code>, <code>create_domain</code>, <code>index</code> — все с <code>pathspec=&lt;domain&gt;</code>. <code>wiki_index</code> теперь коммитит+пушит.</td></tr>
+      <tr><td>§Error handling</td><td>Всё fail-soft через <code>@_safe</code>: page-missing, heading not-found/duplicate, block-структура, source в <code>.iwikiignore</code>, сбой write/log/index (откат + raise), push-fail (<code>pushed:false</code> + warning).</td></tr>
+      <tr><td>§Testing</td><td><code>engine/section.py</code>: replace ok/not-found/duplicate/Overview. <code>wiki_update_page</code>: правка+reindex+upsert; page-not-found; block-heading reject; откат при сбое index; <code>.iwikiignore</code>. <code>commit_and_push</code>: git-repo → committed+sync invoked; non-repo fail-soft. Регресс: write/create_domain/index зелёные.</td></tr>
+      <tr><td>§Out of scope</td><td>Нет section-scoped single-file индекса (index_domain перечитывает домен — дёшево); нет режима «создать раздел, если нет» (update требует существующий).</td></tr>
+      <tr><td>§Follow-up upkeep</td><td><code>README.md</code> (тул в список), <code>docs/wiki/architecture.md</code> (транзакция update + commit-and-push), iwiki-домен <code>iwiki-mcp</code>, patch-bump версии.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Success Criteria</h3>
+  <p class="legend">Явного раздела Success Criteria в спеке нет — критерии выведены из §Testing.</p>
+  <table>
+    <thead><tr><th style="width:6%">#</th><th>Критерий</th></tr></thead>
+    <tbody>
+      <tr><td>SC-1</td><td><code>replace_section</code>: заменяет раздел; not-found и duplicate → <code>SectionError</code>; правка Overview обрабатывается.</td></tr>
+      <tr><td>SC-2</td><td><code>wiki_update_page</code> правит раздел, переиндексирует только его чанки, upsert'ит лог при <code>source</code>.</td></tr>
+      <tr><td>SC-3</td><td><code>wiki_update_page</code> отклоняет отсутствующую страницу и блокирующую структуру раздела.</td></tr>
+      <tr><td>SC-4</td><td>Откат при сбое индексации: файл == original, лог не изменён.</td></tr>
+      <tr><td>SC-5</td><td><code>wiki_update_page</code> отклоняет <code>source</code>, совпадающий с <code>.iwikiignore</code>.</td></tr>
+      <tr><td>SC-6</td><td><code>commit_and_push</code>: git-repo → <code>committed:true</code> + <code>sync</code> вызван; non-repo → fail-soft.</td></tr>
+      <tr><td>SC-7</td><td>Регресс: тесты <code>write_page</code>/<code>create_domain</code>/<code>index</code> остаются зелёными.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Схемы решения и зависимостей</h2>
+
+  <h3>Схема решения — транзакция wiki_update_page</h3>
+  <figure>
+    <div class="flow">
+      <div class="fcard"><span class="t">wiki_update_page</span><span class="d">server.py · read original</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">replace_section</span><span class="d">engine/section.py</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">validate_page</span><span class="d">block: deep_heading / pre_h2_text</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">write + log upsert</span><span class="d">file + log.jsonl (snapshot для отката)</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">index_domain</span><span class="d">эмбед только изменённого раздела</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">commit_and_push</span><span class="d">sync.py</span></div>
+    </div>
+    <figcaption>Сбой на write/log/index → откат файла и байтов лога, затем raise (fail-soft через <code>@_safe</code>).</figcaption>
+  </figure>
+
+  <h3>Схема решения — commit_and_push на всех мутациях (R2)</h3>
+  <figure>
+    <div class="flow">
+      <div class="fcard"><span class="t">write_page</span><span class="d">server.py</span></div>
+      <div class="fcard"><span class="t">update_page</span><span class="d">server.py</span></div>
+      <div class="fcard"><span class="t">create_domain</span><span class="d">server.py</span></div>
+      <div class="fcard"><span class="t">index</span><span class="d">server.py</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">commit_and_push</span><span class="d">auto_commit → sync · pathspec=domain</span></div>
+      <span class="arrow">→</span>
+      <div class="fcard"><span class="t">git</span><span class="d">commit + pull --rebase + push</span></div>
+    </div>
+  </figure>
+
+  <h3>Граф зависимостей (A → B = «A зависит от B»)</h3>
+  <figure>
+    <svg class="graph" viewBox="0 0 1000 430" role="img" aria-label="Граф зависимостей компонентов спецификации">
+      <defs>
+        <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto-start-reverse">
+          <path d="M0,0 L9,4.5 L0,9 z" fill="var(--line)"></path>
+        </marker>
+        <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"></feDropShadow>
+        </filter>
+      </defs>
+      <!-- edges -->
+      <g>
+        <path class="gedge" marker-end="url(#arrow)" d="M90,72 L45,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M100,72 L200,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M110,72 L355,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M120,72 L515,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M150,66 L740,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M330,74 L755,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M560,74 L768,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M815,74 L785,176"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M745,222 L690,336"></path>
+        <path class="gedge" marker-end="url(#arrow)" d="M775,222 L855,336"></path>
+      </g>
+      <!-- callers -->
+      <g filter="url(#ds)">
+        <rect class="gnode hub" x="15" y="28" width="150" height="44" rx="8"></rect>
+        <rect class="gnode" x="255" y="28" width="150" height="44" rx="8"></rect>
+        <rect class="gnode" x="485" y="28" width="150" height="44" rx="8"></rect>
+        <rect class="gnode" x="745" y="28" width="150" height="44" rx="8"></rect>
+      </g>
+      <text class="glabel" x="90"  y="46" text-anchor="middle">wiki_update_page</text>
+      <text class="gsub"   x="90"  y="62" text-anchor="middle">новый тул · R1</text>
+      <text class="glabel" x="330" y="54" text-anchor="middle">wiki_write_page</text>
+      <text class="glabel" x="560" y="54" text-anchor="middle">wiki_create_domain</text>
+      <text class="glabel" x="820" y="54" text-anchor="middle">wiki_index</text>
+      <!-- mid -->
+      <g filter="url(#ds)">
+        <rect class="gnode" x="0"   y="178" width="130" height="44" rx="8"></rect>
+        <rect class="gnode" x="145" y="178" width="120" height="44" rx="8"></rect>
+        <rect class="gnode" x="295" y="178" width="130" height="44" rx="8"></rect>
+        <rect class="gnode" x="455" y="178" width="130" height="44" rx="8"></rect>
+        <rect class="gnode hub" x="685" y="178" width="150" height="44" rx="8"></rect>
+      </g>
+      <text class="glabel" x="65"  y="202" text-anchor="middle">replace_section</text>
+      <text class="gsub"   x="65"  y="216" text-anchor="middle">section.py</text>
+      <text class="glabel" x="205" y="202" text-anchor="middle">validate_page</text>
+      <text class="glabel" x="360" y="202" text-anchor="middle">index_domain</text>
+      <text class="gsub"   x="360" y="216" text-anchor="middle">инкремент. эмбед</text>
+      <text class="glabel" x="520" y="202" text-anchor="middle">log upsert</text>
+      <text class="gsub"   x="520" y="216" text-anchor="middle">indexer.py</text>
+      <text class="glabel" x="760" y="202" text-anchor="middle">commit_and_push</text>
+      <text class="gsub"   x="760" y="216" text-anchor="middle">sync.py · R2</text>
+      <!-- bottom -->
+      <g filter="url(#ds)">
+        <rect class="gnode" x="620" y="338" width="130" height="44" rx="8"></rect>
+        <rect class="gnode" x="795" y="338" width="130" height="44" rx="8"></rect>
+      </g>
+      <text class="glabel" x="685" y="362" text-anchor="middle">auto_commit</text>
+      <text class="glabel" x="860" y="362" text-anchor="middle">sync</text>
+      <text class="gsub"   x="860" y="376" text-anchor="middle">pull --rebase + push</text>
+    </svg>
+    <figcaption>Ацикличный. Хабы (жирная обводка): <code>wiki_update_page</code> и <code>commit_and_push</code> — точки схождения R1 и R2. Циклов нет.</figcaption>
+  </figure>
+
+  <h3>Карта покрытия (задача → требования спеки)</h3>
+  <table>
+    <thead><tr><th style="width:14%">Задача</th><th>Покрывающие требования</th></tr></thead>
+    <tbody>
+      <tr><td>A — <code>wiki_update_page</code> (правка раздела, reindex, commit+push)</td><td>§Problem·R1, §Components/1 (сигнатура+транзакция), §Components/2 (<code>replace_section</code>), §Components/3 (лог upsert), §Components/4 (шаг commit_and_push)</td></tr>
+      <tr><td>B — любая мутация commit+push</td><td>§Problem·R2, §Components/4 (ретрофит <code>write_page</code>/<code>update_page</code>/<code>create_domain</code>/<code>index</code>)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Результаты проверки</h2>
+
+  <h3>Фазы</h3>
+  <table>
+    <thead><tr><th style="width:22%">Фаза</th><th style="width:16%">Статус</th><th>Итог</th></tr></thead>
+    <tbody>
+      <tr><td>1 · structure</td><td><span class="badge b-ok">passed</span></td><td>Плейсхолдеров нет; §-ссылки резолвятся; нумерация без пропусков/дублей.</td></tr>
+      <tr><td>2 · coverage</td><td><span class="badge b-ok">passed</span></td><td>Задачи A и B покрыты; «лишних» требований нет; противоречий нет.</td></tr>
+      <tr><td>3 · clarity</td><td><span class="badge b-ok">passed</span></td><td>DoD <code>commit_and_push</code> уточнён (маппинг возврата); терминология консистентна.</td></tr>
+      <tr><td>4 · consistency</td><td><span class="badge b-ok">passed</span></td><td>Все claim'ы о коде сверены с файлами и точны; rollback-механизм лога уточнён.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Severity</th><th>Раздел</th><th>Проблема</th><th>Fix</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>F-001</td><td><span class="badge b-warn">WARNING</span></td><td>Components/4</td>
+        <td>Маппинг возврата <code>commit_and_push</code> на результат <code>sync()</code> был недоопределён (DoD «push произошёл»).</td>
+        <td>Прописан явный маппинг для committed / not-committed.</td>
+        <td><span class="badge b-fixed">fixed</span></td>
+      </tr>
+      <tr>
+        <td>F-002</td><td><span class="badge b-info">INFO</span></td><td>Components/4</td>
+        <td>Значение <code>pathspec</code> по вызовам не было повторено для всех четырёх ретрофит-callers.</td>
+        <td>Добавлено: все четыре передают <code>pathspec=&lt;domain&gt;</code>.</td>
+        <td><span class="badge b-fixed">fixed</span></td>
+      </tr>
+      <tr>
+        <td>F-003</td><td><span class="badge b-warn">WARNING</span></td><td>Components/3</td>
+        <td>Откат лога не мог переиспользовать <code>_rollback_last_ingest_log</code> (только последняя строка); полная перезапись требует snapshot байтов, иначе лог портится.</td>
+        <td>Добавлен явный rollback-caveat, запрещающий переиспользование хелпера.</td>
+        <td><span class="badge b-fixed">fixed</span></td>
+      </tr>
+      <tr>
+        <td>F-004</td><td><span class="badge b-info">INFO</span></td><td>Approach</td>
+        <td>Кросс-ссылки используют <code>§</code>-нотацию к заголовкам <code>### 1..4</code>; все резолвятся, отмечено для полноты.</td>
+        <td>Правка не нужна; ссылки однозначны.</td>
+        <td><span class="badge b-ok">accepted</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Сводка</h3>
+  <p>
+    <span class="badge b-ok">CRITICAL open: 0</span>&nbsp;
+    <span class="badge b-ok">WARNING open: 0</span>&nbsp;
+    <span class="badge b-info">2 WARNING · 2 INFO — все закрыты (fixed/accepted)</span>
+  </p>
+  <p class="note"><strong>Вердикт: OK</strong> — 0 critical, 0 open warning. Спека готова к стадии плана.</p>
+  <p class="legend">Цепочка: <code>intent</code> (n/a) → <strong>spec ✓</strong> → <code>plan</code> → <code>result</code>. Intent-стадии для этого топика нет — spec открывает задачу.</p>
+
+</section>
+<!-- TAB:spec END -->
+
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:plan END -->
+
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:result END -->
+</body>
+</html>
