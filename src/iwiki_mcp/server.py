@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from . import base, ignore, indexer, retrieval, sync
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
+from .engine.section import SectionError, replace_section
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
 
@@ -230,6 +231,20 @@ def _rollback_last_ingest_log(
         return
 
 
+def _restore_log(path: str, before: bytes | None) -> None:
+    """Restore the ingest log to its pre-edit bytes (or remove it if it did not
+    exist), for wiki_update_page rollback of a whole-file log upsert."""
+    try:
+        if before is None:
+            if os.path.exists(path):
+                os.remove(path)
+        else:
+            with open(path, "wb") as fh:
+                fh.write(before)
+    except OSError:
+        pass
+
+
 @_safe
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None
@@ -293,14 +308,90 @@ def wiki_write_page(
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    commit = sync.auto_commit(bind.base, f"iwiki: ingest {page_rel}",
-                              pathspec=valid_domain)
+    commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
+                                  pathspec=valid_domain)
     return {
         "page": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
         "over_cap": stats["over_cap"],
         "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
+    }
+
+
+@_safe
+def wiki_update_page(
+    domain: str, slug: str, heading: str, new_body: str, source: str | None = None
+) -> dict:
+    bind = base.resolve_binding()
+    valid_domain = _validate_domain(domain)
+    dom_path = _domain_path(bind.base, valid_domain)
+    if not dom_path.is_dir():
+        return {
+            "error": f"domain '{valid_domain}' not found",
+            "hint": "create it with wiki_create_domain",
+        }
+    if source:
+        spec = ignore.load_project_ignore(bind.project_dir)
+        if ignore.is_ignored(spec, source, bind.project_dir):
+            return {
+                "error": "source matches .iwikiignore",
+                "hint": f"'{source}' is excluded by .iwikiignore; "
+                        "remove the pattern to ingest, or omit source",
+            }
+    path = _page_path(bind.base, valid_domain, slug)
+    if not os.path.isfile(path):
+        return {
+            "error": f"page '{valid_domain}/{slug}' not found",
+            "hint": "list pages with wiki_list_pages",
+        }
+    original = open(path, encoding="utf-8").read()
+    try:
+        new_md = replace_section(original, heading, new_body)
+    except SectionError as e:
+        return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+    blocking = [f for f in validate_page(new_md) if f.get("type") in _BLOCKING]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "new_body must use only ## headings; no ###+, no pre-## text",
+        }
+    cfg = Config.load()
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    log_file = base.log_path(bind.base, valid_domain)
+    log_before = None
+    if source and os.path.exists(log_file):
+        with open(log_file, "rb") as fh:
+            log_before = fh.read()
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+        if source:
+            indexer.upsert_ingest_log(
+                bind.base, valid_domain, source, page_file, indexer.src_hash(source)
+            )
+        stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    except Exception:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(original)
+        if source:            # mirrors the upsert gate above
+            _restore_log(log_file, log_before)
+        raise
+    page_rel = f"{valid_domain}/{page_file}"
+    commit = sync.commit_and_push(bind.base, f"iwiki: update {page_rel}",
+                                  pathspec=valid_domain)
+    return {
+        "page": page_rel,
+        "heading": heading.lstrip("#").strip(),
+        "indexed_chunks": stats["indexed_chunks"],
+        "reused": stats["reused"],
+        "embedded": stats["embedded"],
+        "bytes": stats["bytes"],
+        "over_cap": stats["over_cap"],
+        "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
     }
 
 
@@ -322,7 +413,11 @@ def wiki_index(domain: str | None = None) -> dict:
         }
     cfg = Config.load()
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
-    return {"domain": valid_domain, **stats}
+    commit = sync.commit_and_push(bind.base, f"iwiki: reindex {valid_domain}",
+                                  pathspec=valid_domain)
+    return {"domain": valid_domain, **stats,
+            "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False)}
 
 
 @_safe
@@ -334,9 +429,10 @@ def wiki_create_domain(name: str) -> dict:
         return {"error": f"domain '{valid_domain}' already exists"}
     os.makedirs(dom_path / ".iwiki", exist_ok=True)
     ignore.ensure_iwikiignore(bind.project_dir)
-    commit = sync.auto_commit(bind.base, f"iwiki: create domain {valid_domain}",
-                              pathspec=valid_domain)
-    return {"created": valid_domain, "committed": commit.get("committed", False)}
+    commit = sync.commit_and_push(bind.base, f"iwiki: create domain {valid_domain}",
+                                  pathspec=valid_domain)
+    return {"created": valid_domain, "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False)}
 
 
 @_safe
@@ -388,6 +484,7 @@ mcp.tool()(wiki_read_page)
 mcp.tool()(wiki_search)
 mcp.tool()(wiki_related)
 mcp.tool()(wiki_write_page)
+mcp.tool()(wiki_update_page)
 mcp.tool()(wiki_index)
 mcp.tool()(wiki_create_domain)
 mcp.tool()(wiki_bind)

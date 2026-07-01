@@ -104,3 +104,25 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
         return {"pulled": False, "pushed": False, "warning": "base busy: lock timeout"}
     except Exception as e:
         return {"pulled": False, "pushed": False, "error": str(e)}
+
+
+def commit_and_push(base: str, message: str, pathspec: str | None = None) -> dict:
+    """Auto-commit, then push via ``sync`` when the commit landed.
+
+    Fail-soft: when nothing is committed, ``sync`` is not attempted. When the commit
+    landed, any ``sync`` failure — whether ``sync`` reported it as ``warning`` (push
+    rejected) or ``error`` (non-repo, pull conflict) — is surfaced under a single
+    ``warning`` key; the local commit stands.
+    """
+    commit = auto_commit(base, message, pathspec)
+    if not commit.get("committed"):
+        out = {"committed": False, "pushed": False}
+        if commit.get("warning"):
+            out["warning"] = commit["warning"]
+        return out
+    result = sync(base)
+    out = {"committed": True, "pushed": bool(result.get("pushed"))}
+    warn = result.get("warning") or result.get("error")
+    if warn:
+        out["warning"] = warn
+    return out

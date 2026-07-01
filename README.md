@@ -133,7 +133,7 @@ write = "backend"
 # base = "/home/user/wiki"
 ```
 
-`read` controls the default project search scope. `write` is the default target for tools that need one, such as `wiki_index` without a `domain` argument. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
+`read` controls the default project search scope. To read from **every** domain in the base, set `read = []` or omit the line entirely — an empty or absent `read` falls back to all domains. `read = ["all"]` is **not** a wildcard; it is treated as a literal domain named `all`. `write` is the default target for tools that need one, such as `wiki_index` without a `domain` argument. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
 
 You can also bind from the MCP tool surface:
 
@@ -206,8 +206,9 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_read_page` | Read one Markdown page by domain and slug. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain. |
-| `wiki_write_page` | Validate and write a new page, index the domain, and return whether the base auto-commit succeeded. |
-| `wiki_index` | Rebuild one domain index, defaulting to the bound write domain when omitted. |
+| `wiki_write_page` | Validate and write a new page, index the domain, commit and push. |
+| `wiki_update_page` | Replace the body of one `##` section of an existing page, reindex the changed section, commit and push. |
+| `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
 | `wiki_create_domain` | Create a domain directory with `.iwiki/` metadata and return whether the base auto-commit succeeded. |
 | `wiki_bind` | Write or update `.iwiki.toml` for the current project after validating domains. |
@@ -215,13 +216,13 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_lint` | Report domain health, including broken links, orphans, stale pages, and section gaps. |
 | `wiki_sync` | Run `git pull --rebase` and `git push` in the base. |
 
-`wiki_write_page` refuses to overwrite an existing page in v1. For existing pages, read the current page first with `wiki_read_page`, confirm the intended replacement with the user, and then handle the edit deliberately outside the v1 overwrite path.
+`wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None)` — it replaces only the named `##` section and leaves the rest of the page intact. For a full-page rewrite, read the current page first with `wiki_read_page`, confirm the intended replacement with the user, and then handle the edit deliberately outside the v1 overwrite path.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
 
 ## Git sync of the base
 
-When `IWIKI_BASE_DIR` is a git repository, `wiki_write_page` and `wiki_create_domain` stage and commit the base after successful changes. If the base is not a git repo, the write or create still succeeds on disk and the tool response returns `committed: false`. Use `wiki_sync`, `wiki_status`, or git commands in the base repo to diagnose repository and remote setup.
+When `IWIKI_BASE_DIR` is a git repository, every mutating tool — `wiki_write_page`, `wiki_update_page`, `wiki_create_domain`, and `wiki_index` — stages, commits, and pushes the base after successful changes (fail-soft: push errors are reported but do not roll back the write). If the base is not a git repo, the write or create still succeeds on disk and the tool response returns `committed: false`. Use `wiki_sync`, `wiki_status`, or git commands in the base repo to diagnose repository and remote setup.
 
 Use `wiki_sync` to share the base:
 
