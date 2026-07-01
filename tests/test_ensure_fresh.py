@@ -61,6 +61,16 @@ def test_ensure_fresh_updated_fast_forwards(tmp_path):
     assert "neighbor" in _log(base)  # ff pulled the neighbor commit in
 
 
+def test_ensure_fresh_updated_ignores_untracked(tmp_path):
+    remote, base = _setup(tmp_path)
+    _neighbor_push(remote, tmp_path)
+    (base / "scratch.tmp").write_text("untracked")  # untracked, must not block ff
+    res = sync.ensure_fresh(str(base))
+    assert res["state"] == "updated"
+    assert "neighbor" in _log(base)
+    assert (base / "scratch.tmp").exists()  # ff did not disturb the untracked file
+
+
 def test_ensure_fresh_ahead_only(tmp_path):
     _remote, base = _setup(tmp_path)
     (base / "local.md").write_text("x")

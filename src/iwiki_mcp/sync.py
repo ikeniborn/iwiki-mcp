@@ -122,7 +122,8 @@ def _tree_clean(base: str) -> bool:
     r = _run(base, "status", "--porcelain")
     if r.returncode != 0:
         return False
-    # filter out untracked files (??); only care about modifications to tracked files
+    # Untracked files (?? lines) do not block `git merge --ff-only`, so they do
+    # not count as "dirty"; only modifications to tracked files skip the ff.
     for line in r.stdout.strip().split("\n"):
         if line and not line.startswith("??"):
             return False
