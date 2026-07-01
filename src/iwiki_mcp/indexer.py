@@ -68,3 +68,34 @@ def append_log(base: str, domain: str, op: str, source: str, page: str,
            "date": _dt.date.today().isoformat(), "src_hash": src_hash}
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def upsert_ingest_log(base: str, domain: str, source: str, page: str,
+                      src_hash: str | None) -> None:
+    """Replace any prior ``ingest`` records for ``page`` with a single fresh one.
+
+    Unlike ``append_log`` this keeps one ingest record per page, so ``lint``'s
+    first-hit-wins stale detection reads the current ``src_hash`` after an edit.
+    """
+    path = log_path(base, domain)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    kept: list[str] = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    rec = json.loads(s)
+                except Exception:
+                    kept.append(s)
+                    continue
+                if rec.get("op") == "ingest" and rec.get("page") == page:
+                    continue   # drop the stale record for this page
+                kept.append(s)
+    rec = {"op": "ingest", "source": source, "page": page,
+           "date": _dt.date.today().isoformat(), "src_hash": src_hash}
+    kept.append(json.dumps(rec, ensure_ascii=False))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(kept) + "\n")
