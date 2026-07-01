@@ -77,18 +77,23 @@ def _logged_page_path(page: str, wiki_dir: str) -> str:
     return os.path.normpath(os.path.join(wiki_dir, page))
 
 
-def _stale(wiki_dir: str) -> list[dict]:
-    """Pages whose source changed after the last ingest, via .iwiki/log.jsonl
-    (content-hash with mtime fallback; no git). Deduped by page, first hit wins."""
+def _latest_ingest_by_page(wiki_dir: str) -> dict[str, dict]:
+    """Latest ingest record per page from .iwiki/log.jsonl (last-wins).
+
+    An `ingest` record with a non-empty source sets the page's current record;
+    a `delete` record clears it. Last-wins so a delete + re-ingest of the same
+    slug is judged by the NEW source, not a stale earlier record. Legacy records
+    without an `op` are treated as ingests (back-compat). Malformed lines, records
+    without a page, and records without a source are ignored.
+    """
     log = os.path.join(wiki_dir, ".iwiki", "log.jsonl")
+    latest: dict[str, dict] = {}
     if not os.path.isfile(log):
-        return []
-    out: list[dict] = []
-    seen: set[str] = set()
+        return latest
     try:
         lines = open(log, encoding="utf-8").read().splitlines()
     except Exception:
-        return []
+        return latest
     for line in lines:
         line = line.strip()
         if not line:
@@ -97,17 +102,31 @@ def _stale(wiki_dir: str) -> list[dict]:
             rec = json.loads(line)
         except Exception:
             continue
-        src, page = rec.get("source"), rec.get("page")
-        if not src or not page:
+        page = rec.get("page")
+        if not page:
             continue
         page_path = _logged_page_path(page, wiki_dir)
-        if page_path in seen:
+        if rec.get("op") == "delete":
+            latest.pop(page_path, None)
             continue
+        src = rec.get("source")
+        if not src:
+            continue
+        latest[page_path] = {"page": page_path, "source": src,
+                             "src_hash": rec.get("src_hash")}
+    return latest
+
+
+def _stale(wiki_dir: str) -> list[dict]:
+    """Pages whose source changed after the last ingest (content-hash with mtime
+    fallback; no git), from the latest ingest record per page."""
+    out: list[dict] = []
+    for page_path, rec in _latest_ingest_by_page(wiki_dir).items():
+        src = rec["source"]
         if os.path.isfile(src) and os.path.isfile(page_path):
             try:
                 if not _fresh(src, page_path, rec.get("src_hash")):
                     out.append({"page": page_path, "source": src})
-                    seen.add(page_path)
             except Exception:
                 pass
     return out

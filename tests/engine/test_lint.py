@@ -142,3 +142,22 @@ def test_stale_hash_present_but_unreadable_falls_back_to_mtime(tmp_path, monkeyp
     os.utime(src, (2000, 2000))
     os.utime(page, (1000, 1000))
     assert any(s["source"] == src for s in lint(wd)["stale"])
+
+
+def test_stale_last_wins_after_delete_and_reingest(tmp_path):
+    # ingest(old hash) -> delete -> ingest(new hash matching current source):
+    # last-wins => judged by the NEWEST record => NOT stale.
+    wd = _wiki(tmp_path, {"a.md": "## A\nbody\n"})
+    src = tmp_path / "s.py"
+    src.write_text("new\n", encoding="utf-8")
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    recs = [
+        {"op": "ingest", "source": str(src), "page": "a.md", "src_hash": _h("old\n")},
+        {"op": "delete", "source": "", "page": "a.md"},
+        {"op": "ingest", "source": str(src), "page": "a.md", "src_hash": _h("new\n")},
+    ]
+    with open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+    assert lint(wd)["stale"] == []
