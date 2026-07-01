@@ -84,8 +84,8 @@ body:has(#tab-result:checked) label[for="tab-result"]{ color:var(--accent); bord
 <input type="checkbox" id="theme-toggle" hidden>
 <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
 <input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
-<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden checked>
-<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
 <label for="theme-toggle" class="theme-btn" title="Переключить тему">🌙 / ☀️</label>
 <header>
   <h1>Цепочка IDD→SDD: wiki-update-page</h1>
@@ -429,7 +429,71 @@ body:has(#tab-result:checked) label[for="tab-result"]{ color:var(--accent); bord
 
 <!-- TAB:result START -->
 <section class="tab-pane" id="pane-result">
-  <p class="note">Этап ещё не проверен.</p>
+
+  <h2>1. Резюме сверки</h2>
+  <p class="legend">Plan: <code>docs/superpowers/plans/2026-07-01-wiki-update-page.md</code> (plan_hash <code>c8b83d11e7baaf79</code>) &nbsp;·&nbsp; Spec: <code>…-wiki-update-page-design.md</code> &nbsp;·&nbsp; Intent: <code>n/a</code> &nbsp;·&nbsp; Diff base: <code>2339b34..HEAD</code> (9 коммитов, 12 файлов)</p>
+  <p class="note">Реализация исполнена subagent-driven: 6 задач, TDD, per-task spec+quality ревью, финальное ревью (opus) — <strong>READY TO MERGE</strong>. Полный набор тестов: <strong>141 passed</strong>.</p>
+
+  <h2>2. Результаты проверки</h2>
+
+  <h3>Покрытие шагов плана</h3>
+  <table>
+    <thead><tr><th style="width:16%">Статус</th><th style="width:12%">Кол-во</th><th>Задачи</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge b-ok">DONE</span></td><td>6</td><td>T1 section.py · T2 commit_and_push · T3 upsert_ingest_log · T4 wiki_update_page · T5 ретрофит · T6 docs+version</td></tr>
+      <tr><td><span class="badge b-warn">PARTIAL</span></td><td>0</td><td>—</td></tr>
+      <tr><td><span class="badge b-danger">MISSING</span></td><td>0</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Сопоставление шаг → дифф</h3>
+  <table>
+    <thead><tr><th style="width:20%">Задача</th><th>Файлы в диффе</th><th style="width:14%">Статус</th></tr></thead>
+    <tbody>
+      <tr><td>T1</td><td><code>src/iwiki_mcp/engine/section.py</code>, <code>tests/test_section.py</code> (+guard ## в new_body)</td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T2</td><td><code>src/iwiki_mcp/sync.py</code>, <code>tests/test_commit_and_push.py</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T3</td><td><code>src/iwiki_mcp/indexer.py</code>, <code>tests/test_indexer_log.py</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T4</td><td><code>src/iwiki_mcp/server.py</code>, <code>tests/test_server_update.py</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T5</td><td><code>src/iwiki_mcp/server.py</code>, <code>tests/test_server_write.py</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T6</td><td><code>README.md</code>, <code>pyproject.toml</code> (0.1.2→0.1.3); <code>architecture.md</code> — в базе <code>iwiki-personal</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <thead><tr><th>Severity</th><th>Шаг</th><th>Plan → Diff</th><th>Fix / примечание</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="badge b-info">INFO</span></td><td>T6 Step 2</td>
+        <td>План: правка <code>docs/wiki/architecture.md</code>. Дифф: файла нет в репо — wiki живёт во внешней базе.</td>
+        <td>Обновлено в базе <code>iwiki-personal/iwiki-mcp/architecture.md</code> + reindex + lint (чисто). Ожидаемо для этого проекта.</td>
+      </tr>
+      <tr>
+        <td><span class="badge b-warn">WARNING</span></td><td>EXCESS</td>
+        <td>Дифф: <code>uv.lock</code> изменён — прямого шага плана нет.</td>
+        <td>Следствие version-bump (Step 3). Benign.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Покрытие Intent / Spec</h3>
+  <table>
+    <thead><tr><th style="width:30%">Источник</th><th>Покрытие</th></tr></thead>
+    <tbody>
+      <tr><td>Intent · Desired Outcomes</td><td>n/a — intent-стадии для топика нет</td></tr>
+      <tr><td>Spec · требования</td><td><strong>7/7</strong>: R1 wiki_update_page ✓ · R2 commit_and_push на всех мутациях ✓ · section.py ✓ · log upsert ✓ · rollback (file+log) ✓ · error handling ✓ · tests+follow-up ✓</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Сводка</h3>
+  <p>
+    <span class="badge b-ok">CRITICAL: 0</span>&nbsp;
+    <span class="badge b-warn">WARNING: 1</span>&nbsp;
+    <span class="badge b-info">INFO: 1</span>
+  </p>
+  <p class="note"><strong>Вердикт: OK</strong> — MISSING шагов нет; spec-требования покрыты; 141 тест зелёный. Цепочка закрыта.</p>
+  <p class="legend">Цепочка: <code>intent</code> (n/a) → <strong>spec ✓</strong> → <strong>plan ✓</strong> → <strong>result OK</strong>.</p>
+
 </section>
 <!-- TAB:result END -->
 </body>
