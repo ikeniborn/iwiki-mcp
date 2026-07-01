@@ -7,9 +7,9 @@ __pycache__/
 .claude/
 .codex/
 .agents/
-.superpowers/*
+.superpowers/
 dist/
 build/
-docs/superpower/*
+docs/superpower/
 docs/bug-*.md
 
