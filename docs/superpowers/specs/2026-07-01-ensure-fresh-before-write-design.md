@@ -1,3 +1,16 @@
+---
+review:
+  spec_hash: 3c71c3a2097a399a
+  last_run: 2026-07-01
+  phases:
+    structure: {status: passed}
+    coverage: {status: passed}
+    clarity: {status: passed}
+    consistency: {status: passed}
+  findings: []
+chain:
+  intent: null
+---
 # Ensure base freshness before write — design
 
 **Date:** 2026-07-01

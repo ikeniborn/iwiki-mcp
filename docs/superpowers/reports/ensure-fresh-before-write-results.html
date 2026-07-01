@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IDD→SDD chain — ensure-fresh-before-write</title>
+<style>
+:root{
+  --bg:#0f1115; --surface:#171a21; --surface2:#1e222b; --border:#2b313c;
+  --text:#e6e9ef; --muted:#9aa3b2; --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24;
+  --crit:#f87171; --shadow:rgba(0,0,0,.45);
+}
+body:has(#theme-toggle:checked){
+  --bg:#f7f8fa; --surface:#ffffff; --surface2:#eef1f5; --border:#d4dae3;
+  --text:#1a1f29; --muted:#5b6573; --accent:#2563eb; --ok:#15803d; --warn:#b45309;
+  --crit:#b91c1c; --shadow:rgba(0,0,0,.12);
+}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg);color:var(--text);padding:0 0 4rem}
+header{display:flex;align-items:center;gap:1rem;padding:1.1rem 1.6rem;
+  border-bottom:1px solid var(--border);background:var(--surface);position:sticky;top:0;z-index:5}
+header h1{font-size:1.15rem;margin:0;font-weight:650}
+.theme-btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;
+  padding:.3rem .6rem;background:var(--surface2);user-select:none}
+main{max-width:980px;margin:0 auto;padding:0 1.6rem}
+h2{font-size:1.05rem;margin:1.8rem 0 .6rem;border-left:3px solid var(--accent);padding-left:.6rem}
+h3{font-size:.95rem;margin:1.3rem 0 .5rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+table{width:100%;border-collapse:collapse;margin:.6rem 0;background:var(--surface);
+  border:1px solid var(--border);border-radius:10px;overflow:hidden;font-size:.9rem}
+th,td{padding:.5rem .7rem;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+th{background:var(--surface2);font-weight:600}
+tr:last-child td{border-bottom:none}
+code{background:var(--surface2);padding:.05rem .35rem;border-radius:5px;font-size:.85em}
+.note{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);
+  padding:.7rem .9rem;border-radius:8px;color:var(--muted)}
+.badge{display:inline-block;padding:.1rem .55rem;border-radius:999px;font-size:.78rem;font-weight:600}
+.b-ok{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
+.b-warn{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+.b-crit{background:color-mix(in srgb,var(--crit) 22%,transparent);color:var(--crit)}
+.flow{display:flex;flex-wrap:wrap;gap:.5rem;align-items:stretch;margin:.6rem 0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:.55rem .7rem;box-shadow:0 2px 6px var(--shadow);min-width:120px}
+.card b{display:block;font-size:.86rem}
+.card span{font-size:.76rem;color:var(--muted)}
+.arrow{align-self:center;color:var(--accent);font-weight:700}
+figure{margin:.6rem 0}
+figcaption{font-size:.8rem;color:var(--muted);margin-top:.3rem}
+svg{max-width:100%;height:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px}
+.gn{fill:var(--surface2);stroke:var(--border)}
+.gn-srv{fill:color-mix(in srgb,var(--accent) 18%,var(--surface2));stroke:var(--accent)}
+.gt{fill:var(--text);font:12px sans-serif}
+.gt-s{fill:var(--muted);font:10px sans-serif}
+.ge{stroke:var(--muted);stroke-width:1.4;fill:none}
+nav.chain-tabs{display:flex;gap:.3rem;max-width:980px;margin:1rem auto 0;padding:0 1.6rem}
+.tab-radio{position:absolute;left:-9999px}
+.chain-tabs label{cursor:pointer;padding:.4rem .9rem;border:1px solid var(--border);
+  border-bottom:none;border-radius:8px 8px 0 0;background:var(--surface);color:var(--muted)}
+body:has(#tab-intent:checked) label[for="tab-intent"],
+body:has(#tab-spec:checked)   label[for="tab-spec"],
+body:has(#tab-plan:checked)   label[for="tab-plan"],
+body:has(#tab-result:checked) label[for="tab-result"]{color:var(--accent);border-color:var(--accent);font-weight:600}
+.tab-pane{display:none}
+body:has(#tab-intent:checked) #pane-intent,
+body:has(#tab-spec:checked)   #pane-spec,
+body:has(#tab-plan:checked)   #pane-plan,
+body:has(#tab-result:checked) #pane-result{display:block}
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden checked>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+<header>
+  <label for="theme-toggle" class="theme-btn" title="Тёмная / светлая тема">🌙 / ☀️</label>
+  <h1>IDD→SDD chain — ensure-fresh-before-write</h1>
+</header>
+<nav class="chain-tabs">
+  <label for="tab-intent">Intent</label>
+  <label for="tab-spec">Spec</label>
+  <label for="tab-plan">Plan</label>
+  <label for="tab-result">Result</label>
+</nav>
+<main>
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+
+  <h2>1. Резюме спецификации</h2>
+  <p class="note">Файл: <code>docs/superpowers/specs/2026-07-01-ensure-fresh-before-write-design.md</code> ·
+  spec_hash: <code>3c71c3a2097a399a</code> · вердикт: <span class="badge b-ok">OK</span></p>
+  <p>Цель: тянуть remote <b>до</b> локальной мутации, чтобы запись ложилась на текущий remote-tip и push становился fast-forward. При реальном расхождении (diverged) — отказать в записи с hint, не громоздя новый коммит на расхождение.</p>
+
+  <h3>Требования по секциям</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Секция</th><th>Требование</th></tr></thead>
+    <tbody>
+      <tr><td>R1</td><td>Design §1</td><td>Новая fail-soft функция <code>sync.ensure_fresh(base)</code>: fetch + при чистом отставании <code>merge --ff-only</code>; никогда не бросает; берёт <code>base_lock</code>.</td></tr>
+      <tr><td>R2</td><td>Design §1</td><td>ahead/behind считать через <code>git rev-list --left-right --count @{upstream}...HEAD</code>.</td></tr>
+      <tr><td>R3</td><td>Design §1</td><td>Модель состояний: <code>no_repo</code>/<code>no_remote</code>/<code>no_upstream</code>/<code>offline</code>/<code>up_to_date</code>/<code>ahead</code>/<code>updated</code>/<code>dirty</code>/<code>diverged</code> с заданной реакцией.</td></tr>
+      <tr><td>R4</td><td>Design §2</td><td>Вызов <code>ensure_fresh</code> в начале всех <b>5</b> mutating-хендлеров (write/update/delete/reindex/create_domain) до validate/write.</td></tr>
+      <tr><td>R5</td><td>Design §2</td><td><code>diverged</code> → немедленный возврат <code>{error, hint}</code> с <b>нулём</b> сайд-эффектов (нет .md/лога/индекса).</td></tr>
+      <tr><td>R6</td><td>Design §2</td><td>Любой <code>warning</code> (offline/dirty/no_upstream) прокидывается в итоговый result рядом с <code>committed</code>/<code>pushed</code>. <code>wiki_sync</code> не трогаем.</td></tr>
+      <tr><td>R7</td><td>Design §3</td><td>Тесты: unit по состояниям <code>ensure_fresh</code> + хендлер-уровень (diverged→refuse zero-effect; behind→ff+write+push). Паттерн no-network.</td></tr>
+      <tr><td>R8</td><td>Design §4</td><td>Docs: wiki sync-страница, README (только если описывает git-поведение записи), project CLAUDE.md; patch-bump <code>0.1.4</code>→<code>0.1.5</code>; строка в <code>docs/TODO.md</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Модель состояний ensure_fresh</h3>
+  <table>
+    <thead><tr><th>Состояние</th><th>Условие</th><th>Действие</th></tr></thead>
+    <tbody>
+      <tr><td><code>no_repo</code></td><td>не git-репо</td><td>proceed</td></tr>
+      <tr><td><code>no_remote</code></td><td>нет remote</td><td>proceed</td></tr>
+      <tr><td><code>no_upstream</code></td><td>нет <code>@{upstream}</code></td><td>proceed + warning</td></tr>
+      <tr><td><code>offline</code></td><td><code>git fetch</code> упал</td><td>proceed + warning</td></tr>
+      <tr><td><code>up_to_date</code></td><td>behind=0, ahead=0</td><td>proceed</td></tr>
+      <tr><td><code>ahead</code></td><td>ahead&gt;0, behind=0</td><td>proceed (push ff позже)</td></tr>
+      <tr><td><code>updated</code></td><td>behind&gt;0, ahead=0, tree чистый</td><td><code>merge --ff-only</code> → proceed</td></tr>
+      <tr><td><code>dirty</code></td><td>behind&gt;0, tree грязный</td><td>skip ff, proceed + warning</td></tr>
+      <tr><td><code>diverged</code></td><td>ahead&gt;0 <b>и</b> behind&gt;0</td><td><span class="badge b-crit">BLOCK</span> — caller отказывает</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Схема потока записи</h2>
+  <figure>
+    <div class="flow">
+      <div class="card"><b>mutating handler</b><span>write/update/delete/reindex/create_domain</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>ensure_fresh(base)</b><span>fetch + ff-only</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>diverged?</b><span>ahead ∧ behind</span></div>
+    </div>
+    <div class="flow">
+      <div class="card" style="border-color:var(--crit)"><b>да → refuse</b><span>{error, hint}, zero side effects</span></div>
+      <div class="card" style="border-color:var(--ok)"><b>нет → validate → write → log → reindex</b><span>ложится на свежий tip</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>commit_and_push</b><span>push = fast-forward</span></div>
+    </div>
+    <figcaption>ensure_fresh встаёт до validate/write. Свежий base → post-write push становится ff, конфликта на <code>index.jsonl</code> от устаревшего base нет.</figcaption>
+  </figure>
+
+  <h3>Карта покрытия (задача → требования)</h3>
+  <table>
+    <thead><tr><th>Задача из диалога</th><th>Покрыто</th></tr></thead>
+    <tbody>
+      <tr><td>Тянуть remote до записи (fast-forward)</td><td>R1, R2, R3</td></tr>
+      <tr><td>Отказ при расхождении + hint</td><td>R3, R5</td></tr>
+      <tr><td>Гард на всех 5 mutating-хендлерах</td><td>R4</td></tr>
+      <tr><td>Fail-soft, warnings прокидываются</td><td>R1, R6</td></tr>
+      <tr><td>Тесты (no-network)</td><td>R7</td></tr>
+      <tr><td>Docs + версия</td><td>R8</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Результаты проверки</h2>
+  <table>
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>clarity</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge b-ok">passed</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Findings</h3>
+  <p class="note">Находок нет — все 4 фазы пройдены чисто. «TODO» в тексте — ссылка на файл <code>docs/TODO.md</code>, не плейсхолдер.</p>
+  <table>
+    <thead><tr><th>id</th><th>severity</th><th>section</th><th>fragment</th><th>text</th><th>fix</th><th>verdict</th></tr></thead>
+    <tbody><tr><td colspan="7" style="text-align:center;color:var(--muted)">—</td></tr></tbody>
+  </table>
+
+  <h3>Сводка</h3>
+  <p>
+    <span class="badge b-crit">CRITICAL open: 0</span>&nbsp;
+    <span class="badge b-warn">WARNING open: 0</span>&nbsp;
+    <span class="badge b-ok">Вердикт: OK</span>
+  </p>
+  <p class="note">Chain: <code>intent → spec</code> — intent отсутствует (<code>chain.intent: null</code>), задачу открыл этап spec.</p>
+
+</section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:result END -->
+</main>
+</body>
+</html>
