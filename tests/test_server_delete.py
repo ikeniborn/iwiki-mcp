@@ -70,3 +70,9 @@ def test_delete_rolls_back_on_index_failure(tmp_path, monkeypatch):
     assert os.path.exists(os.path.join(b, "backend", "auth.md"))
     log_text = open(base.log_path(b, "backend"), encoding="utf-8").read()
     assert '"op": "delete"' not in log_text
+
+
+def test_delete_invalid_slug_errors(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_delete_page("backend", "../escape")
+    assert "error" in out
