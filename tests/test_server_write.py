@@ -122,3 +122,11 @@ def test_write_page_does_not_leave_index_record_when_logging_fails(
     assert "error" in out
     assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
     assert "auth.md" not in index_text
+
+
+def test_index_commits_and_reports_push(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    server.wiki_write_page("backend", "auth", "# A\n## Overview\no\n## Flow\nx\n")
+    out = server.wiki_index("backend")
+    assert out["domain"] == "backend"
+    assert "committed" in out and "pushed" in out

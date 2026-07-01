@@ -308,14 +308,15 @@ def wiki_write_page(
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    commit = sync.auto_commit(bind.base, f"iwiki: ingest {page_rel}",
-                              pathspec=valid_domain)
+    commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
+                                  pathspec=valid_domain)
     return {
         "page": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
         "over_cap": stats["over_cap"],
         "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
     }
 
 
@@ -412,7 +413,11 @@ def wiki_index(domain: str | None = None) -> dict:
         }
     cfg = Config.load()
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
-    return {"domain": valid_domain, **stats}
+    commit = sync.commit_and_push(bind.base, f"iwiki: reindex {valid_domain}",
+                                  pathspec=valid_domain)
+    return {"domain": valid_domain, **stats,
+            "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False)}
 
 
 @_safe
@@ -424,9 +429,10 @@ def wiki_create_domain(name: str) -> dict:
         return {"error": f"domain '{valid_domain}' already exists"}
     os.makedirs(dom_path / ".iwiki", exist_ok=True)
     ignore.ensure_iwikiignore(bind.project_dir)
-    commit = sync.auto_commit(bind.base, f"iwiki: create domain {valid_domain}",
-                              pathspec=valid_domain)
-    return {"created": valid_domain, "committed": commit.get("committed", False)}
+    commit = sync.commit_and_push(bind.base, f"iwiki: create domain {valid_domain}",
+                                  pathspec=valid_domain)
+    return {"created": valid_domain, "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False)}
 
 
 @_safe
