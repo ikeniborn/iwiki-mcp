@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iwiki-mcp — Server Report</title>
+<style>
+/* ---------- themes ---------- */
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1120px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg); transition:background .3s, color .3s;
+}
+.theme-btn{
+  position:sticky; top:.5rem; float:right; z-index:5;
+  cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--surface);
+}
+h1{ font-size:1.9rem; margin:.2rem 0 .1rem; }
+h2{ font-size:1.28rem; margin:2.2rem 0 .6rem; border-bottom:1px solid var(--border); padding-bottom:.3rem; }
+h3{ font-size:1.05rem; margin:1.3rem 0 .4rem; color:var(--accent); }
+code{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.9em;
+  background:color-mix(in srgb, var(--accent) 10%, transparent); padding:.05rem .3rem; border-radius:4px; }
+.lead{ font-size:1.1rem; }
+.sub{ color:var(--muted); font-size:.92rem; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0;
+  box-shadow:0 1px 8px var(--shadow); }
+.note.warn{ border-left-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+details{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:.7rem 1rem; margin:.7rem 0; box-shadow:0 1px 8px var(--shadow); }
+details summary{ cursor:pointer; font-weight:600; color:var(--accent); }
+details[open] summary{ margin-bottom:.55rem; }
+ul.tight li{ margin:.3rem 0; }
+.badge{ display:inline-block; font-size:.7rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); white-space:nowrap; }
+.badge.llm{ color:var(--warn-2); border-color:var(--warn); }
+.badge.det{ color:var(--ok-2);  border-color:var(--ok); }
+.badge.git{ color:var(--accent-2); border-color:var(--accent); }
+.badge.danger{ color:var(--danger-2); border-color:var(--danger); }
+.grid2{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:.8rem; margin:1rem 0; }
+.card-lite{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:.8rem 1rem; box-shadow:0 1px 8px var(--shadow); }
+.card-lite b{ color:var(--accent); }
+
+/* ---------- table ---------- */
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface);
+  margin:1rem 0; font-size:.9rem; border:1px solid var(--border); border-radius:10px;
+  overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.5rem .75rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table tbody tr:hover{ background:color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.rpt-table td code{ white-space:nowrap; }
+
+/* ---------- C4 ---------- */
+.rpt-c4 .boundary{
+  border:1.6px dashed var(--accent); border-radius:12px;
+  padding:1.8rem 1rem 1rem; margin:.7rem 0; position:relative;
+  display:flex; flex-wrap:wrap; gap:.6rem;
+  background:color-mix(in srgb, var(--accent) 5%, transparent); }
+.rpt-c4 .boundary::before{
+  content:attr(data-label); position:absolute; top:-.7rem; left:.9rem;
+  background:var(--bg); padding:0 .45rem; font-size:.8rem; color:var(--accent); font-weight:600; }
+.rpt-c4 .comp{
+  background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  padding:.55rem .85rem; min-width:6rem; font-size:.82rem; box-shadow:0 1px 6px var(--shadow);
+  border-left:4px solid var(--accent); }
+.rpt-c4 .comp b{ color:var(--accent); }
+.rpt-c4 .comp .sub{ font-size:.72rem; }
+.rpt-c4 .boundary.ext{ border-color:var(--warn); background:color-mix(in srgb, var(--warn) 6%, transparent); }
+.rpt-c4 .boundary.ext::before{ color:var(--warn-2); }
+.rpt-c4 .boundary.ext .comp{ border-left-color:var(--warn); }
+.rpt-c4 .boundary.ext .comp b{ color:var(--warn-2); }
+
+/* ---------- SVG diagram grammar ---------- */
+figure.diagram{ margin:1.2rem 0; }
+figure.diagram svg{ width:100%; height:auto; display:block; overflow:visible; }
+figcaption{ color:var(--muted); font-size:.85rem; margin-top:.35rem; text-align:center; }
+.card{ fill:var(--surface); stroke:var(--border); stroke-width:1.5; filter:url(#dropshadow); transition:stroke .15s, stroke-width .15s; }
+.node:hover .card{ stroke:var(--accent); stroke-width:2.5; }
+.bar-accent{ fill:var(--accent); } .bar-ok{ fill:var(--ok); }
+.bar-warn{ fill:var(--warn); } .bar-term{ fill:var(--danger); }
+.t-title{ fill:var(--fg); font:600 13px system-ui, sans-serif; }
+.t-sub{ fill:var(--muted); font:10.5px system-ui, sans-serif; }
+.t-mono{ font-family:ui-monospace, monospace; }
+text{ pointer-events:none; }
+.conn{ fill:none; stroke:var(--line); stroke-width:2; }
+.conn-a{ fill:none; stroke:var(--accent); stroke-width:2; stroke-dasharray:5 5; }
+.conn-term{ fill:none; stroke:var(--danger); stroke-width:2.2; }
+.flow{ fill:none; stroke:var(--accent); stroke-width:2.4; stroke-dasharray:8 6; animation:dash 1.1s linear infinite; }
+@keyframes dash{ to{ stroke-dashoffset:-14; } }
+@media (prefers-reduced-motion: reduce){ .flow{ animation:none; } }
+.lbl-bg{ fill:var(--bg); }
+.lbl{ fill:var(--fg); font:11px system-ui, sans-serif; }
+.boundary-rect{ fill:none; stroke:var(--accent); stroke-width:1.6; stroke-dasharray:7 6; opacity:.85; }
+.boundary-rect.term{ stroke:var(--danger); }
+/* sequence */
+.lifeline{ stroke:var(--line); stroke-width:1.3; stroke-dasharray:3 5; }
+.seq-call{ fill:none; stroke:var(--accent); stroke-width:2; }
+.seq-ret{ fill:none; stroke:var(--line); stroke-width:1.6; stroke-dasharray:6 4; }
+</style>
+</head>
+<body>
+
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Toggle dark/light">🌙 / ☀️</label>
+
+<!-- shared SVG defs: dropshadow + one arrow marker per semantic color -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="dropshadow" x="-20%" y="-20%" width="140%" height="160%">
+    <feDropShadow dx="0" dy="2.5" stdDeviation="3.5" flood-color="var(--shadow)" flood-opacity="1"/>
+  </filter>
+  <marker id="arr"     markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--line)"/></marker>
+  <marker id="arrA"    markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--accent)"/></marker>
+  <marker id="arrOk"   markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--ok)"/></marker>
+  <marker id="arrTerm" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--danger)"/></marker>
+</defs></svg>
+
+<main class="report">
+
+<h1>iwiki-mcp — How the Server Works</h1>
+<p class="lead">A stdio MCP server that fronts a shared, git-synced wiki <em>base</em> split into <em>domains</em>. Coding agents author Markdown pages; the server validates structure, persists, embeds, indexes, and runs hybrid (vector + lexical) search across the domains a project is bound to.</p>
+<p class="sub">sources: <code>src/iwiki_mcp/**</code> · <code>docs/wiki/*.md</code> · generated 2026-07-01 · branch <code>master</code></p>
+
+<div class="note"><b>Not a daemon.</b> The server lives for the client session that spawned it. <code>iwiki-mcp = iwiki_mcp.server:main</code> parses an optional <code>--project DIR</code>, then <code>mcp.run()</code> speaks MCP over stdio via a <code>FastMCP("iwiki")</code> instance.</div>
+
+<!-- ============================================================= -->
+<h2>1. What the server is</h2>
+<div class="grid2">
+  <div class="card-lite"><b>Two layers</b><br><span class="sub">Top layer is MCP-aware (<code>server.py</code>, <code>base.py</code>, <code>indexer.py</code>, <code>retrieval.py</code>, <code>sync.py</code>, <code>lock.py</code>, <code>ignore.py</code>, <code>resources.py</code>). The <code>engine/</code> core is framework-free and unit-testable.</span></div>
+  <div class="card-lite"><b>On-disk model</b><br><span class="sub">A <em>base</em> dir is a git repo; each immediate subdir is a <em>domain</em> holding <code>*.md</code> pages plus <code>.iwiki/index.jsonl</code> (embedding store) and <code>.iwiki/log.jsonl</code> (ingest log).</span></div>
+  <div class="card-lite"><b>Binding</b><br><span class="sub">A project's <code>.iwiki.toml</code> binds <code>read = [...]</code> domains and one <code>write</code> domain. <code>base.resolve_binding()</code> merges it with <code>IWIKI_*</code> env vars.</span></div>
+  <div class="card-lite"><b>Fail-soft surface</b><br><span class="sub">Every <code>wiki_*</code> handler is wrapped by <code>@_safe</code>: it never raises — exceptions become <code>{"error","hint"}</code> dicts, so the MCP client always gets JSON.</span></div>
+</div>
+
+<!-- ============================================================= -->
+<h2>2. Interaction diagram — component &amp; container map</h2>
+<p>Who talks to whom. The MCP client calls the server's tool surface; the tools delegate to the framework-free <code>engine/</code> core; only two external systems are touched — the embeddings API (HTTP) and the shared git base (subprocess + inter-process lock).</p>
+
+<figure class="rpt-c4">
+  <div class="boundary" data-label="Client session · stdio (MCP)">
+    <div class="comp"><b>MCP Client</b><br><span class="sub">Claude Code / Codex — the authoring agent</span></div>
+
+    <div class="boundary" data-label="iwiki-mcp server · top layer">
+      <div class="comp"><b>server.py</b><br><span class="sub">12 <code>wiki_*</code> tools · <code>@_safe</code> wrap · path guards</span></div>
+      <div class="comp"><b>base.py</b><br><span class="sub">binding · domain/page path resolution</span></div>
+      <div class="comp"><b>indexer.py</b><br><span class="sub">ingest · incremental re-index · ingest log</span></div>
+      <div class="comp"><b>retrieval.py</b><br><span class="sub">hybrid vector + lexical query</span></div>
+      <div class="comp"><b>sync.py</b><br><span class="sub">auto-commit · pull --rebase · push</span></div>
+      <div class="comp"><b>ignore.py / lock.py</b><br><span class="sub"><code>.iwikiignore</code> gate · base file-lock</span></div>
+      <div class="comp"><b>resources.py</b><br><span class="sub"><code>iwiki://authoring-rules</code></span></div>
+
+      <div class="boundary" data-label="engine/ · framework-free core">
+        <div class="comp"><b>chunk</b><br><span class="sub">split on <code>##</code> · prefix context</span></div>
+        <div class="comp"><b>embed</b><br><span class="sub">OpenAI-compat client · retry</span></div>
+        <div class="comp"><b>store</b><br><span class="sub">int8 JSONL · <code>VectorStore</code> seam</span></div>
+        <div class="comp"><b>search / grep</b><br><span class="sub">cosine top-k · term-frequency</span></div>
+        <div class="comp"><b>related / links</b><br><span class="sub">neighbours · <code>[[refs]]</code> graph</span></div>
+        <div class="comp"><b>validate / lint</b><br><span class="sub">structure gate · health (stdlib-only)</span></div>
+        <div class="comp"><b>config</b><br><span class="sub">env tuning · HALT stop-rule</span></div>
+      </div>
+    </div>
+
+    <div class="boundary ext" data-label="External systems">
+      <div class="comp"><b>Embeddings API</b><br><span class="sub">OpenAI-compatible <code>{base_url}/embeddings</code></span></div>
+      <div class="comp"><b>Git base</b><br><span class="sub">shared repo · one subdir per domain</span></div>
+      <div class="comp"><b>Project config</b><br><span class="sub"><code>.iwiki.toml</code> · <code>.iwikiignore</code></span></div>
+    </div>
+  </div>
+</figure>
+<figcaption>Nested boundaries = C4 containers. Two external dependencies: the embeddings backend and the git base. Everything else is in-process.</figcaption>
+
+<h3>2a. Write-path interaction (sequence)</h3>
+<p>The richest flow — it touches all five actors. Solid accent arrows are calls; dashed grey arrows are returns.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 980 470" role="img" aria-label="Write-path interaction sequence across five actors">
+  <!-- actor headers -->
+  <g class="node"><rect class="card" x="15"  y="24" width="150" height="40" rx="10"/><text class="t-title" x="90"  y="42" text-anchor="middle">MCP Client</text><text class="t-sub" x="90"  y="57" text-anchor="middle">agent / IDE</text></g>
+  <g class="node"><rect class="card" x="215" y="24" width="150" height="40" rx="10"/><text class="t-title" x="290" y="42" text-anchor="middle">iwiki-mcp</text><text class="t-sub" x="290" y="57" text-anchor="middle">server.py</text></g>
+  <g class="node"><rect class="card" x="415" y="24" width="150" height="40" rx="10"/><text class="t-title" x="490" y="42" text-anchor="middle">engine/</text><text class="t-sub" x="490" y="57" text-anchor="middle">chunk·embed·store</text></g>
+  <g class="node"><rect class="card" x="615" y="24" width="150" height="40" rx="10"/><text class="t-title" x="690" y="42" text-anchor="middle">Embeddings</text><text class="t-sub" x="690" y="57" text-anchor="middle">OpenAI-compat</text></g>
+  <g class="node"><rect class="card" x="815" y="24" width="150" height="40" rx="10"/><text class="t-title" x="890" y="42" text-anchor="middle">Git base</text><text class="t-sub" x="890" y="57" text-anchor="middle">shared repo</text></g>
+
+  <!-- lifelines -->
+  <line class="lifeline" x1="90"  y1="64" x2="90"  y2="440"/>
+  <line class="lifeline" x1="290" y1="64" x2="290" y2="440"/>
+  <line class="lifeline" x1="490" y1="64" x2="490" y2="440"/>
+  <line class="lifeline" x1="690" y1="64" x2="690" y2="440"/>
+  <line class="lifeline" x1="890" y1="64" x2="890" y2="440"/>
+
+  <!-- 1: client -> server -->
+  <text class="lbl" x="190" y="94"  text-anchor="middle">wiki_write_page(domain, slug, md, source)</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M90,100 H288"/>
+  <!-- 2: server -> engine (validate/ignore) -->
+  <text class="lbl" x="390" y="129" text-anchor="middle">validate_page · .iwikiignore gate</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M290,135 H488"/>
+  <!-- 3: engine -> server return -->
+  <text class="lbl" x="390" y="160" text-anchor="middle">blocking findings? (deep_heading / pre_h2)</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M490,166 H292"/>
+  <!-- 4: server self: write + log -->
+  <path class="seq-call" marker-end="url(#arr)" d="M290,196 H330 V214 H292"/>
+  <text class="lbl" x="338" y="207" text-anchor="start">write .md · append log.jsonl</text>
+  <!-- 5: server -> engine index -->
+  <text class="lbl" x="390" y="243" text-anchor="middle">index_domain() · chunk (hash-diff)</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M290,249 H488"/>
+  <!-- 6: engine -> API -->
+  <text class="lbl" x="590" y="278" text-anchor="middle">POST /embeddings (changed chunks only)</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M490,284 H688"/>
+  <!-- 7: API -> engine -->
+  <text class="lbl" x="590" y="309" text-anchor="middle">vectors (retry ×3, backoff)</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M690,315 H492"/>
+  <!-- 8: engine -> server -->
+  <text class="lbl" x="390" y="344" text-anchor="middle">quantize int8 · save index.jsonl · stats</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M490,350 H292"/>
+  <!-- 9: server -> git -->
+  <text class="lbl" x="590" y="379" text-anchor="middle">auto_commit (base lock, domain-scoped)</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M290,385 H888"/>
+  <!-- 10: server -> client -->
+  <text class="lbl" x="190" y="414" text-anchor="middle">{ page, indexed_chunks, bytes, committed }</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M290,420 H92"/>
+</svg>
+<figcaption>Write path. On any failure between step 4 and step 8 the server rolls back: delete the file, drop the last ingest-log line (see the data-flow diagram in §3a).</figcaption>
+</figure>
+
+<h3>2b. Query-path interaction (sequence)</h3>
+<figure class="diagram">
+<svg viewBox="0 0 980 315" role="img" aria-label="Query-path interaction sequence across four actors">
+  <g class="node"><rect class="card" x="55"  y="24" width="150" height="40" rx="10"/><text class="t-title" x="130" y="42" text-anchor="middle">MCP Client</text><text class="t-sub" x="130" y="57" text-anchor="middle">agent / IDE</text></g>
+  <g class="node"><rect class="card" x="295" y="24" width="150" height="40" rx="10"/><text class="t-title" x="370" y="42" text-anchor="middle">iwiki-mcp</text><text class="t-sub" x="370" y="57" text-anchor="middle">retrieval.py</text></g>
+  <g class="node"><rect class="card" x="535" y="24" width="150" height="40" rx="10"/><text class="t-title" x="610" y="42" text-anchor="middle">engine/</text><text class="t-sub" x="610" y="57" text-anchor="middle">search·grep</text></g>
+  <g class="node"><rect class="card" x="775" y="24" width="150" height="40" rx="10"/><text class="t-title" x="850" y="42" text-anchor="middle">Embeddings</text><text class="t-sub" x="850" y="57" text-anchor="middle">query ×1</text></g>
+
+  <line class="lifeline" x1="130" y1="64" x2="130" y2="295"/>
+  <line class="lifeline" x1="370" y1="64" x2="370" y2="295"/>
+  <line class="lifeline" x1="610" y1="64" x2="610" y2="295"/>
+  <line class="lifeline" x1="850" y1="64" x2="850" y2="295"/>
+
+  <text class="lbl" x="250" y="94"  text-anchor="middle">wiki_search(query, scope, mode)</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M130,100 H368"/>
+
+  <text class="lbl" x="490" y="129" text-anchor="middle">resolve_scope → domains · hybrid_search</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M370,135 H608"/>
+
+  <text class="lbl" x="730" y="164" text-anchor="middle">POST /embeddings (vector / hybrid mode)</text>
+  <path class="seq-call" marker-end="url(#arrA)" d="M610,170 H848"/>
+
+  <text class="lbl" x="730" y="199" text-anchor="middle">query vector</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M850,205 H612"/>
+
+  <text class="lbl" x="490" y="234" text-anchor="middle">cosine + grep → merge · dedupe · rank</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M610,240 H372"/>
+
+  <text class="lbl" x="250" y="269" text-anchor="middle">{ results: [ {domain,file,heading,score,hit} ] }</text>
+  <path class="seq-ret" marker-end="url(#arr)" d="M370,275 H132"/>
+</svg>
+<figcaption>Query path. <code>mode=lexical</code> skips the embeddings call entirely; <code>vector</code>/<code>hybrid</code> embed the query exactly once and reuse it across every in-scope domain.</figcaption>
+</figure>
+
+<!-- ============================================================= -->
+<h2>3. Data-flow diagrams</h2>
+
+<h3>3a. Write path — validate → persist → embed → commit</h3>
+<p>A transactional pipeline. The dashed box is the rollback boundary: if indexing or embedding throws, the file is deleted and the last log line is dropped, leaving no orphaned file / log / index record.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 1080 300" role="img" aria-label="Write-path data flow with a transactional rollback loop">
+  <!-- transaction boundary around persist/log/index -->
+  <rect class="boundary-rect" x="417" y="44" width="424" height="118" rx="14"/>
+  <rect class="lbl-bg" x="433" y="36" width="276" height="18"/>
+  <text class="lbl" x="441" y="49" font-weight="600">TRANSACTION · rollback on any failure</text>
+
+  <!-- nodes -->
+  <g class="node"><rect class="card" x="20"  y="70" width="122" height="60" rx="12"/><rect class="bar-accent" x="28"  y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="81"  y="96" text-anchor="middle">wiki_write_page</text><text class="t-sub" x="81"  y="114" text-anchor="middle">client call</text></g>
+  <g class="node"><rect class="card" x="157" y="70" width="122" height="60" rx="12"/><rect class="bar-warn" x="165" y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="218" y="96" text-anchor="middle">validate</text><text class="t-sub" x="218" y="114" text-anchor="middle">deep_heading · pre_h2</text></g>
+  <g class="node"><rect class="card" x="294" y="70" width="122" height="60" rx="12"/><rect class="bar-warn" x="302" y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="355" y="96" text-anchor="middle">ignore gate</text><text class="t-sub" x="355" y="114" text-anchor="middle">source= filter</text></g>
+  <g class="node"><rect class="card" x="431" y="70" width="122" height="60" rx="12"/><rect class="bar-ok" x="439" y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="492" y="96" text-anchor="middle">write .md</text><text class="t-sub" x="492" y="114" text-anchor="middle">refuse overwrite</text></g>
+  <g class="node"><rect class="card" x="568" y="70" width="122" height="60" rx="12"/><rect class="bar-ok" x="576" y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="629" y="96" text-anchor="middle">append log</text><text class="t-sub" x="629" y="114" text-anchor="middle">log.jsonl</text></g>
+  <g class="node"><rect class="card" x="705" y="70" width="122" height="60" rx="12"/><rect class="bar-accent" x="713" y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="766" y="96" text-anchor="middle">index_domain</text><text class="t-sub" x="766" y="114" text-anchor="middle">chunk·embed·quant·save</text></g>
+  <g class="node"><rect class="card" x="842" y="70" width="122" height="60" rx="12"/><rect class="bar-ok" x="850" y="82" width="5" height="36" rx="2.5"/><text class="t-title" x="903" y="96" text-anchor="middle">auto_commit</text><text class="t-sub" x="903" y="114" text-anchor="middle">git · base lock</text></g>
+
+  <!-- forward edges -->
+  <path class="flow" marker-end="url(#arrA)" d="M142,100 H157"/>
+  <path class="flow" marker-end="url(#arrA)" d="M279,100 H294"/>
+  <path class="flow" marker-end="url(#arrA)" d="M416,100 H431"/>
+  <path class="flow" marker-end="url(#arrA)" d="M553,100 H568"/>
+  <path class="flow" marker-end="url(#arrA)" d="M690,100 H705"/>
+  <path class="flow" marker-end="url(#arrA)" d="M827,100 H842"/>
+
+  <!-- rollback loop-back (danger) -->
+  <path class="conn-term" marker-end="url(#arrTerm)" d="M766,130 V210 Q766,222 754,222 L504,222 Q492,222 492,210 V130"/>
+  <rect class="lbl-bg" x="521" y="213" width="216" height="18"/>
+  <text class="lbl" x="629" y="226" text-anchor="middle">on failure: rm file · drop last log line</text>
+</svg>
+<figcaption>Blocking validation (<code>deep_heading</code>, <code>pre_h2_text</code>) and the <code>.iwikiignore</code> source gate reject before any write. Only changed chunks (hash + dim mismatch) are re-embedded.</figcaption>
+</figure>
+
+<h3>3b. Query path — scope → vector ∥ lexical → merge → rank</h3>
+<figure class="diagram">
+<svg viewBox="0 0 1060 320" role="img" aria-label="Query-path data flow: scope resolution, parallel vector and lexical search, merge and rank">
+  <!-- nodes -->
+  <g class="node"><rect class="card" x="20"  y="130" width="140" height="60" rx="12"/><rect class="bar-accent" x="28"  y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="90"  y="156" text-anchor="middle">wiki_search</text><text class="t-sub" x="90"  y="174" text-anchor="middle">query · mode</text></g>
+  <g class="node"><rect class="card" x="195" y="130" width="140" height="60" rx="12"/><rect class="bar-ok" x="203" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="265" y="156" text-anchor="middle">resolve_scope</text><text class="t-sub" x="265" y="174" text-anchor="middle">read[] / all</text></g>
+
+  <g class="node"><rect class="card" x="380" y="48"  width="180" height="60" rx="12"/><rect class="bar-accent" x="388" y="60" width="5" height="36" rx="2.5"/><text class="t-title" x="470" y="74" text-anchor="middle">vector_search</text><text class="t-sub" x="470" y="92" text-anchor="middle">embed query · cosine (numpy)</text></g>
+  <g class="node"><rect class="card" x="380" y="212" width="180" height="60" rx="12"/><rect class="bar-ok" x="388" y="224" width="5" height="36" rx="2.5"/><text class="t-title" x="470" y="238" text-anchor="middle">lexical_search</text><text class="t-sub" x="470" y="256" text-anchor="middle">grep · term-frequency</text></g>
+
+  <g class="node"><rect class="card" x="615" y="130" width="150" height="60" rx="12"/><rect class="bar-ok" x="623" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="690" y="156" text-anchor="middle">hybrid merge</text><text class="t-sub" x="690" y="174" text-anchor="middle">dedupe key</text></g>
+  <g class="node"><rect class="card" x="800" y="130" width="115" height="60" rx="12"/><rect class="bar-ok" x="808" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="857" y="156" text-anchor="middle">rank</text><text class="t-sub" x="857" y="174" text-anchor="middle">vector/both first</text></g>
+  <g class="node"><rect class="card" x="935" y="130" width="105" height="60" rx="12"/><rect class="bar-ok" x="943" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="987" y="156" text-anchor="middle">top_k</text><text class="t-sub" x="987" y="174" text-anchor="middle">results</text></g>
+
+  <!-- edges -->
+  <path class="flow" marker-end="url(#arrA)" d="M160,160 H195"/>
+  <path class="flow" marker-end="url(#arrA)" d="M335,160 C360,160 360,78 380,78"/>
+  <path class="flow" marker-end="url(#arrA)" d="M335,160 C360,160 360,242 380,242"/>
+  <path class="flow" marker-end="url(#arrA)" d="M560,78 C588,78 588,160 615,160"/>
+  <path class="flow" marker-end="url(#arrA)" d="M560,242 C588,242 588,160 615,160"/>
+  <path class="flow" marker-end="url(#arrA)" d="M765,160 H800"/>
+  <path class="flow" marker-end="url(#arrA)" d="M915,160 H935"/>
+
+  <!-- branch labels -->
+  <rect class="lbl-bg" x="300" y="100" width="112" height="18"/><text class="lbl" x="356" y="113" text-anchor="middle">vector / hybrid</text>
+  <rect class="lbl-bg" x="300" y="204" width="118" height="18"/><text class="lbl" x="359" y="217" text-anchor="middle">lexical / hybrid</text>
+</svg>
+<figcaption>Merge dedupes by <code>(domain, file, heading)</code> — a section hit by both paths collapses to one, marked <code>both</code>. Because vector and lexical scores live on different scales, vector/both are ranked first (by cosine), then lexical (by term frequency).</figcaption>
+</figure>
+
+<!-- ============================================================= -->
+<h2>4. Tool surface</h2>
+<p>Twelve <code>wiki_*</code> tools plus one MCP resource (<code>iwiki://authoring-rules</code>). <span class="badge det">det</span> = deterministic / no network · <span class="badge llm">embed</span> = calls the embeddings API · <span class="badge git">git</span> = mutates the base repo.</p>
+
+<table class="rpt-table">
+  <thead><tr><th>Tool</th><th>Kind</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>wiki_status</code></td><td><span class="badge det">det</span></td><td>Resolve the project binding (base, read[], write) and list domains.</td></tr>
+    <tr><td><code>wiki_bind</code></td><td><span class="badge det">det</span></td><td>Write <code>read</code>/<code>write</code> into <code>.iwiki.toml</code>; validates domains exist; seeds <code>.iwikiignore</code>.</td></tr>
+    <tr><td><code>wiki_create_domain</code></td><td><span class="badge git">git</span></td><td>Create <code>&lt;base&gt;/&lt;domain&gt;/.iwiki/</code> and auto-commit it.</td></tr>
+    <tr><td><code>wiki_list_domains</code></td><td><span class="badge det">det</span></td><td>List domains with each index's byte size.</td></tr>
+    <tr><td><code>wiki_list_pages</code></td><td><span class="badge det">det</span></td><td>List a domain's pages (slug + file), skipping <code>.iwiki</code>.</td></tr>
+    <tr><td><code>wiki_read_page</code></td><td><span class="badge det">det</span></td><td>Return a page's raw Markdown.</td></tr>
+    <tr><td><code>wiki_write_page</code></td><td><span class="badge llm">embed</span> <span class="badge git">git</span></td><td>Validate → write → append log → re-index → auto-commit (transactional; refuses overwrite).</td></tr>
+    <tr><td><code>wiki_index</code></td><td><span class="badge llm">embed</span></td><td>Incrementally re-index a domain (write target by default); re-embeds only changed chunks.</td></tr>
+    <tr><td><code>wiki_search</code></td><td><span class="badge llm">embed</span></td><td>Hybrid / vector / lexical retrieval across in-scope domains.</td></tr>
+    <tr><td><code>wiki_related</code></td><td><span class="badge det">det</span></td><td>Neighbours of a section by vector cosine, falling back to a <code>[[refs]]</code> graph walk.</td></tr>
+    <tr><td><code>wiki_lint</code></td><td><span class="badge det">det</span></td><td>Health report: broken refs, orphans, stale pages, section-formation findings.</td></tr>
+    <tr><td><code>wiki_sync</code></td><td><span class="badge git">git</span></td><td><code>pull --rebase</code> + <code>push</code> under the base lock; retries a non-fast-forward push.</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================================================= -->
+<h2>5. On-disk model</h2>
+<table class="rpt-table">
+  <thead><tr><th>Path</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;base&gt;/</code></td><td>Git repo. Each immediate subdir (non-<code>.</code>-prefixed) is a domain.</td></tr>
+    <tr><td><code>&lt;base&gt;/&lt;domain&gt;/*.md</code></td><td>Authored wiki pages.</td></tr>
+    <tr><td><code>&lt;base&gt;/&lt;domain&gt;/.iwiki/index.jsonl</code></td><td>Embedding store — one int8-quantized <code>Record</code> per sub-chunk (~4× smaller than float32). Paths are domain-relative for portability.</td></tr>
+    <tr><td><code>&lt;base&gt;/&lt;domain&gt;/.iwiki/log.jsonl</code></td><td>Ingest log: <code>{op, source, page, date, src_hash}</code> per line. Powers staleness detection.</td></tr>
+    <tr><td><code>&lt;base&gt;/.iwiki/lock</code></td><td>Inter-process file lock serializing git mutations across all sessions.</td></tr>
+    <tr><td><code>&lt;project&gt;/.iwiki.toml</code></td><td>Binding: <code>base</code>, <code>read = [...]</code>, <code>write</code>.</td></tr>
+    <tr><td><code>&lt;project&gt;/.iwikiignore</code></td><td>gitignore-syntax filter gating the <code>source=</code> argument of writes.</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================================================= -->
+<h2>6. Load-bearing invariants</h2>
+
+<div class="note"><b>Fail-soft.</b> Every <code>wiki_*</code> is wrapped by <code>@_safe</code>. Implementations are plain functions registered separately (<code>mcp.tool()(wiki_*)</code>) so tests call them directly — keep this split when adding tools.</div>
+
+<div class="note warn"><b>HALT stop rule.</b> <code>Config.load()</code> raises <code>ConfigError</code> if <code>IWIKI_LLM_BASE_URL</code>/<code>IWIKI_LLM_KEY</code> are unset; a persistent embedding failure raises <code>EmbedError</code>. Both surface through <code>@_safe</code> as <code>HALT:</code> errors. Missing base/binding raises <code>base.BaseError</code>.</div>
+
+<div class="note"><b>Path-traversal guards are load-bearing.</b> <code>_validate_domain</code>, <code>_slug_parts</code>, and <code>_contains</code> reject <code>.</code>-prefixed, absolute, drive-letter, and <code>..</code> paths <em>before</em> any filesystem join.</div>
+
+<details>
+  <summary>Chunking &amp; indexing details (click to expand)</summary>
+  <ul class="tight">
+    <li><b>Split on <code>##</code> only.</b> The first <code>## Overview</code> section is the article summary and is <em>excluded</em> from the index.</li>
+    <li><b>Context-carrying vectors.</b> Every other section's sub-chunks are prefixed with <code># Title</code> + article summary + <code>## heading</code> + section lead (≤ <code>LEAD_MAX</code> 250), so each vector carries whole-article + whole-section context.</li>
+    <li><b>Incremental.</b> A chunk is reused when its <code>hash</code> and <code>dim</code> match the stored record; only changed chunks hit the embeddings API.</li>
+    <li><b>Cap.</b> <code>index_domain</code> flags <code>over_cap</code> past 8 MB (<code>CAP_BYTES</code>).</li>
+    <li><b>Duplicated constants.</b> <code>OVERVIEW_HEADING</code> / <code>LEAD_MAX</code> / the <code>_H2</code> regex are copied across <code>chunk.py</code>, <code>validate.py</code>, <code>lint.py</code> on purpose — <code>lint</code>/<code>validate</code> must stay stdlib-only (no <code>httpx</code>). Change one copy → change all.</li>
+  </ul>
+</details>
+
+<details>
+  <summary>Git &amp; concurrency details (click to expand)</summary>
+  <ul class="tight">
+    <li><b>Best-effort git.</b> A non-repo, missing remote, or rebase conflict degrades to a warning/error dict — never an exception.</li>
+    <li><b>Domain-scoped commits.</b> <code>auto_commit</code> stages only the written domain's pathspec.</li>
+    <li><b>Cross-process lock.</b> Many servers (one per client session) can share one base; <code>base_lock</code> (a <code>filelock</code> at <code>&lt;base&gt;/.iwiki/lock</code>) serializes all git mutations.</li>
+    <li><b>Push retry.</b> <code>wiki_sync</code> retries a non-fast-forward push up to 3 times; a <code>pull --rebase</code> conflict is aborted cleanly with a resolve hint.</li>
+  </ul>
+</details>
+
+<p class="sub" style="margin-top:2rem">iwiki-mcp · server behavior report · rendered from source + <code>docs/wiki/</code> · dark/light toggle top-right.</p>
+
+</main>
+</body>
+</html>
