@@ -77,18 +77,23 @@ def _logged_page_path(page: str, wiki_dir: str) -> str:
     return os.path.normpath(os.path.join(wiki_dir, page))
 
 
-def _stale(wiki_dir: str) -> list[dict]:
-    """Pages whose source changed after the last ingest, via .iwiki/log.jsonl
-    (content-hash with mtime fallback; no git). Deduped by page, first hit wins."""
+def _latest_ingest_by_page(wiki_dir: str) -> dict[str, dict]:
+    """Latest ingest record per page from .iwiki/log.jsonl (last-wins).
+
+    An `ingest` record with a non-empty source sets the page's current record;
+    a `delete` record clears it. Last-wins so a delete + re-ingest of the same
+    slug is judged by the NEW source, not a stale earlier record. Legacy records
+    without an `op` are treated as ingests (back-compat). Malformed lines, records
+    without a page, and records without a source are ignored.
+    """
     log = os.path.join(wiki_dir, ".iwiki", "log.jsonl")
+    latest: dict[str, dict] = {}
     if not os.path.isfile(log):
-        return []
-    out: list[dict] = []
-    seen: set[str] = set()
+        return latest
     try:
         lines = open(log, encoding="utf-8").read().splitlines()
     except Exception:
-        return []
+        return latest
     for line in lines:
         line = line.strip()
         if not line:
@@ -97,23 +102,59 @@ def _stale(wiki_dir: str) -> list[dict]:
             rec = json.loads(line)
         except Exception:
             continue
-        src, page = rec.get("source"), rec.get("page")
-        if not src or not page:
+        page = rec.get("page")
+        if not page:
             continue
         page_path = _logged_page_path(page, wiki_dir)
-        if page_path in seen:
+        if rec.get("op") == "delete":
+            latest.pop(page_path, None)
             continue
+        src = rec.get("source")
+        if not src:
+            continue
+        latest[page_path] = {"page": page_path, "source": src,
+                             "src_hash": rec.get("src_hash")}
+    return latest
+
+
+def _stale(wiki_dir: str) -> list[dict]:
+    """Pages whose source changed after the last ingest (content-hash with mtime
+    fallback; no git), from the latest ingest record per page."""
+    out: list[dict] = []
+    for page_path, rec in _latest_ingest_by_page(wiki_dir).items():
+        src = rec["source"]
         if os.path.isfile(src) and os.path.isfile(page_path):
             try:
                 if not _fresh(src, page_path, rec.get("src_hash")):
                     out.append({"page": page_path, "source": src})
-                    seen.add(page_path)
             except Exception:
                 pass
     return out
 
 
-def lint(wiki_dir: str) -> dict:
+def _source_exists(src: str, project_dir: str | None) -> bool:
+    """Does the ingest source resolve to a real file? Absolute paths are checked
+    as-is; a relative path is resolved against project_dir (when known) and the
+    cwd. Any hit means the source still exists."""
+    if os.path.isabs(src):
+        return os.path.isfile(src)
+    cands = [os.path.join(project_dir, src)] if project_dir else []
+    cands.append(src)  # cwd-relative fallback
+    return any(os.path.isfile(c) for c in cands)
+
+
+def _missing_source(wiki_dir: str, project_dir: str | None) -> list[dict]:
+    """Pages whose recorded (non-empty) source no longer exists on disk — the
+    deletion candidates surfaced by wiki_lint. Uses the latest ingest per page."""
+    out: list[dict] = []
+    for page_path, rec in _latest_ingest_by_page(wiki_dir).items():
+        src = rec["source"]
+        if os.path.isfile(page_path) and not _source_exists(src, project_dir):
+            out.append({"page": page_path, "source": src})
+    return out
+
+
+def lint(wiki_dir: str, project_dir: str | None = None) -> dict:
     """Health report over docs/wiki/. Absent/empty wiki → {"wiki_present": false}."""
     if not os.path.isdir(wiki_dir):
         return {"wiki_present": False}
@@ -149,4 +190,5 @@ def lint(wiki_dir: str) -> dict:
                 for f in validate_page(c)]
     return {"wiki_present": True, "pages": len(pages),
             "broken": broken, "orphans": orphans, "stale": _stale(wiki_dir),
+            "missing_source": _missing_source(wiki_dir, project_dir),
             "sections": sections}

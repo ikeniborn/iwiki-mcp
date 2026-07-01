@@ -208,15 +208,18 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_related` | Return related sections for a section id within one domain. |
 | `wiki_write_page` | Validate and write a new page, index the domain, commit and push. |
 | `wiki_update_page` | Replace the body of one `##` section of an existing page, reindex the changed section, commit and push. |
+| `wiki_delete_page` | Delete one page by domain and slug: remove the file, append a `delete` log op, reindex the domain, commit and push. Rolls back on failure. |
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
 | `wiki_create_domain` | Create a domain directory with `.iwiki/` metadata and return whether the base auto-commit succeeded. |
 | `wiki_bind` | Write or update `.iwiki.toml` for the current project after validating domains. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
-| `wiki_lint` | Report domain health, including broken links, orphans, stale pages, and section gaps. |
+| `wiki_lint` | Report domain health: broken links, orphans, stale pages, `missing_source` (pages whose ingest source no longer exists on disk — deletion candidates), and section gaps. |
 | `wiki_sync` | Run `git pull --rebase` and `git push` in the base. |
 
 `wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None)` — it replaces only the named `##` section and leaves the rest of the page intact. For a full-page rewrite, read the current page first with `wiki_read_page`, confirm the intended replacement with the user, and then handle the edit deliberately outside the v1 overwrite path.
+
+`wiki_lint` reports `missing_source` pages whose ingest source has disappeared. Remove such a stale page explicitly with `wiki_delete_page` after confirming with the user; `wiki_sync` then propagates the deletion to the remote like any other commit.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
 

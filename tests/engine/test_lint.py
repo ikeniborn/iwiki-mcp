@@ -142,3 +142,107 @@ def test_stale_hash_present_but_unreadable_falls_back_to_mtime(tmp_path, monkeyp
     os.utime(src, (2000, 2000))
     os.utime(page, (1000, 1000))
     assert any(s["source"] == src for s in lint(wd)["stale"])
+
+
+def test_stale_last_wins_after_delete_and_reingest(tmp_path):
+    # ingest(old hash) -> delete -> ingest(new hash matching current source):
+    # last-wins => judged by the NEWEST record => NOT stale.
+    wd = _wiki(tmp_path, {"a.md": "## A\nbody\n"})
+    src = tmp_path / "s.py"
+    src.write_text("new\n", encoding="utf-8")
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    recs = [
+        {"op": "ingest", "source": str(src), "page": "a.md", "src_hash": _h("old\n")},
+        {"op": "delete", "source": "", "page": "a.md"},
+        {"op": "ingest", "source": str(src), "page": "a.md", "src_hash": _h("new\n")},
+    ]
+    with open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+    assert lint(wd)["stale"] == []
+
+
+def test_missing_source_flags_absolute_gone(tmp_path):
+    wd = _wiki(tmp_path, {"a.md": "## A\nbody\n"})
+    gone = tmp_path / "gone.py"  # never created
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    rec = {"op": "ingest", "source": str(gone), "page": "a.md"}
+    open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8").write(
+        json.dumps(rec) + "\n")
+    assert lint(wd)["missing_source"] == [
+        {"page": os.path.normpath(os.path.join(wd, "a.md")), "source": str(gone)}
+    ]
+
+
+def test_missing_source_present_not_flagged(tmp_path):
+    wd, src, page = _wiki_with_log(tmp_path, "## A\nb\n", "x\n")
+    assert lint(wd)["missing_source"] == []
+
+
+def test_missing_source_empty_source_skipped(tmp_path):
+    wd = _wiki(tmp_path, {"a.md": "## A\nb\n"})
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    rec = {"op": "ingest", "source": "", "page": "a.md"}
+    open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8").write(
+        json.dumps(rec) + "\n")
+    assert lint(wd)["missing_source"] == []
+
+
+def test_missing_source_page_absent_skipped(tmp_path):
+    wd = _wiki(tmp_path, {"keep.md": "## K\nx\n"})  # a.md never created
+    gone = tmp_path / "gone.py"
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    rec = {"op": "ingest", "source": str(gone), "page": "a.md"}
+    open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8").write(
+        json.dumps(rec) + "\n")
+    assert lint(wd)["missing_source"] == []
+
+
+def test_missing_source_relative_found_under_project_dir(tmp_path):
+    wd = _wiki(tmp_path, {"a.md": "## A\nb\n"})
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "src.py").write_text("x\n", encoding="utf-8")
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    rec = {"op": "ingest", "source": "src.py", "page": "a.md"}
+    open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8").write(
+        json.dumps(rec) + "\n")
+    assert lint(wd, project_dir=str(proj))["missing_source"] == []
+
+
+def test_missing_source_relative_absent_is_flagged(tmp_path, monkeypatch):
+    wd = _wiki(tmp_path, {"a.md": "## A\nb\n"})
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)  # cwd fallback also lacks src.py
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    rec = {"op": "ingest", "source": "src.py", "page": "a.md"}
+    open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8").write(
+        json.dumps(rec) + "\n")
+    assert lint(wd, project_dir=str(empty))["missing_source"] == [
+        {"page": os.path.normpath(os.path.join(wd, "a.md")), "source": "src.py"}
+    ]
+
+
+def test_missing_source_last_wins_after_delete_and_reingest(tmp_path):
+    wd = _wiki(tmp_path, {"a.md": "## A\nb\n"})
+    newsrc = tmp_path / "new.py"
+    newsrc.write_text("x\n", encoding="utf-8")
+    oldsrc = tmp_path / "old.py"  # never created
+    iwiki = os.path.join(wd, ".iwiki")
+    os.makedirs(iwiki, exist_ok=True)
+    recs = [
+        {"op": "ingest", "source": str(oldsrc), "page": "a.md"},
+        {"op": "delete", "source": "", "page": "a.md"},
+        {"op": "ingest", "source": str(newsrc), "page": "a.md"},
+    ]
+    with open(os.path.join(iwiki, "log.jsonl"), "w", encoding="utf-8") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+    assert lint(wd)["missing_source"] == []

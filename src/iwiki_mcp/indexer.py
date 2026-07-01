@@ -75,7 +75,9 @@ def upsert_ingest_log(base: str, domain: str, source: str, page: str,
     """Replace any prior ``ingest`` records for ``page`` with a single fresh one.
 
     Unlike ``append_log`` this keeps one ingest record per page, so ``lint``'s
-    first-hit-wins stale detection reads the current ``src_hash`` after an edit.
+    stale detection reads the current ``src_hash`` after an edit. ``lint`` also
+    tolerates append-only history via its last-wins ``_latest_ingest_by_page``
+    reader, but a single record keeps the log compact.
     """
     path = log_path(base, domain)
     os.makedirs(os.path.dirname(path), exist_ok=True)

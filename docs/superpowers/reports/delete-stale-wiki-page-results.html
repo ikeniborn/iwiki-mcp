@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IDD→SDD chain — delete-stale-wiki-page</title>
+<style>
+:root{
+  --bg:#0f1115; --surface:#171a21; --surface2:#1e222b; --border:#2b313c;
+  --text:#e6e9ef; --muted:#9aa3b2; --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24;
+  --crit:#f87171; --shadow:rgba(0,0,0,.45);
+}
+body:has(#theme-toggle:checked){
+  --bg:#f7f8fa; --surface:#ffffff; --surface2:#eef1f5; --border:#d4dae3;
+  --text:#1a1f29; --muted:#5b6573; --accent:#2563eb; --ok:#15803d; --warn:#b45309;
+  --crit:#b91c1c; --shadow:rgba(0,0,0,.12);
+}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg);color:var(--text);padding:0 0 4rem}
+header{display:flex;align-items:center;gap:1rem;padding:1.1rem 1.6rem;
+  border-bottom:1px solid var(--border);background:var(--surface);position:sticky;top:0;z-index:5}
+header h1{font-size:1.15rem;margin:0;font-weight:650}
+.theme-btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;
+  padding:.3rem .6rem;background:var(--surface2);user-select:none}
+main{max-width:980px;margin:0 auto;padding:0 1.6rem}
+h2{font-size:1.05rem;margin:1.8rem 0 .6rem;border-left:3px solid var(--accent);padding-left:.6rem}
+h3{font-size:.95rem;margin:1.3rem 0 .5rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+table{width:100%;border-collapse:collapse;margin:.6rem 0;background:var(--surface);
+  border:1px solid var(--border);border-radius:10px;overflow:hidden;font-size:.9rem}
+th,td{padding:.5rem .7rem;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+th{background:var(--surface2);font-weight:600}
+tr:last-child td{border-bottom:none}
+code{background:var(--surface2);padding:.05rem .35rem;border-radius:5px;font-size:.85em}
+.note{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);
+  padding:.7rem .9rem;border-radius:8px;color:var(--muted)}
+.badge{display:inline-block;padding:.1rem .55rem;border-radius:999px;font-size:.78rem;font-weight:600}
+.b-ok{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
+.b-warn{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
+.b-crit{background:color-mix(in srgb,var(--crit) 22%,transparent);color:var(--crit)}
+.flow{display:flex;flex-wrap:wrap;gap:.5rem;align-items:stretch;margin:.6rem 0}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:.55rem .7rem;box-shadow:0 2px 6px var(--shadow);min-width:120px}
+.card b{display:block;font-size:.86rem}
+.card span{font-size:.76rem;color:var(--muted)}
+.arrow{align-self:center;color:var(--accent);font-weight:700}
+figure{margin:.6rem 0}
+figcaption{font-size:.8rem;color:var(--muted);margin-top:.3rem}
+svg{max-width:100%;height:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px}
+.gn{fill:var(--surface2);stroke:var(--border)}
+.gn-srv{fill:color-mix(in srgb,var(--accent) 18%,var(--surface2));stroke:var(--accent)}
+.gt{fill:var(--text);font:12px sans-serif}
+.gt-s{fill:var(--muted);font:10px sans-serif}
+.ge{stroke:var(--muted);stroke-width:1.4;fill:none}
+nav.chain-tabs{display:flex;gap:.3rem;max-width:980px;margin:1rem auto 0;padding:0 1.6rem}
+.tab-radio{position:absolute;left:-9999px}
+.chain-tabs label{cursor:pointer;padding:.4rem .9rem;border:1px solid var(--border);
+  border-bottom:none;border-radius:8px 8px 0 0;background:var(--surface);color:var(--muted)}
+body:has(#tab-intent:checked) label[for="tab-intent"],
+body:has(#tab-spec:checked)   label[for="tab-spec"],
+body:has(#tab-plan:checked)   label[for="tab-plan"],
+body:has(#tab-result:checked) label[for="tab-result"]{color:var(--accent);border-color:var(--accent);font-weight:600}
+.tab-pane{display:none}
+body:has(#tab-intent:checked) #pane-intent,
+body:has(#tab-spec:checked)   #pane-spec,
+body:has(#tab-plan:checked)   #pane-plan,
+body:has(#tab-result:checked) #pane-result{display:block}
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
+<header>
+  <label for="theme-toggle" class="theme-btn" title="Тёмная / светлая тема">🌙 / ☀️</label>
+  <h1>IDD→SDD chain — delete-stale-wiki-page</h1>
+</header>
+<nav class="chain-tabs">
+  <label for="tab-intent">Intent</label>
+  <label for="tab-spec">Spec</label>
+  <label for="tab-plan">Plan</label>
+  <label for="tab-result">Result</label>
+</nav>
+<main>
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+
+  <h2>1. Резюме спецификации</h2>
+  <p class="note">Файл: <code>docs/superpowers/specs/2026-07-01-delete-stale-wiki-page-design.md</code> ·
+  spec_hash: <code>b404753f7cccc92e</code> · вердикт: <span class="badge b-ok">OK</span></p>
+
+  <h3>Требования по секциям</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Секция</th><th>Требование</th></tr></thead>
+    <tbody>
+      <tr><td>R1</td><td>Goal</td><td>Обнаруживать страницы, чей записанный источник исчез с диска — выводить их в <code>wiki_lint</code> полем <code>missing_source</code>.</td></tr>
+      <tr><td>R2</td><td>Goal</td><td>Удалять одну страницу явно через <code>wiki_delete_page(domain, slug)</code> с транзакционной очисткой file+index+log и git-commit.</td></tr>
+      <tr><td>R3</td><td>Decisions · Trigger</td><td>Удаление только явным вызовом; lint лишь помечает кандидатов, никогда не удаляет.</td></tr>
+      <tr><td>R4</td><td>Decisions · Candidate signal</td><td>Сигнал-кандидат — только «source gone»; <code>stale</code>/<code>orphan</code> сохраняют прежний смысл и не считаются сигналом удаления.</td></tr>
+      <tr><td>R5</td><td>Decisions · Granularity</td><td>Гранулярность — страница (slug); удаления целого домена нет.</td></tr>
+      <tr><td>R6</td><td>Decisions · Sync</td><td><code>wiki_sync</code> остаётся чисто git; детекта нет, лишь пропагирует commit удаления.</td></tr>
+      <tr><td>R7</td><td>Decisions · Mechanism</td><td>Подход A: reindex-rebuild через <code>index_domain</code> + append <code>delete</code>-op в лог; reindex при удалении не делает embedding-вызов.</td></tr>
+      <tr><td>R8</td><td>Decisions · Path resolution</td><td>Гибрид A1+A2: абсолютный source проверяется как есть; относительный резолвится от <code>project_dir</code> и cwd перед пометкой.</td></tr>
+      <tr><td>R9</td><td>Components §1</td><td>Tool с success-dict и fail-soft error-dict; переиспользует существующие path-traversal guard'ы.</td></tr>
+      <tr><td>R10</td><td>Components §2</td><td><code>_source_exists</code> + <code>_missing_source</code>; <code>lint(project_dir=None)</code>; <code>source==""</code> пропуск.</td></tr>
+      <tr><td>R10a</td><td>Components §2</td><td>Общий <code>_latest_ingest_by_page</code> (last-wins) для <b>обоих</b> <code>_missing_source</code> и <code>_stale</code> — пересозданную страницу судить по новому source (delete делает <code>ingest→delete→ingest</code> возможным).</td></tr>
+      <tr><td>R11</td><td>Components §3</td><td>Транзакция из 7 шагов, file-removal — точка отката.</td></tr>
+      <tr><td>R12</td><td>Components §4</td><td>Откат: восстановить файл + срезать строку лога; commit best-effort.</td></tr>
+      <tr><td>R13</td><td>Testing</td><td>Тесты: success, негативные кейсы, rollback, детектор <code>missing_source</code> (паттерн no-network).</td></tr>
+      <tr><td>R14</td><td>Docs / versioning</td><td>Обновить <code>README.md</code> (таблица tools + <code>missing_source</code> в строке <code>wiki_lint</code>) и <code>docs/wiki/</code>; patch-bump версии в <code>pyproject.toml</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Success criteria</h3>
+  <table>
+    <thead><tr><th>#</th><th>Критерий</th></tr></thead>
+    <tbody>
+      <tr><td>SC1</td><td>Инвариант: после успеха/отката нет осиротевшего файла, строки лога или записи индекса.</td></tr>
+      <tr><td>SC2</td><td>Reindex при удалении не вызывает <code>embed_texts</code> (без сети) — все оставшиеся chunk'и reused.</td></tr>
+      <tr><td>SC3</td><td>Все тесты проходят (паттерн monkeypatch <code>embed_texts</code> + dummy <code>IWIKI_*</code>).</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Схемы решения и зависимостей</h2>
+
+  <h3>Схема решения</h3>
+  <figure>
+    <div class="flow">
+      <div class="card"><b>wiki_delete_page</b><span>server.py · @_safe</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>os.remove(.md)</b><span>destructive step</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>append_log</b><span>op=delete</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>index_domain</b><span>reindex, no embed</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>auto_commit</b><span>pathspec=domain</span></div>
+    </div>
+    <div class="flow">
+      <div class="card"><b>wiki_lint</b><span>server.py</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>lint(project_dir)</b><span>engine/lint.py</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>_missing_source</b><span>читает log.jsonl</span></div>
+      <div class="arrow">→</div>
+      <div class="card"><b>_source_exists</b><span>A1+A2 резолв</span></div>
+    </div>
+    <figcaption>Удаление (верх) и детекция кандидатов (низ) развязаны: lint только репортит, агент решает и вызывает delete.</figcaption>
+  </figure>
+
+  <h3>Граф зависимостей</h3>
+  <figure>
+    <svg viewBox="0 0 760 470" role="img" aria-label="Граф зависимостей компонентов">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0L10 5L0 10z" fill="var(--muted)"/>
+        </marker>
+        <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="var(--shadow)"/>
+        </filter>
+      </defs>
+      <!-- edges -->
+      <g marker-end="url(#arr)">
+        <path class="ge" d="M150 70 L300 70"/>            <!-- delete->guards -->
+        <path class="ge" d="M150 84 L300 130"/>           <!-- delete->append_log -->
+        <path class="ge" d="M150 92 L300 195"/>           <!-- delete->index_domain -->
+        <path class="ge" d="M150 100 L300 260"/>          <!-- delete->auto_commit -->
+        <path class="ge" d="M450 130 L560 130"/>          <!-- append_log->log.jsonl -->
+        <path class="ge" d="M450 195 L560 195"/>          <!-- index_domain->index.jsonl -->
+        <path class="ge" d="M150 360 L300 330"/>          <!-- lint(srv)->guards? no: ->lint -->
+        <path class="ge" d="M150 372 L300 372"/>          <!-- wiki_lint->lint -->
+        <path class="ge" d="M450 372 L560 372"/>          <!-- lint->_missing_source -->
+        <path class="ge" d="M620 398 L620 430 L505 430 L505 150 L560 150"/> <!-- _missing_source->log.jsonl(read) -->
+        <path class="ge" d="M620 408 L620 440"/>          <!-- _missing_source->_source_exists -->
+      </g>
+      <!-- server nodes -->
+      <g filter="url(#ds)">
+        <rect class="gn-srv" x="20" y="50" width="130" height="60" rx="9"/>
+        <text class="gt" x="30" y="76">wiki_delete_page</text>
+        <text class="gt-s" x="30" y="94">server.py</text>
+
+        <rect class="gn-srv" x="20" y="345" width="130" height="55" rx="9"/>
+        <text class="gt" x="30" y="368">wiki_lint</text>
+        <text class="gt-s" x="30" y="386">server.py</text>
+      </g>
+      <!-- mid nodes -->
+      <g filter="url(#ds)">
+        <rect class="gn" x="300" y="50" width="150" height="42" rx="9"/>
+        <text class="gt" x="312" y="68">path guards</text>
+        <text class="gt-s" x="312" y="84">_validate_domain…</text>
+
+        <rect class="gn" x="300" y="110" width="150" height="42" rx="9"/>
+        <text class="gt" x="312" y="128">append_log</text>
+        <text class="gt-s" x="312" y="144">op=delete</text>
+
+        <rect class="gn" x="300" y="175" width="150" height="42" rx="9"/>
+        <text class="gt" x="312" y="193">index_domain</text>
+        <text class="gt-s" x="312" y="209">reused only</text>
+
+        <rect class="gn" x="300" y="240" width="150" height="42" rx="9"/>
+        <text class="gt" x="312" y="258">auto_commit</text>
+        <text class="gt-s" x="312" y="274">best-effort</text>
+
+        <rect class="gn" x="300" y="351" width="150" height="42" rx="9"/>
+        <text class="gt" x="312" y="369">lint()</text>
+        <text class="gt-s" x="312" y="385">engine/lint.py</text>
+      </g>
+      <!-- leaf nodes -->
+      <g filter="url(#ds)">
+        <rect class="gn" x="560" y="110" width="160" height="42" rx="9"/>
+        <text class="gt" x="572" y="128">log.jsonl</text>
+        <text class="gt-s" x="572" y="144">.iwiki/</text>
+
+        <rect class="gn" x="560" y="175" width="160" height="42" rx="9"/>
+        <text class="gt" x="572" y="193">index.jsonl</text>
+        <text class="gt-s" x="572" y="209">VectorStore</text>
+
+        <rect class="gn" x="560" y="351" width="160" height="42" rx="9"/>
+        <text class="gt" x="572" y="369">_missing_source</text>
+        <text class="gt-s" x="572" y="385">+ _source_exists</text>
+      </g>
+    </svg>
+    <figcaption>Рёбра A→B = «A зависит от / использует B». Циклов нет (DAG).</figcaption>
+  </figure>
+
+  <h3>Карта покрытия (задача → требования)</h3>
+  <table>
+    <thead><tr><th>Задача</th><th>Покрыто требованиями</th></tr></thead>
+    <tbody>
+      <tr><td>T1 — явное удаление, lint не удаляет</td><td>R2, R3, R9</td></tr>
+      <tr><td>T2 — сигнал только «source gone»</td><td>R1, R4, R10, R10a</td></tr>
+      <tr><td>T3 — гранулярность страница</td><td>R5, R9</td></tr>
+      <tr><td>T4 — sync чисто git</td><td>R6</td></tr>
+      <tr><td>T5 — механизм Approach A</td><td>R7, R11, SC2</td></tr>
+      <tr><td>T6 — резолв путей A1+A2</td><td>R8, R10</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Результаты проверки</h2>
+  <table>
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>clarity</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge b-ok">passed</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Findings</h3>
+  <p class="note">Находок нет — все 4 фазы пройдены чисто.</p>
+  <table>
+    <thead><tr><th>id</th><th>severity</th><th>section</th><th>fragment</th><th>text</th><th>fix</th><th>verdict</th></tr></thead>
+    <tbody><tr><td colspan="7" style="text-align:center;color:var(--muted)">—</td></tr></tbody>
+  </table>
+
+  <h3>Сводка</h3>
+  <p>
+    <span class="badge b-crit">CRITICAL open: 0</span>&nbsp;
+    <span class="badge b-warn">WARNING open: 0</span>&nbsp;
+    <span class="badge b-ok">Вердикт: OK</span>
+  </p>
+  <p class="note">Chain: <code>intent → spec</code> — intent отсутствует (<code>chain.intent: null</code>), задачу открыл этап spec.</p>
+
+</section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+
+  <h2>1. Резюме плана</h2>
+  <p class="note">Файл: <code>docs/superpowers/plans/2026-07-01-delete-stale-wiki-page.md</code> ·
+  plan_hash: <code>fdd1e7713e3fedbc</code> · spec_hash: <code>b404753f7cccc92e</code> ·
+  вердикт: <span class="badge b-ok">OK</span> · 4 задачи (TDD)</p>
+
+  <table>
+    <thead><tr><th>Задача</th><th>Файлы</th><th>Definition of Done</th></tr></thead>
+    <tbody>
+      <tr><td>T1 — <code>_latest_ingest_by_page</code> + рефактор <code>_stale</code></td><td>engine/lint.py; tests/engine/test_lint.py</td><td>Новый last-wins тест зелёный + все существующие <code>test_stale_*</code> зелёные.</td></tr>
+      <tr><td>T2 — <code>_source_exists</code> + <code>_missing_source</code> + <code>lint(project_dir)</code></td><td>engine/lint.py; server.py (<code>wiki_lint</code>); test_lint.py</td><td>7 тестов <code>missing_source</code> + last-wins + серверный lint зелёные.</td></tr>
+      <tr><td>T3 — <code>_rollback_last_log</code> + <code>wiki_delete_page</code> + регистрация</td><td>server.py; tests/test_server_delete.py (new)</td><td>5 delete-тестов + существующие write/rollback-тесты зелёные.</td></tr>
+      <tr><td>T4 — README + version 0.1.3 + docs/wiki (gated)</td><td>README.md; pyproject.toml; docs/wiki (по <code>wiki_status</code>)</td><td><code>uv run pytest -q</code> — весь suite зелёный.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Схемы зависимостей и пересечений</h2>
+
+  <h3>Граф зависимостей задач</h3>
+  <figure>
+    <svg viewBox="0 0 620 200" role="img" aria-label="Граф зависимостей задач плана">
+      <defs>
+        <marker id="parr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0L10 5L0 10z" fill="var(--muted)"/>
+        </marker>
+        <filter id="pds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="var(--shadow)"/>
+        </filter>
+      </defs>
+      <g marker-end="url(#parr)">
+        <path class="ge" d="M150 60 L230 60"/>            <!-- T1->T2 -->
+        <path class="ge" d="M150 74 L230 130"/>           <!-- T1->T3 -->
+        <path class="ge" d="M360 60 L440 90"/>            <!-- T2->T4 -->
+        <path class="ge" d="M360 130 L440 100"/>          <!-- T3->T4 -->
+      </g>
+      <g filter="url(#pds)">
+        <rect class="gn-srv" x="20" y="40" width="130" height="44" rx="9"/>
+        <text class="gt" x="32" y="60">T1 helper</text>
+        <text class="gt-s" x="32" y="76">last-wins reader</text>
+        <rect class="gn" x="230" y="40" width="130" height="44" rx="9"/>
+        <text class="gt" x="242" y="60">T2 detector</text>
+        <text class="gt-s" x="242" y="76">missing_source</text>
+        <rect class="gn" x="230" y="110" width="130" height="44" rx="9"/>
+        <text class="gt" x="242" y="130">T3 delete tool</text>
+        <text class="gt-s" x="242" y="146">wiki_delete_page</text>
+        <rect class="gn" x="440" y="70" width="130" height="44" rx="9"/>
+        <text class="gt" x="452" y="90">T4 docs</text>
+        <text class="gt-s" x="452" y="106">README/ver</text>
+      </g>
+    </svg>
+    <figcaption>M→N = результат задачи M нужен задаче N. Порядок 1→2→3→4 без циклов (DAG). T1→T3: delete-op читается last-wins reader'ом.</figcaption>
+  </figure>
+
+  <h3>Пересечения по артефактам</h3>
+  <table>
+    <thead><tr><th>Файл</th><th>Задачи</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/iwiki_mcp/engine/lint.py</code></td><td>T1, T2</td></tr>
+      <tr><td><code>src/iwiki_mcp/server.py</code></td><td>T2 (<code>wiki_lint</code>), T3 (<code>wiki_delete_page</code> + rollback)</td></tr>
+      <tr><td><code>tests/engine/test_lint.py</code></td><td>T1, T2</td></tr>
+      <tr><td><code>README.md</code>, <code>pyproject.toml</code></td><td>T4</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Результаты проверки</h2>
+  <table>
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>dependencies</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>verifiability</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge b-ok">passed</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Findings</h3>
+  <p class="note">Находок нет — 5/5 фаз пройдены чисто. Проверены корректность против исходников: ключи <code>index_domain</code> (<code>indexed_chunks</code>/<code>bytes</code>), сигнатура rollback-хелпера, сохранность всех <code>test_stale_*</code>, spacing <code>json.dumps</code> в ассертах.</p>
+
+  <h3>Сводка</h3>
+  <p>
+    <span class="badge b-crit">CRITICAL open: 0</span>&nbsp;
+    <span class="badge b-warn">WARNING open: 0</span>&nbsp;
+    <span class="badge b-ok">Вердикт: OK</span>
+  </p>
+  <p class="note">Chain: <code>intent → spec → plan</code> — intent отсутствует; spec <code>b404753f7cccc92e</code> → plan <code>fdd1e7713e3fedbc</code>.</p>
+
+</section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+
+  <h2>1. Сверка результата</h2>
+  <p class="note">plan_hash: <code>fdd1e7713e3fedbc</code> · дифф реализации <code>b59b63e..HEAD</code> (5 коммитов) ·
+  вердикт: <span class="badge b-ok">OK</span> · suite <b>133/133</b> · 0 CRITICAL</p>
+
+  <h3>Задачи плана → дифф</h3>
+  <table>
+    <thead><tr><th>Задача</th><th>Коммит</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>T1 — <code>_latest_ingest_by_page</code> + <code>_stale</code></td><td><code>6992eba</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T2 — <code>_missing_source</code> + <code>lint(project_dir)</code></td><td><code>9fb9426</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T3 — <code>wiki_delete_page</code> + <code>_rollback_last_log</code></td><td><code>aea10d4</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>T4 — README + version 0.1.3</td><td><code>98ccfd1</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>+ invalid-slug guard test</td><td><code>b536a08</code></td><td><span class="badge b-ok">DONE</span></td></tr>
+      <tr><td>docs/wiki (iwiki MCP, внешняя база)</td><td><code>2726395</code> (iwiki-personal)</td><td><span class="badge b-ok">DONE</span></td></tr>
+    </tbody>
+  </table>
+  <p class="note">EXCESS: нет. Все изменённые файлы привязаны к задачам плана.</p>
+
+  <h3>Покрытие spec</h3>
+  <p>Все требования <b>R1–R14, R10a</b> и критерии <b>SC1–SC3</b> отражены в диффе. Детали — вкладка Spec.</p>
+
+  <h2>2. Финальный whole-branch review (opus)</h2>
+  <p>
+    <span class="badge b-ok">Merge readiness: YES</span>&nbsp;
+    <span class="badge b-crit">Critical: 0</span>&nbsp;
+    <span class="badge b-warn">Important: 0</span>
+  </p>
+  <p class="note">2 Minor: invalid-slug тест (исправлено, <code>b536a08</code>); source-less <code>_write</code> в delete-тестах (noted-only — резолюция source покрыта unit-тестами lint). Известные Minor из тасков (file-handle style) — pre-existing / вне scope.</p>
+
+  <h2>3. Findings</h2>
+  <p class="note">Reconciliation: 0 CRITICAL, 0 WARNING. 2 INFO (extra slug-guard test — полезен; commit-трейлеры консистентны).</p>
+
+  <h3>Вердикт</h3>
+  <p>
+    <span class="badge b-ok">Result: OK</span>&nbsp;
+    <span class="badge b-ok">Chain: done</span>
+  </p>
+  <p class="note">Chain <code>spec → plan → result</code> закрыт (intent n/a). Ветка <code>dev-delete-stale-page</code> готова к PR в <code>master</code>.</p>
+
+</section>
+<!-- TAB:result END -->
+</main>
+</body>
+</html>

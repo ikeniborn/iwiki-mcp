@@ -208,8 +208,8 @@ def wiki_related(domain: str, section_id: str) -> dict:
 _BLOCKING = {"deep_heading", "pre_h2_text"}
 
 
-def _rollback_last_ingest_log(
-    b: str, domain: str, page: str, source: str, src_hash: str | None
+def _rollback_last_log(
+    b: str, domain: str, op: str, page: str, source: str, src_hash: str | None
 ) -> None:
     path = base.log_path(b, domain)
     try:
@@ -219,7 +219,7 @@ def _rollback_last_ingest_log(
             return
         rec = json.loads(lines[-1])
         if (
-            rec.get("op") != "ingest"
+            rec.get("op") != op
             or rec.get("page") != page
             or rec.get("source") != source
             or rec.get("src_hash") != src_hash
@@ -303,8 +303,8 @@ def wiki_write_page(
         except OSError:
             pass
         if log_appended:
-            _rollback_last_ingest_log(
-                bind.base, valid_domain, page_file, log_source, log_src_hash
+            _rollback_last_log(
+                bind.base, valid_domain, "ingest", page_file, log_source, log_src_hash
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
@@ -396,6 +396,51 @@ def wiki_update_page(
 
 
 @_safe
+def wiki_delete_page(domain: str, slug: str) -> dict:
+    bind = base.resolve_binding()
+    valid_domain = _validate_domain(domain)
+    dom_path = _domain_path(bind.base, valid_domain)
+    if not dom_path.is_dir():
+        return {
+            "error": f"domain '{valid_domain}' not found",
+            "hint": "create it with wiki_create_domain",
+        }
+    path = _page_path(bind.base, valid_domain, slug)
+    if not os.path.isfile(path):
+        return {
+            "error": f"page '{valid_domain}/{slug}' not found",
+            "hint": "list pages with wiki_list_pages",
+        }
+    cfg = Config.load()
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    with open(path, encoding="utf-8") as fh:
+        content = fh.read()
+    log_appended = False
+    os.remove(path)
+    try:
+        indexer.append_log(bind.base, valid_domain, "delete", "", page_file, None)
+        log_appended = True
+        stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    except Exception:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        if log_appended:
+            _rollback_last_log(bind.base, valid_domain, "delete", page_file, "", None)
+        raise
+    page_rel = f"{valid_domain}/{page_file}"
+    commit = sync.commit_and_push(bind.base, f"iwiki: delete {page_rel}",
+                                  pathspec=valid_domain)
+    return {
+        "deleted": page_rel,
+        "indexed_chunks": stats["indexed_chunks"],
+        "bytes": stats["bytes"],
+        "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
+    }
+
+
+@_safe
 def wiki_index(domain: str | None = None) -> dict:
     bind = base.resolve_binding()
     target = domain or bind.write
@@ -466,7 +511,9 @@ def wiki_lint(domain: str | None = None) -> dict:
     reports = {}
     for target in targets:
         valid_domain = _validate_domain(target)
-        reports[valid_domain] = lint(str(_domain_path(bind.base, valid_domain)))
+        reports[valid_domain] = lint(
+            str(_domain_path(bind.base, valid_domain)), project_dir=bind.project_dir
+        )
     return {"domains": list(reports.keys()), "reports": reports}
 
 
@@ -485,6 +532,7 @@ mcp.tool()(wiki_search)
 mcp.tool()(wiki_related)
 mcp.tool()(wiki_write_page)
 mcp.tool()(wiki_update_page)
+mcp.tool()(wiki_delete_page)
 mcp.tool()(wiki_index)
 mcp.tool()(wiki_create_domain)
 mcp.tool()(wiki_bind)
