@@ -70,8 +70,8 @@ body:has(#tab-result:checked) #pane-result{display:block}
 <body>
 <input type="checkbox" id="theme-toggle" hidden>
 <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
-<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden checked>
-<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden checked>
 <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
 <header>
   <label for="theme-toggle" class="theme-btn" title="Тёмная / светлая тема">🌙 / ☀️</label>
@@ -189,7 +189,84 @@ body:has(#tab-result:checked) #pane-result{display:block}
 <!-- TAB:spec END -->
 <!-- TAB:plan START -->
 <section class="tab-pane" id="pane-plan">
-  <p class="note">Этап ещё не проверен.</p>
+
+  <h2>1. Резюме плана</h2>
+  <p class="note">Файл: <code>docs/superpowers/plans/2026-07-01-ensure-fresh-before-write.md</code> ·
+  plan_hash: <code>b4b42701b7aa550d</code> · spec_hash: <code>3c71c3a2097a399a</code> ·
+  вердикт: <span class="badge b-ok">OK</span> · 3 задачи (TDD)</p>
+
+  <table>
+    <thead><tr><th>Задача</th><th>Файлы</th><th>Definition of Done</th></tr></thead>
+    <tbody>
+      <tr><td>T1 — <code>ensure_fresh</code> + <code>_ahead_behind</code> + <code>_tree_clean</code></td><td>sync.py; tests/test_ensure_fresh.py (new)</td><td>6 unit-тестов (updated/diverged/up_to_date/ahead/no_remote/non_repo) зелёные.</td></tr>
+      <tr><td>T2 — гард в 5 mutating-хендлерах + <code>_DIVERGED</code>/<code>_fresh_warn</code></td><td>server.py; tests/test_server_fresh.py (new)</td><td>2 хендлер-теста (diverged→refuse zero-effect; behind→ff+write+push) + весь suite зелёные.</td></tr>
+      <tr><td>T3 — docs + version 0.1.5</td><td>pyproject.toml; README.md; CLAUDE.md; docs/wiki (gated)</td><td><code>uv run pytest -q</code> — весь suite зелёный.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Граф зависимостей задач</h2>
+  <figure>
+    <svg viewBox="0 0 620 130" role="img" aria-label="Граф зависимостей задач плана">
+      <defs>
+        <marker id="parr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0L10 5L0 10z" fill="var(--muted)"/>
+        </marker>
+        <filter id="pds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="var(--shadow)"/>
+        </filter>
+      </defs>
+      <g marker-end="url(#parr)">
+        <path class="ge" d="M150 55 L250 55"/>            <!-- T1->T2 -->
+        <path class="ge" d="M380 55 L480 55"/>            <!-- T2->T3 -->
+      </g>
+      <g filter="url(#pds)">
+        <rect class="gn-srv" x="20" y="33" width="130" height="44" rx="9"/>
+        <text class="gt" x="32" y="53">T1 ensure_fresh</text>
+        <text class="gt-s" x="32" y="69">sync.py + unit</text>
+        <rect class="gn" x="250" y="33" width="130" height="44" rx="9"/>
+        <text class="gt" x="262" y="53">T2 handler guard</text>
+        <text class="gt-s" x="262" y="69">5 mutating</text>
+        <rect class="gn" x="480" y="33" width="130" height="44" rx="9"/>
+        <text class="gt" x="492" y="53">T3 docs/ver</text>
+        <text class="gt-s" x="492" y="69">0.1.5</text>
+      </g>
+    </svg>
+    <figcaption>M→N = результат задачи M нужен задаче N. Линейный DAG 1→2→3, без циклов. T2 использует <code>sync.ensure_fresh</code> из T1.</figcaption>
+  </figure>
+
+  <h3>Пересечения по артефактам</h3>
+  <table>
+    <thead><tr><th>Файл</th><th>Задачи</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/iwiki_mcp/sync.py</code></td><td>T1</td></tr>
+      <tr><td><code>src/iwiki_mcp/server.py</code></td><td>T2</td></tr>
+      <tr><td><code>pyproject.toml</code>, <code>README.md</code>, <code>CLAUDE.md</code></td><td>T3</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Результаты проверки</h2>
+  <table>
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>dependencies</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>verifiability</td><td><span class="badge b-ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge b-ok">passed</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Findings</h3>
+  <p class="note">Находок нет — 5/5 фаз пройдены чисто. Проверено: порядок T1→T2 (ensure_fresh до гарда), <code>_DIVERGED</code>/<code>_fresh_warn</code> определены до использования, распаковка <code>(behind, ahead)</code> согласована, каждый TDD-шаг с командой + expected. «TODO» — только имя <code>docs/TODO.md</code>.</p>
+
+  <h3>Сводка</h3>
+  <p>
+    <span class="badge b-crit">CRITICAL open: 0</span>&nbsp;
+    <span class="badge b-warn">WARNING open: 0</span>&nbsp;
+    <span class="badge b-ok">Вердикт: OK</span>
+  </p>
+  <p class="note">Chain: <code>intent → spec → plan</code> — intent отсутствует; spec <code>3c71c3a2097a399a</code> → plan <code>b4b42701b7aa550d</code>.</p>
+
 </section>
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
