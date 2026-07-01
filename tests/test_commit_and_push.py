@@ -66,3 +66,20 @@ def test_commit_and_push_non_repo_is_fail_soft_and_skips_sync(tmp_path, monkeypa
     assert out["committed"] is False
     assert out["pushed"] is False
     assert calls["n"] == 0
+
+
+def test_commit_and_push_surfaces_sync_error_as_warning(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    _init_repo(base)
+    (base / "backend").mkdir()
+    (base / "backend" / "page.md").write_text("# P\n## Overview\nx\n")
+
+    monkeypatch.setattr(
+        sync, "sync",
+        lambda b, **k: {"pulled": False, "pushed": False, "error": "conflict"},
+    )
+    out = sync.commit_and_push(str(base), "msg", pathspec="backend")
+
+    assert out["committed"] is True
+    assert out["pushed"] is False
+    assert out["warning"] == "conflict"
