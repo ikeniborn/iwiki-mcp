@@ -101,8 +101,8 @@
 <body>
   <input type="checkbox" id="theme-toggle" hidden>
   <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
-  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
   <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
   <header>
     <div>
@@ -189,7 +189,46 @@
 <!-- TAB:spec END -->
 <!-- TAB:plan START -->
   <section class="tab-pane" id="pane-plan">
-    <p class="note">Этап ещё не проверен.</p>
+    <h2>Проверка plan — 2026-07-04</h2>
+    <h3>Артефакт</h3>
+    <table>
+      <tr><th>Поле</th><th>Значение</th></tr>
+      <tr><td>Файл</td><td><code>docs/superpowers/plans/2026-07-04-guard-iwiki-bind-scope-plan.md</code></td></tr>
+      <tr><td>Hash</td><td><code>18e576150cc36943</code></td></tr>
+      <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-04-guard-iwiki-bind-scope-intent.md</code></td></tr>
+      <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-04-guard-iwiki-bind-scope-design.md</code></td></tr>
+    </table>
+    <h3>Steps And DoD</h3>
+    <table>
+      <tr><th>Task</th><th>Steps</th><th>Definition of Done</th></tr>
+      <tr><td>Task 1</td><td>5</td><td>Helper tests fail first, helpers implemented, <code>tests/test_base.py</code> passes, helper commit exists.</td></tr>
+      <tr><td>Task 2</td><td>7</td><td>Server bind guard tests fail first, <code>wiki_bind</code> guarded, bind tests pass, server guard commit exists.</td></tr>
+      <tr><td>Task 3</td><td>5</td><td>Templates and READMEs no longer contain startup bootstrap wording, docs commit exists.</td></tr>
+      <tr><td>Task 4</td><td>7</td><td>Version bumped, focused/full tests and CLI help pass, iwiki page updated, lint run.</td></tr>
+    </table>
+    <h3>Dependency Graph</h3>
+    <p class="note">Task 1 → Task 2 → Task 3 → Task 4. Helper API must exist before server guard; docs describe implemented behavior; final verification and wiki update run after code/docs changes.</p>
+    <h3>Spec Requirement Mapping</h3>
+    <table>
+      <tr><th>Requirement</th><th>Plan Coverage</th></tr>
+      <tr><td>R1</td><td>Task 2 write guard tests and server implementation.</td></tr>
+      <tr><td>R2-R6</td><td>Task 1 helper tests plus Task 2 server-level read guard tests.</td></tr>
+      <tr><td>R7</td><td>Task 2 preserves domain existence checks before config write.</td></tr>
+      <tr><td>Docs/templates</td><td>Task 3 README and snippet edits.</td></tr>
+      <tr><td>Version/wiki</td><td>Task 4 version bump, verification, and iwiki update.</td></tr>
+    </table>
+    <h3>Phase Results</h3>
+    <p>
+      <span class="badge ok">structure passed</span>
+      <span class="badge ok">coverage passed</span>
+      <span class="badge ok">dependencies passed</span>
+      <span class="badge ok">verifiability passed</span>
+      <span class="badge ok">consistency passed</span>
+    </p>
+    <h3>Findings</h3>
+    <p class="note">Новых findings нет.</p>
+    <h3>Summary</h3>
+    <p><span class="badge ok">OK</span> plan valid. Следующий этап: implementation/result.</p>
   </section>
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
