@@ -51,12 +51,16 @@ def test_create_domain(tmp_path, monkeypatch):
     assert os.path.isdir(os.path.join(b, "backend"))
 
 
-def test_bind_writes_config(tmp_path, monkeypatch):
+def test_bind_writes_config_for_current_project_domain(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared", ".iwiki"))
-    out = server.wiki_bind(read=["backend", "shared"], write="backend")
-    assert out["read"] == ["backend", "shared"]
-    assert 'write = "backend"' in open(os.path.join(proj, ".iwiki.toml")).read()
+    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+
+    out = server.wiki_bind(read=["backend", "proj"], write="proj")
+
+    assert out["read"] == ["backend", "proj"]
+    text = open(os.path.join(proj, ".iwiki.toml")).read()
+    assert 'read = ["backend", "proj"]' in text
+    assert 'write = "proj"' in text
 
 
 def test_bind_rejects_missing_domain_without_writing(tmp_path, monkeypatch):
@@ -70,6 +74,58 @@ def test_bind_rejects_missing_domain_without_writing(tmp_path, monkeypatch):
     assert "missing" in out["error"]
     assert 'write = "backend"' in text
     assert "missing" not in text
+
+
+def test_bind_preserves_existing_read_when_adding_current_project(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+
+    out = server.wiki_bind(read=["proj"], write="proj")
+
+    assert out["read"] == ["backend", "proj"]
+    text = open(os.path.join(proj, ".iwiki.toml")).read()
+    assert 'read = ["backend", "proj"]' in text
+    assert 'write = "proj"' in text
+
+
+def test_bind_does_not_remove_existing_read_when_current_already_present(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+    open(config_path, "w").write('read = ["backend", "proj"]\nwrite = "proj"\n')
+
+    out = server.wiki_bind(read=["proj"], write="proj")
+
+    assert out["read"] == ["backend", "proj"]
+    assert 'read = ["backend", "proj"]' in open(config_path).read()
+
+
+def test_bind_rejects_new_non_current_read_without_writing(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "shared", ".iwiki"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+
+    out = server.wiki_bind(read=["shared"], write="proj")
+
+    text = open(config_path).read()
+    assert out["error"] == "read scope is protected"
+    assert 'read = ["backend"]' in text
+    assert 'shared' not in text
+
+
+def test_bind_rejects_non_current_write_without_writing(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "shared", ".iwiki"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+
+    out = server.wiki_bind(write="shared")
+
+    text = open(config_path).read()
+    assert out["error"] == "write domain must match current project domain"
+    assert 'write = "backend"' in text
+    assert 'write = "shared"' not in text
 
 
 def test_write_page_removes_new_file_when_indexing_fails(tmp_path, monkeypatch):
