@@ -141,3 +141,42 @@ def test_index_path_uses_jsonl_index():
     assert base.index_path("/wiki", "backend").endswith(
         os.path.join(".iwiki", "index.jsonl")
     )
+
+
+def test_current_project_domain_uses_project_dir_basename(tmp_path):
+    proj = tmp_path / "my-project"
+    proj.mkdir()
+
+    assert base.current_project_domain(str(proj)) == "my-project"
+
+
+def test_merge_read_scope_sets_read_when_existing_empty():
+    merged, error = base.merge_read_scope((), ("backend", "shared"), "backend")
+
+    assert error is None
+    assert merged == ("backend", "shared")
+
+
+def test_merge_read_scope_appends_current_domain_only():
+    merged, error = base.merge_read_scope(("foreign",), ("backend",), "backend")
+
+    assert error is None
+    assert merged == ("foreign", "backend")
+
+
+def test_merge_read_scope_preserves_existing_when_current_already_present():
+    merged, error = base.merge_read_scope(
+        ("foreign", "backend"),
+        ("backend",),
+        "backend",
+    )
+
+    assert error is None
+    assert merged == ("foreign", "backend")
+
+
+def test_merge_read_scope_rejects_new_non_current_domain():
+    merged, error = base.merge_read_scope(("foreign",), ("shared",), "backend")
+
+    assert merged == ("foreign",)
+    assert error == "read scope is protected"

@@ -53,6 +53,32 @@ def _as_str_tuple(value: Any) -> tuple[str, ...]:
         return (item,) if item else ()
 
 
+def current_project_domain(project_dir: str) -> str:
+    project_name = os.path.basename(os.path.normpath(resolve_project_dir(project_dir)))
+    if not project_name:
+        raise BaseError("cannot infer current project domain")
+    return project_name
+
+
+def merge_read_scope(
+    existing: list[str] | tuple[str, ...] | None,
+    requested: list[str] | tuple[str, ...] | None,
+    current_domain: str,
+) -> tuple[tuple[str, ...], str | None]:
+    existing_read = _as_str_tuple(existing)
+    requested_read = _as_str_tuple(requested)
+    if not existing_read:
+        return requested_read, None
+
+    for domain in requested_read:
+        if domain not in existing_read and domain != current_domain:
+            return existing_read, "read scope is protected"
+
+    if current_domain in requested_read and current_domain not in existing_read:
+        return (*existing_read, current_domain), None
+    return existing_read, None
+
+
 def resolve_binding(project_dir: str | None = None) -> Binding:
     resolved_project_dir = resolve_project_dir(project_dir)
     cfg = load_project_config(resolved_project_dir)
