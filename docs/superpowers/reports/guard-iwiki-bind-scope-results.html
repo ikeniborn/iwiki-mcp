@@ -100,8 +100,8 @@
 </head>
 <body>
   <input type="checkbox" id="theme-toggle" hidden>
-  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden checked>
   <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
   <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
   <header>
@@ -155,7 +155,36 @@
 <!-- TAB:intent END -->
 <!-- TAB:spec START -->
   <section class="tab-pane" id="pane-spec">
-    <p class="note">Этап ещё не проверен.</p>
+    <h2>Проверка spec — 2026-07-04</h2>
+    <h3>Артефакт</h3>
+    <table>
+      <tr><th>Поле</th><th>Значение</th></tr>
+      <tr><td>Файл</td><td><code>docs/superpowers/specs/2026-07-04-guard-iwiki-bind-scope-design.md</code></td></tr>
+      <tr><td>Hash</td><td><code>5841ad189cdbb42e</code></td></tr>
+      <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-04-guard-iwiki-bind-scope-intent.md</code></td></tr>
+    </table>
+    <h3>Requirements</h3>
+    <table>
+      <tr><th>ID</th><th>Requirement</th><th>Acceptance Link</th></tr>
+      <tr><td>R1</td><td><code>wiki_bind(write=...)</code> accepts only the current project domain.</td><td>Current-project-only write.</td></tr>
+      <tr><td>R2</td><td>First-time binding may set requested validated <code>read</code>.</td><td>Preserve setup compatibility.</td></tr>
+      <tr><td>R3</td><td>Existing non-empty <code>read</code> entries are never removed or replaced.</td><td>Forbidden read replacement.</td></tr>
+      <tr><td>R4</td><td>Missing current domain may be appended to existing <code>read</code>.</td><td>Allowed current-domain append.</td></tr>
+      <tr><td>R5</td><td>Existing <code>read</code> remains unchanged when current domain is already present.</td><td>Preserve configured domains.</td></tr>
+      <tr><td>R6</td><td>Adding non-current domains to existing non-empty <code>read</code> is rejected.</td><td>Protected scope.</td></tr>
+      <tr><td>R7</td><td>Domain existence validation remains mandatory.</td><td>Existing validation health metric.</td></tr>
+    </table>
+    <h3>Phase Results</h3>
+    <p>
+      <span class="badge ok">structure passed</span>
+      <span class="badge ok">coverage passed</span>
+      <span class="badge ok">clarity passed</span>
+      <span class="badge ok">consistency passed</span>
+    </p>
+    <h3>Findings</h3>
+    <p class="note">Новых findings нет.</p>
+    <h3>Summary</h3>
+    <p><span class="badge ok">OK</span> spec valid. Следующий этап: plan.</p>
   </section>
 <!-- TAB:spec END -->
 <!-- TAB:plan START -->

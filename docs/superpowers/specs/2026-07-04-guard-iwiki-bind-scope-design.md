@@ -1,3 +1,16 @@
+---
+review:
+  spec_hash: 5841ad189cdbb42e
+  last_run: 2026-07-04
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+  findings: []
+chain:
+  intent: docs/superpowers/intents/2026-07-04-guard-iwiki-bind-scope-intent.md
+---
 # Design: guard iwiki bind scope
 
 ## Acceptance (from intent)
