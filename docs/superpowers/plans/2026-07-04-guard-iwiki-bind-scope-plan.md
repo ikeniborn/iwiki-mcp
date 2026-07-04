@@ -12,6 +12,10 @@ review:
 chain:
   intent: docs/superpowers/intents/2026-07-04-guard-iwiki-bind-scope-intent.md
   spec: docs/superpowers/specs/2026-07-04-guard-iwiki-bind-scope-design.md
+result_check:
+  verdict: OK
+  plan_hash: 18e576150cc36943
+  last_run: 2026-07-04
 ---
 # Guard Iwiki Bind Scope Implementation Plan
 

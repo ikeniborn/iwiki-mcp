@@ -102,8 +102,8 @@
   <input type="checkbox" id="theme-toggle" hidden>
   <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
   <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
-  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
   <header>
     <div>
       <h1>guard-iwiki-bind-scope</h1>
@@ -233,7 +233,36 @@
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
   <section class="tab-pane" id="pane-result">
-    <p class="note">Этап ещё не проверен.</p>
+    <h2>Проверка result — 2026-07-04</h2>
+    <h3>Reconciliation</h3>
+    <table>
+      <tr><th>Plan Task</th><th>Status</th><th>Matched Diff Paths</th></tr>
+      <tr><td>Task 1: Add Binding Policy Helpers</td><td><span class="badge ok">DONE</span></td><td><code>src/iwiki_mcp/base.py</code>, <code>tests/test_base.py</code></td></tr>
+      <tr><td>Task 2: Enforce <code>wiki_bind</code> Guards</td><td><span class="badge ok">DONE</span></td><td><code>src/iwiki_mcp/server.py</code>, <code>tests/test_server_write.py</code>, <code>tests/test_server_iwikiignore.py</code></td></tr>
+      <tr><td>Task 3: Update Agent Guidance And User Docs</td><td><span class="badge ok">DONE</span></td><td><code>README.md</code>, <code>docs/README.ru.md</code>, <code>templates/AGENTS.md.snippet</code>, <code>templates/CLAUDE.md.snippet</code></td></tr>
+      <tr><td>Task 4: Version, Full Verification, And Wiki Update</td><td><span class="badge ok">DONE</span></td><td><code>pyproject.toml</code>, <code>uv.lock</code>, iwiki page <code>iwiki-mcp/base-binding</code></td></tr>
+    </table>
+    <h3>Coverage</h3>
+    <table>
+      <tr><th>Outcome / Requirement</th><th>Evidence</th></tr>
+      <tr><td>Project open no longer triggers iwiki bootstrap through snippets.</td><td>Startup bootstrap wording removed from both templates and READMEs; grep returned no matches.</td></tr>
+      <tr><td><code>read</code> cannot be overwritten once non-empty.</td><td>Helper and server tests cover preserve/reject cases; server merge guards config writes.</td></tr>
+      <tr><td>Current project domain can be appended to <code>read</code>.</td><td><code>test_bind_preserves_existing_read_when_adding_current_project</code> passes.</td></tr>
+      <tr><td><code>write</code> only accepts current project domain.</td><td><code>test_bind_rejects_non_current_write_without_writing</code> passes.</td></tr>
+      <tr><td>Version/wiki/docs updated.</td><td><code>pyproject.toml</code>/<code>uv.lock</code> bumped to <code>0.1.6</code>; iwiki <code>base-binding</code> updated and linted.</td></tr>
+    </table>
+    <h3>Verification</h3>
+    <table>
+      <tr><th>Command / Tool</th><th>Result</th></tr>
+      <tr><td><code>uv run pytest tests/test_base.py tests/test_server_write.py tests/test_server_iwikiignore.py -q</code></td><td><span class="badge ok">PASS</span> 31 passed</td></tr>
+      <tr><td><code>uv run pytest -q</code></td><td><span class="badge ok">PASS</span> 173 passed</td></tr>
+      <tr><td><code>uv run iwiki-mcp --help</code></td><td><span class="badge ok">PASS</span> exits 0 and prints <code>--project</code></td></tr>
+      <tr><td><code>wiki_update_page</code> + <code>wiki_lint(domain="iwiki-mcp")</code></td><td><span class="badge ok">PASS</span> no broken/orphan/stale pages; existing advisory/source-path findings remain unrelated</td></tr>
+    </table>
+    <h3>Findings</h3>
+    <p class="note">Новых findings нет.</p>
+    <h3>Summary</h3>
+    <p><span class="badge ok">OK</span> result valid. Implementation matches intent, spec, and plan.</p>
   </section>
 <!-- TAB:result END -->
   </main>
