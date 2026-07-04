@@ -141,7 +141,7 @@ You can also bind from the MCP tool surface:
 wiki_bind(read=["backend", "frontend"], write="backend")
 ```
 
-`wiki_bind` validates that every provided read and write domain already exists. Create missing domains with `wiki_create_domain` first.
+`wiki_bind` validates that every provided read and write domain already exists. For an existing non-empty `read`, the tool preserves configured domains and may only append the current project domain. `write` must match the current project domain, derived from the project directory name. Create missing domains with `wiki_create_domain` as an explicit manual setup step before binding.
 
 ## Teach the agent to use iwiki
 
@@ -150,7 +150,7 @@ Registering the server exposes the tools, but the agent still needs instructions
 - `templates/CLAUDE.md.snippet` — append to the project's `CLAUDE.md` (Claude Code).
 - `templates/AGENTS.md.snippet` — append to the project's `AGENTS.md` (Codex).
 
-Both carry the same guidance: search before a task, bootstrap a write-target, author pages after functionality changes, and `wiki_sync` at end of session. Append the matching snippet once per project:
+Both carry the same guidance: search before a task, do not mutate binding during ordinary startup, author pages after functionality changes, and `wiki_sync` at end of session. Append the matching snippet once per project:
 
 ```bash
 cat templates/CLAUDE.md.snippet >> CLAUDE.md   # Claude Code

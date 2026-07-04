@@ -515,20 +515,47 @@ def wiki_create_domain(name: str) -> dict:
 @_safe
 def wiki_bind(read: list[str] | None = None, write: str | None = None) -> dict:
     bind = base.resolve_binding()
+    current_domain = _validate_domain(base.current_project_domain(bind.project_dir))
     valid_read = None if read is None else [_validate_domain(d) for d in read]
     valid_write = None if write is None else _validate_domain(write)
+    merged_read = None
+    if valid_read is not None:
+        merged, read_error = base.merge_read_scope(
+            bind.read,
+            valid_read,
+            current_domain,
+        )
+        if read_error:
+            return {
+                "error": read_error,
+                "hint": "existing read scope is preserved; only the current "
+                        "project domain may be appended automatically",
+            }
+        merged_read = list(merged)
+
     for domain in valid_read or ():
         if not _domain_path(bind.base, domain).is_dir():
             return {
                 "error": f"domain '{domain}' not found",
                 "hint": "create it with wiki_create_domain",
             }
-    if valid_write is not None and not _domain_path(bind.base, valid_write).is_dir():
+    if valid_write is not None:
+        if not _domain_path(bind.base, valid_write).is_dir():
+            return {
+                "error": f"domain '{valid_write}' not found",
+                "hint": "create it with wiki_create_domain",
+            }
+        if valid_write != current_domain:
+            return {
+                "error": "write domain must match current project domain",
+                "hint": f"use write='{current_domain}' for this project",
+            }
+    elif bind.write is not None and bind.write != current_domain:
         return {
-            "error": f"domain '{valid_write}' not found",
-            "hint": "create it with wiki_create_domain",
+            "error": "write domain must match current project domain",
+            "hint": f"use write='{current_domain}' for this project",
         }
-    base.write_project_config(bind.project_dir, read=valid_read, write=valid_write)
+    base.write_project_config(bind.project_dir, read=merged_read, write=valid_write)
     ignore.ensure_iwikiignore(bind.project_dir)
     new = base.resolve_binding()
     return {"read": list(new.read), "write": new.write, "project_dir": new.project_dir}
