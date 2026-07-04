@@ -128,6 +128,21 @@ def test_bind_rejects_non_current_write_without_writing(tmp_path, monkeypatch):
     assert 'write = "shared"' not in text
 
 
+def test_bind_rejects_existing_non_current_write_without_current_override(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+
+    out = server.wiki_bind(read=["proj"])
+
+    text = open(config_path).read()
+    assert out["error"] == "write domain must match current project domain"
+    assert 'read = ["backend"]' in text
+    assert 'write = "backend"' in text
+
+
 def test_write_page_removes_new_file_when_indexing_fails(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     monkeypatch.setattr(

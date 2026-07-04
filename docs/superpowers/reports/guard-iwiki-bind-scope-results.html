@@ -254,8 +254,8 @@
     <h3>Verification</h3>
     <table>
       <tr><th>Command / Tool</th><th>Result</th></tr>
-      <tr><td><code>uv run pytest tests/test_base.py tests/test_server_write.py tests/test_server_iwikiignore.py -q</code></td><td><span class="badge ok">PASS</span> 31 passed</td></tr>
-      <tr><td><code>uv run pytest -q</code></td><td><span class="badge ok">PASS</span> 173 passed</td></tr>
+      <tr><td><code>uv run pytest tests/test_base.py tests/test_server_write.py tests/test_server_iwikiignore.py -q</code></td><td><span class="badge ok">PASS</span> 32 passed</td></tr>
+      <tr><td><code>uv run pytest -q</code></td><td><span class="badge ok">PASS</span> 174 passed</td></tr>
       <tr><td><code>uv run iwiki-mcp --help</code></td><td><span class="badge ok">PASS</span> exits 0 and prints <code>--project</code></td></tr>
       <tr><td><code>wiki_update_page</code> + <code>wiki_lint(domain="iwiki-mcp")</code></td><td><span class="badge ok">PASS</span> no broken/orphan/stale pages; existing advisory/source-path findings remain unrelated</td></tr>
     </table>

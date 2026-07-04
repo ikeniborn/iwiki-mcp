@@ -550,6 +550,11 @@ def wiki_bind(read: list[str] | None = None, write: str | None = None) -> dict:
                 "error": "write domain must match current project domain",
                 "hint": f"use write='{current_domain}' for this project",
             }
+    elif bind.write is not None and bind.write != current_domain:
+        return {
+            "error": "write domain must match current project domain",
+            "hint": f"use write='{current_domain}' for this project",
+        }
     base.write_project_config(bind.project_dir, read=merged_read, write=valid_write)
     ignore.ensure_iwikiignore(bind.project_dir)
     new = base.resolve_binding()
