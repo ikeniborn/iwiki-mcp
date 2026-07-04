@@ -1,3 +1,15 @@
+---
+review:
+  intent_hash: fe8918837ccd332a
+  last_run: 2026-07-04
+  phases:
+    structure: { status: passed }
+    completeness: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+    alignment: { status: passed }
+  findings: []
+---
 # Intent: guard iwiki bind scope
 
 **Date:** 2026-07-04

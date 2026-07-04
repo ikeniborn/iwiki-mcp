@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>guard-iwiki-bind-scope chain results</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --surface: #ffffff;
+      --text: #1d2430;
+      --muted: #5d6675;
+      --border: #d8dde6;
+      --accent: #0f6b5f;
+      --ok: #1f7a4d;
+      --wait: #7a5a1f;
+      --code: #f1f4f8;
+    }
+    body:has(#theme-toggle:checked) {
+      color-scheme: dark;
+      --bg: #111418;
+      --surface: #1b2027;
+      --text: #edf1f5;
+      --muted: #aeb7c2;
+      --border: #343c47;
+      --accent: #4bb5a7;
+      --ok: #62c28f;
+      --wait: #d0aa55;
+      --code: #252b33;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+    header, main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    header { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    h2 { margin-top: 0; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 22px 0 8px; font-size: 16px; letter-spacing: 0; }
+    .theme-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chain-tabs {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chain-tabs label {
+      cursor: pointer;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: var(--surface);
+      color: var(--muted);
+    }
+    body:has(#tab-intent:checked) label[for="tab-intent"],
+    body:has(#tab-spec:checked) label[for="tab-spec"],
+    body:has(#tab-plan:checked) label[for="tab-plan"],
+    body:has(#tab-result:checked) label[for="tab-result"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      font-weight: 650;
+    }
+    .tab-pane { display: none; }
+    body:has(#tab-intent:checked) #pane-intent,
+    body:has(#tab-spec:checked) #pane-spec,
+    body:has(#tab-plan:checked) #pane-plan,
+    body:has(#tab-result:checked) #pane-result { display: block; }
+    section.tab-pane {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 0 6px 6px 6px;
+      padding: 22px;
+      margin-top: 0;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; }
+    th, td { border: 1px solid var(--border); padding: 9px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--code); }
+    code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .ok { color: var(--ok); border: 1px solid var(--ok); }
+    .wait { color: var(--wait); border: 1px solid var(--wait); }
+    .note { color: var(--muted); background: var(--code); padding: 12px; border-radius: 6px; }
+    ul { margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <input type="checkbox" id="theme-toggle" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden checked>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <header>
+    <div>
+      <h1>guard-iwiki-bind-scope</h1>
+      <p class="note">IDD to SDD chain report. Current update: intent.</p>
+    </div>
+    <label for="theme-toggle" class="theme-btn" title="Toggle theme">Theme</label>
+  </header>
+  <nav class="chain-tabs">
+    <label for="tab-intent">Intent</label>
+    <label for="tab-spec">Spec</label>
+    <label for="tab-plan">Plan</label>
+    <label for="tab-result">Result</label>
+  </nav>
+  <main>
+<!-- TAB:intent START -->
+  <section class="tab-pane" id="pane-intent">
+    <h2>Проверка intent — 2026-07-04</h2>
+    <h3>Артефакт</h3>
+    <table>
+      <tr><th>Поле</th><th>Значение</th></tr>
+      <tr><td>Файл</td><td><code>docs/superpowers/intents/2026-07-04-guard-iwiki-bind-scope-intent.md</code></td></tr>
+      <tr><td>Hash</td><td><code>fe8918837ccd332a</code></td></tr>
+      <tr><td>Status</td><td><code>approved</code></td></tr>
+    </table>
+    <h3>Секции intent</h3>
+    <table>
+      <tr><th>Секция</th><th>Проверка</th></tr>
+      <tr><td>Objective</td><td>Есть, описывает запрет нежелательного bootstrap и перезаписи binding scope.</td></tr>
+      <tr><td>Desired Outcomes</td><td>Есть, включает запрет замены <code>read</code>, разрешённый append текущего домена и guard для <code>write</code>.</td></tr>
+      <tr><td>Health Metrics</td><td>Есть, защищает существующие bindings, idempotency, search scope и pytest suite.</td></tr>
+      <tr><td>Strategic Context</td><td>Есть, перечислены affected modules and callers; priority trade-off: trust.</td></tr>
+      <tr><td>Constraints</td><td>Есть steering и hard constraints; write guard включён.</td></tr>
+      <tr><td>Autonomy Zones</td><td>Все четыре зоны покрыты.</td></tr>
+      <tr><td>Stop Rules</td><td>Есть halt, escalate и observable done criterion.</td></tr>
+    </table>
+    <h3>Phase Results</h3>
+    <p>
+      <span class="badge ok">structure passed</span>
+      <span class="badge ok">completeness passed</span>
+      <span class="badge ok">clarity passed</span>
+      <span class="badge ok">consistency passed</span>
+      <span class="badge ok">alignment passed</span>
+    </p>
+    <h3>Findings</h3>
+    <p class="note">Новых findings нет.</p>
+    <h3>Summary</h3>
+    <p><span class="badge ok">OK</span> intent valid. Следующий этап: spec.</p>
+  </section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+  <section class="tab-pane" id="pane-spec">
+    <p class="note">Этап ещё не проверен.</p>
+  </section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+  <section class="tab-pane" id="pane-plan">
+    <p class="note">Этап ещё не проверен.</p>
+  </section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+  <section class="tab-pane" id="pane-result">
+    <p class="note">Этап ещё не проверен.</p>
+  </section>
+<!-- TAB:result END -->
+  </main>
+</body>
+</html>
