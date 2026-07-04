@@ -27,7 +27,7 @@ Recent history uses short, direct commit messages such as `update name project` 
 
 ## Versioning
 
-Bump the server version in `pyproject.toml` for every repository change. Use a patch bump by default, for example `0.1.0` to `0.1.1`. Use a minor or major bump only when the task explicitly requests that release level.
+Bump the server version in `pyproject.toml` for every repository change, including code, tests, docs, templates, and agent instruction changes. Use a patch bump by default for each change, for example `0.1.0` to `0.1.1`. Use a minor or major bump only when the task explicitly requests that release level.
 
 ## Security & Configuration Tips
 
