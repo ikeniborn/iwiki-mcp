@@ -115,13 +115,13 @@
 <!-- TAB:intent START -->
 <section class="tab-pane" id="pane-intent">
   <h2>Проверка intent — 2026-07-08</h2>
-  <p class="note">Intent доказывает цель: автоматизировать поддержание актуальности wiki после <code>wiki_lint</code>, применяя lint-backed update/delete действия в одном запуске и возвращая отчёт вместо пошаговых approval gates.</p>
+  <p class="note">Intent доказывает цель: автоматизировать поддержание актуальности wiki после <code>wiki_lint</code> без дублирования write/update/delete API: сервер планирует lint-backed действия, агент применяет их существующими tools и возвращает отчёт вместо пошаговых user gates.</p>
 
   <h3>Сводка артефакта</h3>
   <table>
     <tr><th>Поле</th><th>Значение</th></tr>
     <tr><td>Путь</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
-    <tr><td>Hash</td><td><code>9f76d91778aafb76</code></td></tr>
+    <tr><td>Hash</td><td><code>6634485d64f7f25b</code></td></tr>
     <tr><td>Status</td><td><code>approved</code></td></tr>
     <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
   </table>
@@ -130,8 +130,8 @@
   <div class="flow">
     <div class="node"><strong>Проблема</strong>Wiki может расходиться с source после изменений или удаления файлов.</div>
     <div class="node"><strong>Детектор</strong><code>wiki_lint</code> даёт <code>stale</code> и <code>missing_source</code>.</div>
-    <div class="node"><strong>Действие</strong><code>stale</code> → update, <code>missing_source</code> → delete.</div>
-    <div class="node"><strong>Готово</strong>Индекс обновлён, lint повторён, отчёт содержит <code>updated</code>, <code>deleted</code>, <code>failed</code>, <code>remaining_lint</code>.</div>
+    <div class="node"><strong>Действие</strong>Agent regenerates wiki markdown and applies changes through existing <code>wiki_update_page</code>, <code>wiki_delete_page</code>, <code>wiki_write_page</code>, and <code>wiki_index</code>.</div>
+    <div class="node"><strong>Готово</strong>Индекс обновлён, lint повторён, отчёт содержит <code>planned</code>, <code>updated</code>, <code>deleted</code>, <code>failed</code>, <code>remaining_lint</code>.</div>
   </div>
 
   <h3>Матрица ограничений</h3>
@@ -140,14 +140,14 @@
     <tr><td>Steering</td><td>Best-effort run обрабатывает все candidates.</td><td>Report показывает per-action success/failure.</td></tr>
     <tr><td>Hard</td><td>Только lint findings с ingest history подходят для remediation.</td><td>Кандидаты берутся из <code>stale</code> и <code>missing_source</code>.</td></tr>
     <tr><td>Hard</td><td>Операция не пишет вне bound write domain текущего проекта.</td><td>Domain guard обязателен в design.</td></tr>
-    <tr><td>Hard</td><td>После действий нужен re-lint и re-index.</td><td>Финальный результат содержит remaining lint и обновлённые vectors.</td></tr>
+    <tr><td>Hard</td><td>Planning operation не пишет, не удаляет и не индексирует.</td><td>Изменения идут через existing tools.</td></tr>
   </table>
 
   <h3>Карта автономии</h3>
   <div class="matrix">
-    <div class="node"><strong>Full</strong>Build candidates, update stale pages, delete missing-source pages, re-run lint, re-index, report.</div>
+    <div class="node"><strong>Full</strong>Build candidates, return source/page context, use existing tools for update/delete/index/lint/report.</div>
     <div class="node"><strong>Guarded</strong>Continue after one failed action, record failure, process remaining candidates.</div>
-    <div class="node"><strong>Proposal-first</strong>Change eligibility rules, source-to-wiki transform, domain scope, or destructive actions beyond lint-backed delete.</div>
+    <div class="node"><strong>Proposal-first</strong>Change eligibility rules, add server-side LLM, add a new apply/update API, change domain scope, or destructive actions beyond lint-backed delete.</div>
     <div class="node"><strong>No autonomy</strong>Restore deleted content, resolve semantic disagreement, authorize remediation outside bound domain.</div>
   </div>
 
@@ -180,7 +180,7 @@
   <details>
     <summary>Source anchors</summary>
     <ul>
-      <li><code>Objective</code>: automate wiki freshness maintenance after <code>wiki_lint</code>.</li>
+      <li><code>Objective</code>: automate wiki freshness maintenance after <code>wiki_lint</code> without duplicating existing write tools.</li>
       <li><code>Desired Outcomes</code>: candidates, automatic actions, final report, post-report feedback.</li>
       <li><code>Health Metrics</code>: deterministic lint, backward compatibility, ingest-backed candidates.</li>
       <li><code>Stop Rules</code>: halt on missing bound write domain or lint failure; done after processing, re-index, re-lint, report.</li>
