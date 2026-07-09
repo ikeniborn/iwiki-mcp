@@ -46,6 +46,8 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
         key = f"{c.id}#{c.chunk}"
         prev = existing.get(key)
         if prev and prev.hash == c.hash and prev.dim == cfg.dimensions:
+            prev.type = c.type          # refresh facets without re-embedding
+            prev.tags = list(c.tags)
             fresh.append(prev)
             reused += 1
         else:
