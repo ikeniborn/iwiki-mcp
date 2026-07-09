@@ -51,3 +51,16 @@ def test_write_without_type_uses_server_classifier_when_configured(tmp_path, mon
     meta, _ = fm.split((tmp_path / "d" / "q.md").read_text(encoding="utf-8"))
     assert meta["type"] == "guide"
     assert meta["tags"] == ["x"]
+
+
+def test_explicit_tags_win_over_classifier(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_CHAT_MODEL", "chat-x")
+    from iwiki_mcp import okf
+    monkeypatch.setattr(okf.classify, "classify_page",
+                        lambda cfg, body, existing_tags: {"type": "guide", "tags": ["classifier-tag"], "warning": None})
+    body = "# T\n\n## Overview\nsumm\n\n## B\nwords\n"
+    server.wiki_write_page("d", "p", body, source=None, tags=["Explicit"])
+    meta, _ = fm.split((tmp_path / "d" / "p.md").read_text(encoding="utf-8"))
+    assert meta["tags"] == ["explicit"]        # normalized explicit, not classifier's
+    assert meta["type"] == "guide"             # type still from classifier

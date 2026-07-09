@@ -38,7 +38,9 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
         mtags = fm.normalize_tags(explicit_tags or [])
     elif cfg.chat_model:
         r = classify.classify_page(cfg, body, domain_tag_vocab(base_dir, domain))
-        mtype, mtags, warning = r["type"], r["tags"], r["warning"]
+        mtype = r["type"]
+        mtags = fm.normalize_tags(explicit_tags) if explicit_tags else r["tags"]
+        warning = r["warning"]
     else:
         mtype = fm.DEFAULT_TYPE
         mtags = fm.normalize_tags(explicit_tags or [])
