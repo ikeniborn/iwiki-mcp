@@ -350,19 +350,22 @@ def wiki_write_page(
                         "remove the pattern to ingest, or omit source",
             }
     path = _page_path(bind.base, valid_domain, slug)
-    if os.path.exists(path):
-        return {
-            "error": f"page '{valid_domain}/{slug}' exists",
-            "hint": "editing an existing page is a guarded op; confirm with the user",
-        }
-    cfg = Config.load()
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    # Reject reserved slugs BEFORE the exists check: refresh_artifacts generates
+    # index.md/log.md on the first write, so on an established domain the exists
+    # check would otherwise mask this with a misleading "page exists" error.
     if page_file in RESERVED_OKF:
         return {
             "error": f"slug '{slug}' is reserved for the generated OKF file "
                      f"'{page_file}'",
             "hint": "choose another slug; index/log are generated, not authored",
         }
+    if os.path.exists(path):
+        return {
+            "error": f"page '{valid_domain}/{slug}' exists",
+            "hint": "editing an existing page is a guarded op; confirm with the user",
+        }
+    cfg = Config.load()
     fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, markdown,
         source=source, explicit_type=type, explicit_tags=tags,

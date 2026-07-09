@@ -119,6 +119,10 @@ def _read_log(dom_path: Path) -> list:
 def _looks_authored(text: str) -> bool:
     """A pre-existing reserved file is 'authored' (never clobber) if it carries
     frontmatter or any ## section — the generated nav/log files have neither."""
+    # Gap: a prose-only reserved file (no frontmatter, no '## ') reads as generated
+    # and is overwritten. Accepted — the write guard blocks tool-creation of such
+    # files, and broadening this check would misclassify the generated index.md/
+    # log.md themselves as authored, breaking idempotent refresh.
     meta, _ = fm.split(text)
     if meta:
         return True

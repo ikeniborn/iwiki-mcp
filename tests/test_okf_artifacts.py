@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from iwiki_mcp import base, indexer, okf, server
@@ -154,6 +155,24 @@ def test_refresh_artifacts_excludes_reserved_from_index(tmp_path):
     okf.refresh_artifacts(str(tmp_path / "wiki"), "d")           # first run
     okf.refresh_artifacts(str(tmp_path / "wiki"), "d")           # idempotent re-run
     assert (dom / "index.md").read_text(encoding="utf-8") == "# Index\n\n- [a](a.md)\n"
+
+
+def test_orphans_survive_generated_index(tmp_path):
+    # The generated index.md links every page, but lint excludes it from _pages,
+    # so it must NOT create referenced_by edges — a.md/b.md (unlinked by real
+    # pages) stay orphans. Guards the load-bearing reserved-file exclusion.
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "a.md").write_text(
+        "---\ntype: concept\n---\n# A\n\n## Overview\ns\n", encoding="utf-8")
+    (d / "b.md").write_text(
+        "---\ntype: concept\n---\n# B\n\n## Overview\ns\n", encoding="utf-8")
+    (d / "index.md").write_text(
+        "# Index\n\n- [a](a.md)\n- [b](b.md)\n", encoding="utf-8")
+    report = lint(str(d))
+    a = os.path.normpath(str(d / "a.md"))
+    b = os.path.normpath(str(d / "b.md"))
+    assert a in report["orphans"] and b in report["orphans"]
 
 
 def test_refresh_artifacts_warns_on_authored_reserved(tmp_path):
