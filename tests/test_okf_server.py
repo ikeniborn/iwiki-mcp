@@ -43,3 +43,10 @@ def test_delete_refreshes_index(tmp_path, monkeypatch):
     server.wiki_delete_page("backend", "auth")
     idx = open(os.path.join(b, "backend", "index.md"), encoding="utf-8").read()
     assert "[db](db.md)" in idx and "auth.md" not in idx
+
+
+def test_write_rejects_reserved_slug(tmp_path, monkeypatch):
+    b = _seed(tmp_path, monkeypatch)
+    out = server.wiki_write_page("backend", "index", "# I\n\n## Overview\nx\n")
+    assert "error" in out and "reserved" in out["error"]
+    assert not os.path.isfile(os.path.join(b, "backend", "index.md"))

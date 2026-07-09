@@ -357,6 +357,12 @@ def wiki_write_page(
         }
     cfg = Config.load()
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    if page_file in RESERVED_OKF:
+        return {
+            "error": f"slug '{slug}' is reserved for the generated OKF file "
+                     f"'{page_file}'",
+            "hint": "choose another slug; index/log are generated, not authored",
+        }
     fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, markdown,
         source=source, explicit_type=type, explicit_tags=tags,
