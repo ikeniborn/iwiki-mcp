@@ -39,6 +39,7 @@ class Config:
     score_threshold: float
     graph_depth: int
     ignore: PathSpec | None   # gitignore-style ignore (.iwikiignore); None = index all
+    chat_model: str = ""
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -64,4 +65,5 @@ class Config:
             score_threshold=float(getenv("IWIKI_SCORE_THRESHOLD", "0.2")),
             graph_depth=int(getenv("IWIKI_GRAPH_DEPTH", "2")),
             ignore=_load_ignore(".iwikiignore") if load_ignore else None,
+            chat_model=getenv("IWIKI_CHAT_MODEL", "").strip(),
         )

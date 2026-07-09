@@ -7,6 +7,8 @@ hits first (by cosine), then lexical hits (by term-frequency), deduped by
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from .base import domain_dir, index_path
@@ -18,8 +20,27 @@ from .engine.store import VectorStore, dequantize
 _VALID_MODES = {"hybrid", "vector", "lexical"}
 
 
+def _facet_ok(rtype, rtags, want_type, want_tags) -> bool:
+    if want_type is not None and rtype != want_type:
+        return False
+    if want_tags and not (set(want_tags) & set(rtags or [])):
+        return False
+    return True
+
+
+def _hit_facets(base, domain, file):
+    from .engine import frontmatter as fm
+    path = os.path.join(domain_dir(base, domain), file)
+    try:
+        meta, _ = fm.split(open(path, encoding="utf-8").read())
+    except OSError:
+        return None, []
+    return meta.get("type"), fm.normalize_tags(meta.get("tags", []) or [])
+
+
 def vector_search(cfg: Config, base: str, domains: list[str], query: str,
-                  top_k: int, threshold: float) -> list[dict]:
+                  top_k: int, threshold: float,
+                  type: str | None = None, tags: list | None = None) -> list[dict]:
     if top_k <= 0 or not domains:
         return []
     qv = np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32)
@@ -28,7 +49,7 @@ def vector_search(cfg: Config, base: str, domains: list[str], query: str,
     for d in domains:
         recs = [
             r for r in VectorStore(index_path(base, d)).load()
-            if r.dim == qv.size
+            if r.dim == qv.size and _facet_ok(r.type, r.tags, type, tags)
         ]
         if not recs:
             continue
@@ -47,26 +68,32 @@ def vector_search(cfg: Config, base: str, domains: list[str], query: str,
 
 
 def lexical_search(base: str, domains: list[str], query: str,
-                   top_k: int) -> list[dict]:
+                   top_k: int,
+                   type: str | None = None, tags: list | None = None) -> list[dict]:
     if top_k <= 0:
         return []
     hits: list[dict] = []
     for d in domains:
         for h in grep_sections(domain_dir(base, d), query, top_k):
+            if type is not None or tags:
+                rt, rtags = _hit_facets(base, d, h["file"])
+                if not _facet_ok(rt, rtags, type, tags):
+                    continue
             hits.append({"domain": d, **h})
     hits.sort(key=lambda h: (-h["score"], h["domain"], h["file"], h["heading"]))
     return hits[:top_k]
 
 
 def hybrid_search(cfg: Config, base: str, domains: list[str], query: str,
-                  top_k: int, threshold: float, mode: str = "hybrid") -> list[dict]:
+                  top_k: int, threshold: float, mode: str = "hybrid",
+                  type: str | None = None, tags: list | None = None) -> list[dict]:
     if mode not in _VALID_MODES:
         raise ValueError(f"invalid search mode: {mode}")
     if top_k <= 0:
         return []
-    vec = (vector_search(cfg, base, domains, query, top_k, threshold)
+    vec = (vector_search(cfg, base, domains, query, top_k, threshold, type, tags)
            if mode in ("hybrid", "vector") else [])
-    lex = (lexical_search(base, domains, query, top_k)
+    lex = (lexical_search(base, domains, query, top_k, type, tags)
            if mode in ("hybrid", "lexical") else [])
     merged: dict[tuple, dict] = {}
     for h in vec:

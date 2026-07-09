@@ -54,7 +54,7 @@ def test_hybrid_adds_lexical(tmp_path, monkeypatch):
 def test_hybrid_preserves_best_vector_duplicate(monkeypatch):
     monkeypatch.setattr(
         retrieval, "vector_search",
-        lambda cfg, base, domains, query, top_k, threshold: [
+        lambda cfg, base, domains, query, top_k, threshold, type=None, tags=None: [
             {"domain": "a", "file": "p.md", "heading": "S", "chunk": 1,
              "score": 0.9, "hit": "vector"},
             {"domain": "a", "file": "p.md", "heading": "S", "chunk": 2,
@@ -63,7 +63,7 @@ def test_hybrid_preserves_best_vector_duplicate(monkeypatch):
     )
     monkeypatch.setattr(
         retrieval, "lexical_search",
-        lambda base, domains, query, top_k: [],
+        lambda base, domains, query, top_k, type=None, tags=None: [],
     )
 
     hits = retrieval.hybrid_search(

@@ -175,6 +175,12 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `IWIKI_EMBED_MODEL` | `text-embedding-3-small` | Embedding model name. |
 | `IWIKI_EMBED_DIMENSIONS` | `1536` | Vector size. Must match the configured embedding model. |
 
+**Chat model**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IWIKI_CHAT_MODEL` | empty | Optional chat model name for server-side `type`/`tags` classification. Reuses `IWIKI_LLM_BASE_URL` and `IWIKI_LLM_KEY`. When unset, frontmatter defaults to `type="concept"` with no tags. |
+
 **Search tuning**
 
 | Variable | Default | Meaning |
@@ -222,6 +228,37 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 `wiki_lint` reports `missing_source` pages whose ingest source has disappeared. Remove such a stale page explicitly with `wiki_delete_page` after confirming with the user; `wiki_sync` then propagates the deletion to the remote like any other commit.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
+
+## OKF compatibility
+
+Every page carries a small YAML frontmatter block above the `# Title` H1, written automatically by `wiki_write_page` / `wiki_update_page` / `wiki_apply_okf`. Fields:
+
+| Field | Meaning |
+|---|---|
+| `type` | Required. Closed vocabulary: `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default). |
+| `title` | Derived from the page's `# Title` H1. |
+| `description` | Derived from the `## Overview` section, truncated to `IWIKI_SUMMARY_MAX_CHARS`. |
+| `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. |
+| `tags` | Lowercase kebab-case labels, at most 5 per page. |
+| `timestamp` | On create (`wiki_write_page`, `wiki_apply_okf`, `wiki_migrate_okf`): the page file's last git-commit date, or today's date if not yet committed. On edit (`wiki_update_page`): always today's date. |
+
+`type` and `tags` are resolved with this precedence: an **explicit** `type`/`tags` argument on the write tool wins; otherwise, when `IWIKI_CHAT_MODEL` is set, the server classifies the page body with that chat model; otherwise it defaults to `type="concept"` with no tags.
+
+Faceted search narrows `wiki_search` to a `type` and/or a set of `tags`; the query values are normalized the same way as stored frontmatter (case-insensitive `type`, kebab-case `tags`), so `type="API"` still matches a page whose frontmatter says `type: api`:
+
+```text
+wiki_search(query="deploy steps", type="runbook", tags=["ci"])
+```
+
+Tools for adopting OKF frontmatter on an existing domain:
+
+| Tool | What it does |
+|---|---|
+| `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. In autonomous mode, each page's `resource` falls back to its last logged ingest source, and tags coined for one page are reused as vocabulary for later pages in the same run. |
+| `wiki_apply_okf(domain, slug, type, tags)` | Apply agent-classified `type`/`tags` (plus derived fields) as frontmatter to one page, reindex, commit and push. Omitting `tags` preserves the page's existing tags instead of clearing them. |
+| `wiki_export_okf(domain, dest)` | Export a domain into a fully OKF-conformant bundle at `dest`: every page carries frontmatter (existing pages keep theirs, tags deduped; pages with none get a deterministic `type: concept` / title / description / git-date timestamp), `[[wikilink]]` syntax is rewritten to standard Markdown links, and reserved `index.md` / `log.md` files are generated. Returns a `warnings` list flagging any source page whose name collides with those reserved files. Sources are never mutated, only copied. |
+
+`IWIKI_CHAT_MODEL` (default: empty) is optional; leaving it unset disables server-side classification and `wiki_migrate_okf` falls back to plan mode.
 
 ## Git sync of the base
 

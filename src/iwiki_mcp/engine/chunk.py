@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from . import frontmatter as _fm
 
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
@@ -25,6 +27,8 @@ class Chunk:
     chunk: int           # sub-chunk index within the section (0-based)
     text: str            # prefix + body slice (the text that gets embedded)
     hash: str            # sha256(text)[:16]
+    type: str | None = None
+    tags: list = field(default_factory=list)
 
     @property
     def id(self) -> str:
@@ -84,6 +88,9 @@ def chunk_markdown(file: str, content: str, size: int, overlap: int,
     source and is NOT itself indexed; every other section's sub-chunks are prefixed
     with title + article summary + heading + lead, then word-split with overlap.
     """
+    meta, content = _fm.split(content)
+    ptype = _fm.coerce_type(meta.get("type")) if meta.get("type") else None
+    ptags = _fm.normalize_tags(meta.get("tags", [])) if meta.get("tags") else []
     out: list[Chunk] = []
     title = _page_title(content, file)
     secs = _sections(content)
@@ -99,5 +106,5 @@ def chunk_markdown(file: str, content: str, size: int, overlap: int,
         for ci, piece in enumerate(_split_section(body.split(), size, overlap)):
             text = prefix + "\n\n" + " ".join(piece)
             out.append(Chunk(file=file, heading=heading, chunk=ci,
-                             text=text, hash=_hash(text)))
+                             text=text, hash=_hash(text), type=ptype, tags=list(ptags)))
     return out
