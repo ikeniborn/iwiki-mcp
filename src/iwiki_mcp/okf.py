@@ -125,6 +125,38 @@ def _looks_authored(text: str) -> bool:
     return any(ln.startswith("## ") for ln in text.splitlines())
 
 
+def batch_sweep(cfg, base_dir, domain) -> dict:
+    """Deterministic whole-domain in-place OKF conformance sweep (no chat model).
+    Converts residual [[...]] links and guarantees frontmatter on every page,
+    preserving existing type/tags. Writes back only changed files (idempotent)."""
+    from .engine.links import to_markdown_links
+    dom = Path(base_dir) / domain
+    fixed_links, added_frontmatter = [], []
+    for slug in _page_slugs(dom):
+        page_file = f"{slug}.md"
+        p = dom / page_file
+        original = p.read_text(encoding="utf-8")
+        meta, body = fm.split(original)
+        new_body = to_markdown_links(body)
+        if meta:
+            if meta.get("tags"):
+                meta["tags"] = fm.normalize_tags(meta["tags"])
+            new_full = fm.render(meta) + new_body
+        else:
+            src = latest_source(base_dir, domain, page_file)
+            block, _ = build_frontmatter(
+                cfg, base_dir, domain, slug, new_body,
+                source=src, explicit_type=fm.DEFAULT_TYPE, explicit_tags=None,
+                timestamp_path=f"{domain}/{page_file}")
+            new_full = block + new_body
+            added_frontmatter.append(slug)
+        if new_full != original:
+            p.write_text(new_full, encoding="utf-8")
+            if new_body != body:
+                fixed_links.append(slug)
+    return {"fixed_links": fixed_links, "added_frontmatter": added_frontmatter}
+
+
 def refresh_artifacts(base_dir, domain) -> str | None:
     """Regenerate index.md + log.md in the domain root from current state.
     Deterministic and best-effort: never raises. Returns a warning or None."""

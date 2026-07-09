@@ -914,18 +914,45 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
 
 
 @_safe
-def wiki_export_okf(domain: str, dest: str) -> dict:
-    from . import export
+def wiki_export_okf(domain: str | None = None) -> dict:
     bind = base.resolve_binding()
-    valid_domain = _validate_domain(domain)
+    target = domain or bind.write
+    if not target:
+        return {"error": "no domain given and no write-target bound",
+                "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
+    valid_domain = _validate_domain(target)
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
     dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
-    if not dest:
-        return {"error": "dest is required", "hint": "pass an output directory path"}
-    result = export.export_domain(str(dom_path), os.path.abspath(os.path.expanduser(dest)))
-    return {"domain": valid_domain, **result}
+    cfg = Config.load()
+    swept = okf.batch_sweep(cfg, bind.base, valid_domain)
+    stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
+    commit = sync.commit_and_push(bind.base, f"iwiki: export okf {valid_domain}",
+                                  pathspec=valid_domain)
+    from .engine.lint import lint
+    report = lint(str(dom_path), project_dir=bind.project_dir)
+    result = {
+        "domain": valid_domain,
+        "fixed_links": swept["fixed_links"],
+        "added_frontmatter": swept["added_frontmatter"],
+        "artifacts": list(RESERVED_OKF),
+        "still_missing_frontmatter": report.get("missing_frontmatter", []),
+        "still_legacy_wikilink": report.get("legacy_wikilink", []),
+        "indexed_chunks": stats["indexed_chunks"],
+        "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
+        "next_steps": ["Run wiki_migrate_okf for better type/tags than the "
+                       "deterministic 'concept' default on newly added frontmatter."],
+        **_fresh_warn(fresh),
+    }
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
