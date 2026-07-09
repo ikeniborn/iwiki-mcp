@@ -175,6 +175,12 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `IWIKI_EMBED_MODEL` | `text-embedding-3-small` | Embedding model name. |
 | `IWIKI_EMBED_DIMENSIONS` | `1536` | Vector size. Must match the configured embedding model. |
 
+**Chat model**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IWIKI_CHAT_MODEL` | empty | Optional chat model name for server-side `type`/`tags` classification. Reuses `IWIKI_LLM_BASE_URL` and `IWIKI_LLM_KEY`. When unset, frontmatter defaults to `type="concept"` with no tags. |
+
 **Search tuning**
 
 | Variable | Default | Meaning |
