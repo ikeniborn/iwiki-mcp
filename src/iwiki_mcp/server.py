@@ -19,6 +19,7 @@ from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
 from .engine.links import to_markdown_links
+from .engine.okf_artifacts import RESERVED_OKF
 from .engine.section import SectionError, replace_section
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
@@ -189,7 +190,7 @@ def wiki_list_pages(domain: str) -> dict:
     pages = []
     for path in sorted(dom_path.rglob("*.md")):
         rel_path = path.relative_to(dom_path)
-        if ".iwiki" in rel_path.parts:
+        if ".iwiki" in rel_path.parts or rel_path.as_posix() in RESERVED_OKF:
             continue
         rel = rel_path.as_posix()
         pages.append({"slug": rel[:-3], "file": rel})
@@ -763,7 +764,7 @@ def _unmigrated_pages(dom_path: Path):
     """Yield (slug, page_file, body, has_frontmatter) for each page."""
     for path in sorted(dom_path.rglob("*.md")):
         rel = path.relative_to(dom_path)
-        if ".iwiki" in rel.parts:
+        if ".iwiki" in rel.parts or rel.as_posix() in RESERVED_OKF:
             continue
         meta, body = _fm.split(path.read_text(encoding="utf-8"))
         yield rel.with_suffix("").as_posix(), rel.as_posix(), body, bool(meta)

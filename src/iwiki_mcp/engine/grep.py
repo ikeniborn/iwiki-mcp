@@ -6,6 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from .okf_artifacts import RESERVED_OKF
+
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 
 
@@ -23,7 +25,7 @@ def grep_sections(domain_dir: str, query: str, top_k: int) -> list[dict]:
     out: list[dict] = []
     for md in sorted(root.rglob("*.md")):
         rel_path = md.relative_to(root)
-        if ".iwiki" in rel_path.parts:
+        if ".iwiki" in rel_path.parts or rel_path.as_posix() in RESERVED_OKF:
             continue
         try:
             content = md.read_text(encoding="utf-8")

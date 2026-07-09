@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from .base import index_path, log_path
+from .engine.okf_artifacts import RESERVED_OKF
 from .engine.chunk import chunk_markdown
 from .engine.config import Config
 from .engine.embed import embed_texts
@@ -33,6 +34,7 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
     files = sorted(
         path for path in dom_path.rglob("*.md")
         if ".iwiki" not in path.relative_to(dom_path).parts
+        and path.relative_to(dom_path).as_posix() not in RESERVED_OKF
     )
     chunks = []
     for md in files:
