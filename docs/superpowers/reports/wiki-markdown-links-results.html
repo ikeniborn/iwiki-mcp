@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wiki-markdown-links chain results</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg:#f6f7fb; --surface:#ffffff; --fg:#242836; --muted:#667085;
+      --accent:#176b5d; --border:#d8dde8; --line:#8a94a6; --zebra:#eef2f6;
+      --ok:#277a4d; --warn:#9a6200; --danger:#b42318; --code:#eef2f6;
+      --shadow:rgba(35,45,70,.14);
+    }
+    body:has(#theme-toggle:checked) {
+      color-scheme: dark;
+      --bg:#151922; --surface:#202632; --fg:#e8eef7; --muted:#aab4c3;
+      --accent:#72d6c8; --border:#394252; --line:#7d8797; --zebra:#1a202a;
+      --ok:#8bd6a6; --warn:#e5be6a; --danger:#ff9b91; --code:#293140;
+      --shadow:rgba(0,0,0,.42);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+    header, main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 22px 0 8px; font-size: 16px; letter-spacing: 0; }
+    code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--zebra); }
+    details { border: 1px solid var(--border); background: var(--surface); padding: 10px 12px; margin: 12px 0; border-radius: 6px; }
+    summary { cursor: pointer; font-weight: 650; }
+    .theme-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--fg);
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chain-tabs {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chain-tabs label {
+      cursor: pointer;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: var(--surface);
+      color: var(--muted);
+    }
+    body:has(#tab-intent:checked) label[for="tab-intent"],
+    body:has(#tab-spec:checked) label[for="tab-spec"],
+    body:has(#tab-plan:checked) label[for="tab-plan"],
+    body:has(#tab-result:checked) label[for="tab-result"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .tab-pane { display: none; }
+    body:has(#tab-intent:checked) #pane-intent,
+    body:has(#tab-spec:checked) #pane-spec,
+    body:has(#tab-plan:checked) #pane-plan,
+    body:has(#tab-result:checked) #pane-result { display: block; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid currentColor; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .info { color: var(--muted); }
+    .note { border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); padding: 10px 12px; border-radius: 4px; }
+    figure { margin: 12px 0 18px; }
+    figure svg { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+    figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .g-node { fill: var(--surface); stroke: var(--border); }
+    .g-label { fill: var(--fg); font: 600 12px system-ui, sans-serif; }
+    .g-sub { fill: var(--muted); font: 11px system-ui, sans-serif; }
+    .g-edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
+    @media (max-width: 760px) {
+      header { flex-direction: column; }
+      .chain-tabs { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <input type="checkbox" id="theme-toggle" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
+  <header>
+    <div>
+      <h1>wiki-markdown-links chain results</h1>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>result</code>.</p>
+    </div>
+    <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
+  </header>
+  <nav class="chain-tabs">
+    <label for="tab-intent">Интент</label>
+    <label for="tab-spec">Спека</label>
+    <label for="tab-plan">План</label>
+    <label for="tab-result">Результат</label>
+  </nav>
+  <main>
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <h2>Проверка plan — 2026-07-09</h2>
+  <p class="note">Plan задаёт TDD-исполнение перехода с legacy <code>[[slug#Heading]]</code> на CommonMark-ссылки <code>[Heading](slug.md#anchor)</code>: сначала общий <code>slugify_heading</code>, затем dual-read <code>parse_links</code>, rewriter <code>to_markdown_links</code>, проводка в write-хендлеры, правки <code>lint.py</code>, regression на <code>related.py</code>, docs/version, полная проверка.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/plans/2026-07-09-wiki-markdown-links.md</code></td></tr>
+    <tr><td>Plan hash</td><td><code>b221721a3a1bfb96</code></td></tr>
+    <tr><td>Intent</td><td><code>n/a</code> (интента для топика нет)</td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-09-wiki-markdown-links-design.md</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Резюме плана — задачи и DoD</h3>
+  <table>
+    <tr><th>Task</th><th>Deliverable</th><th>Definition of done</th></tr>
+    <tr><td>1</td><td><code>slugify_heading(s)</code> в <code>engine/links.py</code></td><td>4 теста: lower+hyphenate, strip punctuation, collapse whitespace/hyphens, детерминизм+идемпотентность — PASS.</td></tr>
+    <tr><td>2</td><td>Dual-read <code>parse_links</code> + <code>has_legacy_wikilink</code></td><td>Markdown-ссылки парсятся; images/external/absolute/anchor/non-<code>.md</code> отклонены; <code>.md</code>/<code>./</code> сняты; heading слагифицирован; legacy <code>[[...]]</code> читается; dedup/порядок; весь <code>test_links.py</code> PASS.</td></tr>
+    <tr><td>3</td><td><code>to_markdown_links(body)</code> rewriter</td><td>4 формы <code>[[...]]</code> переписаны с верным text/anchor; код (fenced+inline) и готовые markdown-ссылки нетронуты; идемпотентность — PASS.</td></tr>
+    <tr><td>4</td><td>Проводка нормализации в <code>server.py</code></td><td><code>wiki_write_page</code> нормализует тело, <code>wiki_update_page</code> — редактируемую секцию; сохранённый файл несёт markdown-ссылки; write/update-тесты PASS.</td></tr>
+    <tr><td>5</td><td><code>lint.py</code>: slug-проверка heading + <code>legacy_wikilink</code></td><td>Битая markdown-ссылка флагуется; валидный <code>#anchor</code> совпадает по slug; <code>legacy_wikilink</code> перечисляет только не-мигрированные страницы; <code>test_lint.py</code> PASS.</td></tr>
+    <tr><td>6</td><td>Regression-тест <code>related.py</code> (без правок кода)</td><td><code>_graph_neighbours</code> даёт идентичные соседи для markdown- и legacy-графа; <code>related.py</code> не редактируется.</td></tr>
+    <tr><td>7</td><td>Authoring rule, README (EN+RU), version bump</td><td><code>resources.py</code>/<code>test_resources.py</code> на markdown-форму; README×2 синхронны; <code>pyproject</code> <code>0.1.11</code>→<code>0.1.12</code>; grep не находит legacy-синтаксис.</td></tr>
+    <tr><td>8</td><td>Полная проверка</td><td><code>uv run pytest -q</code> — вся сюита PASS; config-free контракт (<code>links</code>/<code>lint</code> без <code>httpx</code>) подтверждён.</td></tr>
+  </table>
+
+  <h3>Граф зависимостей шагов</h3>
+  <figure>
+    <svg viewBox="0 0 920 380" role="img" aria-label="Граф зависимостей задач плана">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"></path>
+        </marker>
+        <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="var(--shadow)"></feDropShadow>
+        </filter>
+      </defs>
+      <!-- edges (result of M used in N) -->
+      <path class="g-edge" marker-end="url(#arrow)" d="M140,180 L200,96"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M140,180 L200,270"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M140,170 C300,120 300,90 380,80"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M310,270 L380,240"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M310,90 L380,80"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M310,96 C340,180 350,300 380,330"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M490,80 L720,175"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M490,240 L720,190"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M490,330 L720,200"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M670,330 L730,205"></path>
+      <!-- nodes -->
+      <g filter="url(#ds)">
+        <rect class="g-node" x="30" y="157" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="85" y="177" text-anchor="middle">Task 1</text>
+        <text class="g-sub" x="85" y="193" text-anchor="middle">slugify_heading</text>
+
+        <rect class="g-node" x="200" y="67" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="255" y="87" text-anchor="middle">Task 2</text>
+        <text class="g-sub" x="255" y="103" text-anchor="middle">parse_links</text>
+
+        <rect class="g-node" x="200" y="247" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="255" y="267" text-anchor="middle">Task 3</text>
+        <text class="g-sub" x="255" y="283" text-anchor="middle">to_markdown_links</text>
+
+        <rect class="g-node" x="380" y="57" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="435" y="77" text-anchor="middle">Task 5</text>
+        <text class="g-sub" x="435" y="93" text-anchor="middle">lint.py</text>
+
+        <rect class="g-node" x="380" y="217" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="435" y="237" text-anchor="middle">Task 4</text>
+        <text class="g-sub" x="435" y="253" text-anchor="middle">server.py wiring</text>
+
+        <rect class="g-node" x="380" y="307" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="435" y="327" text-anchor="middle">Task 6</text>
+        <text class="g-sub" x="435" y="343" text-anchor="middle">related regression</text>
+
+        <rect class="g-node" x="560" y="307" width="110" height="46" rx="7"></rect>
+        <text class="g-label" x="615" y="327" text-anchor="middle">Task 7</text>
+        <text class="g-sub" x="615" y="343" text-anchor="middle">docs + version</text>
+
+        <rect class="g-node" x="720" y="157" width="120" height="46" rx="7"></rect>
+        <text class="g-label" x="780" y="177" text-anchor="middle">Task 8</text>
+        <text class="g-sub" x="780" y="193" text-anchor="middle">full suite</text>
+      </g>
+    </svg>
+    <figcaption>Ребро M→N означает «результат Task M используется в Task N». Все рёбра идут вперёд (M&lt;N), циклов нет. <code>slugify_heading</code> (Task 1) питает Tasks 2/3/5; <code>parse_links</code> (Task 2) питает Tasks 5/6; <code>to_markdown_links</code> (Task 3) → Task 4; Task 8 замыкает всё.</figcaption>
+  </figure>
+
+  <h3>Пересечения — общие артефакты и покрытие</h3>
+  <table>
+    <tr><th>Артефакт / символ</th><th>Задачи</th><th>Координация</th></tr>
+    <tr><td><code>src/iwiki_mcp/engine/links.py</code></td><td>1, 2, 3</td><td>Последовательные правки одного файла — порядок landing Task 1→2→3 обязателен (общий модуль, растущие константы/функции).</td></tr>
+    <tr><td><code>tests/engine/test_links.py</code></td><td>1, 2, 3</td><td>Каждая задача дописывает свои тесты; Task 2 ещё и заменяет старую ассерцию <code>test_section_ref_target_kept_whole</code>.</td></tr>
+    <tr><td><code>slugify_heading</code> (символ)</td><td>1 → 2, 3, 5</td><td>Одна функция закрывает якорь для парсера, rewriter и lint — единая точка нормализации.</td></tr>
+    <tr><td><code>parse_links</code> / <code>has_legacy_wikilink</code></td><td>2 → 5, 6</td><td>Контракт парсера (<code>slug#heading-slug</code>) потребляют lint (Task 5) и related-regression (Task 6).</td></tr>
+    <tr><td><code>server.py</code> + write/update тесты</td><td>4</td><td>Изолирована: единственная задача, трогающая хендлеры; зависит только от <code>to_markdown_links</code> (Task 3).</td></tr>
+    <tr><td>docs-поверхности (<code>resources.py</code>, <code>test_resources.py</code>, README×2, <code>pyproject.toml</code>)</td><td>7</td><td>Изолирована; <code>test_resources.py</code> жёстко проверял <code>[[</code> — обновляется в том же шаге.</td></tr>
+  </table>
+
+  <h3>Результаты проверки — фазы</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th><th>Заметка</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td><td>Нет плейсхолдеров TODO/TBD/FIXME/???; Tasks 1–8 без пропусков/дублей; шаги пронумерованы (39 шагов).</td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td><td>Каждое требование spec (парсер, slugify, rewriter, write-нормализация, lint, related, docs/version, testing) закрыто ≥1 задачей; лишних задач нет.</td></tr>
+    <tr><td>dependencies</td><td><span class="badge ok">passed</span></td><td>Порядок M&lt;N соблюдён, циклов нет, все используемые символы создаются раньше потребления (см. граф).</td></tr>
+    <tr><td>verifiability</td><td><span class="badge ok">passed</span></td><td>У каждого шага есть команда и Expected (PASS/FAIL) либо grep-проверка; DoD измеримы.</td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td><td>Имена/сигнатуры (<code>slugify_heading</code>, <code>parse_links</code>, <code>to_markdown_links</code>, <code>has_legacy_wikilink</code>, ключ <code>legacy_wikilink</code>) единообразны во всех задачах.</td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <tr><th>id</th><th>severity</th><th>section</th><th>text</th><th>fix</th><th>verdict</th></tr>
+    <tr><td>F-001</td><td><span class="badge info">INFO</span></td><td>Task 4</td><td>Spec просит обновить любые tool-описания в <code>server.py</code>, упоминающие legacy-синтаксис; проверено — таких нет, задача не нужна.</td><td>Нет — подтверждено отсутствие legacy-синтаксиса в описаниях.</td><td>open</td></tr>
+    <tr><td>F-002</td><td><span class="badge info">INFO</span></td><td>Task 1</td><td>Пункт spec «оба потребителя согласованы на одном входе» структурно гарантирован общей функцией (parser и rewriter зовут одну <code>slugify_heading</code>); отдельного cross-consumer теста нет.</td><td>Опционально: тест, что <code>parse_links</code> и <code>to_markdown_links</code> согласны на одном heading.</td><td>open</td></tr>
+  </table>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 0 CRITICAL open, 0 WARNING open, 2 INFO (совещательные, не блокируют). План готов к исполнению.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> → <code>spec (OK)</code> → <code>plan (OK)</code> → <code>result (–)</code></p>
+</section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <h2>Проверка result — 2026-07-09</h2>
+  <p class="note">Реализация сверена с планом через subagent-driven исполнение: все 8 задач присутствуют в diff (11 коммитов), spec-требования покрыты, полная сюита 215/215, config-free контракт сохранён, финальный whole-branch review (opus) — merge-ready (0 Critical / 0 Important). Verdict: <span class="badge ok">OK</span>.</p>
+
+  <h3>Резюме сверки</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Plan</td><td><code>docs/superpowers/plans/2026-07-09-wiki-markdown-links.md</code></td></tr>
+    <tr><td>Plan hash</td><td><code>b221721a3a1bfb96</code></td></tr>
+    <tr><td>Intent</td><td><code>n/a</code> (интента для топика нет)</td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-09-wiki-markdown-links-design.md</code></td></tr>
+    <tr><td>Diff base</td><td><code>20d8e3b..87fb9a0</code> (<code>--since=20d8e3b</code>)</td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Покрытие шагов плана — DONE 8/8 · PARTIAL 0 · MISSING 0</h3>
+  <table>
+    <tr><th>Task</th><th>Статус</th><th>Свидетельство в diff</th></tr>
+    <tr><td>1 — slugify_heading</td><td><span class="badge ok">DONE</span></td><td><code>b51c6df</code>: <code>engine/links.py</code> + 4 теста в <code>test_links.py</code>.</td></tr>
+    <tr><td>2 — dual-read parse_links + has_legacy_wikilink</td><td><span class="badge ok">DONE</span></td><td><code>5ff5d40</code>/<code>df65f2e</code>/<code>ae618eb</code>: <code>links.py</code> (<code>_MD_LINK</code>, <code>_md/_legacy_target_key</code>, нормализация, <code>has_legacy_wikilink</code>) + tests; fallout <code>b844455</code> (<code>test_server_search.py</code>).</td></tr>
+    <tr><td>3 — to_markdown_links</td><td><span class="badge ok">DONE</span></td><td><code>f5d278b</code>: <code>_WIKILINK</code> + code-masking rewriter + 9 тестов.</td></tr>
+    <tr><td>4 — проводка в write-хендлеры</td><td><span class="badge ok">DONE</span></td><td><code>de7a700</code>: <code>server.py</code> (import + 2 нормализации до validate/replace_section) + write/update тесты.</td></tr>
+    <tr><td>5 — lint slug-check + legacy_wikilink</td><td><span class="badge ok">DONE</span></td><td><code>d884bb3</code>: <code>lint.py</code> (slug-to-slug heading check + advisory <code>legacy_wikilink</code>) + <code>test_lint.py</code>.</td></tr>
+    <tr><td>6 — related regression</td><td><span class="badge ok">DONE</span></td><td><code>b549edd</code>: <code>test_related.py</code>; <code>related.py</code> не изменён.</td></tr>
+    <tr><td>7 — docs + version</td><td><span class="badge ok">DONE</span></td><td><code>95015e3</code>: <code>resources.py</code>, <code>test_resources.py</code>, README EN+RU, <code>pyproject.toml</code> 0.1.11→0.1.12; <code>87fb9a0</code>: <code>uv.lock</code> sync.</td></tr>
+    <tr><td>8 — полная проверка</td><td><span class="badge ok">DONE</span></td><td>Контроллером: <code>uv run pytest -q</code> → 215 passed; config-free контракт (<code>links</code>/<code>lint</code> без <code>httpx</code>) OK (проверка, без diff).</td></tr>
+  </table>
+
+  <h3>Карта покрытия intent / spec</h3>
+  <table>
+    <tr><th>Источник</th><th>Покрытие</th><th>Свидетельство</th></tr>
+    <tr><td>Intent</td><td><code>n/a</code></td><td>Интента для топика нет — сверка по spec.</td></tr>
+    <tr><td>Spec: parser dual-read</td><td><span class="badge ok">✓</span></td><td>Task 2 — markdown + legacy, нормализованные ключи, rejection-правила.</td></tr>
+    <tr><td>Spec: slugify_heading</td><td><span class="badge ok">✓</span></td><td>Task 1 — общий helper для parser/rewriter/lint.</td></tr>
+    <tr><td>Spec: to_markdown_links</td><td><span class="badge ok">✓</span></td><td>Task 3 — 4 формы, code-masking, идемпотентность.</td></tr>
+    <tr><td>Spec: write-нормализация</td><td><span class="badge ok">✓</span></td><td>Task 4 — оба хендлера до validate/persist.</td></tr>
+    <tr><td>Spec: lint (slug-check + legacy_wikilink)</td><td><span class="badge ok">✓</span></td><td>Task 5.</td></tr>
+    <tr><td>Spec: related.py unchanged</td><td><span class="badge warn">✓ с уточнением</span></td><td>Task 6 — код не тронут; форма вывода графа нормализована (bare slug), ребро сохранено (см. INFO).</td></tr>
+    <tr><td>Spec: authoring/docs/version + testing</td><td><span class="badge ok">✓</span></td><td>Task 7 + тесты во всех задачах.</td></tr>
+  </table>
+
+  <h3>Лишнее и findings</h3>
+  <table>
+    <tr><th>severity</th><th>step</th><th>Plan / Diff / Fix</th></tr>
+    <tr><td><span class="badge info">INFO</span></td><td>Task 6 / spec</td><td>Spec заявлял «related.py unaffected», но нормализованные ключи меняют строковую форму вывода <code>_graph_neighbours</code> для <code>.md</code>-суффиксных/markdown-ссылок (<code>"other.md"</code>→<code>"other"</code>). Ребро графа сохранено; устаревший тест <code>test_server_search.py</code> приведён к bare-slug (<code>b844455</code>). Семантическое расхождение, разрешено.</td></tr>
+    <tr><td><span class="badge info">INFO</span></td><td>Excess</td><td><code>uv.lock</code> (sync версии) и <code>test_server_search.py</code> (fallout) — не в явном списке файлов плана, но напрямую связаны с bump'ом версии и сменой контракта парсера. Обоснованы.</td></tr>
+  </table>
+  <p>Финальный whole-branch review (opus): 0 Critical, 0 Important, 5 Minor — все DEFER (редкие/degenerate входы, spec-уровень, plan-mandated docstrings). Ни один не блокирует merge.</p>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 8/8 задач DONE, 0 MISSING, spec покрыт, 215/215 тестов, review merge-ready. Плагин, spec, план и реализация согласованы.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> → <code>spec (OK)</code> → <code>plan (OK)</code> → <code>result (OK)</code></p>
+</section>
+<!-- TAB:result END -->
+  </main>
+</body>
+</html>

@@ -35,3 +35,18 @@ def test_graph_follows_extensionless_links_beyond_first_hop(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
 
     assert set(_graph_neighbours("a.md", depth=2)) == {"b", "c"}
+
+
+def test_graph_neighbours_identical_for_markdown_and_legacy(tmp_path, monkeypatch):
+    # legacy [[...]] chain a -> b -> c
+    (tmp_path / "leg_a.md").write_text("[[leg_b]]\n", encoding="utf-8")
+    (tmp_path / "leg_b.md").write_text("[[leg_c]]\n", encoding="utf-8")
+    (tmp_path / "leg_c.md").write_text("## C\n", encoding="utf-8")
+    # markdown chain of the same shape
+    (tmp_path / "md_a.md").write_text("[b](md_b.md)\n", encoding="utf-8")
+    (tmp_path / "md_b.md").write_text("[c](md_c.md)\n", encoding="utf-8")
+    (tmp_path / "md_c.md").write_text("## C\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert set(_graph_neighbours("leg_a.md", depth=2)) == {"leg_b", "leg_c"}
+    assert set(_graph_neighbours("md_a.md", depth=2)) == {"md_b", "md_c"}

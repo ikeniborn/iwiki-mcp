@@ -9,7 +9,10 @@ def _cfg():
 
 
 def test_classify_parses_and_governs(monkeypatch):
-    monkeypatch.setattr(classify, "_chat", lambda cfg, prompt: '{"type": "api", "tags": ["Config", "config"]}')
+    monkeypatch.setattr(
+        classify, "_chat",
+        lambda cfg, prompt: '{"type": "api", "tags": ["Config", "config"]}'
+    )
     out = classify.classify_page(_cfg(), "body", existing_tags=[])
     assert out["type"] == "api"
     assert out["tags"] == ["config"]          # normalized + deduped

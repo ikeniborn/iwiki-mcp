@@ -19,8 +19,14 @@ def _patch(monkeypatch, tmp_path):
     monkeypatch.setenv("IWIKI_LLM_KEY", "k")
     monkeypatch.setattr(server.base, "resolve_binding", lambda: _bind(tmp_path))
     monkeypatch.setattr(server.sync, "ensure_fresh", lambda b: {"state": "clean"})
-    monkeypatch.setattr(server.sync, "commit_and_push", lambda *a, **k: {"committed": True, "pushed": False})
-    monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[0.1, 0.2] for _ in texts])
+    monkeypatch.setattr(
+        server.sync, "commit_and_push",
+        lambda *a, **k: {"committed": True, "pushed": False}
+    )
+    monkeypatch.setattr(
+        indexer, "embed_texts",
+        lambda cfg, texts: [[0.1, 0.2] for _ in texts]
+    )
 
 
 def test_migrate_plan_mode_lists_candidates(tmp_path, monkeypatch):
@@ -47,8 +53,12 @@ def test_migrate_autonomous_mode(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     monkeypatch.setenv("IWIKI_CHAT_MODEL", "chat-x")
     from iwiki_mcp import okf
-    monkeypatch.setattr(okf.classify, "classify_page",
-                        lambda cfg, body, existing_tags: {"type": "guide", "tags": ["x"], "warning": None})
+    monkeypatch.setattr(
+        okf.classify, "classify_page",
+        lambda cfg, body, existing_tags: {
+            "type": "guide", "tags": ["x"], "warning": None
+        }
+    )
     (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
     res = server.wiki_migrate_okf("d")
     assert res["mode"] == "autonomous"
@@ -64,8 +74,12 @@ def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     monkeypatch.setenv("IWIKI_CHAT_MODEL", "chat-x")
     from iwiki_mcp import okf
-    monkeypatch.setattr(okf.classify, "classify_page",
-                        lambda cfg, body, existing_tags: {"type": "guide", "tags": ["x"], "warning": None})
+    monkeypatch.setattr(
+        okf.classify, "classify_page",
+        lambda cfg, body, existing_tags: {
+            "type": "guide", "tags": ["x"], "warning": None
+        }
+    )
     (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
     log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
     log_path.write_text(json.dumps({

@@ -18,6 +18,7 @@ from . import base, ignore, indexer, okf, retrieval, sync
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
+from .engine.links import to_markdown_links
 from .engine.section import SectionError, replace_section
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
@@ -331,6 +332,7 @@ def wiki_write_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
         return {
@@ -435,6 +437,7 @@ def wiki_update_page(
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     original_full = open(path, encoding="utf-8").read()
     meta, original_body = _fm.split(original_full)
+    new_body = to_markdown_links(new_body)
     try:
         new_body = replace_section(original_body, heading, new_body)
     except SectionError as e:
@@ -858,7 +861,10 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     original = open(path, encoding="utf-8").read()
     existing_meta, body = _fm.split(original)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
-    resolved = existing_meta.get("resource") or okf.latest_source(bind.base, valid_domain, page_file)
+    resolved = (
+        existing_meta.get("resource")
+        or okf.latest_source(bind.base, valid_domain, page_file)
+    )
     fm_block, _ = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
         source=resolved, explicit_type=type, explicit_tags=apply_tags,

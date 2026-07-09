@@ -21,6 +21,7 @@ iwiki-mcp = "iwiki_mcp.server:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "flake8>=7.0",
 ]
 
 [build-system]

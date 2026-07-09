@@ -1,4 +1,4 @@
-from iwiki_mcp import base, server
+from iwiki_mcp import server
 
 
 def _seed(tmp_path, monkeypatch):

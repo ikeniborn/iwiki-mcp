@@ -15,10 +15,16 @@ def test_reindex_refreshes_facets_without_reembed(tmp_path, monkeypatch):
     base = tmp_path
     (base / "d" / ".iwiki").mkdir(parents=True)
     page = base / "d" / "p.md"
-    page.write_text("---\ntype: api\ntags: [a]\n---\n# T\n\n## Overview\ns\n\n## B\nwords here\n", encoding="utf-8")
+    page.write_text(
+        "---\ntype: api\ntags: [a]\n---\n# T\n\n## Overview\ns\n\n## B\nwords here\n",
+        encoding="utf-8"
+    )
     indexer.index_domain(_cfg(), str(base), "d")
     # change only the frontmatter (body/hash unchanged)
-    page.write_text("---\ntype: guide\ntags: [b]\n---\n# T\n\n## Overview\ns\n\n## B\nwords here\n", encoding="utf-8")
+    page.write_text(
+        "---\ntype: guide\ntags: [b]\n---\n# T\n\n## Overview\ns\n\n## B\nwords here\n",
+        encoding="utf-8"
+    )
     stats = indexer.index_domain(_cfg(), str(base), "d")
     recs = VectorStore(index_path(str(base), "d")).load()
     assert recs and all(r.type == "guide" for r in recs)

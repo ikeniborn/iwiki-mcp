@@ -305,6 +305,6 @@ wiki_search(query="how does auth work?")
 
 ## Limitations (v1)
 
-- Wiki links are intra-domain: use `[[slug#Heading]]` within the same domain.
+- Wiki links are intra-domain: use `[Heading](slug.md#heading)` within the same domain.
 - Vector search uses numpy brute force, not an external vector database.
 - Staleness checks are project-local and depend on available source paths and ingest logs.

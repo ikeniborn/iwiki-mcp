@@ -13,8 +13,12 @@ def test_wiki_search_passes_facets(monkeypatch):
         score_threshold = 0.5
 
     monkeypatch.setattr(server.retrieval, "hybrid_search", fake_hybrid)
-    monkeypatch.setattr(server.base, "resolve_binding",
-                        lambda: server.base.Binding(base="/b", read=("d",), write="d", project_dir="/p"))
+    monkeypatch.setattr(
+        server.base, "resolve_binding",
+        lambda: server.base.Binding(
+            base="/b", read=("d",), write="d", project_dir="/p"
+        )
+    )
     monkeypatch.setattr(server.base, "resolve_scope", lambda bind, scope, doms: ["d"])
     monkeypatch.setattr(server.Config, "load", staticmethod(lambda: FakeConfig()))
 
@@ -34,8 +38,12 @@ def test_wiki_search_normalizes_facets(monkeypatch):
         score_threshold = 0.5
 
     monkeypatch.setattr(server.retrieval, "hybrid_search", fake_hybrid)
-    monkeypatch.setattr(server.base, "resolve_binding",
-                        lambda: server.base.Binding(base="/b", read=("d",), write="d", project_dir="/p"))
+    monkeypatch.setattr(
+        server.base, "resolve_binding",
+        lambda: server.base.Binding(
+            base="/b", read=("d",), write="d", project_dir="/p"
+        )
+    )
     monkeypatch.setattr(server.base, "resolve_scope", lambda bind, scope, doms: ["d"])
     monkeypatch.setattr(server.Config, "load", staticmethod(lambda: FakeConfig()))
 

@@ -14,7 +14,7 @@ import os
 import re
 
 from . import frontmatter as _fm
-from .links import parse_links
+from .links import parse_links, slugify_heading, has_legacy_wikilink
 from .validate import validate_page
 
 # Keep in sync with chunk._H2 — inlined here to avoid importing .chunk, which
@@ -226,15 +226,17 @@ def lint(wiki_dir: str, project_dir: str | None = None) -> dict:
                         hs = _headings(open(target, encoding="utf-8").read())
                     except Exception:
                         hs = set()
-                if heading.strip() not in hs:
+                if heading not in {slugify_heading(h) for h in hs}:
                     broken.append({"page": page, "ref": ref})
 
     orphans = [p for p in pages if not (referenced_by.get(p, set()) - {p})]
+    legacy_wikilink = sorted(p for p, c in content.items() if has_legacy_wikilink(c))
     sections = [{"page": p, **f} for p in pages
                 for f in validate_page(raw[p])]
     return {"wiki_present": True, "pages": len(pages),
             "broken": broken, "orphans": orphans, "stale": _stale(wiki_dir),
             "missing_source": _missing_source(wiki_dir, project_dir),
+            "legacy_wikilink": legacy_wikilink,
             "sections": sections,
             "missing_frontmatter": missing_frontmatter,
             "tag_drift": _tag_drift(all_tags)}

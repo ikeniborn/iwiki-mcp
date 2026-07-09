@@ -1,6 +1,6 @@
 import os
 
-from iwiki_mcp import indexer, server
+from iwiki_mcp import server
 
 # Reuse the established seed pattern.
 from tests.test_server_write import _seed

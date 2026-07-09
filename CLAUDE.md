@@ -14,11 +14,12 @@ User-facing setup (install, MCP registration in Claude Code / Codex, env referen
 uv sync --extra dev          # install runtime + dev (pytest) deps
 uv run pytest -q             # full test suite
 uv run pytest tests/test_server_write.py::test_create_domain   # single test
+uv run flake8 src tests      # lint (flake8, max-line-length 100)
 uv run iwiki-mcp             # run the server from the checkout (stdio)
 iwiki-mcp --help             # after `uv tool install .` / `pipx install .`
 ```
 
-- No linter/formatter is configured (no ruff/black/mypy in `pyproject.toml`) — match surrounding style by hand.
+- `flake8` is configured (`.flake8`, `max-line-length = 100`) and kept clean; no formatter (black/ruff) — match surrounding style by hand.
 - `pyproject.toml` sets `pythonpath = ["src"]` and `asyncio_mode = "auto"`, so tests import `iwiki_mcp` directly and async tests need no `@pytest.mark.asyncio`.
 - Tests never hit the network: they `monkeypatch` `indexer.embed_texts` and set dummy `IWIKI_*` env vars. Follow that pattern — see `tests/test_server_write.py::_seed`.
 

@@ -17,7 +17,7 @@ AUTHORING_RULES: str = """\
 - Prefer a standard section name where one fits: `## Purpose`, `## Interface`,
   `## API`, `## Dependencies`, `## Data flow`, `## Errors`, `## Usage`.
 - Wrap every code symbol (function, path, flag, command, config key) in backticks.
-- Cross-link related pages with `[[slug#Heading]]` (within the same domain in v1).
+- Cross-link related pages with `[Heading](slug.md#heading)` (within the same domain in v1).
 - Write accurate English prose grounded in the real source; do not invent.
 
 ## OKF frontmatter

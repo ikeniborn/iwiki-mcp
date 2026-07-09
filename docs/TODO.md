@@ -8,3 +8,4 @@
 | ensure-fresh-before-write | done | n/a | ✓ | ✓ | OK | 2026-07-01 | 2026-07-01 | check-result: OK — 3/3 tasks DONE, spec R1–R8 covered, 164 tests pass; final review merge-ready (0 crit/imp); wiki base git-sync.md updated |
 | guard-iwiki-bind-scope | done | ✓ | ✓ | ✓ | OK | 2026-07-04 | 2026-07-04 | result OK — 4/4 tasks done, 174 tests pass, CLI help pass, wiki base-binding updated |
 | wiki-auto-remediation | done | ✓ | ✓ | ✓ | OK | 2026-07-08 | 2026-07-09 | result OK — implementation complete; 184 tests pass; wiki docs updated |
+| wiki-markdown-links | done | n/a | – | ✓ | OK | 2026-07-09 | 2026-07-09 | result OK — 8/8 tasks DONE, spec covered, 215 tests pass, whole-branch review merge-ready (0 crit/imp, 5 minor deferred); wiki authoring-and-linting + mcp-server updated |

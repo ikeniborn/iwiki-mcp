@@ -54,7 +54,10 @@ def test_split_unquoted_existing_pages_still_parse():
 
 
 def test_render_split_round_trip_generic_scalars():
-    for v in ["simple", "[a, b]", "with, comma", "with: colon", "trailing:", " leading", "trailing ", ""]:
+    for v in [
+        "simple", "[a, b]", "with, comma", "with: colon", "trailing:",
+        " leading", "trailing ", ""
+    ]:
         meta = {"description": v}
         meta2, _ = fm.split(fm.render(meta) + "# x\n")
         assert meta2 == meta, f"round-trip failed for {v!r}: got {meta2}"

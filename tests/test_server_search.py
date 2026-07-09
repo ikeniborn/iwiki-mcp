@@ -72,7 +72,7 @@ def test_related_graph_fallback_reads_domain_relative_files(tmp_path, monkeypatc
     out = server.wiki_related("backend", "auth.md#Token")
 
     assert out["vector"] == []
-    assert "other.md" in out["graph"]
+    assert "other" in out["graph"]
 
 
 def test_related_rejects_hidden_domain(tmp_path, monkeypatch):

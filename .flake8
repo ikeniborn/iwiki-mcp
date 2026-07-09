@@ -1,0 +1,5 @@
+[flake8]
+# The codebase targets Black-ish line lengths (~88); a few literals reach 100.
+# 100 documents the project's real convention so editors stop flagging the
+# stdlib default of 79. No formatter is enforced — match surrounding style.
+max-line-length = 100

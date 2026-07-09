@@ -1,7 +1,7 @@
 """Tests for robustness fixes: per-line log tolerance, scalar-tag guard, blank search type."""
 import os
 
-from iwiki_mcp import base, indexer, server
+from iwiki_mcp import indexer, server
 from iwiki_mcp.engine import frontmatter as fm
 from iwiki_mcp import okf
 
@@ -63,10 +63,15 @@ def test_wiki_search_whitespace_type_becomes_no_filter(monkeypatch):
         score_threshold = 0.5
 
     monkeypatch.setattr(server.retrieval, "hybrid_search", fake_hybrid)
-    monkeypatch.setattr(server.base, "resolve_binding",
-                        lambda: server.base.Binding(base="/b", read=("d",), write="d", project_dir="/p"))
+    monkeypatch.setattr(
+        server.base, "resolve_binding",
+        lambda: server.base.Binding(
+            base="/b", read=("d",), write="d", project_dir="/p"
+        )
+    )
     monkeypatch.setattr(server.base, "resolve_scope", lambda bind, scope, doms: ["d"])
     monkeypatch.setattr(server.Config, "load", staticmethod(lambda: FakeConfig()))
 
     server.wiki_search("q", type="  ")
-    assert captured["type"] is None, f"Expected type=None for whitespace input, got {captured['type']}"
+    msg = f"Expected type=None for whitespace input, got {captured['type']}"
+    assert captured["type"] is None, msg

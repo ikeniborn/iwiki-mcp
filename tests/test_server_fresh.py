@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-from iwiki_mcp import base, indexer, server
+from iwiki_mcp import indexer, server
 
 
 def _git(cwd, *args):

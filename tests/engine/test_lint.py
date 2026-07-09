@@ -246,3 +246,35 @@ def test_missing_source_last_wins_after_delete_and_reingest(tmp_path):
         for r in recs:
             fh.write(json.dumps(r) + "\n")
     assert lint(wd)["missing_source"] == []
+
+
+def test_broken_markdown_link_flagged(tmp_path):
+    wd = _wiki(tmp_path, {"a.md": "## A\nlink [x](missing.md) here\n"})
+    out = lint(wd)
+    assert any(b["ref"] == "missing" for b in out["broken"])
+
+
+def test_valid_markdown_anchor_matches_via_slug(tmp_path):
+    wd = _wiki(tmp_path, {
+        "a.md": "## A\nsee [B](b.md#the-section)\n",
+        "b.md": "## The Section\nbody\n",
+    })
+    assert lint(wd)["broken"] == []
+
+
+def test_broken_markdown_anchor_flagged(tmp_path):
+    wd = _wiki(tmp_path, {
+        "a.md": "## A\nsee [B](b.md#no-such)\n",
+        "b.md": "## The Section\nbody\n",
+    })
+    assert any(b["ref"] == "b#no-such" for b in lint(wd)["broken"])
+
+
+def test_legacy_wikilink_lists_only_unmigrated_pages(tmp_path):
+    wd = _wiki(tmp_path, {
+        "a.md": "## A\nold [[b]] link\n",
+        "b.md": "## B\nnew [x](a.md) link\n",
+    })
+    assert lint(wd)["legacy_wikilink"] == [
+        os.path.normpath(os.path.join(wd, "a.md"))
+    ]
