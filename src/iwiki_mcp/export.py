@@ -1,5 +1,5 @@
 """Serialize a domain into a fully OKF-conformant bundle: standard markdown
-links plus reserved REDACTED / log. Sources are never mutated — only copies."""
+links plus reserved index.md / log.md. Sources are never mutated — only copies."""
 from __future__ import annotations
 import json
 import os
@@ -8,15 +8,25 @@ import re
 from .engine import frontmatter as fm
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
+_CODE = re.compile(r"```.*?```|~~~.*?~~~|`[^`]*`", re.DOTALL)
+
+
+def _convert_one(m):
+    target, heading, alias = m.group(1).strip(), m.group(2), m.group(3)
+    text = (alias or heading or target).strip()
+    return f"[{text}]({target}.md)"
 
 
 def convert_wikilinks(body: str) -> str:
-    def repl(m):
-        target, heading, alias = m.group(1).strip(), m.group(2), m.group(3)
-        text = (alias or heading or target).strip()
-        link = "REDACTED" if target == "base" else f"{target}.md"
-        return f"[{text}]({link})"
-    return _WIKILINK.sub(repl, body)
+    """Rewrite [[t]] / [[t#H]] / [[t|a]] to standard markdown links, leaving
+    [[...]] inside fenced or inline code untouched."""
+    out, last = [], 0
+    for cm in _CODE.finditer(body):
+        out.append(_WIKILINK.sub(_convert_one, body[last:cm.start()]))
+        out.append(cm.group(0))
+        last = cm.end()
+    out.append(_WIKILINK.sub(_convert_one, body[last:]))
+    return "".join(out)
 
 
 def _pages(dom_path: str) -> list:

@@ -2,10 +2,16 @@ from iwiki_mcp.export import convert_wikilinks, export_domain
 
 
 def test_convert_wikilinks_forms():
-    assert convert_wikilinks("see [[base#Purpose]]") == "see [Purpose](REDACTED)"
-    assert convert_wikilinks("see [[base|the base]]") == "see [the base](REDACTED)"
-    assert convert_wikilinks("see [[base]]") == "see [base](REDACTED)"
+    assert convert_wikilinks("see [[base#Purpose]]") == "see [Purpose](base.md)"
+    assert convert_wikilinks("see [[base|the base]]") == "see [the base](base.md)"
+    assert convert_wikilinks("see [[base]]") == "see [base](base.md)"
     assert convert_wikilinks("sub [[a/b#H]]") == "sub [H](a/b.md)"
+
+
+def test_convert_wikilinks_skips_code():
+    assert convert_wikilinks("`[[ -f x ]]`") == "`[[ -f x ]]`"
+    fenced = "```bash\nif [[ $# -gt 0 ]]; then :; fi\n```"
+    assert convert_wikilinks(fenced) == fenced
 
 
 def test_export_writes_bundle(tmp_path):
