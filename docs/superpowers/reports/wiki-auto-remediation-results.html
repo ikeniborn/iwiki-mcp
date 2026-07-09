@@ -94,14 +94,14 @@
 </head>
 <body>
   <input type="checkbox" id="theme-toggle" hidden>
-  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden checked>
   <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
   <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
   <header>
     <div>
       <h1>wiki-auto-remediation chain results</h1>
-      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>intent</code>.</p>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>spec</code>.</p>
     </div>
     <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
   </header>
@@ -193,7 +193,79 @@
 <!-- TAB:intent END -->
 <!-- TAB:spec START -->
 <section class="tab-pane" id="pane-spec">
-  <p class="note">Этап ещё не проверен.</p>
+  <h2>Проверка spec — 2026-07-09</h2>
+  <p class="note">Spec проверяет дизайн одного read-only planning tool: <code>wiki_remediation_plan</code> строит кандидаты из <code>wiki_lint</code>, отдаёт агенту source/page context и не дублирует existing write/update/delete API.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md</code></td></tr>
+    <tr><td>Hash</td><td><code>635f3b55e7eaa2f1</code></td></tr>
+    <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Карта покрытия требований</h3>
+  <table>
+    <tr><th>Outcome intent</th><th>Spec requirements</th><th>Acceptance</th></tr>
+    <tr><td>Planning tool returns update/delete candidates.</td><td>R1-R5</td><td><code>update_candidates</code> and <code>delete_candidates</code> derive from lint.</td></tr>
+    <tr><td>Agent receives source, page, rules, metadata.</td><td>R6-R11</td><td>Candidate includes context, authoring rules, next steps, ignore guard.</td></tr>
+    <tr><td>Agent uses existing tools.</td><td>R10-R13</td><td>No second apply/update API; existing contracts unchanged.</td></tr>
+    <tr><td>Final report covers actions and remaining lint.</td><td>R10, Data Flow steps 7-9</td><td>Agent runs <code>wiki_lint</code> after existing-tool changes.</td></tr>
+  </table>
+
+  <h3>Граф компонентов</h3>
+  <div class="flow">
+    <div class="node"><strong><code>server.py</code></strong>Owns <code>wiki_remediation_plan</code>, binding/domain guard, MCP registration.</div>
+    <div class="node"><strong><code>engine.lint</code></strong>Supplies <code>stale</code> and <code>missing_source</code> findings.</div>
+    <div class="node"><strong>Existing tools</strong><code>wiki_update_page</code>, <code>wiki_delete_page</code>, <code>wiki_write_page</code>, <code>wiki_index</code> remain mutation surface.</div>
+    <div class="node"><strong>Agent</strong>Performs semantic regeneration and final user-facing report.</div>
+  </div>
+
+  <h3>Поток данных</h3>
+  <div class="flow">
+    <div class="node"><strong>1. Plan</strong>Agent calls <code>wiki_remediation_plan</code>.</div>
+    <div class="node"><strong>2. Enrich</strong>Server runs lint and reads current page/source context.</div>
+    <div class="node"><strong>3. Apply</strong>Agent regenerates markdown and calls existing tools.</div>
+    <div class="node"><strong>4. Verify</strong>Agent runs <code>wiki_lint</code> and reports planned/updated/deleted/failed/remaining_lint.</div>
+  </div>
+
+  <h3>Карта рисков и мер</h3>
+  <table>
+    <tr><th>Риск</th><th>Мера</th></tr>
+    <tr><td>Planning exposes ignored or secret source content.</td><td>R9 blocks `.iwikiignore` matches with <code>source_ignored</code>.</td></tr>
+    <tr><td>API duplicates update/delete semantics.</td><td>R12-R13 forbid writes and preserve existing tool contracts.</td></tr>
+    <tr><td>Huge source payload overloads MCP response.</td><td>Source cap marks <code>source_truncated: true</code>.</td></tr>
+    <tr><td>Wrong domain content exposed.</td><td>R2 rejects non-bound write domain.</td></tr>
+  </table>
+
+  <h3>Approval lens</h3>
+  <p>Safe: one additive read-only tool and no mutation contract changes. Risk: exposing source content; spec mitigates via bound write-domain guard, `.iwikiignore`, fail-soft blocked candidates, and response truncation.</p>
+
+  <h3>Phase results</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>clarity</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <p>Новых findings нет.</p>
+
+  <details>
+    <summary>Source anchors</summary>
+    <ul>
+      <li><code>Requirements</code>: R1-R13 define API, data shape, guardrails, and compatibility.</li>
+      <li><code>Data Flow</code>: steps 1-9 define agent-orchestrated remediation.</li>
+      <li><code>Error Handling</code>: domain, unreadable source/page, ignored source, truncation, empty lint.</li>
+      <li><code>Out of Scope</code>: no server-side chat client, no <code>wiki_remediation_apply</code>, no <code>wiki_update_page</code> semantic change.</li>
+    </ul>
+  </details>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> Spec готов к user review через этот HTML report.</p>
 </section>
 <!-- TAB:spec END -->
 <!-- TAB:plan START -->
