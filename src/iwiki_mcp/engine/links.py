@@ -11,6 +11,8 @@ _FENCE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", re.DOTALL | re.MULTI
 _INLINE = re.compile(r"`[^`]*`")
 # Inline markdown link [text](target); leading '!' (image) captured to reject it.
 _MD_LINK = re.compile(r"(!?)\[[^\]]*\]\(([^)\s]+)\)")
+# Full [[slug#Heading|Alias]] with optional #Heading and |Alias, for rewriting.
+_WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
 
 
 def slugify_heading(s: str) -> str:
@@ -92,3 +94,27 @@ def has_legacy_wikilink(content: str) -> bool:
     """True if content still contains a [[...]] link outside code — the
     lazy-migration 'not yet edited' marker surfaced by lint."""
     return bool(_LINK.search(_strip_code(content)))
+
+
+def to_markdown_links(body: str) -> str:
+    """Rewrite the four [[...]] forms to CommonMark relative links, leaving code
+    (fenced + inline) and existing markdown links untouched. Idempotent: a body
+    with no [[...]] is returned unchanged."""
+    masks: list[str] = []
+
+    def _mask(m: re.Match) -> str:
+        masks.append(m.group(0))
+        return f"\x00{len(masks) - 1}\x00"
+
+    masked = _INLINE.sub(_mask, _FENCE.sub(_mask, body))
+
+    def _rewrite(m: re.Match) -> str:
+        slug = m.group(1).strip()
+        heading = (m.group(2) or "").strip()
+        alias = (m.group(3) or "").strip()
+        text = alias or heading or slug
+        anchor = f"#{slugify_heading(heading)}" if heading else ""
+        return f"[{text}]({slug}.md{anchor})"
+
+    rewritten = _WIKILINK.sub(_rewrite, masked)
+    return re.sub(r"\x00(\d+)\x00", lambda m: masks[int(m.group(1))], rewritten)

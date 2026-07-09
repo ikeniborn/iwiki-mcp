@@ -99,3 +99,49 @@ def test_markdown_noncanonical_anchor_slugified_and_dedupes_with_legacy():
 
 def test_legacy_bare_anchor_rejected():
     assert parse_links("see [[#Something]] here") == []
+
+
+from iwiki_mcp.engine.links import to_markdown_links
+
+
+def test_rewrite_plain_slug():
+    assert to_markdown_links("see [[core]] now") == "see [core](core.md) now"
+
+
+def test_rewrite_slug_heading():
+    assert to_markdown_links("[[nvm#Claude Binary Detection]]") == \
+        "[Claude Binary Detection](nvm.md#claude-binary-detection)"
+
+
+def test_rewrite_slug_alias():
+    assert to_markdown_links("[[core|the core]]") == "[the core](core.md)"
+
+
+def test_rewrite_slug_heading_alias():
+    assert to_markdown_links("[[nvm#Binary Detection|see nvm]]") == \
+        "[see nvm](nvm.md#binary-detection)"
+
+
+def test_bash_wikilike_in_fence_untouched():
+    md = "```bash\nif [[ $# -gt 0 ]]; then :; fi\n```\n"
+    assert to_markdown_links(md) == md
+
+
+def test_markdown_example_in_fence_untouched():
+    md = "```\n[[core]] renders as [core](core.md)\n```\n"
+    assert to_markdown_links(md) == md
+
+
+def test_inline_code_wikilink_untouched():
+    md = "use `[[x]]` literally"
+    assert to_markdown_links(md) == md
+
+
+def test_idempotent_on_markdown_body():
+    md = "already [core](core.md) linked"
+    assert to_markdown_links(md) == md
+
+
+def test_idempotent_rerun():
+    once = to_markdown_links("[[a#B c]] and [[d]]")
+    assert to_markdown_links(once) == once
