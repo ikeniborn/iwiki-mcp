@@ -93,18 +93,27 @@ normalized shape, so `related.py`/`lint.py` keep their contract.
 `related.py` uses only the slug part → unaffected. `lint.py` compares the
 (now slugified) heading against a slugified heading set → one-line change.
 
+**Contract change.** For legacy `[[slug#Heading]]`, the heading portion of the
+return shifts from raw text (`"slug#Heading"`, today's behaviour) to a slug
+(`"slug#heading-slug"`). `related.py` ignores the heading portion; `lint.py`
+slugifies its heading set to match. Existing `test_links.py` assertions on the
+returned heading form are updated accordingly.
+
 ## Heading slug helper
 
 `[[slug#Heading]]` carried the heading **text** (`Related sections`); a markdown
-anchor is a **slug** (`related-sections`). To compare them uniformly, a single
-stdlib-only `slugify_heading(s)` lives in `engine/links.py` (importable by
-`lint.py`, which must stay config-free):
+anchor is a **slug** (`related-sections`). A single stdlib-only
+`slugify_heading(s)` in `engine/links.py` (importable by `lint.py`, which must
+stay config-free) produces the anchor:
 
-- lowercase, drop characters other than word-chars / spaces / hyphens, collapse
-  whitespace to `-`.
-- GitHub-approximate, but the requirement is **internal consistency** between the
-  two consumers (write-time normalization and lint), not byte-exact GitHub
-  parity.
+- Target GitHub's heading-anchor algorithm: lowercase; drop characters other than
+  word-chars, spaces, and hyphens; collapse whitespace to `-`; collapse repeated
+  `-`. This keeps anchors resolvable when a page renders on GitHub (the Overview
+  goal), and — because the **same** function feeds parser, rewrite, and lint —
+  keeps the three internally consistent.
+- Residual gap: GitHub de-duplicates repeated headings with `-1`/`-2` suffixes;
+  iwiki's `##`-only structure makes duplicate headings rare, so v1 does not
+  handle it (a duplicate-heading anchor jumps to the first occurrence). Deferred.
 
 Used by: the parser (heading → slug on extraction), write-time normalization
 (heading → anchor), and `lint.py` (heading set → slugs for the `#anchor` check).
@@ -156,7 +165,9 @@ No migration tool. A pure engine function converts on write:
 - `README.md` + `docs/README.ru.md`: if link syntax is documented, update both
   (EN + RU, kept in sync).
 - `pyproject.toml`: **patch** bump (no new tool; changed write behaviour + parser
-  — repo default is patch).
+  — repo default is patch). This branch is cut from `master` (`0.1.x`); if the
+  OKF branch (which bumps to `0.2.0`) merges first, reconcile the version line at
+  merge time.
 
 ## Testing
 
@@ -203,9 +214,10 @@ Repo pattern: monkeypatch `indexer.embed_texts`, dummy `IWIKI_*` env, no network
 
 - **Phantom edges from code samples** — mitigated by `_strip_code` before both
   parser and normalization; masking preserves code verbatim on rewrite.
-- **Heading-anchor mismatch** (`Related sections` vs `related-sections`) — a
-  single `slugify_heading` is the shared normalization point for parser,
-  rewrite, and lint; consistency is internal, not GitHub-exact.
+- **Heading-anchor mismatch** (`Related sections` vs `related-sections`) — one
+  `slugify_heading` targeting GitHub's algorithm is the shared normalization
+  point for parser, rewrite, and lint; the only residual gap is GitHub's `-N`
+  de-duplication of repeated headings (rare under `##`-only structure, deferred).
 - **Incomplete graph during transition** — mitigated by dual-read; the parser
   reads legacy `[[...]]` until a page is edited. `legacy_wikilink` surfaces
   remaining pages.
