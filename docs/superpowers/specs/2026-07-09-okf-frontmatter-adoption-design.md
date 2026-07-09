@@ -60,17 +60,71 @@ Field sources and determinism:
 
 | Field         | OKF role            | Source in iwiki                         | Deterministic |
 |---------------|---------------------|-----------------------------------------|---------------|
-| `type`        | required            | LLM classification of body              | no (LLM)      |
+| `type`        | required            | LLM classified into a closed vocabulary | no (LLM)      |
 | `title`       | reference-parser    | `# H1` line                             | yes           |
 | `description` | reference-parser    | `## Overview` body, ≤400 chars          | yes           |
 | `resource`    | optional            | `source=` recorded in the ingest log    | yes           |
-| `tags`        | optional            | LLM-suggested                           | no (LLM)      |
+| `tags`        | optional            | LLM, reuse-biased + normalized          | no (LLM)      |
 | `timestamp`   | reference-parser    | git last-commit date of the file, or    | yes           |
 |               |                     | the page's ingest-log `date`            |               |
 
 Covering `type` + `title` + `description` + `timestamp` satisfies both the
 spec's single required field and Google's reference parser (which additionally
 rejects files missing `title`/`description`/`timestamp`).
+
+`type` and `tags` are LLM-derived but **governed** — see "Type and tag
+governance" below — so the vocabulary stays unified instead of drifting (the
+known OKF weakness where two conformant bundles share no common vocabulary).
+
+## Type and tag governance
+
+The LLM fills `type` and `tags`, but under rules that keep the vocabulary
+convergent across the whole base.
+
+### `type` — closed vocabulary
+
+A single hardcoded enum, global to every base and domain (maximum unification,
+zero config). Defined once in `engine/frontmatter.py` as `OKF_TYPES`, with
+`concept` as the default/fallback:
+
+| type           | When                          | Body signal                     |
+|----------------|-------------------------------|---------------------------------|
+| `architecture` | system structure              | components, data flow, modules  |
+| `api`          | a call/interface surface      | functions, endpoints, signatures|
+| `guide`        | how to do something           | step-by-step, usage             |
+| `reference`    | lookup material               | tables of keys, flags, configs  |
+| `runbook`      | operational procedure         | deploy, incident, runbook steps |
+| `concept`      | explains an idea/model        | **default / fallback**          |
+
+- The LLM **classifies into** `OKF_TYPES`; it never invents a type. The prompt
+  carries the enum plus this rubric.
+- A returned value outside `OKF_TYPES` falls back to `concept`.
+- The same rubric text lives in `resources.py` (`iwiki://authoring-rules`) so
+  humans and the LLM share one criterion.
+- `validate.py` adds an advisory `unknown_type` finding when a page's `type` is
+  not in `OKF_TYPES` (non-blocking; surfaces drift without rejecting).
+- A per-domain override is intentionally deferred (YAGNI) — one global enum is
+  what makes the base uniform.
+
+### `tags` — open but disciplined
+
+Tags stay open-ended (closing them into an enum would defeat their purpose), but
+three rules prevent sprawl:
+
+1. **Normalization (deterministic).** `frontmatter.normalize_tag`: lowercase,
+   kebab-case, spaces/underscores → `-`, drop empties, cap at `MAX_TAGS = 5` per
+   page. Kills case/format duplicates (`Config` / `config` / `configuration`
+   collapse by form). Applied on both write and migrate.
+2. **Reuse-first.** On write/migrate the LLM is given the domain's **current tag
+   vocabulary** (collected from the index's `tags` across all records) and
+   instructed to reuse an existing tag where one fits, coining a new tag only
+   when nothing matches. Biases the vocabulary toward convergence.
+3. **Drift visibility.** `wiki_lint` reports near-duplicate tag pairs (shared
+   prefix / small edit distance) as a `tag_drift` finding, so synonyms that slip
+   through get curated by hand. Deterministic, stdlib-only (no embeddings).
+
+The tag vocabulary is derived, not stored separately: it is simply the set of
+`tags` already present across the domain's index records.
 
 ## Engine changes (stdlib-only core)
 
@@ -87,6 +141,11 @@ dependency.
 - Parses only what iwiki writes: scalar `key: value` lines and
   `tags: [a, b]` inline lists. Deterministic; tolerant of absent/malformed
   blocks (fail-soft to `{}`).
+- Governance constants and helper (single source of truth, stdlib-only):
+  `OKF_TYPES` (the closed type enum), `DEFAULT_TYPE = "concept"`,
+  `MAX_TAGS = 5`, and `normalize_tag(s) -> str` (lowercase, kebab-case,
+  spaces/underscores → `-`). `coerce_type(s) -> str` maps any value to a member
+  of `OKF_TYPES`, falling back to `DEFAULT_TYPE`.
 
 ### Body-only processing in existing modules
 
@@ -97,10 +156,12 @@ All three operate on `body` (post-`split`), never the raw content:
   also stamps `type`/`tags` from `meta` onto each `Chunk` (for faceted search).
 - `validate.py` — `validate_page` validates `body`, so `pre_h2_text` no longer
   false-fires on frontmatter lines. Body rules (`##`-only, Overview, lead) are
-  unchanged. Adds advisory findings `missing_type`, `missing_description`
-  (non-blocking, so legacy pages are not rejected before migration).
-- `lint.py` — reads `body` for section/link checks; also reports pages lacking
-  frontmatter as `wiki_migrate_okf` candidates.
+  unchanged. Adds advisory findings `missing_type`, `missing_description`, and
+  `unknown_type` (type not in `OKF_TYPES`) — all non-blocking, so legacy pages
+  are not rejected before migration.
+- `lint.py` — reads `body` for section/link checks; reports pages lacking
+  frontmatter as `wiki_migrate_okf` candidates, and near-duplicate tag pairs as
+  `tag_drift` (shared prefix / small edit distance; deterministic, stdlib-only).
 
 The blocking validation subset (`deep_heading`, `pre_h2_text`) is mirrored by
 the `iwiki-validate` PreToolUse hook noted in `validate.py`'s docstring — that
@@ -134,9 +195,11 @@ mirror must also strip frontmatter before the `pre_h2_text` check.
 
 - `wiki_write_page` / `wiki_update_page`: after body validation, derive
   `title` / `description` / `timestamp` / `resource` deterministically and write
-  the frontmatter block above the body. `type` / `tags` come from one LLM
-  classification of the body. An optional `type=` argument lets the author set
-  it explicitly and skip the LLM call.
+  the frontmatter block above the body. `type` / `tags` come from one LLM call
+  over the body, governed: `type` is `coerce_type`-clamped to `OKF_TYPES`; `tags`
+  are prompted reuse-first against the domain's current tag vocabulary, then
+  `normalize_tag`-normalized and capped at `MAX_TAGS`. An optional `type=`
+  argument lets the author set it explicitly and skip the classification call.
 - Transactional write is preserved: frontmatter is part of the written file, so
   the existing rollback (delete file, drop last ingest-log line) still covers it.
 
@@ -145,7 +208,10 @@ mirror must also strip frontmatter before the `pre_h2_text` check.
 New MCP tool. Makes an existing base conformant with no manual rework.
 
 - Iterates pages lacking frontmatter. Derives deterministic fields from
-  H1 / Overview / ingest-log / git. `type` / `tags` from LLM (batched).
+  H1 / Overview / ingest-log / git. `type` / `tags` from LLM (batched), under
+  the same governance as the write path: `type` clamped to `OKF_TYPES`, `tags`
+  reuse-first against the domain vocabulary built up so far, then normalized and
+  capped.
 - Writes the frontmatter block into each file, then re-indexes the domain.
 - Idempotent: pages that already have frontmatter are skipped; re-runs are safe.
 
@@ -177,10 +243,13 @@ env, no network.
 
 - `frontmatter.split` / `render`: round-trip, absent block, malformed block,
   `tags` list parsing.
+- Governance helpers: `coerce_type` clamps off-vocab → `concept` and keeps valid
+  members; `normalize_tag` lowercases/kebab-cases; `MAX_TAGS` cap applied.
 - `chunk_markdown` with frontmatter: frontmatter excluded from chunks; `type`/
   `tags` stamped on chunks.
 - `validate_page`: frontmatter does not trigger `pre_h2_text`; `missing_type` /
-  `missing_description` are advisory only.
+  `missing_description` / `unknown_type` are advisory only.
+- `lint`: `tag_drift` flags a near-duplicate tag pair; distinct tags don't.
 - `wiki_migrate_okf`: derives fields; idempotent on re-run; skips already-
   migrated pages.
 - `wiki_export_okf`: `[[refs]]` converted to markdown links in the copy;
