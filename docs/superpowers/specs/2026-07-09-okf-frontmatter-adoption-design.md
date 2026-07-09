@@ -60,11 +60,11 @@ Field sources and determinism:
 
 | Field         | OKF role            | Source in iwiki                         | Deterministic |
 |---------------|---------------------|-----------------------------------------|---------------|
-| `type`        | required            | LLM classified into a closed vocabulary | no (LLM)      |
+| `type`        | required            | host agent classifies into a closed set | no (agent)    |
 | `title`       | reference-parser    | `# H1` line                             | yes           |
 | `description` | reference-parser    | `## Overview` body, ≤400 chars          | yes           |
 | `resource`    | optional            | `source=` recorded in the ingest log    | yes           |
-| `tags`        | optional            | LLM, reuse-biased + normalized          | no (LLM)      |
+| `tags`        | optional            | host agent, reuse-biased + normalized   | no (agent)    |
 | `timestamp`   | reference-parser    | git last-commit date of the file, or    | yes           |
 |               |                     | the page's ingest-log `date`            |               |
 
@@ -72,14 +72,29 @@ Covering `type` + `title` + `description` + `timestamp` satisfies both the
 spec's single required field and Google's reference parser (which additionally
 rejects files missing `title`/`description`/`timestamp`).
 
-`type` and `tags` are LLM-derived but **governed** — see "Type and tag
-governance" below — so the vocabulary stays unified instead of drifting (the
-known OKF weakness where two conformant bundles share no common vocabulary).
+**Who classifies — two paths, one governance.** The iwiki server runs inside a
+host agent (Claude Code / Codex) that is itself an LLM, but it must not be
+*hard-bound* to that host nor to any one external model. So classification of
+`type`/`tags` has two sources, resolved by precedence:
+
+1. **Explicit params.** If the caller passes `type`/`tags`, they win (the host
+   agent authored the page and knows them).
+2. **Optional server-side model.** Else, if `IWIKI_CHAT_MODEL` is set, the
+   server classifies via an OpenAI-compatible chat endpoint (reusing
+   `IWIKI_LLM_BASE_URL`/`IWIKI_LLM_KEY`), best-effort.
+3. **Default.** Else `type` → `concept`, `tags` → `[]`, with a `warning`.
+
+`IWIKI_CHAT_MODEL` is **optional and empty by default** — no server-side chat is
+introduced unless the operator opts in. Either way the server *governs* the
+result (see below). Whatever the source, `type`/`tags` are **governed** so the
+vocabulary stays unified instead of drifting (the known OKF weakness where two
+conformant bundles share no common vocabulary).
 
 ## Type and tag governance
 
-The LLM fills `type` and `tags`, but under rules that keep the vocabulary
-convergent across the whole base.
+Whoever fills `type`/`tags` — the host agent (explicit params) or the optional
+server-side model — does so under rules the server enforces to keep the
+vocabulary convergent across the whole base.
 
 ### `type` — closed vocabulary
 
@@ -96,11 +111,13 @@ zero config). Defined once in `engine/frontmatter.py` as `OKF_TYPES`, with
 | `runbook`      | operational procedure         | deploy, incident, runbook steps |
 | `concept`      | explains an idea/model        | **default / fallback**          |
 
-- The LLM **classifies into** `OKF_TYPES`; it never invents a type. The prompt
-  carries the enum plus this rubric.
-- A returned value outside `OKF_TYPES` falls back to `concept`.
-- The same rubric text lives in `resources.py` (`iwiki://authoring-rules`) so
-  humans and the LLM share one criterion.
+- The classifier (host agent via `type=`, or the optional server-side model)
+  **chooses from** `OKF_TYPES`; it never invents a type. The rubric guides both.
+- Any value outside `OKF_TYPES` (or an omitted `type` with no server model) is
+  clamped by the server to `concept` via `coerce_type`.
+- The rubric text lives in `resources.py` (`iwiki://authoring-rules`), in the
+  tool descriptions, and in the server-side classify prompt — one shared
+  criterion across all sources.
 - `validate.py` adds an advisory `unknown_type` finding when a page's `type` is
   not in `OKF_TYPES` (non-blocking; surfaces drift without rejecting).
 - A per-domain override is intentionally deferred (YAGNI) — one global enum is
@@ -115,10 +132,11 @@ three rules prevent sprawl:
    kebab-case, spaces/underscores → `-`, drop empties, cap at `MAX_TAGS = 5` per
    page. Kills case/format duplicates (`Config` / `config` / `configuration`
    collapse by form). Applied on both write and migrate.
-2. **Reuse-first.** On write/migrate the LLM is given the domain's **current tag
-   vocabulary** (collected from the index's `tags` across all records) and
-   instructed to reuse an existing tag where one fits, coining a new tag only
-   when nothing matches. Biases the vocabulary toward convergence.
+2. **Reuse-first.** On write/migrate the classifier is given the domain's
+   **current tag vocabulary** (collected from the index's `tags` across all
+   records) — in the tool result for the host agent, or in the prompt for the
+   server-side model — and is asked to reuse an existing tag where one fits,
+   coining a new tag only when nothing matches. Biases toward convergence.
 3. **Drift visibility.** `wiki_lint` reports near-duplicate tag pairs (shared
    prefix / small edit distance) as a `tag_drift` finding, so synonyms that slip
    through get curated by hand. Deterministic, stdlib-only (no embeddings).
@@ -195,25 +213,40 @@ mirror must also strip frontmatter before the `pre_h2_text` check.
 
 - `wiki_write_page` / `wiki_update_page`: after body validation, derive
   `title` / `description` / `timestamp` / `resource` deterministically and write
-  the frontmatter block above the body. `type` / `tags` come from one LLM call
-  over the body, governed: `type` is `coerce_type`-clamped to `OKF_TYPES`; `tags`
-  are prompted reuse-first against the domain's current tag vocabulary, then
-  `normalize_tag`-normalized and capped at `MAX_TAGS`. An optional `type=`
-  argument lets the author set it explicitly and skip the classification call.
+  the frontmatter block above the body. `type` / `tags` follow the precedence
+  above: explicit params win; else the optional server-side model classifies
+  (when `IWIKI_CHAT_MODEL` is set); else default `concept` / `[]` with a warning.
+  The server governs the result — `type` `coerce_type`-clamped to `OKF_TYPES`,
+  `tags` `normalize_tag`-normalized, deduped, capped at `MAX_TAGS`.
+  `wiki_update_page` preserves existing `type`/`tags` and only refreshes the
+  deterministic fields unless new values are passed.
+- The tool descriptions carry the type rubric and the domain's current tag
+  vocabulary hint so the host agent fills `type`/`tags` consistently when it is
+  the classifier.
 - Transactional write is preserved: frontmatter is part of the written file, so
   the existing rollback (delete file, drop last ingest-log line) still covers it.
 
-## Backfill migration — `wiki_migrate_okf(domain)`
+## Backfill migration — dual-mode, plan + apply
 
-New MCP tool. Makes an existing base conformant with no manual rework.
+Two MCP tools whose behavior adapts to whether a server-side model is configured.
+Either way this is "no manual rework" — a machine does the work, not the human.
 
-- Iterates pages lacking frontmatter. Derives deterministic fields from
-  H1 / Overview / ingest-log / git. `type` / `tags` from LLM (batched), under
-  the same governance as the write path: `type` clamped to `OKF_TYPES`, `tags`
-  reuse-first against the domain vocabulary built up so far, then normalized and
-  capped.
-- Writes the frontmatter block into each file, then re-indexes the domain.
-- Idempotent: pages that already have frontmatter are skipped; re-runs are safe.
+- **`wiki_migrate_okf(domain)`.**
+  - *With `IWIKI_CHAT_MODEL` set:* autonomously classifies every page lacking
+    frontmatter (server-side, best-effort, reuse-first against the growing
+    domain vocabulary), writes the frontmatter block into each file, and
+    re-indexes. Returns `migrated` / `skipped` / `warnings`.
+  - *Without it:* runs as a **plan** (no writes) — for each page lacking
+    frontmatter returns `slug`, the page `body`, the deterministically derived
+    fields, the domain's current tag vocabulary, the `OKF_TYPES` rubric,
+    `authoring_rules`, and `next_steps` pointing at `wiki_apply_okf`. Mirrors the
+    existing `wiki_remediation_plan` idiom.
+  - Idempotent either way: pages that already have frontmatter are skipped.
+- **`wiki_apply_okf(domain, slug, type, tags=None)` (apply, one page).** The
+  host agent, having classified a page from the plan, calls this. The server
+  derives the deterministic fields, clamps `type`, normalizes `tags`, writes the
+  frontmatter block into the file, and re-indexes. Transactional like the other
+  write tools; re-running just refreshes the page's frontmatter (safe).
 
 ## Export bundle — `wiki_export_okf(domain, dest)`
 
@@ -250,8 +283,14 @@ env, no network.
 - `validate_page`: frontmatter does not trigger `pre_h2_text`; `missing_type` /
   `missing_description` / `unknown_type` are advisory only.
 - `lint`: `tag_drift` flags a near-duplicate tag pair; distinct tags don't.
-- `wiki_migrate_okf`: derives fields; idempotent on re-run; skips already-
-  migrated pages.
+- `classify` (server-side path): parses/governs a chat response; off-vocab →
+  `concept`; endpoint failure is best-effort (default + warning, never raises).
+  Gated on `IWIKI_CHAT_MODEL`; monkeypatched in tests (no network).
+- Write precedence: explicit `type`/`tags` win; with no params and no chat model,
+  defaults to `concept`/`[]` + warning.
+- `wiki_migrate_okf`: plan mode (no chat model) returns candidates + rubric;
+  autonomous mode (chat model set) writes frontmatter; idempotent; skips
+  already-migrated pages. `wiki_apply_okf`: applies agent-classified type/tags.
 - `wiki_export_okf`: `[[refs]]` converted to markdown links in the copy;
   sources untouched; `index.md` / `log.md` generated.
 - Faceted search: `type` narrows results; `tags` intersection; a pre-existing
@@ -260,10 +299,13 @@ env, no network.
 
 ## Files touched
 
-- New: `src/iwiki_mcp/engine/frontmatter.py`
+- New: `src/iwiki_mcp/engine/frontmatter.py`, `src/iwiki_mcp/engine/classify.py`
+  (server-side classify, gated on `IWIKI_CHAT_MODEL`), `src/iwiki_mcp/okf.py`
+  (top-layer frontmatter assembly), `src/iwiki_mcp/export.py`
 - Modified: `engine/chunk.py`, `engine/validate.py`, `engine/lint.py`,
-  `engine/store.py`, `retrieval.py`, `indexer.py`, `server.py`, `resources.py`,
-  `pyproject.toml`, `README.md`, `docs/README.ru.md`
+  `engine/store.py`, `engine/config.py` (add `chat_model`), `retrieval.py`,
+  `indexer.py`, `server.py`, `resources.py`, `pyproject.toml`, `README.md`,
+  `docs/README.ru.md`
 - New tests under `tests/`
 - PreToolUse `iwiki-validate` hook mirror: strip frontmatter before
   `pre_h2_text`.
@@ -273,8 +315,11 @@ env, no network.
 - **Chunking/retrieval regression** — mitigated by stripping frontmatter before
   the `##` split; body is untouched.
 - **Index back-compat** — `Record` new fields default, so old JSONL loads.
-- **LLM non-determinism for `type`** — accepted per decision; deterministic
-  fields cover the rest; `type=` override available.
+- **Classifier non-determinism for `type`** — accepted; deterministic fields
+  cover the rest; explicit `type=` always overrides; `coerce_type` clamps.
+- **No hard model binding** — server-side classification is optional
+  (`IWIKI_CHAT_MODEL`); unset means the host agent classifies or the field
+  defaults. The server keeps working with only its embeddings dependency.
 - **OKF v0.1 is a draft** — we target its stable core (`type` + the
   reference-parser fields); export is a thin adapter that can track spec drift.
 ```
