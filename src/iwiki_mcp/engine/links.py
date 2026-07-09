@@ -46,18 +46,21 @@ def _md_target_key(target: str) -> str | None:
     slug = path[:-3]
     if not slug:
         return None
-    return f"{slug}#{anchor}" if anchor else slug
+    return f"{slug}#{slugify_heading(anchor)}" if anchor else slug
 
 
-def _legacy_target_key(target: str) -> str:
+def _legacy_target_key(target: str) -> str | None:
     """A [[...]] target -> normalized 'slug' / 'slug#heading-slug' (heading slugified
-    so legacy and markdown links collapse to the same key)."""
+    so legacy and markdown links collapse to the same key), or None for a bare
+    same-page anchor ([[#Heading]], empty slug)."""
     slug, _, heading = target.strip().partition("#")
     slug = slug.strip()
     if slug.startswith("./"):
         slug = slug[2:]
     if slug.endswith(".md"):
         slug = slug[:-3]
+    if not slug:
+        return None
     heading = heading.strip()
     return f"{slug}#{slugify_heading(heading)}" if heading else slug
 
@@ -76,7 +79,9 @@ def parse_links(content: str) -> list[str]:
         if key:
             hits.append((m.start(), key))
     for m in _LINK.finditer(stripped):
-        hits.append((m.start(), _legacy_target_key(m.group(1))))
+        key = _legacy_target_key(m.group(1))
+        if key:
+            hits.append((m.start(), key))
     seen: dict[str, None] = {}
     for _, key in sorted(hits, key=lambda t: t[0]):
         seen.setdefault(key, None)

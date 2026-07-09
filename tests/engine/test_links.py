@@ -90,3 +90,12 @@ def test_has_legacy_wikilink_true_false_and_code():
     assert has_legacy_wikilink("see [[x]] here") is True
     assert has_legacy_wikilink("see [x](x.md) here") is False
     assert has_legacy_wikilink("`[[ $# ]]` in code") is False
+
+
+def test_markdown_noncanonical_anchor_slugified_and_dedupes_with_legacy():
+    md = "[Docs](guide.md#My Section) and [[guide#My Section]]"
+    assert parse_links(md) == ["guide#my-section"]
+
+
+def test_legacy_bare_anchor_rejected():
+    assert parse_links("see [[#Something]] here") == []
