@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 
 from iwiki_mcp import base, server
 from iwiki_mcp.engine import lint as lint_engine

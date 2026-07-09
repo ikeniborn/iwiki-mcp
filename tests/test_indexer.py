@@ -18,7 +18,7 @@ def test_index_domain_stores_relative_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts])
     stats = indexer.index_domain(_cfg(), str(b), "backend")
     assert stats["indexed_chunks"] >= 1
-    recs = [json.loads(l) for l in open(base.index_path(str(b), "backend"))]
+    recs = [json.loads(line) for line in open(base.index_path(str(b), "backend"))]
     assert all(r["file"] == "auth.md" for r in recs)   # domain-relative, portable
 
 
@@ -31,7 +31,7 @@ def test_index_domain_stores_nested_paths_as_posix(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts])
     indexer.index_domain(_cfg(), str(b), "backend")
-    recs = [json.loads(l) for l in open(base.index_path(str(b), "backend"))]
+    recs = [json.loads(line) for line in open(base.index_path(str(b), "backend"))]
     assert all(r["file"] == "nested/auth.md" for r in recs)
 
 
@@ -50,7 +50,7 @@ def test_index_domain_reembeds_stale_dimensions(tmp_path, monkeypatch):
     indexer.index_domain(_cfg(dimensions=2), str(b), "backend")
     stats = indexer.index_domain(_cfg(dimensions=3), str(b), "backend")
 
-    recs = [json.loads(l) for l in open(base.index_path(str(b), "backend"))]
+    recs = [json.loads(line) for line in open(base.index_path(str(b), "backend"))]
     assert stats["embedded"] == 1
     assert stats["reused"] == 0
     assert all(r["dim"] == 3 for r in recs)

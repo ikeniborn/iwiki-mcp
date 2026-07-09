@@ -1,6 +1,6 @@
 [project]
 name = "iwiki-mcp"
-version = "0.1.14"
+version = "0.1.15"
 description = "MCP server for a shared, git-synced wiki knowledge base split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,7 @@ iwiki-mcp = "iwiki_mcp.server:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "flake8>=7.0",
 ]
 
 [build-system]

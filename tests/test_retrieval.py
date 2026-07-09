@@ -1,6 +1,6 @@
 import pytest
 
-from iwiki_mcp import retrieval, indexer, base
+from iwiki_mcp import retrieval, indexer
 from iwiki_mcp.engine.config import Config
 
 

@@ -1,5 +1,3 @@
-import os
-
 from iwiki_mcp import ignore
 
 
