@@ -16,15 +16,18 @@ _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]")
 
 
 def slugify_heading(s: str) -> str:
-    """Heading text -> GitHub-style anchor slug. Shared by the parser, the
-    write-time rewriter, and lint so all three agree on the same anchor.
-    Lowercase; drop non-word/space/hyphen chars; whitespace -> '-'; collapse
-    repeated '-'. Deterministic and idempotent."""
+    """Heading text -> GitHub-style anchor slug (github-slugger algorithm).
+    Lowercase; drop every character that is not a word char, whitespace, or
+    hyphen; replace each whitespace character with a hyphen. Repeated hyphens
+    are NOT collapsed and leading/trailing hyphens are NOT stripped, matching
+    GitHub exactly so a heading like `A - B` resolves to `#a---b` when the page
+    renders there. Deterministic and idempotent on an already-slugified anchor.
+    The single shared anchor helper for the parser, the write-time rewriter,
+    and lint, so all three agree on the same anchor by construction."""
     s = s.strip().lower()
     s = re.sub(r"[^\w\s-]", "", s)
-    s = re.sub(r"\s+", "-", s)
-    s = re.sub(r"-+", "-", s)
-    return s.strip("-")
+    s = re.sub(r"\s", "-", s)
+    return s
 
 
 def _strip_code(content: str) -> str:

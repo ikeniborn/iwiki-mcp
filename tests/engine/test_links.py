@@ -38,8 +38,11 @@ def test_slugify_strips_punctuation():
     assert slugify_heading("API: the /v1 endpoint!") == "api-the-v1-endpoint"
 
 
-def test_slugify_collapses_whitespace_and_hyphens():
-    assert slugify_heading("Foo   ---  Bar") == "foo-bar"
+def test_slugify_matches_github_no_hyphen_collapse():
+    # GitHub does NOT collapse repeated hyphens: punctuation or extra spaces
+    # between words leave a gap of hyphens, so the anchor resolves on GitHub.
+    assert slugify_heading("Data / Flow") == "data--flow"
+    assert slugify_heading("A - B") == "a---b"
 
 
 def test_slugify_is_deterministic_and_idempotent():
