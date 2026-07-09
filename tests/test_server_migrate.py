@@ -1,0 +1,58 @@
+import iwiki_mcp.server as server
+import iwiki_mcp.indexer as indexer
+from iwiki_mcp.engine import frontmatter as fm
+
+
+def _bind(tmp_path):
+    return server.base.Binding(base=str(tmp_path), read=("d",), write="d",
+                               project_dir=str(tmp_path))
+
+
+def _patch(monkeypatch, tmp_path):
+    # Eager: tests write fixture pages into tmp_path/d/ before calling the
+    # tool, so the domain dir must exist before resolve_binding() is (lazily)
+    # invoked inside the handler.
+    (tmp_path / "d" / ".iwiki").mkdir(parents=True)
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
+    monkeypatch.setenv("IWIKI_LLM_KEY", "k")
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: _bind(tmp_path))
+    monkeypatch.setattr(server.sync, "ensure_fresh", lambda b: {"state": "clean"})
+    monkeypatch.setattr(server.sync, "commit_and_push", lambda *a, **k: {"committed": True, "pushed": False})
+    monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[0.1, 0.2] for _ in texts])
+
+
+def test_migrate_plan_mode_lists_candidates(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)   # no IWIKI_CHAT_MODEL
+    (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    res = server.wiki_migrate_okf("d")
+    assert res["mode"] == "plan"
+    slugs = [c["slug"] for c in res["candidates"]]
+    assert "a" in slugs
+    assert (tmp_path / "d" / "a.md").read_text(encoding="utf-8").startswith("# A")  # no write
+
+
+def test_apply_okf_writes_frontmatter(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    res = server.wiki_apply_okf("d", "a", "guide", tags=["Flow"])
+    assert "error" not in res
+    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    assert meta["type"] == "guide"
+    assert meta["tags"] == ["flow"]
+
+
+def test_migrate_autonomous_mode(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_CHAT_MODEL", "chat-x")
+    from iwiki_mcp import okf
+    monkeypatch.setattr(okf.classify, "classify_page",
+                        lambda cfg, body, existing_tags: {"type": "guide", "tags": ["x"], "warning": None})
+    (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    res = server.wiki_migrate_okf("d")
+    assert res["mode"] == "autonomous"
+    assert "a" in res["migrated"]
+    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    assert meta["type"] == "guide"
+    # idempotent
+    res2 = server.wiki_migrate_okf("d")
+    assert res2["migrated"] == [] and "a" in res2["skipped"]

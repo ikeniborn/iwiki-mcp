@@ -754,6 +754,119 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
     }
 
 
+def _unmigrated_pages(dom_path: Path):
+    """Yield (slug, page_file, body, has_frontmatter) for each page."""
+    for path in sorted(dom_path.rglob("*.md")):
+        rel = path.relative_to(dom_path)
+        if ".iwiki" in rel.parts:
+            continue
+        meta, body = _fm.split(path.read_text(encoding="utf-8"))
+        yield rel.with_suffix("").as_posix(), rel.as_posix(), body, bool(meta)
+
+
+@_safe
+def wiki_migrate_okf(domain: str | None = None) -> dict:
+    bind = base.resolve_binding()
+    target = _validate_domain(domain or bind.write or "")
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
+    dom_path = _domain_path(bind.base, target)
+    if not dom_path.is_dir():
+        return {"error": f"domain '{target}' not found",
+                "hint": "create it with wiki_create_domain"}
+    cfg = Config.load()
+    if cfg.chat_model:
+        migrated, skipped, warnings = [], [], []
+        for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
+            if has_fm:
+                skipped.append(slug)
+                continue
+            fm_block, warn = okf.build_frontmatter(
+                cfg, bind.base, target, slug, body,
+                source=None, explicit_type=None, explicit_tags=None,
+                timestamp_path=f"{target}/{page_file}")
+            (dom_path / page_file).write_text(fm_block + body, encoding="utf-8")
+            migrated.append(slug)
+            if warn:
+                warnings.append({"slug": slug, "warning": warn})
+        stats = indexer.index_domain(cfg, bind.base, target)
+        commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
+                                      pathspec=target)
+        return {"domain": target, "mode": "autonomous", "migrated": migrated,
+                "skipped": skipped, "warnings": warnings,
+                "indexed_chunks": stats["indexed_chunks"],
+                "committed": commit.get("committed", False),
+                "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+    # plan mode: no writes
+    vocab = okf.domain_tag_vocab(bind.base, target)
+    candidates = []
+    for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
+        if has_fm:
+            continue
+        candidates.append({
+            "slug": slug,
+            "body": body,
+            "derived": {
+                "title": _fm.derive_title(body, slug),
+                "description": _fm.derive_description(body, cfg.summary_max),
+                "timestamp": okf.git_last_commit_date(bind.base, f"{target}/{page_file}"),
+            },
+            "tag_vocab": vocab,
+            "recommended_tools": ["wiki_apply_okf"],
+        })
+    return {"domain": target, "mode": "plan", "candidates": candidates,
+            "type_vocabulary": list(_fm.OKF_TYPES),
+            "authoring_rules": AUTHORING_RULES,
+            "next_steps": ["Classify each candidate's type (from type_vocabulary) "
+                           "and tags (reuse tag_vocab first), then call "
+                           "wiki_apply_okf(domain, slug, type, tags).",
+                           "Run wiki_lint to confirm no missing_frontmatter remains."],
+            **_fresh_warn(fresh)}
+
+
+@_safe
+def wiki_apply_okf(domain: str, slug: str, type: str,
+                   tags: list[str] | None = None) -> dict:
+    bind = base.resolve_binding()
+    valid_domain = _validate_domain(domain)
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
+    dom_path = _domain_path(bind.base, valid_domain)
+    if not dom_path.is_dir():
+        return {"error": f"domain '{valid_domain}' not found",
+                "hint": "create it with wiki_create_domain"}
+    path = _page_path(bind.base, valid_domain, slug)
+    if not os.path.isfile(path):
+        return {"error": f"page '{valid_domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages"}
+    cfg = Config.load()
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    original = open(path, encoding="utf-8").read()
+    _, body = _fm.split(original)
+    fm_block, _ = okf.build_frontmatter(
+        cfg, bind.base, valid_domain, slug, body,
+        source=None, explicit_type=type, explicit_tags=tags,
+        timestamp_path=f"{valid_domain}/{page_file}")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(fm_block + body)
+        stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    except Exception:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(original)
+        raise
+    page_rel = f"{valid_domain}/{page_file}"
+    commit = sync.commit_and_push(bind.base, f"iwiki: apply okf {page_rel}",
+                                  pathspec=valid_domain)
+    meta, _ = _fm.split(fm_block + body)
+    return {"page": page_rel, "type": meta.get("type"), "tags": meta.get("tags", []),
+            "indexed_chunks": stats["indexed_chunks"],
+            "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+
+
 @_safe
 def wiki_sync() -> dict:
     bind = base.resolve_binding()
@@ -775,6 +888,8 @@ mcp.tool()(wiki_create_domain)
 mcp.tool()(wiki_bind)
 mcp.tool()(wiki_lint)
 mcp.tool()(wiki_remediation_plan)
+mcp.tool()(wiki_migrate_okf)
+mcp.tool()(wiki_apply_okf)
 mcp.tool()(wiki_sync)
 
 
