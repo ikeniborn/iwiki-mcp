@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>okf-artifacts-inplace chain results</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg:#f6f7fb; --surface:#ffffff; --fg:#242836; --muted:#667085;
+      --accent:#176b5d; --border:#d8dde8; --line:#8a94a6; --zebra:#eef2f6;
+      --ok:#277a4d; --warn:#9a6200; --danger:#b42318; --code:#eef2f6;
+      --shadow:rgba(35,45,70,.14);
+    }
+    body:has(#theme-toggle:checked) {
+      color-scheme: dark;
+      --bg:#151922; --surface:#202632; --fg:#e8eef7; --muted:#aab4c3;
+      --accent:#72d6c8; --border:#394252; --line:#7d8797; --zebra:#1a202a;
+      --ok:#8bd6a6; --warn:#e5be6a; --danger:#ff9b91; --code:#293140;
+      --shadow:rgba(0,0,0,.42);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+    header, main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 22px 0 8px; font-size: 16px; letter-spacing: 0; }
+    h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--zebra); }
+    details { border: 1px solid var(--border); background: var(--surface); padding: 10px 12px; margin: 12px 0; border-radius: 6px; }
+    summary { cursor: pointer; font-weight: 650; }
+    .theme-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--fg);
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chain-tabs {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chain-tabs label {
+      cursor: pointer;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: var(--surface);
+      color: var(--muted);
+    }
+    body:has(#tab-intent:checked) label[for="tab-intent"],
+    body:has(#tab-spec:checked) label[for="tab-spec"],
+    body:has(#tab-plan:checked) label[for="tab-plan"],
+    body:has(#tab-result:checked) label[for="tab-result"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .tab-pane { display: none; }
+    body:has(#tab-intent:checked) #pane-intent,
+    body:has(#tab-spec:checked) #pane-spec,
+    body:has(#tab-plan:checked) #pane-plan,
+    body:has(#tab-result:checked) #pane-result { display: block; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid currentColor; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .info { color: var(--muted); }
+    .note { border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); padding: 10px 12px; border-radius: 4px; }
+    figure { margin: 12px 0 18px; }
+    figure svg { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+    figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .g-node { fill: var(--surface); stroke: var(--border); }
+    .g-label { fill: var(--fg); font: 600 12px system-ui, sans-serif; }
+    .g-sub { fill: var(--muted); font: 11px system-ui, sans-serif; }
+    .g-edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
+    .layers { display: flex; flex-direction: column; gap: 0; margin: 12px 0 6px; }
+    .layer { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; }
+    .mods { display: flex; flex-wrap: wrap; gap: 8px; }
+    .mod { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; background: var(--zebra); font-size: 13px; }
+    .flow-arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1.2; }
+    @media (max-width: 760px) {
+      header { flex-direction: column; }
+      .chain-tabs { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <input type="checkbox" id="theme-toggle" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden checked>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <header>
+    <div>
+      <h1>okf-artifacts-inplace chain results</h1>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>spec</code>.</p>
+    </div>
+    <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
+  </header>
+  <nav class="chain-tabs">
+    <label for="tab-intent">Интент</label>
+    <label for="tab-spec">Спека</label>
+    <label for="tab-plan">План</label>
+    <label for="tab-result">Результат</label>
+  </nav>
+  <main>
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+  <h2>Проверка spec — 2026-07-09 (повторный прогон)</h2>
+  <p class="note">Спека перепрофилирует on-demand OKF-экспорт в <strong>детерминированное in-place сопровождение</strong>: (1) инкрементальное обновление reserved <code>index.md</code>/<code>log.md</code> на каждом мутирующем хендлере и (2) <code>wiki_export_okf(domain=None)</code> — свип по всему домену (bulk-fix frontmatter + <code>[[...]]</code>-ссылки) поверх существующих helpers, с удалением дублирующего <code>export.py</code>. Все 4 фазы пройдены; 3 находки первого прогона (2 WARNING + 1 INFO) <strong>устранены правками автора</strong> — все <code>fixed</code>. Открытых находок нет.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/specs/2026-07-09-okf-artifacts-inplace-design.md</code></td></tr>
+    <tr><td>Spec hash</td><td><code>4475f4bf6a553619</code> (совпадает с телом — Step-0 quick-exit пройдёт)</td></tr>
+    <tr><td>Intent</td><td><code>n/a</code> (интента для топика нет)</td></tr>
+    <tr><td>Supersedes</td><td>секция «Export bundle — <code>wiki_export_okf(domain, dest)</code>» из <code>2026-07-09-okf-frontmatter-adoption-design.md</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Резюме спецификации — требования по секциям</h3>
+  <table>
+    <tr><th>Секция</th><th>Требование</th></tr>
+    <tr><td>Overview / Goals</td><td><strong>R-01</strong> · <code>index.md</code>/<code>log.md</code> в каталоге домена, детерминированно обновляются в конце каждого успешного мутирующего хендлера</td></tr>
+    <tr><td>Overview / Goals</td><td><strong>R-02</strong> · каталог домена всегда валидный OKF-бандл (отдельной копии нет)</td></tr>
+    <tr><td>Overview / Goals</td><td><strong>R-03</strong> · <code>wiki_export_okf(domain=None)</code> — in-place свип по всему домену (bulk-fix frontmatter + ссылки) + регенерация reserved-файлов; <strong>без <code>dest</code></strong></td></tr>
+    <tr><td>Overview / Goals</td><td><strong>R-04</strong> · удалить дублирование write-path логики из <code>export.py</code> (свип переиспользует helpers)</td></tr>
+    <tr><td>Non-goals</td><td><strong>C-01</strong> (ограничение) · нет dest-копии; векторы остаются в <code>.iwiki/</code>; body/chunk/retrieval не меняются; свип детерминирован, без LLM; <code>type</code>/<code>tags</code> не переклассифицируются; формат store не меняется</td></tr>
+    <tr><td>Mechanism — incremental</td><td><strong>R-05</strong> · новый engine-модуль <code>okf_artifacts.py</code> (stdlib-only, детерм.): <code>render_index</code>, <code>render_log</code>, <code>RESERVED_OKF</code></td></tr>
+    <tr><td>Mechanism — incremental</td><td><strong>R-06</strong> · <code>okf.refresh_artifacts(base, domain)</code> — обходит страницы (исключая <code>RESERVED_OKF</code> и <code>.iwiki/</code>), читает <code>.iwiki/log.jsonl</code>, пишет оба файла; возвращает <code>warning|None</code>; никогда не бросает</td></tr>
+    <tr><td>Mechanism — incremental</td><td><strong>R-07</strong> · вызов <code>refresh_artifacts</code> в конце каждого мутирующего хендлера (write/update/delete/apply_okf/migrate_okf/export_okf) — после re-index, до auto-commit; best-effort</td></tr>
+    <tr><td>Mechanism — batch sweep</td><td><strong>R-08</strong> · <code>wiki_export_okf(domain=None)</code>: bulk <code>[[...]]</code>→markdown (<code>links.to_markdown_links</code>), bulk-ensure frontmatter (<code>type: concept</code> дефолт, существующие <code>type</code>/<code>tags</code> сохраняются), затем <strong>re-index (шаг 3)</strong> и регенерация через <code>refresh_artifacts</code> <strong>после re-index (шаг 4)</strong> + commit; отчёт (<code>fixed_links</code>/<code>added_frontmatter</code>/<code>artifacts</code>/<code>warnings</code>/<code>next_steps</code>); идемпотентно</td></tr>
+    <tr><td>Mechanism — batch sweep</td><td><strong>R-09</strong> · отношение к <code>wiki_migrate_okf</code>: композиция, не дублирование (export = детерм. гарантия, migrate = качественная классификация)</td></tr>
+    <tr><td>Reserved files / exclusion / guards</td><td><strong>R-10</strong> · <code>RESERVED_OKF</code> — одна общая константа; исключение на этапе <strong>перечисления страниц</strong> (indexer/retrieval page-walk + листинг через единый shared skip); <code>lint</code> строит content map из отфильтрованного набора; <code>validate.py</code>/<code>lint.py</code> остаются stdlib-only и <strong>не изменяются</strong></td></tr>
+    <tr><td>Reserved files / exclusion / guards</td><td><strong>R-11</strong> · write-time guard: <code>wiki_write_page</code> отклоняет slug <code>index</code>/<code>log</code> до доступа к ФС (<code>{error,hint}</code>)</td></tr>
+    <tr><td>Reserved files / exclusion / guards</td><td><strong>R-12</strong> · существующие авторские <code>index.md</code>/<code>log.md</code> не затираются — свип/refresh пропускает и выдаёт warning</td></tr>
+    <tr><td>Transaction and sync</td><td><strong>R-13</strong> · артефакты (и правленые страницы) входят в тот же auto-commit, что и операция</td></tr>
+    <tr><td>Transaction and sync</td><td><strong>R-14</strong> · merge-конфликт в производных файлах решается regenerate-wins (документированный <code>wiki_export_okf</code> recovery, без спец. merge-логики)</td></tr>
+    <tr><td>Authoring / README / versioning</td><td><strong>R-15</strong> · <code>resources.py</code> (<code>iwiki://authoring-rules</code>): отметить reserved slugs <code>index</code>/<code>log</code></td></tr>
+    <tr><td>Authoring / README / versioning</td><td><strong>R-16</strong> · <code>README.md</code> + <code>docs/README.ru.md</code> (EN+RU синхронно): обновить строку <code>wiki_export_okf</code> и in-place OKF</td></tr>
+    <tr><td>Authoring / README / versioning</td><td><strong>R-17</strong> · <code>pyproject.toml</code>: patch bump <code>0.2.3</code> → <code>0.2.4</code></td></tr>
+  </table>
+
+  <h3>Success Criteria (Testing / Verification)</h3>
+  <table>
+    <tr><th>ID</th><th>Критерий приёмки</th></tr>
+    <tr><td>SC-1</td><td><code>uv run pytest -q</code> зелёный; <code>uv run flake8 src tests</code> чисто</td></tr>
+    <tr><td>SC-2</td><td><code>grep -rn 'export_domain\|convert_wikilinks' src tests</code> — пусто (дублирование удалено)</td></tr>
+    <tr><td>SC-3</td><td>manual: <code>index.md</code>/<code>log.md</code> появляются и обновляются в каталоге домена и отсутствуют в <code>wiki_search</code>; <code>wiki_export_okf</code> на legacy-странице добавляет frontmatter + markdown-ссылки in-place</td></tr>
+  </table>
+
+  <h3>Схема решения — компоненты и связи</h3>
+  <figure>
+    <div class="layers">
+      <div class="layer">
+        <h4>MCP-поверхность · server.py</h4>
+        <div class="mods">
+          <span class="mod">wiki_write_page (+ reserved-slug guard)</span>
+          <span class="mod">wiki_update_page</span>
+          <span class="mod">wiki_delete_page</span>
+          <span class="mod">wiki_apply_okf</span>
+          <span class="mod">wiki_migrate_okf</span>
+          <span class="mod">wiki_export_okf(domain=None) — batch sweep</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&#8595; вызывает refresh_artifacts (после re-index, до commit)</div>
+      <div class="layer">
+        <h4>Top-layer · okf.py</h4>
+        <div class="mods">
+          <span class="mod">refresh_artifacts(base, domain) &#8594; warning|None</span>
+          <span class="mod">batch-sweep helper &#8594; links.to_markdown_links, okf/frontmatter derivation</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&#8595; использует чистые генераторы</div>
+      <div class="layer">
+        <h4>Engine · okf_artifacts.py (stdlib-only, детерминированный)</h4>
+        <div class="mods">
+          <span class="mod">render_index(slugs)</span>
+          <span class="mod">render_log(records)</span>
+          <span class="mod">RESERVED_OKF = ("index.md", "log.md")</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&#8593; RESERVED_OKF — единый источник исключения</div>
+      <div class="layer">
+        <h4>Exclusion · перечисление страниц — indexer / retrieval (единый shared skip)</h4>
+        <div class="mods">
+          <span class="mod">skip RESERVED_OKF рядом со skip .iwiki/</span>
+          <span class="mod">lint content map — из отфильтрованного набора</span>
+          <span class="mod">validate.py / lint.py — не изменяются (stdlib-only)</span>
+        </div>
+      </div>
+    </div>
+    <figcaption>Слои сверху вниз: MCP-хендлеры зовут <code>refresh_artifacts</code> в конце операции; top-layer переиспользует существующие helpers (<code>links</code>/<code>okf</code>/<code>frontmatter</code>); engine-модуль отдаёт чистые генераторы и константу <code>RESERVED_OKF</code>. Исключение живёт только на этапе перечисления страниц (indexer/retrieval + листинг); <code>lint</code> получает уже отфильтрованный набор, <code>validate.py</code>/<code>lint.py</code> остаются нетронутыми. <code>export.py</code> удалён.</figcaption>
+  </figure>
+
+  <h3>Граф зависимостей — «A &#8594; B» = A зависит от B</h3>
+  <figure>
+    <svg viewBox="0 0 980 470" role="img" aria-label="Граф зависимостей компонентов спеки">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"></path>
+        </marker>
+        <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="var(--shadow)"></feDropShadow>
+        </filter>
+      </defs>
+      <!-- edges: A depends on B, arrow A->B -->
+      <path class="g-edge" marker-end="url(#arrow)" d="M220,63 L420,105"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M220,163 L420,124"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M220,168 C480,175 560,150 730,150"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M510,136 C600,200 660,235 728,258"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M220,323 C440,315 560,290 728,272"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M220,413 C450,400 560,320 728,286"></path>
+      <!-- nodes -->
+      <g filter="url(#ds)">
+        <rect class="g-node" x="40" y="40" width="180" height="46" rx="7"></rect>
+        <text class="g-label" x="130" y="60" text-anchor="middle">server call-site</text>
+        <text class="g-sub" x="130" y="76" text-anchor="middle">refresh в хендлерах (R-07)</text>
+
+        <rect class="g-node" x="40" y="140" width="180" height="46" rx="7"></rect>
+        <text class="g-label" x="130" y="160" text-anchor="middle">wiki_export_okf sweep</text>
+        <text class="g-sub" x="130" y="176" text-anchor="middle">batch (R-08)</text>
+
+        <rect class="g-node" x="40" y="300" width="180" height="46" rx="7"></rect>
+        <text class="g-label" x="130" y="320" text-anchor="middle">exclusion page-walk</text>
+        <text class="g-sub" x="130" y="336" text-anchor="middle">R-10</text>
+
+        <rect class="g-node" x="40" y="390" width="180" height="46" rx="7"></rect>
+        <text class="g-label" x="130" y="410" text-anchor="middle">write guard</text>
+        <text class="g-sub" x="130" y="426" text-anchor="middle">R-11</text>
+
+        <rect class="g-node" x="420" y="90" width="180" height="46" rx="7"></rect>
+        <text class="g-label" x="510" y="110" text-anchor="middle">refresh_artifacts</text>
+        <text class="g-sub" x="510" y="126" text-anchor="middle">okf.py (R-06)</text>
+
+        <rect class="g-node" x="730" y="120" width="200" height="54" rx="7"></rect>
+        <text class="g-label" x="830" y="142" text-anchor="middle">helpers (существующие)</text>
+        <text class="g-sub" x="830" y="159" text-anchor="middle">links / okf / frontmatter</text>
+
+        <rect class="g-node" x="730" y="240" width="200" height="54" rx="7"></rect>
+        <text class="g-label" x="830" y="262" text-anchor="middle">okf_artifacts.py</text>
+        <text class="g-sub" x="830" y="279" text-anchor="middle">render_* · RESERVED_OKF (R-05)</text>
+      </g>
+    </svg>
+    <figcaption>Все рёбра направлены к базовым модулям (<code>okf_artifacts.py</code>, существующие helpers) — граф ацикличен, порядок реализации: engine &#8594; okf.py &#8594; server. <code>refresh_artifacts</code> зависит от <code>okf_artifacts</code>; свип — от <code>refresh_artifacts</code> и helpers; исключение и write-guard — от <code>RESERVED_OKF</code>. Циклов нет.</figcaption>
+  </figure>
+
+  <h3>Карта покрытия — задача &#8594; требование(я)</h3>
+  <table>
+    <tr><th>Задача (из контекста)</th><th>Требования</th><th>Покрыто</th></tr>
+    <tr><td>T1 · инкрементальный refresh на каждом мутирующем хендлере</td><td>R-01, R-06, R-07</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T2 · <code>wiki_export_okf</code> сохраняет имя, drops <code>dest</code>, in-place свип на helpers</td><td>R-03, R-08</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T3 · удалить дублирование <code>export.py</code></td><td>R-04, R-05</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T4 · исключить reserved из index/validate/lint/search</td><td>R-10</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T5 · reserved-slug write guard</td><td>R-11</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T6 · patch bump <code>0.2.3</code>&#8594;<code>0.2.4</code></td><td>R-17</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T7 · rebuild НЕ переклассифицирует <code>type</code>/<code>tags</code></td><td>R-08 (preserve), R-09, C-01</td><td><span class="badge ok">✓</span></td></tr>
+  </table>
+
+  <h3>Результаты проверки — фазы</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th><th>Заметка</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td><td>Нет плейсхолдеров TODO/TBD/FIXME/???; нет битых якорных ссылок; заголовки уникальны; нумерации секций нет (нумерованные списки без пропусков).</td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td><td>Все 7 задач контекста закрыты &#8805;1 требованием; лишних требований нет. Расхождение порядка refresh vs re-index (F-001) устранено — шаги свипа переупорядочены.</td></tr>
+    <tr><td>clarity</td><td><span class="badge ok">passed</span></td><td>Явных вагонных терминов без критерия нет; DoD покрыт Testing/Verification. Неоднозначность «defined once» (F-002) устранена переписанной секцией; doc/version критерий (F-003) добавлен в Verification.</td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td><td>Повторный прогон: изменены секции batch-sweep, Reserved files, Files touched, Verification; кросс-секционные расхождения (F-001/F-002) сняты, новых противоречий нет.</td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <tr><th>id</th><th>severity</th><th>section</th><th>text</th><th>fix / resolution</th><th>verdict</th></tr>
+    <tr>
+      <td>F-001</td>
+      <td><span class="badge warn">WARNING</span></td>
+      <td>Mechanism — batch sweep</td>
+      <td>Внутреннее расхождение порядка. Правило Call site: <code>refresh_artifacts</code> идёт «после re-index, до auto-commit»; последовательность свипа перечисляла refresh (шаг 3) до re-index+commit (шаг 4). Внутри <code>wiki_export_okf</code> refresh оказывался до, а не после re-index — два утверждения расходились.</td>
+      <td>Шаги свипа переупорядочены: шаг 3 = re-index, шаг 4 = регенерация через <code>refresh_artifacts</code> «после re-index» + commit — совпадает с правилом write-path. Противоречие снято.</td>
+      <td><span class="badge ok">fixed</span> · 2026-07-09</td>
+    </tr>
+    <tr>
+      <td>F-002</td>
+      <td><span class="badge warn">WARNING</span></td>
+      <td>Reserved files, exclusion, and guards</td>
+      <td>«Exclusion defined once» в едином shared skip path было в напряжении с Files touched, где перечислялись <code>indexer.py</code>/<code>validate.py</code>/<code>lint.py</code>/<code>retrieval.py</code>, каждый под исключение <code>RESERVED_OKF</code>. <code>validate.py</code>/<code>lint.py</code> — stdlib-only и делают проверку имени, а не directory page-walk, поэтому один shared skip path мог не покрывать все четыре точки.</td>
+      <td>Секция переписана: <code>RESERVED_OKF</code> — одна общая константа; исключение только на этапе перечисления страниц (indexer/retrieval + листинг), <code>lint</code> content map из отфильтрованного набора, <code>validate.py</code>/<code>lint.py</code> НЕ изменяются. Files touched обновлён. Locus однозначен.</td>
+      <td><span class="badge ok">fixed</span> · 2026-07-09</td>
+    </tr>
+    <tr>
+      <td>F-003</td>
+      <td><span class="badge info">INFO</span></td>
+      <td>Authoring rules, README, versioning</td>
+      <td>Заметка в <code>resources.py</code>, правки README/README.ru и bump версии не имели явного критерия приёмки в Testing/Verification (проверялись только осмотром).</td>
+      <td>В Verification добавлен bullet Inspection: version == 0.2.4; authoring-rules упоминают reserved slugs; README (EN+RU) описывает no-<code>dest</code> свип. Критерии приёмки теперь явные.</td>
+      <td><span class="badge ok">fixed</span> · 2026-07-09</td>
+    </tr>
+  </table>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 0 CRITICAL open, 0 WARNING open, 0 INFO open. Все 3 находки первого прогона <code>fixed</code> (2026-07-09); фазы passed; <code>spec_hash</code> <code>4475f4bf6a553619</code> совпадает с телом — Step-0 quick-exit пройдёт.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> &#8594; <code>spec (OK)</code> &#8594; <code>plan (–)</code> &#8594; <code>result (–)</code></p>
+</section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:result END -->
+  </main>
+</body>
+</html>
