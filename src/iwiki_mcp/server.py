@@ -217,6 +217,8 @@ def wiki_search(
     domains: list[str] | None = None,
     k: int | None = None,
     threshold: float | None = None,
+    type: str | None = None,
+    tags: list[str] | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     cfg = Config.load()
@@ -231,6 +233,8 @@ def wiki_search(
         top_k=cfg.top_k if k is None else k,
         threshold=cfg.score_threshold if threshold is None else threshold,
         mode=mode,
+        type=type,
+        tags=tags,
     )
     return {"results": results}
 
