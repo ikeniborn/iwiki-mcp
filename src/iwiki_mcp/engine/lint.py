@@ -13,6 +13,7 @@ import json
 import os
 import re
 
+from . import frontmatter as _fm
 from .links import parse_links
 from .validate import validate_page
 
@@ -154,6 +155,40 @@ def _missing_source(wiki_dir: str, project_dir: str | None) -> list[dict]:
     return out
 
 
+def _edit_distance_le1(a: str, b: str) -> bool:
+    """True if a and b differ by at most one insert/delete/substitution."""
+    if a == b:
+        return False
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long = (a, b) if la < lb else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(short) and j < len(long):
+        if short[i] == long[j]:
+            i += 1
+            j += 1
+        elif skipped:
+            return False
+        else:
+            skipped = True
+            j += 1
+    return True
+
+
+def _tag_drift(all_tags: set) -> list:
+    tags = sorted(all_tags)
+    out = []
+    for i, a in enumerate(tags):
+        for b in tags[i + 1:]:
+            if a != b and (b.startswith(a) or a.startswith(b) or _edit_distance_le1(a, b)):
+                out.append({"tags": [a, b]})
+    return out
+
+
 def lint(wiki_dir: str, project_dir: str | None = None) -> dict:
     """Health report over docs/wiki/. Absent/empty wiki → {"wiki_present": false}."""
     if not os.path.isdir(wiki_dir):
@@ -162,8 +197,17 @@ def lint(wiki_dir: str, project_dir: str | None = None) -> dict:
     if not pages:
         return {"wiki_present": False}
 
-    content = {p: _read(p) for p in pages}
+    raw = {p: _read(p) for p in pages}
+    meta_body = {p: _fm.split(c) for p, c in raw.items()}
+    content = {p: mb[1] for p, mb in meta_body.items()}   # body only
     headings = {p: _headings(c) for p, c in content.items()}
+
+    missing_frontmatter = [p for p, (meta, _) in meta_body.items() if not meta]
+    all_tags = set()
+    for meta, _ in meta_body.values():
+        for t in meta.get("tags", []) or []:
+            all_tags.add(_fm.normalize_tag(t))
+    all_tags.discard("")
 
     broken: list[dict] = []
     referenced_by: dict[str, set[str]] = {}
@@ -191,4 +235,6 @@ def lint(wiki_dir: str, project_dir: str | None = None) -> dict:
     return {"wiki_present": True, "pages": len(pages),
             "broken": broken, "orphans": orphans, "stale": _stale(wiki_dir),
             "missing_source": _missing_source(wiki_dir, project_dir),
-            "sections": sections}
+            "sections": sections,
+            "missing_frontmatter": missing_frontmatter,
+            "tag_drift": _tag_drift(all_tags)}
