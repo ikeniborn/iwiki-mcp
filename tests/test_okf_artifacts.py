@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from iwiki_mcp import base, indexer, server
+from iwiki_mcp import base, indexer, okf, server
 from iwiki_mcp.engine.config import Config
 from iwiki_mcp.engine.okf_artifacts import RESERVED_OKF, render_index, render_log
 from iwiki_mcp.engine.grep import grep_sections
@@ -131,3 +131,36 @@ def test_unmigrated_pages_skips_reserved(tmp_path):
     assert "a" in slugs
     assert "sub/index" in slugs                        # nested kept
     assert "index" not in slugs and "log" not in slugs  # domain-root reserved skipped
+
+
+def test_refresh_artifacts_writes_index_and_log(tmp_path):
+    dom = tmp_path / "wiki" / "d"
+    (dom / ".iwiki").mkdir(parents=True)
+    (dom / ".iwiki" / "log.jsonl").write_text(
+        '{"op":"ingest","page":"a.md","date":"2026-07-01"}\n', encoding="utf-8")
+    (dom / "a.md").write_text(
+        "---\ntype: concept\n---\n# A\n\n## Overview\ns\n", encoding="utf-8")
+    warn = okf.refresh_artifacts(str(tmp_path / "wiki"), "d")
+    assert warn is None
+    assert (dom / "index.md").read_text(encoding="utf-8") == "# Index\n\n- [a](a.md)\n"
+    assert (dom / "log.md").read_text(encoding="utf-8") == \
+        "# Log\n\n- 2026-07-01 ingest a.md\n"
+
+
+def test_refresh_artifacts_excludes_reserved_from_index(tmp_path):
+    dom = tmp_path / "wiki" / "d"
+    (dom / ".iwiki").mkdir(parents=True)
+    (dom / "a.md").write_text("# A\n\n## Overview\ns\n", encoding="utf-8")
+    okf.refresh_artifacts(str(tmp_path / "wiki"), "d")           # first run
+    okf.refresh_artifacts(str(tmp_path / "wiki"), "d")           # idempotent re-run
+    assert (dom / "index.md").read_text(encoding="utf-8") == "# Index\n\n- [a](a.md)\n"
+
+
+def test_refresh_artifacts_warns_on_authored_reserved(tmp_path):
+    dom = tmp_path / "wiki" / "d"
+    (dom / ".iwiki").mkdir(parents=True)
+    (dom / "index.md").write_text(
+        "---\ntype: concept\n---\n# Real\n\n## Overview\nx\n", encoding="utf-8")
+    warn = okf.refresh_artifacts(str(tmp_path / "wiki"), "d")
+    assert warn and "index.md" in warn
+    assert "Real" in (dom / "index.md").read_text(encoding="utf-8")   # left intact

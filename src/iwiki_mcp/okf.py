@@ -5,8 +5,10 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import subprocess
+from pathlib import Path
 
 from .engine import classify, frontmatter as fm
+from .engine import okf_artifacts as _oa
 from .engine.store import VectorStore
 from . import base as _base
 
@@ -86,3 +88,60 @@ def latest_source(base_dir, domain, page_file):
         elif rec.get("source"):
             src = rec["source"]
     return src
+
+
+def _page_slugs(dom_path: Path) -> list[str]:
+    """Domain page slugs, excluding the .iwiki dir and the reserved OKF files."""
+    out = []
+    for p in sorted(dom_path.rglob("*.md")):
+        rel = p.relative_to(dom_path)
+        if ".iwiki" in rel.parts or rel.as_posix() in _oa.RESERVED_OKF:
+            continue
+        out.append(rel.with_suffix("").as_posix())
+    return out
+
+
+def _read_log(dom_path: Path) -> list:
+    path = dom_path / ".iwiki" / "log.jsonl"
+    recs: list = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                recs.append(json.loads(line))
+            except ValueError:
+                pass
+    return recs
+
+
+def _looks_authored(text: str) -> bool:
+    """A pre-existing reserved file is 'authored' (never clobber) if it carries
+    frontmatter or any ## section — the generated nav/log files have neither."""
+    meta, _ = fm.split(text)
+    if meta:
+        return True
+    return any(ln.startswith("## ") for ln in text.splitlines())
+
+
+def refresh_artifacts(base_dir, domain) -> str | None:
+    """Regenerate index.md + log.md in the domain root from current state.
+    Deterministic and best-effort: never raises. Returns a warning or None."""
+    try:
+        dom = Path(base_dir) / domain
+        slugs = _page_slugs(dom)
+        records = _read_log(dom)
+        warnings: list = []
+        for name, content in (("index.md", _oa.render_index(slugs)),
+                              ("log.md", _oa.render_log(records))):
+            p = dom / name
+            if p.is_file() and _looks_authored(p.read_text(encoding="utf-8")):
+                warnings.append(
+                    f"authored page '{name}' collides with the generated OKF "
+                    "file; left untouched")
+                continue
+            p.write_text(content, encoding="utf-8")
+        return "; ".join(warnings) or None
+    except Exception:
+        return "okf artifact refresh failed"
