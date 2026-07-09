@@ -42,7 +42,9 @@ def test_index_domain_reembeds_stale_dimensions(tmp_path, monkeypatch):
         "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
     )
     monkeypatch.setattr(
-        indexer, "embed_texts", lambda cfg, texts: [[1.0] + [0.0] * (cfg.dimensions - 1) for _ in texts]
+        indexer,
+        "embed_texts",
+        lambda cfg, texts: [[1.0] + [0.0] * (cfg.dimensions - 1) for _ in texts],
     )
 
     indexer.index_domain(_cfg(dimensions=2), str(b), "backend")

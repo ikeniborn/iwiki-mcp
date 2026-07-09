@@ -94,9 +94,13 @@ def parse_links(content: str) -> list[str]:
 
 
 def has_legacy_wikilink(content: str) -> bool:
-    """True if content still contains a [[...]] link outside code — the
-    lazy-migration 'not yet edited' marker surfaced by lint."""
-    return bool(_LINK.search(_strip_code(content)))
+    """True if content still contains a [[...]] link with a real slug outside
+    code — the lazy-migration 'not yet edited' marker surfaced by lint. A bare
+    same-page anchor ([[#Heading]], empty slug) is not counted: parse_links
+    rejects it and to_markdown_links never rewrites it, so it must never keep a
+    page from converging to a clean legacy_wikilink report."""
+    stripped = _strip_code(content)
+    return any(_legacy_target_key(m.group(1)) for m in _LINK.finditer(stripped))
 
 
 def to_markdown_links(body: str) -> str:
@@ -119,5 +123,11 @@ def to_markdown_links(body: str) -> str:
         anchor = f"#{slugify_heading(heading)}" if heading else ""
         return f"[{text}]({slug}.md{anchor})"
 
+    def _restore(m: re.Match) -> str:
+        # Only our own sentinels index into `masks`; a stray \x00N\x00 already
+        # in the body (never in real markdown) passes through, not IndexError.
+        i = int(m.group(1))
+        return masks[i] if i < len(masks) else m.group(0)
+
     rewritten = _WIKILINK.sub(_rewrite, masked)
-    return re.sub(r"\x00(\d+)\x00", lambda m: masks[int(m.group(1))], rewritten)
+    return re.sub(r"\x00(\d+)\x00", _restore, rewritten)

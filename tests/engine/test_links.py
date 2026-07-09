@@ -1,4 +1,9 @@
-from iwiki_mcp.engine.links import parse_links, slugify_heading
+from iwiki_mcp.engine.links import (
+    has_legacy_wikilink,
+    parse_links,
+    slugify_heading,
+    to_markdown_links,
+)
 
 
 def test_ignores_fenced_code_block():
@@ -51,9 +56,6 @@ def test_slugify_is_deterministic_and_idempotent():
     assert slugify_heading(once) == once
 
 
-from iwiki_mcp.engine.links import has_legacy_wikilink
-
-
 def test_markdown_link_with_anchor_parsed():
     assert parse_links("See [Flow](auth.md#login-flow) here.") == ["auth#login-flow"]
 
@@ -95,6 +97,13 @@ def test_has_legacy_wikilink_true_false_and_code():
     assert has_legacy_wikilink("`[[ $# ]]` in code") is False
 
 
+def test_has_legacy_wikilink_ignores_bare_anchor():
+    # A bare same-page anchor has no slug: parse_links rejects it and
+    # to_markdown_links never rewrites it, so it must not read as un-migrated.
+    assert has_legacy_wikilink("bare [[#anchor]] only") is False
+    assert has_legacy_wikilink("real [[page]] and [[#a]]") is True
+
+
 def test_markdown_noncanonical_anchor_slugified_and_dedupes_with_legacy():
     md = "[Docs](guide.md#My-Section) and [[guide#My Section]]"
     assert parse_links(md) == ["guide#my-section"]
@@ -102,9 +111,6 @@ def test_markdown_noncanonical_anchor_slugified_and_dedupes_with_legacy():
 
 def test_legacy_bare_anchor_rejected():
     assert parse_links("see [[#Something]] here") == []
-
-
-from iwiki_mcp.engine.links import to_markdown_links
 
 
 def test_rewrite_plain_slug():
@@ -148,3 +154,10 @@ def test_idempotent_on_markdown_body():
 def test_idempotent_rerun():
     once = to_markdown_links("[[a#B c]] and [[d]]")
     assert to_markdown_links(once) == once
+
+
+def test_to_markdown_links_tolerates_nul_sentinel_lookalike():
+    # A NUL-sentinel look-alike already in the body (never in real markdown)
+    # must pass through untouched, not raise IndexError from the restore step.
+    body = "weird \x000\x00 text with [[core]]"
+    assert to_markdown_links(body) == "weird \x000\x00 text with [core](core.md)"
