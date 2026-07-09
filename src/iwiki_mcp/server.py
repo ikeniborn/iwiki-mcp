@@ -390,6 +390,7 @@ def wiki_write_page(
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
                                   pathspec=valid_domain)
     result = {
@@ -403,6 +404,8 @@ def wiki_write_page(
     }
     if fm_warning:
         result.setdefault("warning", fm_warning)
+    if art_warn:
+        result.setdefault("warning", art_warn)
     return result
 
 
@@ -479,9 +482,10 @@ def wiki_update_page(
             _restore_log(log_file, log_before)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: update {page_rel}",
                                   pathspec=valid_domain)
-    return {
+    result = {
         "page": page_rel,
         "heading": heading.lstrip("#").strip(),
         "indexed_chunks": stats["indexed_chunks"],
@@ -493,6 +497,9 @@ def wiki_update_page(
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
@@ -532,9 +539,10 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
             _rollback_last_log(bind.base, valid_domain, "delete", page_file, "", None)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: delete {page_rel}",
                                   pathspec=valid_domain)
-    return {
+    result = {
         "deleted": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
@@ -542,6 +550,9 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
@@ -807,13 +818,17 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
                 if t not in vocab:
                     vocab.append(t)
         stats = indexer.index_domain(cfg, bind.base, target)
+        art_warn = okf.refresh_artifacts(bind.base, target)
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
                                       pathspec=target)
-        return {"domain": target, "mode": "autonomous", "migrated": migrated,
-                "skipped": skipped, "warnings": warnings,
-                "indexed_chunks": stats["indexed_chunks"],
-                "committed": commit.get("committed", False),
-                "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+        result = {"domain": target, "mode": "autonomous", "migrated": migrated,
+                  "skipped": skipped, "warnings": warnings,
+                  "indexed_chunks": stats["indexed_chunks"],
+                  "committed": commit.get("committed", False),
+                  "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+        if art_warn:
+            result.setdefault("warning", art_warn)
+        return result
     # plan mode: no writes
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
@@ -879,13 +894,17 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
             fh.write(original)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: apply okf {page_rel}",
                                   pathspec=valid_domain)
     meta, _ = _fm.split(fm_block + body)
-    return {"page": page_rel, "type": meta.get("type"), "tags": meta.get("tags", []),
-            "indexed_chunks": stats["indexed_chunks"],
-            "committed": commit.get("committed", False),
-            "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+    result = {"page": page_rel, "type": meta.get("type"), "tags": meta.get("tags", []),
+              "indexed_chunks": stats["indexed_chunks"],
+              "committed": commit.get("committed", False),
+              "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
