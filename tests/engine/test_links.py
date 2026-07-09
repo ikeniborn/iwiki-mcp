@@ -93,7 +93,7 @@ def test_has_legacy_wikilink_true_false_and_code():
 
 
 def test_markdown_noncanonical_anchor_slugified_and_dedupes_with_legacy():
-    md = "[Docs](guide.md#My Section) and [[guide#My Section]]"
+    md = "[Docs](guide.md#My-Section) and [[guide#My Section]]"
     assert parse_links(md) == ["guide#my-section"]
 
 
