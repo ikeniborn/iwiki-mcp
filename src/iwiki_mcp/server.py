@@ -227,7 +227,7 @@ def wiki_search(
     doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
         return {"results": [], "hint": "no domains in scope"}
-    q_type = type.strip().lower() if type else None
+    q_type = (type.strip().lower() or None) if type else None
     q_tags = _fm.normalize_tags(tags) if tags else None
     q_tags = q_tags or None
     results = retrieval.hybrid_search(

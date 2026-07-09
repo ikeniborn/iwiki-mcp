@@ -72,6 +72,8 @@ def normalize_tag(s: str) -> str:
 
 
 def normalize_tags(tags: list[str]) -> list[str]:
+    if isinstance(tags, str):
+        tags = [tags]
     out: list[str] = []
     for t in tags:
         n = normalize_tag(t)

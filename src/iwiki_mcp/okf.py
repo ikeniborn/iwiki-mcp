@@ -68,17 +68,21 @@ def latest_source(base_dir, domain, page_file):
     path = log_path(base_dir, domain)
     src = None
     try:
-        for line in open(path, encoding="utf-8"):
-            line = line.strip()
-            if not line:
-                continue
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
             rec = json.loads(line)
-            if rec.get("page") != page_file:
-                continue
-            if rec.get("op") == "delete":
-                src = None
-            elif rec.get("source"):
-                src = rec["source"]
-    except (OSError, ValueError):
-        pass
+        except ValueError:
+            continue
+        if rec.get("page") != page_file:
+            continue
+        if rec.get("op") == "delete":
+            src = None
+        elif rec.get("source"):
+            src = rec["source"]
     return src
