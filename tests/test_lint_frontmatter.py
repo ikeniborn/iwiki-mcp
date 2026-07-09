@@ -31,3 +31,12 @@ def test_no_drift_for_distinct_tags(tmp_path):
         "b": "---\ntype: api\ntags: [binding]\n---\n# B\n\n## Overview\ns\n\n## C\ny\n",
     })
     assert lint(wiki)["tag_drift"] == []
+
+
+def test_lint_sections_surface_frontmatter_advisories(tmp_path):
+    wiki = _wiki(tmp_path, {
+        "a": "---\ntype: bogus\n---\n# A\n\n## Overview\ns\n\n## B\nx\n",
+    })
+    rep = lint(wiki)
+    kinds = {s["type"] for s in rep["sections"] if "a.md" in s["page"]}
+    assert "unknown_type" in kinds

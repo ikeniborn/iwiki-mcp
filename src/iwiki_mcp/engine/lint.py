@@ -179,12 +179,12 @@ def _edit_distance_le1(a: str, b: str) -> bool:
     return True
 
 
-def _tag_drift(all_tags: set) -> list:
+def _tag_drift(all_tags: set[str]) -> list[dict]:
     tags = sorted(all_tags)
     out = []
     for i, a in enumerate(tags):
         for b in tags[i + 1:]:
-            if a != b and (b.startswith(a) or a.startswith(b) or _edit_distance_le1(a, b)):
+            if b.startswith(a) or a.startswith(b) or _edit_distance_le1(a, b):
                 out.append({"tags": [a, b]})
     return out
 
@@ -230,8 +230,8 @@ def lint(wiki_dir: str, project_dir: str | None = None) -> dict:
                     broken.append({"page": page, "ref": ref})
 
     orphans = [p for p in pages if not (referenced_by.get(p, set()) - {p})]
-    sections = [{"page": p, **f} for p, c in content.items()
-                for f in validate_page(c)]
+    sections = [{"page": p, **f} for p in pages
+                for f in validate_page(raw[p])]
     return {"wiki_present": True, "pages": len(pages),
             "broken": broken, "orphans": orphans, "stale": _stale(wiki_dir),
             "missing_source": _missing_source(wiki_dir, project_dir),
