@@ -4,7 +4,8 @@ Mirrors the structural rules the authoring skills mandate (see the section-forma
 spec). Consumed by ``lint`` (folded into its report) and the ``validate`` subcommand.
 The blocking subset (deep_heading, pre_h2_text) is mirrored inline by the
 iwiki-validate PreToolUse hook; the advisory subset (missing_overview, missing_lead,
-long_lead) is report-only.
+long_lead, and — only when the page has frontmatter — missing_type, unknown_type,
+missing_description) is report-only.
 """
 from __future__ import annotations
 import re
@@ -55,8 +56,7 @@ def validate_page(content: str) -> list[dict]:
                          "text": "indexable text before the first ## (only a single # H1 allowed)"})
 
     secs = _sections(body)
-    has_overview = secs and secs[0][0].lower() == OVERVIEW_HEADING
-    if not has_overview:
+    if not (secs and secs[0][0].lower() == OVERVIEW_HEADING):
         findings.append({"type": "missing_overview", "severity": "advisory",
                          "text": "first ## section is not 'Overview'"})
 
@@ -69,14 +69,14 @@ def validate_page(content: str) -> list[dict]:
             findings.append({"type": "long_lead", "severity": "advisory",
                              "text": f"section '{heading}' lead exceeds {LEAD_MAX} chars"})
 
-    # Only check frontmatter fields if page has frontmatter or is structurally new-format
-    if meta or not has_overview:
+    if meta:                       # only nudge per-field issues once frontmatter exists
         if not meta.get("type"):
             findings.append({"type": "missing_type", "severity": "advisory",
                              "text": "frontmatter has no 'type' (run wiki_migrate_okf)"})
-            findings.append({"type": "missing_description", "severity": "advisory",
-                             "text": "frontmatter has no 'description'"})
         elif meta["type"] not in _fm.OKF_TYPES:
             findings.append({"type": "unknown_type", "severity": "advisory",
                              "text": f"type '{meta['type']}' not in the OKF vocabulary"})
+        if not meta.get("description"):
+            findings.append({"type": "missing_description", "severity": "advisory",
+                             "text": "frontmatter has no 'description'"})
     return findings

@@ -11,7 +11,7 @@ def test_frontmatter_does_not_trigger_pre_h2_text():
 
 
 def test_missing_type_and_description_are_advisory():
-    page = "# T\n\n## B\nbody without overview\n"
+    page = "---\ntitle: X\n---\n# T\n\n## B\nbody without overview\n"
     findings = validate_page(page)
     types = _types(findings)
     assert "missing_type" in types
@@ -27,6 +27,6 @@ def test_unknown_type_flagged_advisory():
 
 
 def test_valid_typed_page_has_no_frontmatter_findings():
-    page = "---\ntype: api\n---\n# T\n\n## Overview\ns\n\n## B\nbody\n"
+    page = "---\ntype: api\ndescription: d\n---\n# T\n\n## Overview\ns\n\n## B\nbody\n"
     types = _types(validate_page(page))
     assert not ({"missing_type", "unknown_type", "missing_description"} & types)
