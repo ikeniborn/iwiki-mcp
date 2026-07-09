@@ -868,6 +868,21 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
 
 
 @_safe
+def wiki_export_okf(domain: str, dest: str) -> dict:
+    from . import export
+    bind = base.resolve_binding()
+    valid_domain = _validate_domain(domain)
+    dom_path = _domain_path(bind.base, valid_domain)
+    if not dom_path.is_dir():
+        return {"error": f"domain '{valid_domain}' not found",
+                "hint": "create it with wiki_create_domain"}
+    if not dest:
+        return {"error": "dest is required", "hint": "pass an output directory path"}
+    result = export.export_domain(str(dom_path), os.path.abspath(os.path.expanduser(dest)))
+    return {"domain": valid_domain, **result}
+
+
+@_safe
 def wiki_sync() -> dict:
     bind = base.resolve_binding()
     return sync.sync(bind.base)
@@ -890,6 +905,7 @@ mcp.tool()(wiki_lint)
 mcp.tool()(wiki_remediation_plan)
 mcp.tool()(wiki_migrate_okf)
 mcp.tool()(wiki_apply_okf)
+mcp.tool()(wiki_export_okf)
 mcp.tool()(wiki_sync)
 
 
