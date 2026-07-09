@@ -227,6 +227,9 @@ def wiki_search(
     doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
         return {"results": [], "hint": "no domains in scope"}
+    q_type = type.strip().lower() if type else None
+    q_tags = _fm.normalize_tags(tags) if tags else None
+    q_tags = q_tags or None
     results = retrieval.hybrid_search(
         cfg,
         bind.base,
@@ -235,8 +238,8 @@ def wiki_search(
         top_k=cfg.top_k if k is None else k,
         threshold=cfg.score_threshold if threshold is None else threshold,
         mode=mode,
-        type=type,
-        tags=tags,
+        type=q_type,
+        tags=q_tags,
     )
     return {"results": results}
 
@@ -448,8 +451,7 @@ def wiki_update_page(
         desc = _fm.derive_description(new_body, cfg.summary_max)
         if desc:
             meta["description"] = desc
-        meta["timestamp"] = (okf.git_last_commit_date(bind.base, f"{valid_domain}/{page_file}")
-                             or _dt.date.today().isoformat())
+        meta["timestamp"] = _dt.date.today().isoformat()
         new_md = _fm.render(meta) + new_body
     else:
         new_md = new_body
@@ -767,7 +769,11 @@ def _unmigrated_pages(dom_path: Path):
 @_safe
 def wiki_migrate_okf(domain: str | None = None) -> dict:
     bind = base.resolve_binding()
-    target = _validate_domain(domain or bind.write or "")
+    target = domain or bind.write
+    if not target:
+        return {"error": "no domain given and no write-target bound",
+                "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
+    target = _validate_domain(target)
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
@@ -778,18 +784,24 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     cfg = Config.load()
     if cfg.chat_model:
         migrated, skipped, warnings = [], [], []
+        vocab = okf.domain_tag_vocab(bind.base, target)
         for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
             if has_fm:
                 skipped.append(slug)
                 continue
+            src = okf.latest_source(bind.base, target, page_file)
             fm_block, warn = okf.build_frontmatter(
                 cfg, bind.base, target, slug, body,
-                source=None, explicit_type=None, explicit_tags=None,
-                timestamp_path=f"{target}/{page_file}")
+                source=src, explicit_type=None, explicit_tags=None,
+                timestamp_path=f"{target}/{page_file}", tag_vocab=vocab)
             (dom_path / page_file).write_text(fm_block + body, encoding="utf-8")
             migrated.append(slug)
             if warn:
                 warnings.append({"slug": slug, "warning": warn})
+            m, _ = _fm.split(fm_block)
+            for t in m.get("tags", []):
+                if t not in vocab:
+                    vocab.append(t)
         stats = indexer.index_domain(cfg, bind.base, target)
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
                                       pathspec=target)
@@ -844,10 +856,12 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     cfg = Config.load()
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     original = open(path, encoding="utf-8").read()
-    _, body = _fm.split(original)
+    existing_meta, body = _fm.split(original)
+    apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
+    resolved = existing_meta.get("resource") or okf.latest_source(bind.base, valid_domain, page_file)
     fm_block, _ = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
-        source=None, explicit_type=type, explicit_tags=tags,
+        source=resolved, explicit_type=type, explicit_tags=apply_tags,
         timestamp_path=f"{valid_domain}/{page_file}")
     try:
         with open(path, "w", encoding="utf-8") as fh:

@@ -1,3 +1,5 @@
+import json
+
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
 from iwiki_mcp.engine import frontmatter as fm
@@ -56,3 +58,76 @@ def test_migrate_autonomous_mode(tmp_path, monkeypatch):
     # idempotent
     res2 = server.wiki_migrate_okf("d")
     assert res2["migrated"] == [] and "a" in res2["skipped"]
+
+
+def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_CHAT_MODEL", "chat-x")
+    from iwiki_mcp import okf
+    monkeypatch.setattr(okf.classify, "classify_page",
+                        lambda cfg, body, existing_tags: {"type": "guide", "tags": ["x"], "warning": None})
+    (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
+    log_path.write_text(json.dumps({
+        "op": "ingest", "source": "/src/a.py", "page": "a.md",
+        "date": "2020-01-01", "src_hash": "abc",
+    }) + "\n", encoding="utf-8")
+    res = server.wiki_migrate_okf("d")
+    assert res["mode"] == "autonomous"
+    assert "a" in res["migrated"]
+    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    assert meta["resource"] == "/src/a.py"
+
+
+def test_migrate_no_domain_no_write_target_friendly_error(monkeypatch):
+    monkeypatch.setattr(
+        server.base, "resolve_binding",
+        lambda: server.base.Binding(base="/b", read=(), write=None, project_dir="/p"),
+    )
+    res = server.wiki_migrate_okf()
+    assert res == {
+        "error": "no domain given and no write-target bound",
+        "hint": "pass domain= or set write in .iwiki.toml via wiki_bind",
+    }
+
+
+def test_apply_okf_preserves_existing_tags_when_none(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    meta = {"type": "guide", "title": "A", "tags": ["existing"]}
+    body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
+    (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
+    res = server.wiki_apply_okf("d", "a", "reference", tags=None)
+    assert "error" not in res
+    new_meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    assert new_meta["tags"] == ["existing"]
+
+
+def test_apply_okf_sets_resource_from_log(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
+    (tmp_path / "d" / "a.md").write_text(body, encoding="utf-8")
+    log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
+    log_path.write_text(json.dumps({
+        "op": "ingest", "source": "/src/a.py", "page": "a.md",
+        "date": "2020-01-01", "src_hash": "abc",
+    }) + "\n", encoding="utf-8")
+    res = server.wiki_apply_okf("d", "a", "guide")
+    assert "error" not in res
+    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    assert meta["resource"] == "/src/a.py"
+
+
+def test_apply_okf_rollback_on_index_failure(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
+    page_path = tmp_path / "d" / "a.md"
+    page_path.write_text(body, encoding="utf-8")
+    before = page_path.read_bytes()
+
+    def boom(cfg, base, domain):
+        raise RuntimeError("index failed")
+
+    monkeypatch.setattr(indexer, "index_domain", boom)
+    res = server.wiki_apply_okf("d", "a", "guide")
+    assert "error" in res
+    assert page_path.read_bytes() == before

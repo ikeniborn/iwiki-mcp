@@ -3,6 +3,7 @@ type/tags precedence (explicit params -> optional server-side classify ->
 default). Kept out of the engine because it reaches git and the index."""
 from __future__ import annotations
 import datetime as _dt
+import json
 import subprocess
 
 from .engine import classify, frontmatter as fm
@@ -30,14 +31,15 @@ def domain_tag_vocab(base_dir: str, domain: str) -> list:
 
 
 def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
-                      explicit_type, explicit_tags, timestamp_path):
+                      explicit_type, explicit_tags, timestamp_path, tag_vocab=None):
     """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default."""
     warning = None
     if explicit_type is not None:
         mtype = fm.coerce_type(explicit_type)
         mtags = fm.normalize_tags(explicit_tags or [])
     elif cfg.chat_model:
-        r = classify.classify_page(cfg, body, domain_tag_vocab(base_dir, domain))
+        vocab = tag_vocab if tag_vocab is not None else domain_tag_vocab(base_dir, domain)
+        r = classify.classify_page(cfg, body, vocab)
         mtype = r["type"]
         mtags = fm.normalize_tags(explicit_tags) if explicit_tags else r["tags"]
         warning = r["warning"]
@@ -57,3 +59,26 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
     meta["timestamp"] = (git_last_commit_date(base_dir, timestamp_path)
                          or _dt.date.today().isoformat())
     return fm.render(meta), warning
+
+
+def latest_source(base_dir, domain, page_file):
+    """Return the most recent ingest-log ``source`` recorded for ``page_file``,
+    or None if there is no log, no matching record, or the latest record is a delete."""
+    from .base import log_path
+    path = log_path(base_dir, domain)
+    src = None
+    try:
+        for line in open(path, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if rec.get("page") != page_file:
+                continue
+            if rec.get("op") == "delete":
+                src = None
+            elif rec.get("source"):
+                src = rec["source"]
+    except (OSError, ValueError):
+        pass
+    return src

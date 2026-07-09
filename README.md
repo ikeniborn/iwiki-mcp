@@ -238,13 +238,13 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 | `type` | Required. Closed vocabulary: `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default). |
 | `title` | Derived from the page's `# Title` H1. |
 | `description` | Derived from the `## Overview` section, truncated to `IWIKI_SUMMARY_MAX_CHARS`. |
-| `resource` | The `source` passed to the write tool, if any. |
+| `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. |
 | `tags` | Lowercase kebab-case labels, at most 5 per page. |
-| `timestamp` | The page file's last git-commit date, or today's date if not yet committed. |
+| `timestamp` | On create (`wiki_write_page`, `wiki_apply_okf`, `wiki_migrate_okf`): the page file's last git-commit date, or today's date if not yet committed. On edit (`wiki_update_page`): always today's date. |
 
 `type` and `tags` are resolved with this precedence: an **explicit** `type`/`tags` argument on the write tool wins; otherwise, when `IWIKI_CHAT_MODEL` is set, the server classifies the page body with that chat model; otherwise it defaults to `type="concept"` with no tags.
 
-Faceted search narrows `wiki_search` to a `type` and/or a set of `tags`:
+Faceted search narrows `wiki_search` to a `type` and/or a set of `tags`; the query values are normalized the same way as stored frontmatter (case-insensitive `type`, kebab-case `tags`), so `type="API"` still matches a page whose frontmatter says `type: api`:
 
 ```text
 wiki_search(query="deploy steps", type="runbook", tags=["ci"])
@@ -254,8 +254,8 @@ Tools for adopting OKF frontmatter on an existing domain:
 
 | Tool | What it does |
 |---|---|
-| `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. |
-| `wiki_apply_okf(domain, slug, type, tags)` | Apply agent-classified `type`/`tags` (plus derived fields) as frontmatter to one page, reindex, commit and push. |
+| `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. In autonomous mode, each page's `resource` falls back to its last logged ingest source, and tags coined for one page are reused as vocabulary for later pages in the same run. |
+| `wiki_apply_okf(domain, slug, type, tags)` | Apply agent-classified `type`/`tags` (plus derived fields) as frontmatter to one page, reindex, commit and push. Omitting `tags` preserves the page's existing tags instead of clearing them. |
 | `wiki_export_okf(domain, dest)` | Export a domain into a fully OKF-conformant bundle at `dest`: pages keep their frontmatter, `[[wikilink]]` syntax is rewritten to standard Markdown links, and reserved `index.md` / `log.md` files are generated. Sources are never mutated, only copied. |
 
 `IWIKI_CHAT_MODEL` (default: empty) is optional; leaving it unset disables server-side classification and `wiki_migrate_okf` falls back to plan mode.
