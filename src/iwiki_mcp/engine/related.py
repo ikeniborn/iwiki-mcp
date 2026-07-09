@@ -1,4 +1,5 @@
-"""Related sections: vector neighbours, with a [[refs]] graph fallback."""
+"""Related sections: vector neighbours, with a link-graph fallback (the
+parser reads both markdown links and legacy [[refs]])."""
 from __future__ import annotations
 from .store import Record, dequantize, cosine
 from .links import parse_links
@@ -17,7 +18,8 @@ def _vector_neighbours(target: Record, recs: list[Record], top_k: int) -> list[d
 
 
 def _graph_neighbours(target_file: str, depth: int) -> list[str]:
-    """BFS over [[refs]] starting from target_file's links, up to `depth` hops."""
+    """BFS over the page link graph (markdown links and legacy [[refs]])
+    starting from target_file's links, up to `depth` hops."""
     seen: set[str] = set()
     frontier = [target_file]
     for _ in range(max(0, depth)):

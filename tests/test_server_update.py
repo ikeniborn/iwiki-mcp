@@ -116,3 +116,12 @@ def test_update_removes_log_it_created_on_rollback(tmp_path, monkeypatch):
     assert "error" in out
     assert open(page, encoding="utf-8").read() == BASE_MD          # file restored
     assert not os.path.exists(log_file)                            # log removed on rollback
+
+
+def test_update_normalizes_wikilinks_in_edited_section(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    _write(BASE_MD)
+    server.wiki_update_page("backend", "auth", "Flow", "see [[core|the core]] now")
+    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    assert "[the core](core.md)" in content
+    assert "[[core|the core]]" not in content
