@@ -8,6 +8,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from mcp.server.fastmcp import FastMCP
@@ -20,6 +21,25 @@ from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
 
 mcp = FastMCP("iwiki")
+
+SOURCE_CONTENT_MAX_BYTES = 200_000
+
+_REMEDIATION_NEXT_STEPS = [
+    "Regenerate stale wiki markdown from source semantics.",
+    "Use wiki_update_page for compatible section-body edits.",
+    "Use wiki_delete_page then wiki_write_page when the article structure must change.",
+    "Use wiki_delete_page for missing_source delete candidates.",
+    "Run wiki_lint and report planned, updated, deleted, failed, and remaining_lint.",
+]
+
+_UPDATE_REMEDIATION_TOOLS = [
+    "wiki_update_page",
+    "wiki_delete_page",
+    "wiki_write_page",
+    "wiki_lint",
+]
+
+_DELETE_REMEDIATION_TOOLS = ["wiki_delete_page", "wiki_lint"]
 
 
 def _safe(fn):
@@ -97,6 +117,34 @@ def _page_path(b: str, domain: str, slug: str) -> str:
     if not _contains(dom, path):
         raise ValueError(f"invalid page slug '{slug}'")
     return str(path)
+
+
+def _slug_from_page_path(dom_path: Path, page_path: str) -> str:
+    rel = Path(page_path).resolve().relative_to(dom_path.resolve())
+    if rel.suffix != ".md":
+        raise ValueError(f"invalid page path '{page_path}'")
+    return rel.with_suffix("").as_posix()
+
+
+def _h2_headings(markdown: str) -> list[str]:
+    return [
+        m.group(1).strip()
+        for m in re.finditer(r"^##\s+(.*?)\s*$", markdown, re.MULTILINE)
+    ]
+
+
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _read_source_preview(path: str) -> tuple[str, int, bool]:
+    with open(path, "rb") as fh:
+        data = fh.read(SOURCE_CONTENT_MAX_BYTES + 1)
+    truncated = len(data) > SOURCE_CONTENT_MAX_BYTES
+    if truncated:
+        data = data[:SOURCE_CONTENT_MAX_BYTES]
+    return data.decode("utf-8", errors="replace"), os.path.getsize(path), truncated
 
 
 @_safe
@@ -577,6 +625,111 @@ def wiki_lint(domain: str | None = None) -> dict:
 
 
 @_safe
+def wiki_remediation_plan(domain: str | None = None) -> dict:
+    from .engine.lint import lint
+
+    bind = base.resolve_binding()
+    if not bind.write:
+        return {
+            "error": "no write domain bound",
+            "hint": "set write in .iwiki.toml via wiki_bind",
+        }
+    target = _validate_domain(domain or bind.write)
+    if target != bind.write:
+        return {
+            "error": "domain must match bound write domain",
+            "hint": f"use the bound write domain '{bind.write}'",
+        }
+    dom_path = _domain_path(bind.base, target)
+    report = lint(str(dom_path), project_dir=bind.project_dir)
+
+    update_candidates = []
+    delete_candidates = []
+    blocked_candidates = []
+    ignore_spec = ignore.load_project_ignore(bind.project_dir)
+
+    for finding in report.get("stale", []):
+        page = finding.get("page", "")
+        source = finding.get("source", "")
+        if source and ignore.is_ignored(ignore_spec, source, bind.project_dir):
+            blocked_candidates.append({
+                "domain": target,
+                "page": page,
+                "source": source,
+                "reason": "source_ignored",
+            })
+            continue
+        try:
+            slug = _slug_from_page_path(dom_path, page)
+            current_markdown = _read_text(page)
+        except Exception as e:
+            blocked_candidates.append({
+                "domain": target,
+                "page": page,
+                "source": source,
+                "reason": "page_unreadable",
+                "error": str(e),
+            })
+            continue
+        try:
+            source_content, source_bytes, source_truncated = _read_source_preview(source)
+        except OSError as e:
+            blocked_candidates.append({
+                "domain": target,
+                "slug": slug,
+                "page": page,
+                "source": source,
+                "reason": "source_unreadable",
+                "error": str(e),
+            })
+            continue
+        update_candidates.append({
+            "domain": target,
+            "slug": slug,
+            "page": page,
+            "source": source,
+            "current_markdown": current_markdown,
+            "source_content": source_content,
+            "source_bytes": source_bytes,
+            "source_truncated": source_truncated,
+            "current_headings": _h2_headings(current_markdown),
+            "recommended_tools": list(_UPDATE_REMEDIATION_TOOLS),
+        })
+
+    for finding in report.get("missing_source", []):
+        page = finding.get("page", "")
+        source = finding.get("source", "")
+        try:
+            slug = _slug_from_page_path(dom_path, page)
+        except Exception as e:
+            blocked_candidates.append({
+                "domain": target,
+                "page": page,
+                "source": source,
+                "reason": "page_unreadable",
+                "error": str(e),
+            })
+            continue
+        delete_candidates.append({
+            "domain": target,
+            "slug": slug,
+            "page": page,
+            "source": source,
+            "recommended_tools": list(_DELETE_REMEDIATION_TOOLS),
+        })
+
+    return {
+        "domain": target,
+        "lint": report,
+        "update_candidates": update_candidates,
+        "delete_candidates": delete_candidates,
+        "blocked_candidates": blocked_candidates,
+        "authoring_rules": AUTHORING_RULES,
+        "next_steps": list(_REMEDIATION_NEXT_STEPS),
+    }
+
+
+@_safe
 def wiki_sync() -> dict:
     bind = base.resolve_binding()
     return sync.sync(bind.base)
@@ -596,6 +749,7 @@ mcp.tool()(wiki_index)
 mcp.tool()(wiki_create_domain)
 mcp.tool()(wiki_bind)
 mcp.tool()(wiki_lint)
+mcp.tool()(wiki_remediation_plan)
 mcp.tool()(wiki_sync)
 
 

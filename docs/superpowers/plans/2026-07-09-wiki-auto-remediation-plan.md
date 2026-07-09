@@ -9,6 +9,12 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  plan_hash: e916abeb399d4bf2
+  last_run: 2026-07-09
+  reviewed: true
+  docs_checked: true
 chain:
   intent: docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md
   spec: docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md
