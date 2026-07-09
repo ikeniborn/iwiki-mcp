@@ -1,2 +1,2 @@
-read = ["iwiki-mcp"]
+read = ["iwiki-mcp", "personal-ai-wiki", "obsidian-ai-wiki"]
 write = "iwiki-mcp"
