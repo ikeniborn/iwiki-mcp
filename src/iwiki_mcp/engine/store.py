@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 
 @dataclass
@@ -16,6 +16,8 @@ class Record:
     dim: int
     scale: float
     q: list[int]         # int8 quantized vector
+    type: str | None = None
+    tags: list = field(default_factory=list)
 
 
 def quantize(vec: list[float]) -> tuple[float, list[int]]:
@@ -33,7 +35,8 @@ def dequantize(scale: float, q: list[int]) -> list[float]:
 def make_record(c, vec: list[float]) -> Record:
     scale, q = quantize(vec)
     return Record(id=c.id, file=c.file, heading=c.heading, chunk=c.chunk,
-                  hash=c.hash, dim=len(vec), scale=scale, q=q)
+                  hash=c.hash, dim=len(vec), scale=scale, q=q,
+                  type=getattr(c, "type", None), tags=list(getattr(c, "tags", [])))
 
 
 def load_index(path: str) -> list[Record]:
