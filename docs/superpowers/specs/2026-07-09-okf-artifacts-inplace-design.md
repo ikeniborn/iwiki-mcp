@@ -1,7 +1,7 @@
 ---
 review:
   stage: spec
-  spec_hash: 4475f4bf6a553619
+  spec_hash: 214dc2b159cf4025
   last_run: 2026-07-09
   chain:
     intent: n/a
@@ -40,7 +40,7 @@ review:
       phase: clarity
       severity: WARNING
       section: "## Reserved files, exclusion, and guards"
-      section_hash: 751b65dcaaa310fb
+      section_hash: e43da41aff26e117
       fragment: "extend the one shared page-enumeration/skip path (the place that already skips .iwiki/, alongside ignore.py) with RESERVED_OKF, so the exclusion is defined once."
       text: >-
         "Exclusion defined once" in a single shared skip path is in tension with Files
@@ -55,10 +55,14 @@ review:
       verdict: fixed
       verdict_at: 2026-07-09
       resolution: >-
-        Section rewritten: RESERVED_OKF is one shared constant; exclusion enforced only at
-        page enumeration (indexer/retrieval page-walk + listing), lint's content map is built
-        from the filtered set, and validate.py/lint.py stay stdlib-only and UNMODIFIED. Files
-        touched updated to drop them. Locus is now unambiguous.
+        Section rewritten accurately (re-confirmed after the coordinator's accuracy edit):
+        RESERVED_OKF is one shared constant in the stdlib-only engine/okf_artifacts.py. The
+        .iwiki/ skip is NOT centralized, so each enumeration site adds the same RESERVED_OKF
+        check beside its .iwiki/ skip — indexer.index_domain, engine/grep.grep_sections,
+        server.wiki_list_pages, server._unmigrated_pages, engine/lint._pages. lint.py is
+        lightly modified (one filter line) but stays stdlib-only; validate.py is unmodified.
+        Files touched lists indexer.py/engine/grep.py/engine/lint.py to match. Locus precise
+        and internally consistent.
     - id: F-003
       phase: clarity
       severity: INFO
@@ -225,18 +229,24 @@ default.
 
 The generated reserved files are artifacts, not authored pages, and must never
 appear in the indexed/searchable surface. `RESERVED_OKF` is one shared constant
-(in `engine/okf_artifacts.py`); exclusion is enforced where pages are
-**enumerated**, not inside the stdlib engine checkers:
+(in the stdlib-only `engine/okf_artifacts.py`); the exclusion is applied where
+pages are **enumerated**. The `.iwiki/` skip is already inlined at each
+enumeration site (not centralized), so each site gains the same `RESERVED_OKF`
+check beside its existing `.iwiki/` skip:
 
-- The indexer / retrieval page-walk and the domain page listing route through a
-  single shared skip that consults `RESERVED_OKF` — the same place that already
-  skips `.iwiki/`, alongside `ignore.py`. This keeps reserved files out of
-  chunking, embedding, faceted search, and listings.
-- `lint`'s content map is built from that already-filtered page set, so `lint.py`
-  never sees a reserved file and stays stdlib-only (**unmodified**).
-- `validate.py` is unaffected: it runs per-page on write, and reserved files are
-  never written through the authoring path (the write guard blocks the slugs; the
-  files are produced only by `refresh_artifacts`).
+- `indexer.index_domain` — keeps reserved files out of chunking/embedding, hence
+  out of both vector and faceted search.
+- `retrieval` via `engine/grep.grep_sections` — out of lexical search.
+- `server.wiki_list_pages` and `server._unmigrated_pages` — out of listings and
+  the migrate sweep.
+- `engine/lint._pages` — no `missing_frontmatter` / orphan / section findings
+  against reserved files. `lint.py` stays stdlib-only because `RESERVED_OKF`
+  lives in the stdlib-only `engine/okf_artifacts.py`.
+
+`validate.py` is unaffected: it validates a single page body on write, and
+reserved files never reach it — they are never written through the authoring
+path (the write guard blocks the slugs; they are produced only by
+`refresh_artifacts`) and never enter lint's page set.
 
 ### Write-time collision guard
 
@@ -277,14 +287,13 @@ surfaced, never destructive.
   `render_log`, `RESERVED_OKF`).
 - **Deleted:** `src/iwiki_mcp/export.py` (duplicated logic dropped; the two
   generators relocated; the batch sweep re-expressed on existing helpers).
-- **Modified:** `src/iwiki_mcp/okf.py` (`refresh_artifacts`; the batch-sweep
+- **Modified:** `src/iwiki_mcp/okf.py` (`refresh_artifacts` + the batch-sweep
   helper), `server.py` (call `refresh_artifacts` in every mutating handler;
-  rewrite `wiki_export_okf` as the in-place sweep; reserved-slug write guard;
-  build `lint`'s content map from the filtered page set), the shared
-  page-walk / skip path used by `indexer.py` and `retrieval.py` (exclude
-  `RESERVED_OKF` via the shared constant), `resources.py`, `README.md`,
-  `docs/README.ru.md`, `pyproject.toml`. (`validate.py` and `lint.py` stay
-  stdlib-only and unmodified — they receive already-filtered input.)
+  rewrite `wiki_export_okf` as the in-place sweep; reserved-slug write guard),
+  `indexer.py`, `engine/grep.py`, and `engine/lint.py` (add the `RESERVED_OKF`
+  filter beside each existing `.iwiki/` skip; `lint.py` stays stdlib-only),
+  `resources.py`, `README.md`, `docs/README.ru.md`, `pyproject.toml`.
+  (`validate.py` is unmodified — reserved files never reach `validate_page`.)
 - **Rewritten test:** `tests/test_export_okf.py` (same name; now covers the
   in-place sweep + reserved-file maintenance instead of copy-to-dest).
 

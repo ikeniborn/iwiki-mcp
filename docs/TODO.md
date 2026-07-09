@@ -9,4 +9,4 @@
 | guard-iwiki-bind-scope | done | ✓ | ✓ | ✓ | OK | 2026-07-04 | 2026-07-04 | result OK — 4/4 tasks done, 174 tests pass, CLI help pass, wiki base-binding updated |
 | wiki-auto-remediation | done | ✓ | ✓ | ✓ | OK | 2026-07-08 | 2026-07-09 | result OK — implementation complete; 184 tests pass; wiki docs updated |
 | wiki-markdown-links | done | n/a | – | ✓ | OK | 2026-07-09 | 2026-07-09 | result OK — 8/8 tasks DONE, spec covered, 215 tests pass, whole-branch review merge-ready (0 crit/imp, 5 minor deferred); wiki authoring-and-linting + mcp-server updated |
-| okf-artifacts-inplace | in-progress | n/a | ✓ | – | – | 2026-07-09 |  | check-chain spec: OK — 4/4 фазы passed, 7/7 задач покрыты; все 3 находки (F-001 порядок refresh/re-index, F-002 «defined once», F-003 doc-критерии) fixed после правок автора; spec_hash 4475f4bf6a553619 |
+| okf-artifacts-inplace | in-progress | n/a | ✓ | ✓ | – | 2026-07-09 |  | check-chain plan: OK — 5/5 фаз passed, 8 задач покрывают все требования spec, зависимости ацикличны, TDD-verifiable; 2 INFO open (F-001 R-14 recovery-нота, F-002 ключ warnings vs still_*); plan_hash 31318c28eddbf5b9 |
