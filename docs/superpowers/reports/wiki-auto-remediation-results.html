@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wiki-auto-remediation chain results</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg:#f6f7fb; --surface:#ffffff; --fg:#242836; --muted:#667085;
+      --accent:#176b5d; --border:#d8dde8; --line:#8a94a6; --zebra:#eef2f6;
+      --ok:#277a4d; --warn:#9a6200; --danger:#b42318; --code:#eef2f6;
+      --shadow:rgba(35,45,70,.14);
+    }
+    body:has(#theme-toggle:checked) {
+      color-scheme: dark;
+      --bg:#151922; --surface:#202632; --fg:#e8eef7; --muted:#aab4c3;
+      --accent:#72d6c8; --border:#394252; --line:#7d8797; --zebra:#1a202a;
+      --ok:#8bd6a6; --warn:#e5be6a; --danger:#ff9b91; --code:#293140;
+      --shadow:rgba(0,0,0,.42);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+    header, main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 22px 0 8px; font-size: 16px; letter-spacing: 0; }
+    code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--zebra); }
+    details { border: 1px solid var(--border); background: var(--surface); padding: 10px 12px; margin: 12px 0; border-radius: 6px; }
+    summary { cursor: pointer; font-weight: 650; }
+    .theme-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--fg);
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chain-tabs {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chain-tabs label {
+      cursor: pointer;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: var(--surface);
+      color: var(--muted);
+    }
+    body:has(#tab-intent:checked) label[for="tab-intent"],
+    body:has(#tab-spec:checked) label[for="tab-spec"],
+    body:has(#tab-plan:checked) label[for="tab-plan"],
+    body:has(#tab-result:checked) label[for="tab-result"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .tab-pane { display: none; }
+    body:has(#tab-intent:checked) #pane-intent,
+    body:has(#tab-spec:checked) #pane-spec,
+    body:has(#tab-plan:checked) #pane-plan,
+    body:has(#tab-result:checked) #pane-result { display: block; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid currentColor; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .note { border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); padding: 10px 12px; border-radius: 4px; }
+    .flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 12px 0 18px; }
+    .node { border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 10px; box-shadow: 0 3px 12px var(--shadow); min-height: 92px; }
+    .node strong { display: block; margin-bottom: 4px; color: var(--accent); }
+    .matrix { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0 18px; }
+    @media (max-width: 760px) {
+      header { flex-direction: column; }
+      .chain-tabs { overflow-x: auto; }
+      .flow, .matrix { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <input type="checkbox" id="theme-toggle" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
+  <header>
+    <div>
+      <h1>wiki-auto-remediation chain results</h1>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>result</code>.</p>
+    </div>
+    <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
+  </header>
+  <nav class="chain-tabs">
+    <label for="tab-intent">Интент</label>
+    <label for="tab-spec">Спека</label>
+    <label for="tab-plan">План</label>
+    <label for="tab-result">Результат</label>
+  </nav>
+  <main>
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <h2>Проверка intent — 2026-07-08</h2>
+  <p class="note">Intent доказывает цель: автоматизировать поддержание актуальности wiki после <code>wiki_lint</code> без дублирования write/update/delete API: сервер планирует lint-backed действия, агент применяет их существующими tools и возвращает отчёт вместо пошаговых user gates.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
+    <tr><td>Hash</td><td><code>6634485d64f7f25b</code></td></tr>
+    <tr><td>Status</td><td><code>approved</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Цепочка результатов</h3>
+  <div class="flow">
+    <div class="node"><strong>Проблема</strong>Wiki может расходиться с source после изменений или удаления файлов.</div>
+    <div class="node"><strong>Детектор</strong><code>wiki_lint</code> даёт <code>stale</code> и <code>missing_source</code>.</div>
+    <div class="node"><strong>Действие</strong>Agent regenerates wiki markdown and applies changes through existing <code>wiki_update_page</code>, <code>wiki_delete_page</code>, <code>wiki_write_page</code>, and <code>wiki_index</code>.</div>
+    <div class="node"><strong>Готово</strong>Индекс обновлён, lint повторён, отчёт содержит <code>planned</code>, <code>updated</code>, <code>deleted</code>, <code>failed</code>, <code>remaining_lint</code>.</div>
+  </div>
+
+  <h3>Матрица ограничений</h3>
+  <table>
+    <tr><th>Тип</th><th>Ограничение</th><th>Проверка</th></tr>
+    <tr><td>Steering</td><td>Best-effort run обрабатывает все candidates.</td><td>Report показывает per-action success/failure.</td></tr>
+    <tr><td>Hard</td><td>Только lint findings с ingest history подходят для remediation.</td><td>Кандидаты берутся из <code>stale</code> и <code>missing_source</code>.</td></tr>
+    <tr><td>Hard</td><td>Операция не пишет вне bound write domain текущего проекта.</td><td>Domain guard обязателен в design.</td></tr>
+    <tr><td>Hard</td><td>Planning operation не пишет, не удаляет и не индексирует.</td><td>Изменения идут через existing tools.</td></tr>
+  </table>
+
+  <h3>Карта автономии</h3>
+  <div class="matrix">
+    <div class="node"><strong>Full</strong>Build candidates, return source/page context, use existing tools for update/delete/index/lint/report.</div>
+    <div class="node"><strong>Guarded</strong>Continue after one failed action, record failure, process remaining candidates.</div>
+    <div class="node"><strong>Proposal-first</strong>Change eligibility rules, add server-side LLM, add a new apply/update API, change domain scope, or destructive actions beyond lint-backed delete.</div>
+    <div class="node"><strong>No autonomy</strong>Restore deleted content, resolve semantic disagreement, authorize remediation outside bound domain.</div>
+  </div>
+
+  <h3>Карта контекста</h3>
+  <table>
+    <tr><th>Участник</th><th>Роль</th></tr>
+    <tr><td>MCP server tools</td><td>Публичная tool surface для агентов.</td></tr>
+    <tr><td><code>engine.lint</code></td><td>Источник кандидатов и финальной проверки.</td></tr>
+    <tr><td>Ingest log</td><td>Связь page ↔ source и eligibility для действий.</td></tr>
+    <tr><td>Indexer/vector store</td><td>Пост-изменений обновляет поиск и related data.</td></tr>
+    <tr><td>Claude Code / Codex</td><td>Основные потребители operation report.</td></tr>
+  </table>
+
+  <h3>Approval lens</h3>
+  <p>Безопасно проектировать автоматический запуск внутри bound write domain, потому что intent запрещает страницы без ingest history и действия вне lint findings. Риск находится в transform source → wiki markdown; если design меняет этот механизм, нужен human checkpoint.</p>
+
+  <h3>Phase results</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>completeness</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>clarity</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>alignment</td><td><span class="badge ok">passed</span></td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <p>Новых findings нет.</p>
+
+  <details>
+    <summary>Source anchors</summary>
+    <ul>
+      <li><code>Objective</code>: automate wiki freshness maintenance after <code>wiki_lint</code> without duplicating existing write tools.</li>
+      <li><code>Desired Outcomes</code>: candidates, automatic actions, final report, post-report feedback.</li>
+      <li><code>Health Metrics</code>: deterministic lint, backward compatibility, ingest-backed candidates.</li>
+      <li><code>Stop Rules</code>: halt on missing bound write domain or lint failure; done after processing, re-index, re-lint, report.</li>
+    </ul>
+  </details>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> Intent approved. Можно переходить к design spec.</p>
+</section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+  <h2>Проверка spec — 2026-07-09</h2>
+  <p class="note">Spec проверяет дизайн одного read-only planning tool: <code>wiki_remediation_plan</code> строит кандидаты из <code>wiki_lint</code>, отдаёт агенту source/page context и не дублирует existing write/update/delete API.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md</code></td></tr>
+    <tr><td>Hash</td><td><code>635f3b55e7eaa2f1</code></td></tr>
+    <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Карта покрытия требований</h3>
+  <table>
+    <tr><th>Outcome intent</th><th>Spec requirements</th><th>Acceptance</th></tr>
+    <tr><td>Planning tool returns update/delete candidates.</td><td>R1-R5</td><td><code>update_candidates</code> and <code>delete_candidates</code> derive from lint.</td></tr>
+    <tr><td>Agent receives source, page, rules, metadata.</td><td>R6-R11</td><td>Candidate includes context, authoring rules, next steps, ignore guard.</td></tr>
+    <tr><td>Agent uses existing tools.</td><td>R10-R13</td><td>No second apply/update API; existing contracts unchanged.</td></tr>
+    <tr><td>Final report covers actions and remaining lint.</td><td>R10, Data Flow steps 7-9</td><td>Agent runs <code>wiki_lint</code> after existing-tool changes.</td></tr>
+  </table>
+
+  <h3>Граф компонентов</h3>
+  <div class="flow">
+    <div class="node"><strong><code>server.py</code></strong>Owns <code>wiki_remediation_plan</code>, binding/domain guard, MCP registration.</div>
+    <div class="node"><strong><code>engine.lint</code></strong>Supplies <code>stale</code> and <code>missing_source</code> findings.</div>
+    <div class="node"><strong>Existing tools</strong><code>wiki_update_page</code>, <code>wiki_delete_page</code>, <code>wiki_write_page</code>, <code>wiki_index</code> remain mutation surface.</div>
+    <div class="node"><strong>Agent</strong>Performs semantic regeneration and final user-facing report.</div>
+  </div>
+
+  <h3>Поток данных</h3>
+  <div class="flow">
+    <div class="node"><strong>1. Plan</strong>Agent calls <code>wiki_remediation_plan</code>.</div>
+    <div class="node"><strong>2. Enrich</strong>Server runs lint and reads current page/source context.</div>
+    <div class="node"><strong>3. Apply</strong>Agent regenerates markdown and calls existing tools.</div>
+    <div class="node"><strong>4. Verify</strong>Agent runs <code>wiki_lint</code> and reports planned/updated/deleted/failed/remaining_lint.</div>
+  </div>
+
+  <h3>Карта рисков и мер</h3>
+  <table>
+    <tr><th>Риск</th><th>Мера</th></tr>
+    <tr><td>Planning exposes ignored or secret source content.</td><td>R9 blocks `.iwikiignore` matches with <code>source_ignored</code>.</td></tr>
+    <tr><td>API duplicates update/delete semantics.</td><td>R12-R13 forbid writes and preserve existing tool contracts.</td></tr>
+    <tr><td>Huge source payload overloads MCP response.</td><td>Source cap marks <code>source_truncated: true</code>.</td></tr>
+    <tr><td>Wrong domain content exposed.</td><td>R2 rejects non-bound write domain.</td></tr>
+  </table>
+
+  <h3>Approval lens</h3>
+  <p>Safe: one additive read-only tool and no mutation contract changes. Risk: exposing source content; spec mitigates via bound write-domain guard, `.iwikiignore`, fail-soft blocked candidates, and response truncation.</p>
+
+  <h3>Phase results</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>clarity</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <p>Новых findings нет.</p>
+
+  <details>
+    <summary>Source anchors</summary>
+    <ul>
+      <li><code>Requirements</code>: R1-R13 define API, data shape, guardrails, and compatibility.</li>
+      <li><code>Data Flow</code>: steps 1-9 define agent-orchestrated remediation.</li>
+      <li><code>Error Handling</code>: domain, unreadable source/page, ignored source, truncation, empty lint.</li>
+      <li><code>Out of Scope</code>: no server-side chat client, no <code>wiki_remediation_apply</code>, no <code>wiki_update_page</code> semantic change.</li>
+    </ul>
+  </details>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> Spec готов к user review через этот HTML report.</p>
+</section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <h2>Проверка plan — 2026-07-09</h2>
+  <p class="note">Plan задаёт TDD execution для read-only <code>wiki_remediation_plan</code>: сначала tests, затем skeleton, candidate enrichment, guardrails, docs/wiki, version bump, full verification.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/plans/2026-07-09-wiki-auto-remediation-plan.md</code></td></tr>
+    <tr><td>Hash</td><td><code>e916abeb399d4bf2</code></td></tr>
+    <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Граф шагов</h3>
+  <div class="flow">
+    <div class="node"><strong>Task 1</strong>Failing API shape tests for empty plan, domain guard, and no mutation.</div>
+    <div class="node"><strong>Task 2</strong>Minimal read-only tool skeleton and MCP registration.</div>
+    <div class="node"><strong>Task 3</strong>Stale update and missing-source delete candidate enrichment.</div>
+    <div class="node"><strong>Task 4</strong>Ignore, truncation, and blocked-candidate guardrails.</div>
+  </div>
+  <div class="flow">
+    <div class="node"><strong>Task 5</strong>Version bump, docs/wiki updates, full tests, CLI check, result check.</div>
+    <div class="node"><strong>Commit cadence</strong>Plan includes commits after skeleton, enrichment, guardrails, and final implementation.</div>
+    <div class="node"><strong>Dependency</strong>Each implementation task depends on tests and code from previous task.</div>
+    <div class="node"><strong>Gate</strong>No implementation before this plan report is approved.</div>
+  </div>
+
+  <h3>Карта влияния на артефакты</h3>
+  <table>
+    <tr><th>Task</th><th>Files / docs</th><th>Purpose</th></tr>
+    <tr><td>1</td><td><code>tests/test_server_lint_sync.py</code></td><td>Define behavior before code.</td></tr>
+    <tr><td>2-4</td><td><code>src/iwiki_mcp/server.py</code>, <code>tests/test_server_lint_sync.py</code></td><td>Add read-only tool and helper guardrails.</td></tr>
+    <tr><td>5</td><td><code>pyproject.toml</code>, iwiki pages <code>mcp-server</code>, <code>authoring-and-linting</code></td><td>Version and documentation evidence.</td></tr>
+    <tr><td>Result</td><td><code>docs/superpowers/reports/wiki-auto-remediation-results.html</code>, <code>docs/TODO.md</code></td><td>Chain evidence and task status.</td></tr>
+  </table>
+
+  <h3>Карта проверок</h3>
+  <table>
+    <tr><th>Проверка</th><th>Command</th><th>Expected evidence</th></tr>
+    <tr><td>Focused tests</td><td><code>uv run pytest tests/test_server_lint_sync.py -q</code></td><td>PASS</td></tr>
+    <tr><td>Full suite</td><td><code>uv run pytest -q</code></td><td>PASS</td></tr>
+    <tr><td>CLI smoke</td><td><code>uv run iwiki-mcp --help</code></td><td>usage output, exit 0</td></tr>
+    <tr><td>Wiki health</td><td><code>wiki_lint(domain="iwiki-mcp")</code></td><td>No new broken refs or stale docs from this change.</td></tr>
+    <tr><td>Chain result</td><td><code>/check-chain result docs/superpowers/plans/2026-07-09-wiki-auto-remediation-plan.md</code></td><td>Result report generated and OK when implementation is complete.</td></tr>
+  </table>
+
+  <h3>Поток человеческих контрольных точек</h3>
+  <p>Plan contains no proposal-first implementation decisions. Human checkpoint remains before implementation execution choice and before any future decision to add server-side LLM, new apply API, or broaden domain eligibility.</p>
+
+  <h3>Phase results</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>dependencies</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>verifiability</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <p>Новых findings нет.</p>
+
+  <details>
+    <summary>Source anchors</summary>
+    <ul>
+      <li><code>Task 1</code>: tests for API shape, domain guard, no mutation.</li>
+      <li><code>Task 2</code>: constants, skeleton function, MCP registration.</li>
+      <li><code>Task 3</code>: stale/delete candidate enrichment.</li>
+      <li><code>Task 4</code>: `.iwikiignore`, truncation, blocked candidates.</li>
+      <li><code>Task 5</code>: version, verification, docs/wiki, result check.</li>
+    </ul>
+  </details>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> Plan готов к user review через этот HTML report.</p>
+</section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <h2>Проверка result — 2026-07-09</h2>
+  <p class="note">Result сверяет реализацию с планом, intent и spec: новый read-only tool `wiki_remediation_plan` добавлен в MCP surface, покрыт tests, docs/wiki обновлены, проверки прошли. Verdict: <span class="badge ok">OK</span>.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Plan</td><td><code>docs/superpowers/plans/2026-07-09-wiki-auto-remediation-plan.md</code></td></tr>
+    <tr><td>Plan hash</td><td><code>e916abeb399d4bf2</code></td></tr>
+    <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md</code></td></tr>
+    <tr><td>Changed paths</td><td><code>src/iwiki_mcp/server.py</code>, <code>tests/test_server_lint_sync.py</code>, <code>pyproject.toml</code>, <code>uv.lock</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Граф сверки diff</h3>
+  <div class="flow">
+    <div class="node"><strong>Task 1</strong>DONE: server-level tests added for empty plan, write-domain guard, no mutation, stale/delete candidates, ignore, truncation, blocked inputs.</div>
+    <div class="node"><strong>Task 2</strong>DONE: `SOURCE_CONTENT_MAX_BYTES`, next steps, skeleton, lint call, MCP registration.</div>
+    <div class="node"><strong>Task 3</strong>DONE: stale update and missing-source delete enrichment with slug, page/source context, headings, tools.</div>
+    <div class="node"><strong>Task 4</strong>DONE: `.iwikiignore` blocking, truncation metadata, fail-soft blocked candidates.</div>
+  </div>
+  <div class="flow">
+    <div class="node"><strong>Task 5</strong>DONE: version bump, focused/full tests, CLI smoke, wiki docs, wiki lint, result state.</div>
+    <div class="node"><strong>Docs</strong>DONE: `mcp-server` and `authoring-and-linting` updated through iwiki MCP tools.</div>
+    <div class="node"><strong>Review</strong>DONE: code review found no blocking implementation bugs; one docs mismatch was fixed.</div>
+    <div class="node"><strong>Gate</strong>DONE: `result_check.verdict: OK`, TODO row closed.</div>
+  </div>
+
+  <h3>Reconciliation table</h3>
+  <table>
+    <tr><th>Plan step</th><th>Status</th><th>Diff evidence</th></tr>
+    <tr><td>Task 1 — Planning API Shape Tests</td><td><span class="badge ok">DONE</span></td><td><code>tests/test_server_lint_sync.py</code> adds remediation fixtures and API shape/no-mutation/domain tests.</td></tr>
+    <tr><td>Task 2 — Minimal Read-Only Tool Skeleton</td><td><span class="badge ok">DONE</span></td><td><code>src/iwiki_mcp/server.py</code> adds constants, function skeleton, lint call, and `mcp.tool()(wiki_remediation_plan)`.</td></tr>
+    <tr><td>Task 3 — Candidate Enrichment</td><td><span class="badge ok">DONE</span></td><td>Update/delete candidates include slug, source/page fields, current markdown, source preview, headings, and recommended tools.</td></tr>
+    <tr><td>Task 4 — Guardrails</td><td><span class="badge ok">DONE</span></td><td>Ignored sources become `source_ignored`; large sources truncate; unreadable inputs become blocked candidates.</td></tr>
+    <tr><td>Task 5 — Documentation, Version, Verification</td><td><span class="badge ok">DONE</span></td><td><code>pyproject.toml</code>/<code>uv.lock</code> set version `0.1.11`; tests and CLI pass; iwiki docs updated; result artifacts refreshed.</td></tr>
+  </table>
+
+  <h3>Карта свидетельств результатов</h3>
+  <table>
+    <tr><th>Intent / spec outcome</th><th>Evidence</th></tr>
+    <tr><td>Read-only planning tool returns update and delete candidates from lint freshness findings.</td><td>`wiki_remediation_plan` calls `engine.lint.lint`, returns raw `lint`, `update_candidates`, `delete_candidates`, and tests cover stale and missing-source records.</td></tr>
+    <tr><td>Plan result includes source content, current page, authoring rules, and action metadata.</td><td>Update candidates include `current_markdown`, `source_content`, `source_bytes`, `source_truncated`, `current_headings`, `recommended_tools`; response includes `AUTHORING_RULES` and `next_steps`.</td></tr>
+    <tr><td>No second apply/update API and no mutation during planning.</td><td>No new write/apply tool added; no-mutation test proves page, log, and index remain unchanged.</td></tr>
+    <tr><td>Only bound write domain is eligible.</td><td>Function defaults to `bind.write`, rejects missing write domain and requested non-write domain; tests cover both.</td></tr>
+    <tr><td>Ignore/truncation/blocking guardrails.</td><td>Tests cover `.iwikiignore` blocking without `source_content`, truncation metadata, and fail-soft blocked candidates.</td></tr>
+  </table>
+
+  <h3>Карта лишнего и пропусков</h3>
+  <table>
+    <tr><th>Type</th><th>Status</th><th>Notes</th></tr>
+    <tr><td>Missing plan work</td><td><span class="badge ok">None</span></td><td>All five tasks have diff, test, or documentation evidence.</td></tr>
+    <tr><td>Excess code changes</td><td><span class="badge ok">None</span></td><td>Changed implementation/test/config files map to planned file structure and versioning policy.</td></tr>
+    <tr><td>Intent/spec drift</td><td><span class="badge ok">None</span></td><td>Implementation keeps read-only planner scope; no server-side LLM or apply API added.</td></tr>
+    <tr><td>Residual wiki lint</td><td><span class="badge warn">Existing advisory</span></td><td>`wiki_lint` still reports old unrelated `missing_source` and `long_lead` findings; `broken=[]`, `stale=[]` for this change.</td></tr>
+  </table>
+
+  <h3>Карта замечаний code review</h3>
+  <table>
+    <tr><th>Changed path</th><th>Reviewed risk</th><th>Finding</th><th>Evidence</th></tr>
+    <tr><td><code>src/iwiki_mcp/server.py</code></td><td>Domain binding, path safety, read-only behavior, ignore handling, truncation, blocked candidates.</td><td><span class="badge ok">No blocking bugs</span></td><td>Focused tests plus existing suite pass.</td></tr>
+    <tr><td><code>tests/test_server_lint_sync.py</code></td><td>Coverage maps to new public behavior and no-mutation guarantee.</td><td><span class="badge ok">No issue</span></td><td>12 tests in file pass.</td></tr>
+    <tr><td><code>pyproject.toml</code>, <code>uv.lock</code></td><td>Version metadata stays aligned.</td><td><span class="badge ok">No issue</span></td><td>Package version bumped to `0.1.11`; lock editable package synchronized.</td></tr>
+  </table>
+
+  <h3>Карта документационных свидетельств</h3>
+  <table>
+    <tr><th>Changed behavior</th><th>Doc evidence</th><th>Lint evidence</th></tr>
+    <tr><td>Tool surface now has fifteen tools and a planning category.</td><td>iwiki `mcp-server#Overview` and `mcp-server#Tool surface` updated via MCP.</td><td>`wiki_lint(domain="iwiki-mcp")`: `broken=[]`, `stale=[]`.</td></tr>
+    <tr><td>Lint freshness findings can feed remediation planning.</td><td>iwiki `authoring-and-linting#Health linting` updated via MCP.</td><td>Same lint run; old unrelated advisories remain documented as residual.</td></tr>
+  </table>
+
+  <h3>Карта распространения решений</h3>
+  <table>
+    <tr><th>Decision</th><th>Propagation</th></tr>
+    <tr><td>Planner is read-only and does not mutate pages/logs/indexes.</td><td>Matches intent hard constraints, spec R12, plan tests, and wiki docs.</td></tr>
+    <tr><td>Agents still apply changes through existing tools.</td><td>Captured in `next_steps`, `recommended_tools`, spec, and wiki tool-surface docs.</td></tr>
+    <tr><td>Source preview truncation is non-fatal.</td><td>Matches spec source-size cap and focused test evidence.</td></tr>
+    <tr><td>No upstream artifact changes required.</td><td>Intent/spec/plan body already describe shipped behavior; only result state added to plan frontmatter.</td></tr>
+  </table>
+
+  <h3>Verification evidence</h3>
+  <table>
+    <tr><th>Check</th><th>Result</th></tr>
+    <tr><td><code>uv run pytest tests/test_server_lint_sync.py -q</code></td><td><span class="badge ok">12 passed in 0.61s</span></td></tr>
+    <tr><td><code>uv run pytest -q</code></td><td><span class="badge ok">184 passed in 7.20s</span></td></tr>
+    <tr><td><code>uv run iwiki-mcp --help</code></td><td><span class="badge ok">exit 0, usage printed</span></td></tr>
+    <tr><td><code>git diff --check</code></td><td><span class="badge ok">clean</span></td></tr>
+    <tr><td><code>wiki_lint(domain="iwiki-mcp")</code></td><td><span class="badge ok">broken=[], stale=[]</span></td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <p>Open findings нет. Во время result review найдено одно docs inconsistency: `mcp-server#Overview` всё ещё говорил “fourteen tools”. Исправлено через `wiki_update_page`; повторный `wiki_lint` подтвердил `broken=[]`, `stale=[]`.</p>
+
+  <details>
+    <summary>Source anchors</summary>
+    <ul>
+      <li><code>src/iwiki_mcp/server.py</code>: constants, helpers, `wiki_remediation_plan`, MCP registration.</li>
+      <li><code>tests/test_server_lint_sync.py</code>: focused tests for candidates, guards, no mutation, truncation, ignore, domain binding.</li>
+      <li><code>docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md</code>: requirements R1-R13.</li>
+      <li><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code>: read-only planning and existing write-tool workflow constraints.</li>
+      <li>iwiki pages: <code>mcp-server</code>, <code>authoring-and-linting</code>.</li>
+    </ul>
+  </details>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> Plan, spec, intent, tests, docs, and result artifacts agree. No open CRITICAL/WARNING result findings.</p>
+</section>
+<!-- TAB:result END -->
+  </main>
+</body>
+</html>
