@@ -95,13 +95,13 @@
 <body>
   <input type="checkbox" id="theme-toggle" hidden>
   <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
-  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
   <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
   <header>
     <div>
       <h1>wiki-auto-remediation chain results</h1>
-      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>spec</code>.</p>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>plan</code>.</p>
     </div>
     <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
   </header>
@@ -270,7 +270,81 @@
 <!-- TAB:spec END -->
 <!-- TAB:plan START -->
 <section class="tab-pane" id="pane-plan">
-  <p class="note">Этап ещё не проверен.</p>
+  <h2>Проверка plan — 2026-07-09</h2>
+  <p class="note">Plan задаёт TDD execution для read-only <code>wiki_remediation_plan</code>: сначала tests, затем skeleton, candidate enrichment, guardrails, docs/wiki, version bump, full verification.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/plans/2026-07-09-wiki-auto-remediation-plan.md</code></td></tr>
+    <tr><td>Hash</td><td><code>e916abeb399d4bf2</code></td></tr>
+    <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-07-08-wiki-auto-remediation-intent.md</code></td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-09-wiki-auto-remediation-design.md</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Граф шагов</h3>
+  <div class="flow">
+    <div class="node"><strong>Task 1</strong>Failing API shape tests for empty plan, domain guard, and no mutation.</div>
+    <div class="node"><strong>Task 2</strong>Minimal read-only tool skeleton and MCP registration.</div>
+    <div class="node"><strong>Task 3</strong>Stale update and missing-source delete candidate enrichment.</div>
+    <div class="node"><strong>Task 4</strong>Ignore, truncation, and blocked-candidate guardrails.</div>
+  </div>
+  <div class="flow">
+    <div class="node"><strong>Task 5</strong>Version bump, docs/wiki updates, full tests, CLI check, result check.</div>
+    <div class="node"><strong>Commit cadence</strong>Plan includes commits after skeleton, enrichment, guardrails, and final implementation.</div>
+    <div class="node"><strong>Dependency</strong>Each implementation task depends on tests and code from previous task.</div>
+    <div class="node"><strong>Gate</strong>No implementation before this plan report is approved.</div>
+  </div>
+
+  <h3>Карта влияния на артефакты</h3>
+  <table>
+    <tr><th>Task</th><th>Files / docs</th><th>Purpose</th></tr>
+    <tr><td>1</td><td><code>tests/test_server_lint_sync.py</code></td><td>Define behavior before code.</td></tr>
+    <tr><td>2-4</td><td><code>src/iwiki_mcp/server.py</code>, <code>tests/test_server_lint_sync.py</code></td><td>Add read-only tool and helper guardrails.</td></tr>
+    <tr><td>5</td><td><code>pyproject.toml</code>, iwiki pages <code>mcp-server</code>, <code>authoring-and-linting</code></td><td>Version and documentation evidence.</td></tr>
+    <tr><td>Result</td><td><code>docs/superpowers/reports/wiki-auto-remediation-results.html</code>, <code>docs/TODO.md</code></td><td>Chain evidence and task status.</td></tr>
+  </table>
+
+  <h3>Карта проверок</h3>
+  <table>
+    <tr><th>Проверка</th><th>Command</th><th>Expected evidence</th></tr>
+    <tr><td>Focused tests</td><td><code>uv run pytest tests/test_server_lint_sync.py -q</code></td><td>PASS</td></tr>
+    <tr><td>Full suite</td><td><code>uv run pytest -q</code></td><td>PASS</td></tr>
+    <tr><td>CLI smoke</td><td><code>uv run iwiki-mcp --help</code></td><td>usage output, exit 0</td></tr>
+    <tr><td>Wiki health</td><td><code>wiki_lint(domain="iwiki-mcp")</code></td><td>No new broken refs or stale docs from this change.</td></tr>
+    <tr><td>Chain result</td><td><code>/check-chain result docs/superpowers/plans/2026-07-09-wiki-auto-remediation-plan.md</code></td><td>Result report generated and OK when implementation is complete.</td></tr>
+  </table>
+
+  <h3>Поток человеческих контрольных точек</h3>
+  <p>Plan contains no proposal-first implementation decisions. Human checkpoint remains before implementation execution choice and before any future decision to add server-side LLM, new apply API, or broaden domain eligibility.</p>
+
+  <h3>Phase results</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>dependencies</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>verifiability</td><td><span class="badge ok">passed</span></td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <p>Новых findings нет.</p>
+
+  <details>
+    <summary>Source anchors</summary>
+    <ul>
+      <li><code>Task 1</code>: tests for API shape, domain guard, no mutation.</li>
+      <li><code>Task 2</code>: constants, skeleton function, MCP registration.</li>
+      <li><code>Task 3</code>: stale/delete candidate enrichment.</li>
+      <li><code>Task 4</code>: `.iwikiignore`, truncation, blocked candidates.</li>
+      <li><code>Task 5</code>: version, verification, docs/wiki, result check.</li>
+    </ul>
+  </details>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> Plan готов к user review через этот HTML report.</p>
 </section>
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
