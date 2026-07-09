@@ -223,6 +223,37 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
 
+## OKF compatibility
+
+Every page carries a small YAML frontmatter block above the `# Title` H1, written automatically by `wiki_write_page` / `wiki_update_page` / `wiki_apply_okf`. Fields:
+
+| Field | Meaning |
+|---|---|
+| `type` | Required. Closed vocabulary: `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default). |
+| `title` | Derived from the page's `# Title` H1. |
+| `description` | Derived from the `## Overview` section, truncated to `IWIKI_SUMMARY_MAX_CHARS`. |
+| `resource` | The `source` passed to the write tool, if any. |
+| `tags` | Lowercase kebab-case labels, at most 5 per page. |
+| `timestamp` | The page file's last git-commit date, or today's date if not yet committed. |
+
+`type` and `tags` are resolved with this precedence: an **explicit** `type`/`tags` argument on the write tool wins; otherwise, when `IWIKI_CHAT_MODEL` is set, the server classifies the page body with that chat model; otherwise it defaults to `type="concept"` with no tags.
+
+Faceted search narrows `wiki_search` to a `type` and/or a set of `tags`:
+
+```text
+wiki_search(query="deploy steps", type="runbook", tags=["ci"])
+```
+
+Tools for adopting OKF frontmatter on an existing domain:
+
+| Tool | What it does |
+|---|---|
+| `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. |
+| `wiki_apply_okf(domain, slug, type, tags)` | Apply agent-classified `type`/`tags` (plus derived fields) as frontmatter to one page, reindex, commit and push. |
+| `wiki_export_okf(domain, dest)` | Export a domain into a fully OKF-conformant bundle at `dest`: pages keep their frontmatter, `[[wikilink]]` syntax is rewritten to standard Markdown links, and reserved `index.md` / `log.md` files are generated. Sources are never mutated, only copied. |
+
+`IWIKI_CHAT_MODEL` (default: empty) is optional; leaving it unset disables server-side classification and `wiki_migrate_okf` falls back to plan mode.
+
 ## Git sync of the base
 
 When `IWIKI_BASE_DIR` is a git repository, every mutating tool — `wiki_write_page`, `wiki_update_page`, `wiki_create_domain`, and `wiki_index` — stages, commits, and pushes the base after successful changes (fail-soft: push errors are reported but do not roll back the write). Before writing, each mutating tool first fetches and fast-forwards the base when it is cleanly behind its remote, so the change lands on the current tip and the push is a fast-forward. If the base has genuinely diverged (local unpushed commits *and* the remote moved ahead), the tool refuses with `base diverged from remote` and a hint to run `wiki_sync` (or resolve the conflict in the base repo) before retrying — it does not stack another commit onto the divergence. If the base is not a git repo, the write or create still succeeds on disk and the tool response returns `committed: false`. Use `wiki_sync`, `wiki_status`, or git commands in the base repo to diagnose repository and remote setup.
