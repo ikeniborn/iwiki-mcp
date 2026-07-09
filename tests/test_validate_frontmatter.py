@@ -30,3 +30,11 @@ def test_valid_typed_page_has_no_frontmatter_findings():
     page = "---\ntype: api\ndescription: d\n---\n# T\n\n## Overview\ns\n\n## B\nbody\n"
     types = _types(validate_page(page))
     assert not ({"missing_type", "unknown_type", "missing_description"} & types)
+
+
+def test_typed_page_missing_only_description():
+    page = "---\ntype: api\n---\n# T\n\n## Overview\ns\n\n## B\nbody\n"
+    types = _types(validate_page(page))
+    assert "missing_description" in types
+    assert "missing_type" not in types
+    assert "unknown_type" not in types
