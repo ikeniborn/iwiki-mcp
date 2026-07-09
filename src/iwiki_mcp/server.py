@@ -5,6 +5,7 @@ exceptions become {"error","hint"} structures.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import functools
 import json
 import os
@@ -13,7 +14,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from mcp.server.fastmcp import FastMCP
 
-from . import base, ignore, indexer, retrieval, sync
+from . import base, ignore, indexer, okf, retrieval, sync
+from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
 from .engine.section import SectionError, replace_section
@@ -312,7 +314,8 @@ def _fresh_warn(fresh: dict) -> dict:
 
 @_safe
 def wiki_write_page(
-    domain: str, slug: str, markdown: str, source: str | None = None
+    domain: str, slug: str, markdown: str, source: str | None = None,
+    type: str | None = None, tags: list[str] | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
@@ -348,13 +351,18 @@ def wiki_write_page(
         }
     cfg = Config.load()
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    fm_block, fm_warning = okf.build_frontmatter(
+        cfg, bind.base, valid_domain, slug, markdown,
+        source=source, explicit_type=type, explicit_tags=tags,
+        timestamp_path=f"{valid_domain}/{page_file}")
+    full_md = fm_block + markdown
     log_source = source or ""
     log_src_hash = indexer.src_hash(source) if source else None
     log_appended = False
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(markdown)
+            fh.write(full_md)
         indexer.append_log(
             bind.base,
             valid_domain,
@@ -378,7 +386,7 @@ def wiki_write_page(
     page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
                                   pathspec=valid_domain)
-    return {
+    result = {
         "page": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
@@ -387,6 +395,9 @@ def wiki_write_page(
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
+    if fm_warning:
+        result.setdefault("warning", fm_warning)
+    return result
 
 
 @_safe
@@ -418,12 +429,14 @@ def wiki_update_page(
             "error": f"page '{valid_domain}/{slug}' not found",
             "hint": "list pages with wiki_list_pages",
         }
-    original = open(path, encoding="utf-8").read()
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    original_full = open(path, encoding="utf-8").read()
+    meta, original_body = _fm.split(original_full)
     try:
-        new_md = replace_section(original, heading, new_body)
+        new_body = replace_section(original_body, heading, new_body)
     except SectionError as e:
         return {"error": str(e), "hint": "check the heading with wiki_read_page"}
-    blocking = [f for f in validate_page(new_md) if f.get("type") in _BLOCKING]
+    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
     if blocking:
         return {
             "error": "section structure invalid",
@@ -431,7 +444,15 @@ def wiki_update_page(
             "hint": "new_body must use only ## headings; no ###+, no pre-## text",
         }
     cfg = Config.load()
-    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    if meta:
+        desc = _fm.derive_description(new_body, cfg.summary_max)
+        if desc:
+            meta["description"] = desc
+        meta["timestamp"] = (okf.git_last_commit_date(bind.base, f"{valid_domain}/{page_file}")
+                             or _dt.date.today().isoformat())
+        new_md = _fm.render(meta) + new_body
+    else:
+        new_md = new_body
     log_file = base.log_path(bind.base, valid_domain)
     log_before = None
     if source and os.path.exists(log_file):
@@ -447,7 +468,7 @@ def wiki_update_page(
         stats = indexer.index_domain(cfg, bind.base, valid_domain)
     except Exception:
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(original)
+            fh.write(original_full)
         if source:            # mirrors the upsert gate above
             _restore_log(log_file, log_before)
         raise
