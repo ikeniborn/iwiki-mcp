@@ -1,2 +1,2 @@
 """iwiki MCP server: a shared, git-synced wiki base split into domains."""
-__version__ = "0.2.3"
+__version__ = "0.2.4"

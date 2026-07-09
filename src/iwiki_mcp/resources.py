@@ -31,4 +31,7 @@ AUTHORING_RULES: str = """\
   `reference` = lookup tables; `runbook` = ops procedure; `concept` = an idea/model.
 - `tags` are lowercase kebab-case, <=5 per page; reuse an existing domain tag
   before coining a new one.
+- The slugs `index` and `log` are reserved: `index.md` / `log.md` are generated
+  OKF navigation/history files kept fresh in the domain on every write. Do not
+  author a page with either slug -- the write tools reject it.
 """
