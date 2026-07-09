@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from . import base, ignore, indexer, retrieval, sync
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
+from .engine.links import to_markdown_links
 from .engine.section import SectionError, replace_section
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
@@ -321,6 +322,7 @@ def wiki_write_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
         return {
@@ -415,6 +417,7 @@ def wiki_update_page(
             "hint": "list pages with wiki_list_pages",
         }
     original = open(path, encoding="utf-8").read()
+    new_body = to_markdown_links(new_body)
     try:
         new_md = replace_section(original, heading, new_body)
     except SectionError as e:

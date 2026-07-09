@@ -201,3 +201,12 @@ def test_index_commits_and_reports_push(tmp_path, monkeypatch):
     out = server.wiki_index("backend")
     assert out["domain"] == "backend"
     assert "committed" in out and "pushed" in out
+
+
+def test_write_normalizes_wikilinks_to_markdown(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    md = "# Auth\n## Overview\nsummary\n## Flow\nsee [[core#Token Store]] here\n"
+    server.wiki_write_page("backend", "auth", md)
+    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    assert "[Token Store](core.md#token-store)" in content
+    assert "[[core#Token Store]]" not in content
