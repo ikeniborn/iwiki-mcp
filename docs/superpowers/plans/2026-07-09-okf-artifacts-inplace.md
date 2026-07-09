@@ -55,6 +55,10 @@ review:
         spec's R-08 report list to the plan's `still_*` / `warning` keys.
       verdict: open
       verdict_at: null
+result_check:
+  verdict: OK
+  plan_hash: 31318c28eddbf5b9
+  last_run: 2026-07-10
 ---
 # OKF Artifacts In-Place Implementation Plan
 

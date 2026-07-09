@@ -105,12 +105,12 @@
   <input type="checkbox" id="theme-toggle" hidden>
   <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
   <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
-  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
   <header>
     <div>
       <h1>okf-artifacts-inplace chain results</h1>
-      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>plan</code>.</p>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>result</code>.</p>
     </div>
     <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
   </header>
@@ -470,7 +470,56 @@
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
 <section class="tab-pane" id="pane-result">
-  <p class="note">Этап ещё не проверен.</p>
+  <h2>Проверка result — 2026-07-10</h2>
+  <p class="note">Реализация ветки <code>dev-okf-artifacts-inplace</code> сверена с планом по диффу <code>4c50d9d..1c088ce</code>. Все 8 задач присутствуют в диффе (9 коммитов), spec-требования R-01…R-17 и Success Criteria SC-1…SC-3 покрыты, полная сюита 301 passed, flake8 clean, orphan-ref grep пуст. Финальный whole-branch review — «With fixes»: единственный Important (порядок reserved-slug guard) исправлен в <code>1c088ce</code>. Verdict: <span class="badge ok">OK</span>.</p>
+
+  <h3>Резюме сверки</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Plan</td><td><code>docs/superpowers/plans/2026-07-09-okf-artifacts-inplace.md</code></td></tr>
+    <tr><td>Plan hash</td><td><code>31318c28eddbf5b9</code> (result_check совпадает с телом)</td></tr>
+    <tr><td>Intent</td><td><code>n/a</code> (интента для топика нет)</td></tr>
+    <tr><td>Spec</td><td><code>2026-07-09-okf-artifacts-inplace-design.md</code> · spec_hash <code>214dc2b159cf4025</code></td></tr>
+    <tr><td>Diff base</td><td><code>4c50d9d..1c088ce</code> (<code>--since=4c50d9d</code>), ветка <code>dev-okf-artifacts-inplace</code></td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Покрытие шагов плана — DONE 8/8 · PARTIAL 0 · MISSING 0</h3>
+  <table>
+    <tr><th>Task</th><th>Статус</th><th>Свидетельство в диффе</th></tr>
+    <tr><td>1 — okf_artifacts.py</td><td><span class="badge ok">DONE</span></td><td><code>22024f8</code>: <code>engine/okf_artifacts.py</code> (<code>RESERVED_OKF</code> + <code>render_index</code>/<code>render_log</code>) + <code>test_okf_artifacts.py</code>.</td></tr>
+    <tr><td>2 — exclusion</td><td><span class="badge ok">DONE</span></td><td><code>ee80c4a</code>/<code>5f6a41a</code>: <code>RESERVED_OKF</code>-skip в <code>indexer.index_domain</code>, <code>grep.grep_sections</code>, <code>lint._pages</code>, <code>server.wiki_list_pages</code>/<code>_unmigrated_pages</code>.</td></tr>
+    <tr><td>3 — refresh_artifacts</td><td><span class="badge ok">DONE</span></td><td><code>1a90375</code>: <code>okf.refresh_artifacts</code> + <code>_page_slugs</code>/<code>_read_log</code>/<code>_looks_authored</code>.</td></tr>
+    <tr><td>4 — wire handlers</td><td><span class="badge ok">DONE</span></td><td><code>899f85e</code>: <code>refresh_artifacts</code> в <code>wiki_write/update/delete/apply_okf/migrate_okf</code> (autonomous) + <code>test_okf_server.py</code>.</td></tr>
+    <tr><td>5 — slug guard</td><td><span class="badge ok">DONE</span></td><td><code>7fc7cfa</code> + фикс <code>1c088ce</code>: guard в <code>wiki_write_page</code>, размещён ДО exists-check.</td></tr>
+    <tr><td>6 — sweep/export</td><td><span class="badge ok">DONE</span></td><td><code>02712e8</code>: <code>okf.batch_sweep</code> + <code>wiki_export_okf(domain=None)</code>; <code>export.py</code> удалён (−111); <code>test_export_okf.py</code> переписан.</td></tr>
+    <tr><td>7 — docs + version</td><td><span class="badge ok">DONE</span></td><td><code>44025a2</code>: <code>resources.py</code>, README EN+RU, <code>pyproject.toml</code>+<code>__init__.py</code> → <code>0.2.4</code>.</td></tr>
+    <tr><td>8 — full suite</td><td><span class="badge ok">DONE</span></td><td>301 passed, flake8 clean; <code>grep export_domain|convert_wikilinks|iwiki_mcp.export</code> пуст (SC-2 проверен).</td></tr>
+  </table>
+
+  <h3>Карта покрытия spec / Success Criteria</h3>
+  <table>
+    <tr><th>Источник</th><th>Покрытие</th><th>Свидетельство</th></tr>
+    <tr><td>Intent</td><td><code>n/a</code></td><td>Интента нет — сверка по spec. Desired Outcomes 0/0.</td></tr>
+    <tr><td>Spec R-01…R-17</td><td><span class="badge ok">17/17</span></td><td>R-01/R-07/R-13 → Task 4; R-02 → Tasks 3/4/6; R-03/R-04/R-08/R-09 → Task 6; R-05 → Task 1; R-06/R-12 → Task 3; R-10 → Task 2; R-11 → Task 5; R-14 → детерм. регенерация без merge-логики; R-15/R-16/R-17 → Task 7.</td></tr>
+    <tr><td>SC-1 (pytest + flake8)</td><td><span class="badge ok">✓</span></td><td>301 passed; flake8 clean.</td></tr>
+    <tr><td>SC-2 (grep пуст)</td><td><span class="badge ok">✓</span></td><td>Проверено в этой сверке — вывода нет.</td></tr>
+    <tr><td>SC-3 (manual/поведение)</td><td><span class="badge ok">✓</span></td><td>Отражено тестами: reserved не индексируются, write обновляет index/log, sweep добавляет frontmatter + markdown-ссылки in-place.</td></tr>
+  </table>
+
+  <h3>Лишнее и findings</h3>
+  <table>
+    <tr><th>severity</th><th>step</th><th>Plan / Diff / Fix</th></tr>
+    <tr><td><span class="badge info">INFO</span></td><td>Excess / Task 7</td><td><code>uv.lock</code> не в явном списке файлов плана, но дифф синхронизирует его версию <code>0.1.15</code>→<code>0.2.4</code> — прямое следствие bump'а версии (Task 7). Обосновано, фикс не нужен.</td></tr>
+    <tr><td><span class="badge info">INFO</span></td><td>Task 5</td><td>План размещал guard «после <code>page_file = …</code>» (что попадало после exists-check); реализация подняла вычисление <code>page_file</code> и поставила guard ДО exists-check (фикс <code>1c088ce</code>, Important из review). Семантическое улучшение против буквального плана; уже решено.</td></tr>
+  </table>
+  <p>Финальный whole-branch review: вердикт «With fixes» — 1 Important (порядок reserved-slug guard) исправлен в <code>1c088ce</code>; блокеров merge нет. Сверка plan↔diff — код-ревью здесь не выполнялось.</p>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 8/8 задач DONE, 0 MISSING; spec 17/17 + SC 3/3; 301 тест pass, flake8 clean; 2 INFO (uv.lock excess, улучшение размещения guard), 0 CRITICAL / 0 WARNING. План, spec и реализация согласованы.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> &#8594; <code>spec (OK)</code> &#8594; <code>plan (OK)</code> &#8594; <code>result (OK)</code></p>
 </section>
 <!-- TAB:result END -->
   </main>
