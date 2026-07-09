@@ -32,6 +32,10 @@ review:
 chain:
   intent: n/a
   spec: docs/superpowers/specs/2026-07-09-wiki-markdown-links-design.md
+result_check:
+  verdict: OK
+  plan_hash: b221721a3a1bfb96
+  last_run: 2026-07-09
 ---
 
 # Wiki Markdown Link Graph Implementation Plan

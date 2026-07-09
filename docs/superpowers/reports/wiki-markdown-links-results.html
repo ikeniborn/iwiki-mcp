@@ -99,12 +99,12 @@
   <input type="checkbox" id="theme-toggle" hidden>
   <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
   <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
-  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
   <header>
     <div>
       <h1>wiki-markdown-links chain results</h1>
-      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>plan</code>.</p>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>result</code>.</p>
     </div>
     <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
   </header>
@@ -250,7 +250,59 @@
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
 <section class="tab-pane" id="pane-result">
-  <p class="note">Этап ещё не проверен.</p>
+  <h2>Проверка result — 2026-07-09</h2>
+  <p class="note">Реализация сверена с планом через subagent-driven исполнение: все 8 задач присутствуют в diff (11 коммитов), spec-требования покрыты, полная сюита 215/215, config-free контракт сохранён, финальный whole-branch review (opus) — merge-ready (0 Critical / 0 Important). Verdict: <span class="badge ok">OK</span>.</p>
+
+  <h3>Резюме сверки</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Plan</td><td><code>docs/superpowers/plans/2026-07-09-wiki-markdown-links.md</code></td></tr>
+    <tr><td>Plan hash</td><td><code>b221721a3a1bfb96</code></td></tr>
+    <tr><td>Intent</td><td><code>n/a</code> (интента для топика нет)</td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-07-09-wiki-markdown-links-design.md</code></td></tr>
+    <tr><td>Diff base</td><td><code>20d8e3b..87fb9a0</code> (<code>--since=20d8e3b</code>)</td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Покрытие шагов плана — DONE 8/8 · PARTIAL 0 · MISSING 0</h3>
+  <table>
+    <tr><th>Task</th><th>Статус</th><th>Свидетельство в diff</th></tr>
+    <tr><td>1 — slugify_heading</td><td><span class="badge ok">DONE</span></td><td><code>b51c6df</code>: <code>engine/links.py</code> + 4 теста в <code>test_links.py</code>.</td></tr>
+    <tr><td>2 — dual-read parse_links + has_legacy_wikilink</td><td><span class="badge ok">DONE</span></td><td><code>5ff5d40</code>/<code>df65f2e</code>/<code>ae618eb</code>: <code>links.py</code> (<code>_MD_LINK</code>, <code>_md/_legacy_target_key</code>, нормализация, <code>has_legacy_wikilink</code>) + tests; fallout <code>b844455</code> (<code>test_server_search.py</code>).</td></tr>
+    <tr><td>3 — to_markdown_links</td><td><span class="badge ok">DONE</span></td><td><code>f5d278b</code>: <code>_WIKILINK</code> + code-masking rewriter + 9 тестов.</td></tr>
+    <tr><td>4 — проводка в write-хендлеры</td><td><span class="badge ok">DONE</span></td><td><code>de7a700</code>: <code>server.py</code> (import + 2 нормализации до validate/replace_section) + write/update тесты.</td></tr>
+    <tr><td>5 — lint slug-check + legacy_wikilink</td><td><span class="badge ok">DONE</span></td><td><code>d884bb3</code>: <code>lint.py</code> (slug-to-slug heading check + advisory <code>legacy_wikilink</code>) + <code>test_lint.py</code>.</td></tr>
+    <tr><td>6 — related regression</td><td><span class="badge ok">DONE</span></td><td><code>b549edd</code>: <code>test_related.py</code>; <code>related.py</code> не изменён.</td></tr>
+    <tr><td>7 — docs + version</td><td><span class="badge ok">DONE</span></td><td><code>95015e3</code>: <code>resources.py</code>, <code>test_resources.py</code>, README EN+RU, <code>pyproject.toml</code> 0.1.11→0.1.12; <code>87fb9a0</code>: <code>uv.lock</code> sync.</td></tr>
+    <tr><td>8 — полная проверка</td><td><span class="badge ok">DONE</span></td><td>Контроллером: <code>uv run pytest -q</code> → 215 passed; config-free контракт (<code>links</code>/<code>lint</code> без <code>httpx</code>) OK (проверка, без diff).</td></tr>
+  </table>
+
+  <h3>Карта покрытия intent / spec</h3>
+  <table>
+    <tr><th>Источник</th><th>Покрытие</th><th>Свидетельство</th></tr>
+    <tr><td>Intent</td><td><code>n/a</code></td><td>Интента для топика нет — сверка по spec.</td></tr>
+    <tr><td>Spec: parser dual-read</td><td><span class="badge ok">✓</span></td><td>Task 2 — markdown + legacy, нормализованные ключи, rejection-правила.</td></tr>
+    <tr><td>Spec: slugify_heading</td><td><span class="badge ok">✓</span></td><td>Task 1 — общий helper для parser/rewriter/lint.</td></tr>
+    <tr><td>Spec: to_markdown_links</td><td><span class="badge ok">✓</span></td><td>Task 3 — 4 формы, code-masking, идемпотентность.</td></tr>
+    <tr><td>Spec: write-нормализация</td><td><span class="badge ok">✓</span></td><td>Task 4 — оба хендлера до validate/persist.</td></tr>
+    <tr><td>Spec: lint (slug-check + legacy_wikilink)</td><td><span class="badge ok">✓</span></td><td>Task 5.</td></tr>
+    <tr><td>Spec: related.py unchanged</td><td><span class="badge warn">✓ с уточнением</span></td><td>Task 6 — код не тронут; форма вывода графа нормализована (bare slug), ребро сохранено (см. INFO).</td></tr>
+    <tr><td>Spec: authoring/docs/version + testing</td><td><span class="badge ok">✓</span></td><td>Task 7 + тесты во всех задачах.</td></tr>
+  </table>
+
+  <h3>Лишнее и findings</h3>
+  <table>
+    <tr><th>severity</th><th>step</th><th>Plan / Diff / Fix</th></tr>
+    <tr><td><span class="badge info">INFO</span></td><td>Task 6 / spec</td><td>Spec заявлял «related.py unaffected», но нормализованные ключи меняют строковую форму вывода <code>_graph_neighbours</code> для <code>.md</code>-суффиксных/markdown-ссылок (<code>"other.md"</code>→<code>"other"</code>). Ребро графа сохранено; устаревший тест <code>test_server_search.py</code> приведён к bare-slug (<code>b844455</code>). Семантическое расхождение, разрешено.</td></tr>
+    <tr><td><span class="badge info">INFO</span></td><td>Excess</td><td><code>uv.lock</code> (sync версии) и <code>test_server_search.py</code> (fallout) — не в явном списке файлов плана, но напрямую связаны с bump'ом версии и сменой контракта парсера. Обоснованы.</td></tr>
+  </table>
+  <p>Финальный whole-branch review (opus): 0 Critical, 0 Important, 5 Minor — все DEFER (редкие/degenerate входы, spec-уровень, plan-mandated docstrings). Ни один не блокирует merge.</p>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 8/8 задач DONE, 0 MISSING, spec покрыт, 215/215 тестов, review merge-ready. Плагин, spec, план и реализация согласованы.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> → <code>spec (OK)</code> → <code>plan (OK)</code> → <code>result (OK)</code></p>
 </section>
 <!-- TAB:result END -->
   </main>
