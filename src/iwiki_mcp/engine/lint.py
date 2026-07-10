@@ -15,6 +15,7 @@ import re
 
 from . import frontmatter as _fm
 from .links import parse_links, slugify_heading, has_legacy_wikilink
+from .okf_artifacts import RESERVED_OKF
 from .validate import validate_page
 
 # Keep in sync with chunk._H2 — inlined here to avoid importing .chunk, which
@@ -23,9 +24,17 @@ _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 
 
 def _pages(wiki_dir: str) -> list[str]:
-    """All docs/wiki/**/*.md (normalised), excluding the .iwiki index dir."""
+    """All docs/wiki/**/*.md (normalised), excluding the .iwiki index dir and
+    the generated OKF reserved files (index.md / log.md)."""
     files = glob.glob(os.path.join(wiki_dir, "**", "*.md"), recursive=True)
-    return sorted(os.path.normpath(f) for f in files if "/.iwiki/" not in f)
+    out = []
+    for f in files:
+        if "/.iwiki/" in f:
+            continue
+        if os.path.relpath(f, wiki_dir) in RESERVED_OKF:
+            continue
+        out.append(os.path.normpath(f))
+    return sorted(out)
 
 
 def _read(path: str) -> str:

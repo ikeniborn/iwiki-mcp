@@ -235,12 +235,21 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 
 | Field | Meaning |
 |---|---|
-| `type` | Required. Closed vocabulary: `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default). |
+| `type` | Required. **Open** vocabulary: prefer `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default), but any value is accepted (e.g. `person`); off-list values get only an advisory `unknown_type`. |
 | `title` | Derived from the page's `# Title` H1. |
-| `description` | Derived from the `## Overview` section, truncated to `IWIKI_SUMMARY_MAX_CHARS`. |
+| `description` | The authored article summary — the single source of the summary, embedded as each section's context prefix. Falls back to a `## Overview` section only transitionally (migration). |
 | `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. |
 | `tags` | Lowercase kebab-case labels, at most 5 per page. |
+| `status` | Optional iwiki extension: `stub` (default), `developing`, `stable`, `deprecated`. |
 | `timestamp` | On create (`wiki_write_page`, `wiki_apply_okf`, `wiki_migrate_okf`): the page file's last git-commit date, or today's date if not yet committed. On edit (`wiki_update_page`): always today's date. |
+
+The reserved OKF files `index.md` (navigation) and `log.md` (history) are kept fresh in the domain directory on every write, so a git-synced domain is always a complete OKF bundle read directly by external consumers — there is no separate export copy. The `index` and `log` slugs are reserved and rejected by `wiki_write_page`.
+
+Pages no longer carry a `## Overview` section: the summary lives in `description`.
+Relationship links go in two reserved `##` sections — `## Outgoing links` (Markdown
+links) and `## External links` (bare URLs) — which are excluded from the search index
+but still feed the link graph. Run `wiki_export_okf` once to migrate legacy pages
+(it strips `## Overview`, backfills `description`, and defaults `status`).
 
 `type` and `tags` are resolved with this precedence: an **explicit** `type`/`tags` argument on the write tool wins; otherwise, when `IWIKI_CHAT_MODEL` is set, the server classifies the page body with that chat model; otherwise it defaults to `type="concept"` with no tags.
 
@@ -256,7 +265,7 @@ Tools for adopting OKF frontmatter on an existing domain:
 |---|---|
 | `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. In autonomous mode, each page's `resource` falls back to its last logged ingest source, and tags coined for one page are reused as vocabulary for later pages in the same run. |
 | `wiki_apply_okf(domain, slug, type, tags)` | Apply agent-classified `type`/`tags` (plus derived fields) as frontmatter to one page, reindex, commit and push. Omitting `tags` preserves the page's existing tags instead of clearing them. |
-| `wiki_export_okf(domain, dest)` | Export a domain into a fully OKF-conformant bundle at `dest`: every page carries frontmatter (existing pages keep theirs, tags deduped; pages with none get a deterministic `type: concept` / title / description / git-date timestamp), `[[wikilink]]` syntax is rewritten to standard Markdown links, and reserved `index.md` / `log.md` files are generated. Returns a `warnings` list flagging any source page whose name collides with those reserved files. Sources are never mutated, only copied. |
+| `wiki_export_okf(domain=None)` | Whole-domain, in-place OKF conformance sweep (no copy, no `dest`): converts any residual `[[wikilink]]` to Markdown links and guarantees frontmatter on every page (deterministic `type: concept` where missing; existing `type`/`tags` preserved), then regenerates the reserved `index.md` / `log.md`. Deterministic — never calls the chat model. Returns `fixed_links`, `added_frontmatter`, and `still_missing_frontmatter` / `still_legacy_wikilink`, with a `next_steps` hint to `wiki_migrate_okf` for better `type`/`tags`. The domain directory is itself the OKF bundle. It also migrates each page to the v2 body model: strips a `## Overview` section, backfilling `description` from it when empty, and defaults `status` to `stub`. |
 
 `IWIKI_CHAT_MODEL` (default: empty) is optional; leaving it unset disables server-side classification and `wiki_migrate_okf` falls back to plan mode.
 
@@ -293,7 +302,8 @@ wiki_bind(read=["backend"], write="backend")
 wiki_write_page(
   domain="backend",
   slug="auth",
-  markdown="# Auth\n\n## Overview\nToken authentication flow.\n\n## Purpose\nAuth verifies users and protects private routes.\n"
+  markdown="# Auth\n\n## Purpose\nAuth verifies users and protects private routes.\n",
+  description="Token authentication flow."
 )
 ```
 

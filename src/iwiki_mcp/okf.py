@@ -4,11 +4,16 @@ default). Kept out of the engine because it reaches git and the index."""
 from __future__ import annotations
 import datetime as _dt
 import json
+import re
 import subprocess
+from pathlib import Path
 
 from .engine import classify, frontmatter as fm
+from .engine import okf_artifacts as _oa
 from .engine.store import VectorStore
 from . import base as _base
+
+_H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)   # keep in sync with chunk._H2
 
 
 def git_last_commit_date(base_dir: str, path: str) -> str | None:
@@ -31,34 +36,54 @@ def domain_tag_vocab(base_dir: str, domain: str) -> list:
 
 
 def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
-                      explicit_type, explicit_tags, timestamp_path, tag_vocab=None):
-    """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default."""
-    warning = None
+                      explicit_type, explicit_tags, timestamp_path,
+                      explicit_description=None, explicit_status=None, tag_vocab=None):
+    """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default.
+    description: explicit param -> transitional ## Overview derive -> empty (+warning).
+    status: explicit param -> DEFAULT_STATUS. type: stored as authored (open, normalized)."""
+    warnings: list = []
     if explicit_type is not None:
-        mtype = fm.coerce_type(explicit_type)
+        mtype = fm.normalize_type(explicit_type)
         mtags = fm.normalize_tags(explicit_tags or [])
     elif cfg.chat_model:
         vocab = tag_vocab if tag_vocab is not None else domain_tag_vocab(base_dir, domain)
         r = classify.classify_page(cfg, body, vocab)
         mtype = r["type"]
         mtags = fm.normalize_tags(explicit_tags) if explicit_tags else r["tags"]
-        warning = r["warning"]
+        if r["warning"]:
+            warnings.append(r["warning"])
     else:
         mtype = fm.DEFAULT_TYPE
         mtags = fm.normalize_tags(explicit_tags or [])
-        warning = "type not given and IWIKI_CHAT_MODEL unset; defaulted to concept"
+        warnings.append("type not given and IWIKI_CHAT_MODEL unset; defaulted to concept")
 
     meta: dict = {"type": mtype, "title": fm.derive_title(body, slug)}
-    desc = fm.derive_description(body, cfg.summary_max)
+    desc = (explicit_description if explicit_description is not None
+            else fm.derive_description(body, cfg.summary_max))
     if desc:
         meta["description"] = desc
+    else:
+        warnings.append("no description given and no ## Overview to derive from")
     if source:
         meta["resource"] = source
     if mtags:
         meta["tags"] = mtags
+    meta["status"] = fm.normalize_status(explicit_status) if explicit_status else fm.DEFAULT_STATUS
     meta["timestamp"] = (git_last_commit_date(base_dir, timestamp_path)
                          or _dt.date.today().isoformat())
-    return fm.render(meta), warning
+    return fm.render(meta), ("; ".join(warnings) or None)
+
+
+def _strip_overview(body: str, max_chars: int) -> tuple[str, str]:
+    """If the FIRST ## section is 'Overview', drop it and return (new_body,
+    overview_text) — mirrors derive_description's first-section rule. No Overview
+    -> (body, "")."""
+    ms = list(_H2.finditer(body))
+    if not ms or ms[0].group(1).strip().lower() != "overview":
+        return body, ""
+    first, end = ms[0], (ms[1].start() if len(ms) > 1 else len(body))
+    overview_text = " ".join(body[first.end():end].split())[:max_chars]
+    return body[:first.start()] + body[end:], overview_text
 
 
 def latest_source(base_dir, domain, page_file):
@@ -86,3 +111,105 @@ def latest_source(base_dir, domain, page_file):
         elif rec.get("source"):
             src = rec["source"]
     return src
+
+
+def _page_slugs(dom_path: Path) -> list[str]:
+    """Domain page slugs, excluding the .iwiki dir and the reserved OKF files."""
+    out = []
+    for p in sorted(dom_path.rglob("*.md")):
+        rel = p.relative_to(dom_path)
+        if ".iwiki" in rel.parts or rel.as_posix() in _oa.RESERVED_OKF:
+            continue
+        out.append(rel.with_suffix("").as_posix())
+    return out
+
+
+def _read_log(dom_path: Path) -> list:
+    path = dom_path / ".iwiki" / "log.jsonl"
+    recs: list = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                recs.append(json.loads(line))
+            except ValueError:
+                pass
+    return recs
+
+
+def _looks_authored(text: str) -> bool:
+    """A pre-existing reserved file is 'authored' (never clobber) if it carries
+    frontmatter or any ## section — the generated nav/log files have neither."""
+    # Gap: a prose-only reserved file (no frontmatter, no '## ') reads as generated
+    # and is overwritten. Accepted — the write guard blocks tool-creation of such
+    # files, and broadening this check would misclassify the generated index.md/
+    # log.md themselves as authored, breaking idempotent refresh.
+    meta, _ = fm.split(text)
+    if meta:
+        return True
+    return any(ln.startswith("## ") for ln in text.splitlines())
+
+
+def batch_sweep(cfg, base_dir, domain) -> dict:
+    """Deterministic whole-domain in-place OKF conformance sweep (no chat model).
+    Converts residual [[...]] links, migrates the body to the v2 model (strips a
+    first-section ## Overview, backfilling frontmatter ``description`` from it when
+    empty and defaulting ``status`` to stub), and guarantees frontmatter on every
+    page, preserving existing type/tags. Writes back only changed files (idempotent)."""
+    from .engine.links import to_markdown_links
+    dom = Path(base_dir) / domain
+    fixed_links, added_frontmatter = [], []
+    for slug in _page_slugs(dom):
+        page_file = f"{slug}.md"
+        p = dom / page_file
+        original = p.read_text(encoding="utf-8")
+        meta, body = fm.split(original)
+        linked = to_markdown_links(body)
+        links_changed = linked != body
+        new_body, overview_text = _strip_overview(linked, cfg.summary_max)
+        if meta:
+            if meta.get("tags"):
+                meta["tags"] = fm.normalize_tags(meta["tags"])
+            if not meta.get("description") and overview_text:
+                meta["description"] = overview_text
+            if not meta.get("status"):
+                meta["status"] = fm.DEFAULT_STATUS
+            new_full = fm.render(meta) + new_body
+        else:
+            src = latest_source(base_dir, domain, page_file)
+            block, _ = build_frontmatter(
+                cfg, base_dir, domain, slug, new_body,
+                source=src, explicit_type=fm.DEFAULT_TYPE, explicit_tags=None,
+                explicit_description=(overview_text or None),
+                timestamp_path=f"{domain}/{page_file}")
+            new_full = block + new_body
+            added_frontmatter.append(slug)
+        if new_full != original:
+            p.write_text(new_full, encoding="utf-8")
+            if links_changed:
+                fixed_links.append(slug)
+    return {"fixed_links": fixed_links, "added_frontmatter": added_frontmatter}
+
+
+def refresh_artifacts(base_dir, domain) -> str | None:
+    """Regenerate index.md + log.md in the domain root from current state.
+    Deterministic and best-effort: never raises. Returns a warning or None."""
+    try:
+        dom = Path(base_dir) / domain
+        slugs = _page_slugs(dom)
+        records = _read_log(dom)
+        warnings: list = []
+        for name, content in (("index.md", _oa.render_index(slugs)),
+                              ("log.md", _oa.render_log(records))):
+            p = dom / name
+            if p.is_file() and _looks_authored(p.read_text(encoding="utf-8")):
+                warnings.append(
+                    f"authored page '{name}' collides with the generated OKF "
+                    "file; left untouched")
+                continue
+            p.write_text(content, encoding="utf-8")
+        return "; ".join(warnings) or None
+    except Exception:
+        return "okf artifact refresh failed"

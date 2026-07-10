@@ -19,10 +19,12 @@ def test_classify_parses_and_governs(monkeypatch):
     assert out["warning"] is None
 
 
-def test_classify_offvocab_falls_back(monkeypatch):
-    monkeypatch.setattr(classify, "_chat", lambda cfg, prompt: '{"type": "nonsense", "tags": []}')
+def test_classify_keeps_type_open(monkeypatch):
+    # type is now an open vocabulary: an off-list classifier value is kept
+    # (normalized), not clamped — advisory unknown_type flags it downstream.
+    monkeypatch.setattr(classify, "_chat", lambda cfg, prompt: '{"type": "Person", "tags": []}')
     out = classify.classify_page(_cfg(), "body", existing_tags=[])
-    assert out["type"] == "concept"
+    assert out["type"] == "person"
 
 
 def test_classify_failure_is_best_effort(monkeypatch):

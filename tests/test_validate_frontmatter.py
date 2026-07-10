@@ -38,3 +38,8 @@ def test_typed_page_missing_only_description():
     assert "missing_description" in types
     assert "missing_type" not in types
     assert "unknown_type" not in types
+
+
+def test_missing_description_still_fires_without_overview():
+    page = "---\ntype: api\n---\n# T\n\n## B\nbody\n"
+    assert "missing_description" in _types(validate_page(page))

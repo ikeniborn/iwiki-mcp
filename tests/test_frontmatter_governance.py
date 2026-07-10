@@ -1,11 +1,10 @@
 from iwiki_mcp.engine import frontmatter as fm
 
 
-def test_coerce_type_case_and_whitespace_insensitive():
-    assert fm.coerce_type("API") == "api"
-    assert fm.coerce_type(" Architecture ") == "architecture"
-    assert fm.coerce_type(" api ") == "api"
-    assert fm.coerce_type("weird") == fm.DEFAULT_TYPE
+def test_normalize_type_case_and_whitespace_insensitive_open():
+    assert fm.normalize_type("API") == "api"
+    assert fm.normalize_type(" Architecture ") == "architecture"
+    assert fm.normalize_type("weird") == "weird"      # open — not clamped
 
 
 def test_normalize_tag_folds_list_delimiters():

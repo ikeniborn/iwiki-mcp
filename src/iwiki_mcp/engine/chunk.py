@@ -1,9 +1,10 @@
 """Split markdown on ## headings into sections, then into overlapping sub-chunks.
 
-Each content section's sub-chunks are prefixed with the page title, the authored
-``## Overview`` summary, the section heading, and the section lead, so every vector
-carries whole-article + whole-section context. The first ``## Overview`` section is
-the summary source and is itself excluded from the index.
+Each content section's sub-chunks are prefixed with the page title, the frontmatter
+``description`` (the authored article summary), the section heading, and the section
+lead, so every vector carries whole-article + whole-section context. The reserved
+link sections (``## Outgoing links`` / ``## External links``) and any ``## Overview``
+are excluded from the index; the summary lives only in ``description``.
 """
 from __future__ import annotations
 import hashlib
@@ -16,7 +17,6 @@ from . import frontmatter as _fm
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 
-OVERVIEW_HEADING = "overview"   # reserved first section; its body is the article summary
 LEAD_MAX = 250                  # section lead (= section summary) char cap
 
 
@@ -84,20 +84,23 @@ def chunk_markdown(file: str, content: str, size: int, overlap: int,
                    summary_max: int = 400) -> list[Chunk]:
     """Return chunks for one markdown file.
 
-    The first ``## Overview`` section (case-insensitive) is the article-summary
-    source and is NOT itself indexed; every other section's sub-chunks are prefixed
-    with title + article summary + heading + lead, then word-split with overlap.
+    The article summary is the frontmatter ``description``; every section that is not
+    reserved and not ``## Overview`` has its sub-chunks prefixed with title + summary
+    + heading + lead, then word-split with overlap. Reserved link sections and
+    ``## Overview`` are dropped, never indexed.
     """
     meta, content = _fm.split(content)
-    ptype = _fm.coerce_type(meta.get("type")) if meta.get("type") else None
+    ptype = _fm.normalize_type(meta.get("type")) if meta.get("type") else None
     ptags = _fm.normalize_tags(meta.get("tags", [])) if meta.get("tags") else []
     out: list[Chunk] = []
     title = _page_title(content, file)
-    secs = _sections(content)
-    article_summary = ""
-    if secs and secs[0][0].lower() == OVERVIEW_HEADING:
-        article_summary = " ".join(secs[0][1].split())[:summary_max]
-        secs = secs[1:]                       # exclude Overview from the index
+    desc = meta.get("description", "")
+    article_summary = " ".join(desc.split())[:summary_max] if isinstance(desc, str) else ""
+    # `## Overview` is never indexed: its text belongs in `description` now, and an
+    # un-migrated Overview must not leak into the vectors. Excluded like the reserved
+    # link sections (migration also strips it from the body).
+    excluded = (*_fm.RESERVED_SECTIONS, _fm.OVERVIEW_HEADING)
+    secs = [(h, b) for h, b in _sections(content) if h.lower() not in excluded]
     for heading, body in secs:
         lead = _lead(body)
         prefix = "\n".join(

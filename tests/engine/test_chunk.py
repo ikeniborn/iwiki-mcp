@@ -37,24 +37,28 @@ def test_overview_section_is_not_indexed():
     assert {c.heading for c in chunks} == {"TLS Handling", "OAuth Refresh"}
 
 
-def test_prefix_carries_title_overview_and_lead():
-    chunks = chunk_markdown("proxy.md", PAGE, size=512, overlap=64)
+def test_prefix_carries_title_description_and_lead():
+    page = (
+        "---\ntype: concept\ndescription: The gateway routes API traffic via a proxy.\n---\n"
+        "# Proxy Management\n\n## TLS Handling\nThe proxy terminates TLS using a local CA.\n"
+    )
+    chunks = chunk_markdown("proxy.md", page, size=512, overlap=64)
     tls = next(c for c in chunks if c.heading == "TLS Handling")
     assert tls.text.startswith("# Proxy Management\n")
-    assert "The gateway routes API traffic via an HTTPS proxy" in tls.text  # article summary
-    assert "## TLS Handling" in tls.text                                # heading
-    assert "The proxy terminates TLS using a local CA." in tls.text     # lead
+    assert "The gateway routes API traffic via a proxy." in tls.text  # summary from description
+    assert "## TLS Handling" in tls.text
+    assert "The proxy terminates TLS using a local CA." in tls.text
 
 
 def test_prefix_on_every_subchunk_of_a_split_section():
     body = " ".join(str(i) for i in range(40))
-    md = f"# T\n\n## Overview\nsumm of all.\n\n## Big\n{body}\n"
+    md = f"---\ndescription: summ of all.\n---\n# T\n\n## Big\n{body}\n"
     chunks = chunk_markdown("f.md", md, size=8, overlap=2)
     big = [c for c in chunks if c.heading == "Big"]
     assert len(big) > 1
     assert all(c.text.startswith("# T\n") for c in big)
-    assert all("summ of all." in c.text for c in big)   # article summary in every piece
-    assert all("## Big" in c.text for c in big)          # section heading in every piece
+    assert all("summ of all." in c.text for c in big)   # article summary from description
+    assert all("## Big" in c.text for c in big)
 
 
 def test_title_falls_back_to_humanized_basename():
@@ -70,9 +74,11 @@ def test_no_overview_yields_no_summary_line():
     assert chunks[0].text.startswith("# T\n## A\nbody alpha.\n\n")
 
 
-def test_hash_changes_when_overview_changes():
-    a = chunk_markdown("f.md", "# T\n\n## Overview\nsumm one.\n\n## A\nbody.\n",
+def test_hash_changes_when_description_changes():
+    # Overview is no longer indexed, so a section's hash tracks the `description`
+    # prefix, not an Overview body.
+    a = chunk_markdown("f.md", "---\ndescription: summ one.\n---\n# T\n\n## A\nbody.\n",
                        size=512, overlap=64)
-    b = chunk_markdown("f.md", "# T\n\n## Overview\nsumm two.\n\n## A\nbody.\n",
+    b = chunk_markdown("f.md", "---\ndescription: summ two.\n---\n# T\n\n## A\nbody.\n",
                        size=512, overlap=64)
     assert a[0].hash != b[0].hash

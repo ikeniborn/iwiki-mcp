@@ -42,10 +42,32 @@ def test_normalize_tags_dedupe_and_cap():
     assert len(tags) == fm.MAX_TAGS
 
 
-def test_coerce_type_clamps_offvocab():
-    assert fm.coerce_type("api") == "api"
-    assert fm.coerce_type("weird") == fm.DEFAULT_TYPE
-    assert fm.coerce_type(None) == fm.DEFAULT_TYPE
+def test_normalize_type_no_clamp():
+    assert fm.normalize_type("API") == "api"          # lower/trim
+    assert fm.normalize_type("  weird ") == "weird"   # open — NOT clamped
+    assert fm.normalize_type(None) == fm.DEFAULT_TYPE
+    assert fm.normalize_type("") == fm.DEFAULT_TYPE
+
+
+def test_normalize_status_open_with_default():
+    assert fm.normalize_status("Stable") == "stable"
+    assert fm.normalize_status("  weird ") == "weird"     # kept as-is (advisory)
+    assert fm.normalize_status(None) == fm.DEFAULT_STATUS
+    assert fm.DEFAULT_STATUS == "stub"
+    assert fm.STATUS_VOCAB == ("stub", "developing", "stable", "deprecated")
+
+
+def test_reserved_sections_constant():
+    assert fm.RESERVED_SECTIONS == ("outgoing links", "external links")
+
+
+def test_render_places_status_before_timestamp():
+    meta = {"type": "person", "title": "X", "status": "developing",
+            "timestamp": "2026-07-10"}
+    out = fm.render(meta)
+    assert out.index("status:") < out.index("timestamp:")
+    meta2, _ = fm.split(out + "# x\n")
+    assert meta2["status"] == "developing"
 
 
 def test_derive_title_from_h1_then_slug():

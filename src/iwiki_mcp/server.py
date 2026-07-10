@@ -19,6 +19,7 @@ from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError
 from .engine.links import to_markdown_links
+from .engine.okf_artifacts import RESERVED_OKF
 from .engine.section import SectionError, replace_section
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
@@ -189,7 +190,7 @@ def wiki_list_pages(domain: str) -> dict:
     pages = []
     for path in sorted(dom_path.rglob("*.md")):
         rel_path = path.relative_to(dom_path)
-        if ".iwiki" in rel_path.parts:
+        if ".iwiki" in rel_path.parts or rel_path.as_posix() in RESERVED_OKF:
             continue
         rel = rel_path.as_posix()
         pages.append({"slug": rel[:-3], "file": rel})
@@ -320,6 +321,7 @@ def _fresh_warn(fresh: dict) -> dict:
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None,
     type: str | None = None, tags: list[str] | None = None,
+    description: str | None = None, status: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
@@ -349,16 +351,26 @@ def wiki_write_page(
                         "remove the pattern to ingest, or omit source",
             }
     path = _page_path(bind.base, valid_domain, slug)
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    # Reject reserved slugs BEFORE the exists check: refresh_artifacts generates
+    # index.md/log.md on the first write, so on an established domain the exists
+    # check would otherwise mask this with a misleading "page exists" error.
+    if page_file in RESERVED_OKF:
+        return {
+            "error": f"slug '{slug}' is reserved for the generated OKF file "
+                     f"'{page_file}'",
+            "hint": "choose another slug; index/log are generated, not authored",
+        }
     if os.path.exists(path):
         return {
             "error": f"page '{valid_domain}/{slug}' exists",
             "hint": "editing an existing page is a guarded op; confirm with the user",
         }
     cfg = Config.load()
-    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, markdown,
         source=source, explicit_type=type, explicit_tags=tags,
+        explicit_description=description, explicit_status=status,
         timestamp_path=f"{valid_domain}/{page_file}")
     full_md = fm_block + markdown
     log_source = source or ""
@@ -389,6 +401,7 @@ def wiki_write_page(
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
                                   pathspec=valid_domain)
     result = {
@@ -402,12 +415,15 @@ def wiki_write_page(
     }
     if fm_warning:
         result.setdefault("warning", fm_warning)
+    if art_warn:
+        result.setdefault("warning", art_warn)
     return result
 
 
 @_safe
 def wiki_update_page(
-    domain: str, slug: str, heading: str, new_body: str, source: str | None = None
+    domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
+    description: str | None = None, status: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
@@ -451,9 +467,10 @@ def wiki_update_page(
         }
     cfg = Config.load()
     if meta:
-        desc = _fm.derive_description(new_body, cfg.summary_max)
-        if desc:
-            meta["description"] = desc
+        if description is not None:
+            meta["description"] = description
+        if status is not None:
+            meta["status"] = _fm.normalize_status(status)
         meta["timestamp"] = _dt.date.today().isoformat()
         new_md = _fm.render(meta) + new_body
     else:
@@ -478,9 +495,10 @@ def wiki_update_page(
             _restore_log(log_file, log_before)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: update {page_rel}",
                                   pathspec=valid_domain)
-    return {
+    result = {
         "page": page_rel,
         "heading": heading.lstrip("#").strip(),
         "indexed_chunks": stats["indexed_chunks"],
@@ -492,6 +510,9 @@ def wiki_update_page(
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
@@ -531,9 +552,10 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
             _rollback_last_log(bind.base, valid_domain, "delete", page_file, "", None)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: delete {page_rel}",
                                   pathspec=valid_domain)
-    return {
+    result = {
         "deleted": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
@@ -541,6 +563,9 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
@@ -763,7 +788,7 @@ def _unmigrated_pages(dom_path: Path):
     """Yield (slug, page_file, body, has_frontmatter) for each page."""
     for path in sorted(dom_path.rglob("*.md")):
         rel = path.relative_to(dom_path)
-        if ".iwiki" in rel.parts:
+        if ".iwiki" in rel.parts or rel.as_posix() in RESERVED_OKF:
             continue
         meta, body = _fm.split(path.read_text(encoding="utf-8"))
         yield rel.with_suffix("").as_posix(), rel.as_posix(), body, bool(meta)
@@ -806,13 +831,17 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
                 if t not in vocab:
                     vocab.append(t)
         stats = indexer.index_domain(cfg, bind.base, target)
+        art_warn = okf.refresh_artifacts(bind.base, target)
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
                                       pathspec=target)
-        return {"domain": target, "mode": "autonomous", "migrated": migrated,
-                "skipped": skipped, "warnings": warnings,
-                "indexed_chunks": stats["indexed_chunks"],
-                "committed": commit.get("committed", False),
-                "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+        result = {"domain": target, "mode": "autonomous", "migrated": migrated,
+                  "skipped": skipped, "warnings": warnings,
+                  "indexed_chunks": stats["indexed_chunks"],
+                  "committed": commit.get("committed", False),
+                  "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+        if art_warn:
+            result.setdefault("warning", art_warn)
+        return result
     # plan mode: no writes
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
@@ -878,28 +907,59 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
             fh.write(original)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: apply okf {page_rel}",
                                   pathspec=valid_domain)
     meta, _ = _fm.split(fm_block + body)
-    return {"page": page_rel, "type": meta.get("type"), "tags": meta.get("tags", []),
-            "indexed_chunks": stats["indexed_chunks"],
-            "committed": commit.get("committed", False),
-            "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+    result = {"page": page_rel, "type": meta.get("type"), "tags": meta.get("tags", []),
+              "indexed_chunks": stats["indexed_chunks"],
+              "committed": commit.get("committed", False),
+              "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
-def wiki_export_okf(domain: str, dest: str) -> dict:
-    from . import export
+def wiki_export_okf(domain: str | None = None) -> dict:
     bind = base.resolve_binding()
-    valid_domain = _validate_domain(domain)
+    target = domain or bind.write
+    if not target:
+        return {"error": "no domain given and no write-target bound",
+                "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
+    valid_domain = _validate_domain(target)
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
     dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
-    if not dest:
-        return {"error": "dest is required", "hint": "pass an output directory path"}
-    result = export.export_domain(str(dom_path), os.path.abspath(os.path.expanduser(dest)))
-    return {"domain": valid_domain, **result}
+    cfg = Config.load()
+    swept = okf.batch_sweep(cfg, bind.base, valid_domain)
+    stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
+    commit = sync.commit_and_push(bind.base, f"iwiki: export okf {valid_domain}",
+                                  pathspec=valid_domain)
+    from .engine.lint import lint
+    report = lint(str(dom_path), project_dir=bind.project_dir)
+    result = {
+        "domain": valid_domain,
+        "fixed_links": swept["fixed_links"],
+        "added_frontmatter": swept["added_frontmatter"],
+        "artifacts": list(RESERVED_OKF),
+        "still_missing_frontmatter": report.get("missing_frontmatter", []),
+        "still_legacy_wikilink": report.get("legacy_wikilink", []),
+        "indexed_chunks": stats["indexed_chunks"],
+        "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
+        "next_steps": ["Run wiki_migrate_okf for better type/tags than the "
+                       "deterministic 'concept' default on newly added frontmatter."],
+        **_fresh_warn(fresh),
+    }
+    if art_warn:
+        result.setdefault("warning", art_warn)
+    return result
 
 
 @_safe
