@@ -9,9 +9,8 @@ AUTHORING_RULES: str = """\
   indexed as separate units; flatten them into the `##` section's prose.
 - Put **no content before the first `##`** except the frontmatter block and a
   single `# Title` H1.
-- Lead with `# Title`, then a first `## Overview` section summarizing all of the
-  page's sections in <=400 characters. The Overview is NOT indexed as its own
-  section; it gives every other section whole-article context.
+- Lead with `# Title`, then the page's `##` sections directly. Do NOT write a
+  `## Overview` section -- the article summary is the frontmatter `description`.
 - One `##` section per concept; lead each section with a <=250-char paragraph
   stating what it covers and why it matters (intent, not just mechanics).
 - Prefer a standard section name where one fits: `## Purpose`, `## Interface`,
@@ -23,15 +22,19 @@ AUTHORING_RULES: str = """\
 ## OKF frontmatter
 
 - Every page carries a YAML frontmatter block above the `# Title` H1. The write
-  tools fill it; you rarely hand-author it. Fields: `type` (required), `title`,
-  `description`, `resource`, `tags`, `timestamp`.
-- `type` MUST be one of the closed vocabulary -- `architecture`, `api`, `guide`,
-  `reference`, `runbook`, `concept` (default). Pick by dominant intent:
-  `architecture` = structure/data flow; `api` = call surface; `guide` = how-to;
-  `reference` = lookup tables; `runbook` = ops procedure; `concept` = an idea/model.
-- `tags` are lowercase kebab-case, <=5 per page; reuse an existing domain tag
-  before coining a new one.
+  tools fill it. Fields: `type` (required), `title`, `description`, `resource`,
+  `tags`, `status`, `timestamp`.
+- `description` is the authored article summary and the single source of it (it is
+  embedded as each section's context prefix). Write it rich: include `Covers:` and
+  `Terms:` keyword lines so retrieval matches the page. There is no `## Overview`.
+- `type` is an OPEN vocabulary. Prefer a common value -- `architecture`, `api`,
+  `guide`, `reference`, `runbook`, `concept` (default) -- but any lower-case value
+  is allowed (e.g. `person`, `team`); an off-list value is only advised, not rejected.
+- `status` is one of `stub` (default), `developing`, `stable`, `deprecated`.
+- `tags` are lowercase kebab-case, <=5 per page; reuse an existing domain tag first.
+- Put relationship links in two reserved sections, `## Outgoing links` (Markdown links
+  to other pages) and `## External links` (bare URLs). Both are EXCLUDED from search
+  indexing but still feed the link graph (`wiki_related`, `lint`).
 - The slugs `index` and `log` are reserved: `index.md` / `log.md` are generated
-  OKF navigation/history files kept fresh in the domain on every write. Do not
-  author a page with either slug -- the write tools reject it.
+  OKF navigation/history files kept fresh on every write. The write tools reject them.
 """

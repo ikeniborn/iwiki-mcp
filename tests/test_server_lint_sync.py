@@ -62,7 +62,7 @@ def test_remediation_plan_empty_when_lint_has_no_candidates(tmp_path, monkeypatc
     assert out["blocked_candidates"] == []
     assert out["lint"]["wiki_present"] is False
     assert "use wiki_update_page" in " ".join(out["next_steps"]).lower()
-    assert "## Overview" in out["authoring_rules"]
+    assert "description" in out["authoring_rules"]
 
 
 def test_remediation_plan_rejects_non_write_domain(tmp_path, monkeypatch):

@@ -82,6 +82,33 @@ def test_write_rejects_reserved_slug_on_established_domain(tmp_path, monkeypatch
     assert "[auth](auth.md)" in open(idx_path, encoding="utf-8").read()   # not overwritten
 
 
+def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
+    # SC-3: reserved `## Outgoing links` / `## External links` sections never enter
+    # the vector store, but the page-to-page edges they carry still reach
+    # `wiki_related`'s link graph. `target` is given only a reserved section, so it
+    # contributes zero index records; that leaves `alice.md#Role` as the domain's
+    # only record, forcing `related()`'s vector-neighbour lookup empty and its
+    # graph fallback to run -- proving the edge, not a vector-similarity coincidence.
+    b = _seed(tmp_path, monkeypatch)
+    server.wiki_write_page("backend", "target",
+                           "# Target\n\n## External links\n- https://example.com/target\n",
+                           source=None, type="concept", description="target page")
+    page = ("# Alice\n\n## Role\nbilling prose here.\n\n"
+            "## Outgoing links\n- [Target](target.md)\n\n"
+            "## External links\n- https://example.com/docs\n")
+    server.wiki_write_page("backend", "alice", page, source=None, type="person",
+                           description="Alice covers billing.")
+    recs = VectorStore(base.index_path(b, "backend")).load()
+    assert not any(r.file == "target.md" for r in recs)   # target's section is reserved only
+    alice = [r for r in recs if r.file == "alice.md"]
+    headings = {r.heading for r in alice}
+    assert headings == {"Role"}                      # link sections not indexed
+    # the authored outgoing link still feeds the graph
+    rel = server.wiki_related("backend", "alice.md#Role")
+    assert rel["graph"] == ["target"]
+    assert "target" in str(rel)
+
+
 def test_reserved_files_land_in_the_same_commit(tmp_path, monkeypatch):
     # Load-bearing: the generated index.md/log.md must be committed alongside the
     # page in ONE commit. The default _seed base is not a git repo, so this is the
