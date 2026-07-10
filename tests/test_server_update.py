@@ -60,35 +60,35 @@ def test_update_rejects_deep_heading_in_body(tmp_path, monkeypatch):
 
 
 def test_update_upserts_log_when_source_given(tmp_path, monkeypatch):
-    b, _ = _seed(tmp_path, monkeypatch)
-    src = tmp_path / "src.txt"
-    src.write_text("v1")
-    _write(BASE_MD, source=str(src))
-    src.write_text("v2")
+    b, proj = _seed(tmp_path, monkeypatch)
+    src = os.path.join(proj, "src.txt")
+    open(src, "w").write("v1")
+    _write(BASE_MD, source=src)
+    open(src, "w").write("v2")
 
-    out = server.wiki_update_page("backend", "auth", "Flow", "new", source=str(src))
+    out = server.wiki_update_page("backend", "auth", "Flow", "new", source=src)
     assert "error" not in out
 
     text = open(base.log_path(b, "backend"), encoding="utf-8").read()
     recs = [json.loads(line) for line in text.splitlines() if line.strip()]
     ingest = [r for r in recs if r.get("op") == "ingest" and r["page"] == "auth.md"]
     assert len(ingest) == 1
-    assert ingest[0]["source"] == str(src)
+    assert ingest[0]["source"] == "src.txt"
 
 
 def test_update_rolls_back_file_and_log_on_index_failure(tmp_path, monkeypatch):
-    b, _ = _seed(tmp_path, monkeypatch)
-    src = tmp_path / "src.txt"
-    src.write_text("v1")
-    _write(BASE_MD, source=str(src))
+    b, proj = _seed(tmp_path, monkeypatch)
+    src = os.path.join(proj, "src.txt")
+    open(src, "w").write("v1")
+    _write(BASE_MD, source=src)
     log_before = open(base.log_path(b, "backend"), encoding="utf-8").read()
 
     monkeypatch.setattr(
         indexer, "index_domain",
         lambda cfg, base, domain: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    src.write_text("v2")
-    out = server.wiki_update_page("backend", "auth", "Flow", "newbody", source=str(src))
+    open(src, "w").write("v2")
+    out = server.wiki_update_page("backend", "auth", "Flow", "newbody", source=src)
 
     assert "error" in out
     content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
@@ -97,7 +97,7 @@ def test_update_rolls_back_file_and_log_on_index_failure(tmp_path, monkeypatch):
 
 
 def test_update_removes_log_it_created_on_rollback(tmp_path, monkeypatch):
-    b, _ = _seed(tmp_path, monkeypatch)
+    b, proj = _seed(tmp_path, monkeypatch)
     # page exists on disk but NO ingest log yet (log-less page)
     page = os.path.join(b, "backend", "auth.md")
     with open(page, "w", encoding="utf-8") as fh:
@@ -105,13 +105,13 @@ def test_update_removes_log_it_created_on_rollback(tmp_path, monkeypatch):
     log_file = base.log_path(b, "backend")
     assert not os.path.exists(log_file)
 
-    src = tmp_path / "src.txt"
-    src.write_text("v1")
+    src = os.path.join(proj, "src.txt")
+    open(src, "w").write("v1")
     monkeypatch.setattr(
         indexer, "index_domain",
         lambda cfg, base, domain: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    out = server.wiki_update_page("backend", "auth", "Flow", "newbody", source=str(src))
+    out = server.wiki_update_page("backend", "auth", "Flow", "newbody", source=src)
 
     assert "error" in out
     assert open(page, encoding="utf-8").read() == BASE_MD          # file restored

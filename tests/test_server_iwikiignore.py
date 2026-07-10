@@ -20,6 +20,26 @@ def test_write_page_rejects_ignored_source(tmp_path, monkeypatch):
     assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
 
 
+def test_write_page_rejects_path_anchored_ignored_source(tmp_path, monkeypatch):
+    # A PATH-ANCHORED pattern must still match when source is an absolute path
+    # inside the project. The ignore gate runs on the raw source before it is
+    # normalized to project-relative; if normalization ran first, is_ignored
+    # would abspath the relative path against the process CWD (the repo root,
+    # not the tmp project) and the anchored pattern would silently miss.
+    b, proj = _seed(tmp_path, monkeypatch)
+    open(os.path.join(proj, ".iwikiignore"), "w").write("config/secret.py\n")
+    os.makedirs(os.path.join(proj, "config"))
+    secret = os.path.join(proj, "config", "secret.py")
+    open(secret, "w").write("TOKEN=1")
+
+    md = "# Auth\n## Overview\no\n## Flow\nx\n"
+    out = server.wiki_write_page("backend", "auth", md, source=secret)
+
+    assert "error" in out
+    assert "iwikiignore" in out["error"]
+    assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+
+
 def test_write_page_allows_non_ignored_source(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
     open(os.path.join(proj, ".iwikiignore"), "w").write(".env\n")

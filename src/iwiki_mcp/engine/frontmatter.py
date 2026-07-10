@@ -110,12 +110,15 @@ def derive_title(body: str, slug: str) -> str:
     return stem.replace("-", " ").replace("_", " ").strip()
 
 
-def derive_description(body: str, max_chars: int = 400) -> str:
+def derive_description(body: str, max_chars: int | None = None) -> str:
     """Only the FIRST ``##`` section may serve as the description source,
-    mirroring chunk.py/validate.py: an Overview elsewhere in the body doesn't count."""
+    mirroring chunk.py/validate.py: an Overview elsewhere doesn't count.
+    ``max_chars=None`` returns the full text (the stored description must not
+    lose context); an explicit int caps it (e.g. an embedding-prefix caller)."""
     ms = list(_H2.finditer(body))
     if not ms or ms[0].group(1).strip().lower() != OVERVIEW_HEADING:
         return ""
     m = ms[0]
     end = ms[1].start() if len(ms) > 1 else len(body)
-    return " ".join(body[m.end():end].split())[:max_chars]
+    text = " ".join(body[m.end():end].split())
+    return text if max_chars is None else text[:max_chars]

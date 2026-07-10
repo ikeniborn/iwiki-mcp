@@ -116,6 +116,21 @@ def test_apply_okf_preserves_existing_tags_when_none(tmp_path, monkeypatch):
     assert new_meta["tags"] == ["existing"]
 
 
+def test_apply_okf_preserves_existing_description_and_status(tmp_path, monkeypatch):
+    # v2-shaped page: frontmatter carries the summary as `description`, body has
+    # NO ## Overview (that's what triggers derive_description's empty re-derive).
+    _patch(monkeypatch, tmp_path)
+    meta = {"type": "concept", "title": "A", "description": "Existing summary text.",
+            "status": "stable"}
+    body = "# A\n\n## B\nwords\n"
+    (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
+    res = server.wiki_apply_okf("d", "a", "reference", tags=["x"])
+    assert "error" not in res
+    new_meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    assert new_meta.get("description") == "Existing summary text."
+    assert new_meta.get("status") == "stable"
+
+
 def test_apply_okf_sets_resource_from_log(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
