@@ -15,7 +15,7 @@ DEFAULT_STATUS = "stub"
 # chunk.py and validate.py so the set lives in one config-free place.
 RESERVED_SECTIONS = ("outgoing links", "external links")
 
-OVERVIEW_HEADING = "overview"   # keep in sync with chunk.OVERVIEW_HEADING
+OVERVIEW_HEADING = "overview"   # reserved summary section; consumed by chunk.py / okf.py
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 _FM = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)

@@ -64,3 +64,11 @@ def test_overview_excluded_even_when_not_first_section():
     page = "# T\n\n## Body\nwords here\n\n## Overview\nsummary text\n"
     chunks = chunk_markdown("p.md", page, size=512, overlap=64)
     assert {c.heading for c in chunks} == {"Body"}
+
+
+def test_list_description_does_not_crash():
+    # a hand-authored `description: [a, b]` parses to a list — chunking must not
+    # crash (mirrors validate's isinstance guard); no article summary is emitted.
+    page = "---\ntype: person\ndescription: [a, b]\n---\n# T\n\n## Body\nwords\n"
+    chunks = chunk_markdown("p.md", page, size=512, overlap=64)
+    assert {c.heading for c in chunks} == {"Body"}

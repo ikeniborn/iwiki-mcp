@@ -94,7 +94,8 @@ def chunk_markdown(file: str, content: str, size: int, overlap: int,
     ptags = _fm.normalize_tags(meta.get("tags", [])) if meta.get("tags") else []
     out: list[Chunk] = []
     title = _page_title(content, file)
-    article_summary = " ".join(meta.get("description", "").split())[:summary_max]
+    desc = meta.get("description", "")
+    article_summary = " ".join(desc.split())[:summary_max] if isinstance(desc, str) else ""
     # `## Overview` is never indexed: its text belongs in `description` now, and an
     # un-migrated Overview must not leak into the vectors. Excluded like the reserved
     # link sections (migration also strips it from the body).
