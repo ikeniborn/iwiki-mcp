@@ -84,11 +84,12 @@ def test_write_rejects_reserved_slug_on_established_domain(tmp_path, monkeypatch
 
 def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
     # SC-3: reserved `## Outgoing links` / `## External links` sections never enter
-    # the vector store, but the page-to-page edges they carry still reach
-    # `wiki_related`'s link graph. `target` is given only a reserved section, so it
-    # contributes zero index records; that leaves `alice.md#Role` as the domain's
-    # only record, forcing `related()`'s vector-neighbour lookup empty and its
-    # graph fallback to run -- proving the edge, not a vector-similarity coincidence.
+    # the vector store as *section* records, but the page-to-page edges they carry
+    # still reach `wiki_related`'s link graph. `target`'s only section is reserved, so
+    # it contributes no section record (only its summary record from the frontmatter
+    # description); `alice.md#Role` is the domain's only section record, so
+    # `related()`'s vector-neighbour lookup (section-only) is empty and its graph
+    # fallback runs -- proving the edge, not a vector-similarity coincidence.
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "target",
                            "# Target\n\n## External links\n- https://example.com/target\n",
@@ -99,9 +100,10 @@ def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
     server.wiki_write_page("backend", "alice", page, source=None, type="person",
                            description="Alice covers billing.")
     recs = VectorStore(base.index_path(b, "backend")).load()
-    assert not any(r.file == "target.md" for r in recs)   # target's section is reserved only
-    alice = [r for r in recs if r.file == "alice.md"]
-    headings = {r.heading for r in alice}
+    # target's reserved section is never indexed as a section (only its summary lands)
+    assert not any(r.file == "target.md" and r.kind == "section" for r in recs)
+    alice_secs = [r for r in recs if r.file == "alice.md" and r.kind == "section"]
+    headings = {r.heading for r in alice_secs}
     assert headings == {"Role"}                      # link sections not indexed
     # the authored outgoing link still feeds the graph
     rel = server.wiki_related("backend", "alice.md#Role")

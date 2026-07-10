@@ -37,48 +37,46 @@ def test_overview_section_is_not_indexed():
     assert {c.heading for c in chunks} == {"TLS Handling", "OAuth Refresh"}
 
 
-def test_prefix_carries_title_description_and_lead():
+def test_section_chunk_is_clean_of_title_and_description():
     page = (
         "---\ntype: concept\ndescription: The gateway routes API traffic via a proxy.\n---\n"
         "# Proxy Management\n\n## TLS Handling\nThe proxy terminates TLS using a local CA.\n"
     )
     chunks = chunk_markdown("proxy.md", page, size=512, overlap=64)
     tls = next(c for c in chunks if c.heading == "TLS Handling")
-    assert tls.text.startswith("# Proxy Management\n")
-    assert "The gateway routes API traffic via a proxy." in tls.text  # summary from description
-    assert "## TLS Handling" in tls.text
-    assert "The proxy terminates TLS using a local CA." in tls.text
+    assert tls.text == "## TLS Handling\nThe proxy terminates TLS using a local CA."
+    assert "Proxy Management" not in tls.text
+    assert "gateway routes API traffic" not in tls.text
 
 
-def test_prefix_on_every_subchunk_of_a_split_section():
+def test_section_subchunks_all_start_with_heading_only():
     body = " ".join(str(i) for i in range(40))
     md = f"---\ndescription: summ of all.\n---\n# T\n\n## Big\n{body}\n"
     chunks = chunk_markdown("f.md", md, size=8, overlap=2)
     big = [c for c in chunks if c.heading == "Big"]
     assert len(big) > 1
-    assert all(c.text.startswith("# T\n") for c in big)
-    assert all("summ of all." in c.text for c in big)   # article summary from description
-    assert all("## Big" in c.text for c in big)
+    assert all(c.text.startswith("## Big\n") for c in big)
+    assert all("summ of all" not in c.text for c in big)   # description stays out
+    assert all("# T" not in c.text.split("\n")[0] for c in big)
 
 
-def test_title_falls_back_to_humanized_basename():
-    md = "## Overview\nsumm.\n\n## A\nbody.\n"   # no H1
-    chunks = chunk_markdown("my-page.md", md, size=512, overlap=64)
-    assert chunks[0].text.startswith("# my page\n")
-
-
-def test_no_overview_yields_no_summary_line():
+def test_no_description_yields_no_summary_chunk():
     md = "# T\n\n## A\nbody alpha.\n"
     chunks = chunk_markdown("f.md", md, size=512, overlap=64)
-    # prefix is title + heading + lead only; no blank summary line injected
-    assert chunks[0].text.startswith("# T\n## A\nbody alpha.\n\n")
+    assert not any(c.kind == "summary" for c in chunks)
+    assert chunks[0].text == "## A\nbody alpha."
 
 
-def test_hash_changes_when_description_changes():
-    # Overview is no longer indexed, so a section's hash tracks the `description`
-    # prefix, not an Overview body.
+def test_section_hash_independent_of_description():
+    # section chunk text no longer includes the description, so its hash is stable
+    # when only the description changes; the summary chunk's hash tracks it instead.
     a = chunk_markdown("f.md", "---\ndescription: summ one.\n---\n# T\n\n## A\nbody.\n",
                        size=512, overlap=64)
     b = chunk_markdown("f.md", "---\ndescription: summ two.\n---\n# T\n\n## A\nbody.\n",
                        size=512, overlap=64)
-    assert a[0].hash != b[0].hash
+    a_sec = next(c for c in a if c.kind == "section")
+    b_sec = next(c for c in b if c.kind == "section")
+    assert a_sec.hash == b_sec.hash
+    a_summ = next(c for c in a if c.kind == "summary")
+    b_summ = next(c for c in b if c.kind == "summary")
+    assert a_summ.hash != b_summ.hash
