@@ -105,8 +105,8 @@
   <input type="checkbox" id="theme-toggle" hidden>
   <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
   <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
-  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
-  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
   <header>
     <div>
       <h1>okf-frontmatter-v2 chain results</h1>
@@ -459,7 +459,55 @@
 <!-- TAB:plan END -->
 <!-- TAB:result START -->
 <section class="tab-pane" id="pane-result">
-  <p class="note">Этап ещё не проверен.</p>
+  <h2>Сверка result — 2026-07-10</h2>
+  <p class="note"><span class="badge ok">OK</span> — реализация сверена с планом и спекой. <strong>7/7 задач DONE</strong> (0 MISSING), R-01…R-14 + SC-1…SC-5 покрыты, 328 tests pass, flake8 clean, version 0.3.0. Исполнено subagent-driven (implementer+reviewer на задачу); whole-branch review (opus) — «merge-ready with fixes», единственный Important (list-valued <code>description</code> ронял индексацию домена) исправлен. Цепочка закрыта.</p>
+
+  <h3>Резюме сверки</h3>
+  <table>
+    <tr><th>Документ</th><th>Значение</th></tr>
+    <tr><td>Plan</td><td><code>plans/2026-07-10-okf-frontmatter-v2.md</code> (plan_hash <code>be541bffa8ee5b7c</code>)</td></tr>
+    <tr><td>Spec</td><td><code>specs/2026-07-10-okf-frontmatter-v2-design.md</code> (spec_hash <code>037b7a2df1fbfedb</code>)</td></tr>
+    <tr><td>Intent</td><td><code>n/a</code></td></tr>
+    <tr><td>Diff base</td><td><code>aad4d2f..fccd433</code> (8 коммитов реализации)</td></tr>
+  </table>
+
+  <h3>Покрытие шагов плана — 7/7 DONE, 0 PARTIAL, 0 MISSING</h3>
+  <table>
+    <tr><th>Задача</th><th>Статус</th><th>Коммит · свидетельство в diff</th></tr>
+    <tr><td>T1 frontmatter primitives</td><td><span class="badge ok">DONE</span></td><td><code>77cbb13</code> · normalize_type/status, STATUS_VOCAB, RESERVED_SECTIONS; coerce_type удалён; 3 call-sites</td></tr>
+    <tr><td>T2 chunk summary + exclude</td><td><span class="badge ok">DONE</span></td><td><code>e676ee5</code> · summary из description; Overview+reserved исключены; +position-independent тест</td></tr>
+    <tr><td>T3 validate</td><td><span class="badge ok">DONE</span></td><td><code>9d46291</code> · drop missing_overview; unknown_status (isinstance guard); reserved-exempt</td></tr>
+    <tr><td>T4 okf assembly + migration</td><td><span class="badge ok">DONE</span></td><td><code>325e4fd</code> · build_frontmatter desc/status/open type; _strip_overview; batch_sweep идемпотентен</td></tr>
+    <tr><td>T5 server params</td><td><span class="badge ok">DONE</span></td><td><code>1655971</code> · description=/status= на write/update; derive_description-re-derive убран</td></tr>
+    <tr><td>T6 integration + docs + version</td><td><span class="badge ok">DONE</span></td><td><code>2505e2f</code> (+uv.lock <code>a2957b7</code>) · SC-3 тест; authoring rules; README EN/RU; 0.3.0</td></tr>
+    <tr><td>T7 wiki upkeep + verify</td><td><span class="badge ok">DONE</span></td><td>iwiki MCP: okf-governance#Frontmatter assembly + indexing#Markdown chunking (committed+pushed); wiki_lint clean; SC-1…5 verified</td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <tr><th>severity</th><th>step</th><th>Plan / Diff / Fix</th></tr>
+    <tr><td><span class="badge danger">CRITICAL</span></td><td>—</td><td>нет</td></tr>
+    <tr><td><span class="badge warn">Important</span></td><td>T2 chunk.py:97</td><td>list-valued <code>description</code> → <code>AttributeError</code> на <code>.split()</code>, вешало индексацию всего домена → <strong>исправлено <code>fccd433</code></strong> (isinstance-guard как в validate + регресс-тест <code>test_list_description_does_not_crash</code>)</td></tr>
+    <tr><td><span class="badge info">Minor×6</span></td><td>various</td><td>deferred (non-blocking): stale-комментарий (исправлен fccd433), untested «; »-warning join, fixed_links==[] assert, status truthiness asymmetry, _strip_overview dup, weak «description» substring asserts</td></tr>
+  </table>
+
+  <h3>Покрытие intent + spec</h3>
+  <table>
+    <tr><th>Источник</th><th>Покрытие</th></tr>
+    <tr><td>Intent Desired Outcomes</td><td><code>n/a</code> (интента нет)</td></tr>
+    <tr><td>Spec requirements</td><td><strong>14/14</strong> (R-01…R-14) отражены в diff</td></tr>
+    <tr><td>Success Criteria</td><td><strong>5/5</strong> (SC-1 suite+flake8; SC-2 description-summary; SC-3 reserved-not-indexed+graph; SC-4 export migrate+idempotent; SC-5 0.3.0+open type)</td></tr>
+  </table>
+
+  <h3>Лишние изменения</h3>
+  <p><code>uv.lock</code> → синхронизирован к 0.3.0 (<code>chore(deps)</code>, ожидаемое следствие bump). Коммит <code>fccd433</code> — фикс Important из whole-branch review. Незаявленных лишних изменений нет.</p>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 0 CRITICAL / 0 MISSING; 1 Important исправлен; 6 Minor deferred (non-blocking). 328/328 tests, flake8 clean, version 0.3.0. Строгий инвариант (Overview никогда не в индексе) подтверждён whole-branch review end-to-end.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> &#8594; <code>spec (OK)</code> &#8594; <code>plan (OK)</code> &#8594; <code>result (OK)</code></p>
+  <p class="note">Next step: <code>superpowers:finishing-a-development-branch</code> — PR в master (ветка <code>dev-okf-artifacts-inplace</code>).</p>
 </section>
 <!-- TAB:result END -->
   </main>

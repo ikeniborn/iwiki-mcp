@@ -97,6 +97,10 @@ review:
         Optionally update that comment when editing frontmatter.py in Task 1.
       verdict: open
       verdict_at: null
+result_check:
+  verdict: OK
+  plan_hash: be541bffa8ee5b7c
+  last_run: 2026-07-10
 ---
 # OKF Frontmatter v2 Implementation Plan
 
