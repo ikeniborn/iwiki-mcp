@@ -75,23 +75,17 @@ def vector_search(cfg: Config, base: str, domains: list[str], query: str,
 
 
 def lexical_search(base: str, domains: list[str], query: str, top_k: int,
-                   type: str | None = None, tags: list | None = None,
-                   cfg: Config | None = None,
-                   pool_by_domain: dict[str, dict] | None = None) -> list[dict]:
+                   type: str | None = None, tags: list | None = None) -> list[dict]:
     if top_k <= 0:
         return []
     hits: list[dict] = []
     for d in domains:
-        pool = pool_by_domain.get(d) if pool_by_domain else None
         for h in grep_sections(domain_dir(base, d), query, top_k * 3):
-            if pool is not None and h["file"] not in pool:
-                continue
             if type is not None or tags:
                 rt, rtags = _hit_facets(base, d, h["file"])
                 if not _facet_ok(rt, rtags, type, tags):
                     continue
-            hits.append({"domain": d, **h,
-                         "source": (pool.get(h["file"]) if pool else "graph")})
+            hits.append({"domain": d, **h, "source": "lexical"})
     hits.sort(key=lambda h: (-h["score"], h["domain"], h["file"], h["heading"]))
     return hits[:top_k]
 

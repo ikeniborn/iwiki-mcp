@@ -10,7 +10,7 @@ from .links import parse_links
 
 
 def sim(query_vec: list[float], rec: Record) -> float:
-    return cosine(query_vec, dequantize(rec.scale, rec.q))
+    return float(cosine(query_vec, dequantize(rec.scale, rec.q)))
 
 
 def seed_articles(query_vec: list[float], summary_recs: list[Record],
