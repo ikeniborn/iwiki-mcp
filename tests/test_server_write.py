@@ -210,3 +210,13 @@ def test_write_normalizes_wikilinks_to_markdown(tmp_path, monkeypatch):
     content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
     assert "[Token Store](core.md#token-store)" in content
     assert "[[core#Token Store]]" not in content
+
+
+def test_normalize_source(tmp_path):
+    proj = str(tmp_path)
+    assert server._normalize_source(proj, "src/x.py") == "src/x.py"
+    inside = str(tmp_path / "src" / "x.py")
+    assert server._normalize_source(proj, inside) == "src/x.py"
+    import pytest
+    with pytest.raises(ValueError):
+        server._normalize_source(proj, "/etc/passwd")

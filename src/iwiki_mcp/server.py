@@ -123,6 +123,21 @@ def _page_path(b: str, domain: str, slug: str) -> str:
     return str(path)
 
 
+def _normalize_source(project_dir: str, source: str) -> str:
+    """Store the ingest source relative to the project. An already-relative
+    path passes through; an absolute path under the project is relativized; an
+    absolute path outside the project is rejected (the server works only within
+    the bound project)."""
+    p = Path(source)
+    if not p.is_absolute():
+        return source
+    proj = Path(project_dir).resolve()
+    try:
+        return p.resolve().relative_to(proj).as_posix()
+    except ValueError:
+        raise ValueError("source outside project")
+
+
 def _slug_from_page_path(dom_path: Path, page_path: str) -> str:
     rel = Path(page_path).resolve().relative_to(dom_path.resolve())
     if rel.suffix != ".md":
@@ -342,6 +357,12 @@ def wiki_write_page(
             "findings": blocking,
             "hint": "use only ## headings; no text before the first ##",
         }
+    if source is not None:
+        try:
+            source = _normalize_source(bind.project_dir, source)
+        except ValueError as exc:
+            return {"error": str(exc),
+                    "hint": "pass a source path inside the bound project"}
     if source:
         spec = ignore.load_project_ignore(bind.project_dir)
         if ignore.is_ignored(spec, source, bind.project_dir):
@@ -436,6 +457,12 @@ def wiki_update_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    if source is not None:
+        try:
+            source = _normalize_source(bind.project_dir, source)
+        except ValueError as exc:
+            return {"error": str(exc),
+                    "hint": "pass a source path inside the bound project"}
     if source:
         spec = ignore.load_project_ignore(bind.project_dir)
         if ignore.is_ignored(spec, source, bind.project_dir):
