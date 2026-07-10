@@ -51,7 +51,7 @@ def classify_page(cfg: Config, body: str, existing_tags: list) -> dict:
     try:
         raw = _chat(cfg, prompt)
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
-        return {"type": fm.coerce_type(data.get("type")),
+        return {"type": fm.normalize_type(data.get("type")),
                 "tags": fm.normalize_tags(data.get("tags", []) or []),
                 "warning": None}
     except Exception as e:

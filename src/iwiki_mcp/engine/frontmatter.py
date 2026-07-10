@@ -8,6 +8,12 @@ import re
 OKF_TYPES = ("architecture", "api", "guide", "reference", "runbook", "concept")
 DEFAULT_TYPE = "concept"
 MAX_TAGS = 5
+STATUS_VOCAB = ("stub", "developing", "stable", "deprecated")
+DEFAULT_STATUS = "stub"
+# Reserved ## sections: authored link lists, excluded from chunking/embedding and
+# exempt from lead checks. Lower-case; compared case-insensitively. Referenced by
+# chunk.py and validate.py so the set lives in one config-free place.
+RESERVED_SECTIONS = ("outgoing links", "external links")
 
 OVERVIEW_HEADING = "overview"   # keep in sync with chunk.OVERVIEW_HEADING
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
@@ -46,7 +52,7 @@ def render(meta: dict) -> str:
     """Emit a frontmatter block in a stable key order. Lists render inline;
     scalar strings are double-quoted (with escaping) when bare emission would
     be ambiguous or invalid YAML (see ``_needs_quote``)."""
-    order = ["type", "title", "description", "resource", "tags", "timestamp"]
+    order = ["type", "title", "description", "resource", "tags", "status", "timestamp"]
     keys = [k for k in order if k in meta] + [k for k in meta if k not in order]
     lines = ["---"]
     for k in keys:
@@ -82,9 +88,16 @@ def normalize_tags(tags: list[str]) -> list[str]:
     return out[:MAX_TAGS]
 
 
-def coerce_type(s: str | None) -> str:
-    s = (s or "").strip().lower()
-    return s if s in OKF_TYPES else DEFAULT_TYPE
+def normalize_type(s: str | None) -> str:
+    """Trim/lower-case a type for matching. Open vocabulary — NOT clamped to
+    OKF_TYPES (that stays advisory, flagged by validate/lint). Empty -> DEFAULT_TYPE."""
+    return (s or "").strip().lower() or DEFAULT_TYPE
+
+
+def normalize_status(s: str | None) -> str:
+    """Trim/lower-case a status. Open like type: a value outside STATUS_VOCAB is
+    kept as-is (flagged advisory). Empty -> DEFAULT_STATUS."""
+    return (s or "").strip().lower() or DEFAULT_STATUS
 
 
 def derive_title(body: str, slug: str) -> str:

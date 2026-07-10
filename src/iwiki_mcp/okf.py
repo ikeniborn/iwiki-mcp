@@ -37,7 +37,7 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
     """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default."""
     warning = None
     if explicit_type is not None:
-        mtype = fm.coerce_type(explicit_type)
+        mtype = fm.normalize_type(explicit_type)
         mtags = fm.normalize_tags(explicit_tags or [])
     elif cfg.chat_model:
         vocab = tag_vocab if tag_vocab is not None else domain_tag_vocab(base_dir, domain)

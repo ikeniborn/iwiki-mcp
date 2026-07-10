@@ -89,7 +89,7 @@ def chunk_markdown(file: str, content: str, size: int, overlap: int,
     with title + article summary + heading + lead, then word-split with overlap.
     """
     meta, content = _fm.split(content)
-    ptype = _fm.coerce_type(meta.get("type")) if meta.get("type") else None
+    ptype = _fm.normalize_type(meta.get("type")) if meta.get("type") else None
     ptags = _fm.normalize_tags(meta.get("tags", [])) if meta.get("tags") else []
     out: list[Chunk] = []
     title = _page_title(content, file)
