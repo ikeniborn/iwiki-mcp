@@ -75,6 +75,14 @@ def test_derive_title_from_h1_then_slug():
     assert fm.derive_title("## Overview\nx", "my-slug") == "my slug"
 
 
+def test_derive_description_full_by_default():
+    body = "# T\n\n## Overview\n" + "word " * 200 + "\n\n## Other\nx"
+    desc = fm.derive_description(body)
+    assert len(desc) > 400            # not capped
+    assert desc.startswith("word")
+    assert desc.endswith("word")      # no mid-word cut
+
+
 def test_derive_description_from_overview_capped():
     body = "# T\n\n## Overview\n" + "word " * 200 + "\n\n## Other\nx"
     desc = fm.derive_description(body, max_chars=50)

@@ -59,7 +59,7 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
 
     meta: dict = {"type": mtype, "title": fm.derive_title(body, slug)}
     desc = (explicit_description if explicit_description is not None
-            else fm.derive_description(body, cfg.summary_max))
+            else fm.derive_description(body))
     if desc:
         meta["description"] = desc
     else:
@@ -82,7 +82,7 @@ def _strip_overview(body: str, max_chars: int) -> tuple[str, str]:
     if not ms or ms[0].group(1).strip().lower() != "overview":
         return body, ""
     first, end = ms[0], (ms[1].start() if len(ms) > 1 else len(body))
-    overview_text = " ".join(body[first.end():end].split())[:max_chars]
+    overview_text = " ".join(body[first.end():end].split())
     return body[:first.start()] + body[end:], overview_text
 
 
