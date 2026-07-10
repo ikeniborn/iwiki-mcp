@@ -57,3 +57,21 @@ def test_export_okf_preserves_existing_type(tmp_path, monkeypatch):
     server.wiki_export_okf("backend")
     text = open(os.path.join(dom, "a.md"), encoding="utf-8").read()
     assert "type: api" in text
+
+
+def test_export_okf_migrates_overview_and_status(tmp_path, monkeypatch):
+    b = _seed(tmp_path, monkeypatch)
+    dom = os.path.join(b, "backend")
+    # legacy page: frontmatter present, empty description, ## Overview in body, no status
+    with open(os.path.join(dom, "a.md"), "w", encoding="utf-8") as fh:
+        fh.write("---\ntype: api\n---\n# A\n\n## Overview\nsummary text\n\n## B\nwords\n")
+    server.wiki_export_okf("backend")
+    text = open(os.path.join(dom, "a.md"), encoding="utf-8").read()
+    assert "## Overview" not in text                 # section removed
+    assert "description: summary text" in text       # backfilled from Overview
+    assert "status: stub" in text                    # defaulted
+    assert "type: api" in text                        # preserved
+    # idempotent on re-run
+    first = text
+    server.wiki_export_okf("backend")
+    assert open(os.path.join(dom, "a.md"), encoding="utf-8").read() == first
