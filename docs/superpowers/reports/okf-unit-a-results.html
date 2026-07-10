@@ -82,8 +82,8 @@ footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px so
 <body>
 <input type="checkbox" id="theme-toggle" hidden>
 <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
-<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden checked>
-<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden checked>
 <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
 <header>
   <label for="theme-toggle" class="theme-btn" title="Тёмная/светлая тема">🌙 / ☀️</label>
@@ -210,7 +210,73 @@ footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px so
 
 <!-- TAB:plan START -->
 <section class="tab-pane" id="pane-plan">
-  <p class="note">Этап ещё не проверен.</p>
+  <p class="lead">План <code>2026-07-10-okf-unit-a.md</code> — вердикт <span class="verdict-ok">OK</span>.</p>
+  <p class="sub">plan_hash <code>e75bf34604e018e8</code> · last_run 2026-07-10 · chain intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span></p>
+
+  <h2>Резюме плана</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Задача</th><th>Действие</th><th>DoD</th></tr></thead>
+    <tbody>
+      <tr><td>T1</td><td><code>derive_description</code> default без реза; <code>okf.py</code> callers/<code>_strip_overview</code> без слайса</td><td>новый тест: len&gt;400 и без мид-словного реза; suite + flake8 зелёные</td></tr>
+      <tr><td>T2</td><td><code>_normalize_source</code> в write/update; bump <code>0.4.0</code></td><td>тест rel / abs-in / abs-out(raise); suite + flake8 зелёные</td></tr>
+      <tr><td>T3</td><td>reinstall + reconnect, cleanup <code>log.jsonl</code>, <code>wiki_export_okf</code> sweep, rewrite <code>okf-export</code>, <code>apply</code>×8, lint</td><td><code>missing_frontmatter: []</code>, <code>legacy_wikilink: []</code>, без <code>altuser</code></td></tr>
+      <tr><td>T4</td><td>rm <code>export.pyc</code>, README EN/RU, wiki, TODO, PR</td><td>pytest + flake8 зелёные; PR <code>dev-okf-unit-a</code>→<code>master</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Схемы зависимостей и пересечений</h2>
+  <h3>Граф зависимостей шагов</h3>
+  <figure class="rpt-graph">
+    <svg viewBox="0 0 520 170" width="520" role="img" aria-label="граф зависимостей задач">
+      <defs>
+        <marker id="arrp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/>
+        </marker>
+        <filter id="dsp" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"/>
+        </filter>
+      </defs>
+      <line x1="150" y1="45"  x2="210" y2="78"  stroke="var(--line)" stroke-width="2" marker-end="url(#arrp)"/>
+      <line x1="150" y1="120" x2="210" y2="90"  stroke="var(--line)" stroke-width="2" marker-end="url(#arrp)"/>
+      <line x1="330" y1="85"  x2="400" y2="85"  stroke="var(--line)" stroke-width="2" marker-end="url(#arrp)"/>
+      <g filter="url(#dsp)">
+        <rect x="30"  y="28"  width="120" height="36" rx="8" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="30"  y="103" width="120" height="36" rx="8" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="210" y="65"  width="120" height="40" rx="8" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="400" y="65"  width="100" height="40" rx="8" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      </g>
+      <text class="nlabel" x="90"  y="50"  text-anchor="middle">T1 desc</text>
+      <text class="nlabel" x="90"  y="125" text-anchor="middle">T2 source</text>
+      <text class="nlabel" x="270" y="82"  text-anchor="middle">T3 reinstall</text>
+      <text class="nlabel" x="270" y="97"  text-anchor="middle">+ migrate</text>
+      <text class="nlabel" x="450" y="89"  text-anchor="middle">T4 docs</text>
+    </svg>
+  </figure>
+  <p class="sub">Рёбра «результат M нужен в N»: код T1/T2 → reinstall+миграция T3 → docs/PR T4. Циклов нет; порядок M&lt;N соблюдён.</p>
+
+  <h3>Пересечения (общий артефакт / требование)</h3>
+  <table class="rpt-table">
+    <thead><tr><th>Пара</th><th>Общий артефакт</th><th>Связь</th></tr></thead>
+    <tbody>
+      <tr><td>T1 × T3</td><td><code>okf.py</code> batch_sweep</td><td>T3 прогоняет полный description из T1</td></tr>
+      <tr><td>T2 × T3</td><td><code>server.py</code> / <code>log.jsonl</code></td><td>reinstall несёт normalize из T2; cleanup чистит source</td></tr>
+      <tr><td>T3 × T4</td><td>item 4 (export)</td><td>T3 переписывает вики <code>okf-export</code>; T4 удаляет orphan <code>.pyc</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Результаты проверки</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>dependencies</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>verifiability</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Находок нет.</b> CRITICAL 0 · WARNING 0 · INFO 0 open. Вердикт <span class="verdict-ok">OK</span>. Цепочка: intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span>.</div>
+  <footer>Next step: superpowers:subagent-driven-development (или executing-plans)</footer>
 </section>
 <!-- TAB:plan END -->
 
