@@ -1,7 +1,23 @@
 import os
+import subprocess
 
 from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.store import VectorStore
+
+
+def _git_init(base_dir):
+    """Turn the seeded base into a real (remote-less) git repo so commit_and_push
+    actually commits — the default _seed base is not a repo."""
+    for args in (["init", "-q"], ["config", "user.email", "t@t"],
+                 ["config", "user.name", "t"],
+                 ["commit", "--allow-empty", "-qm", "init"]):
+        subprocess.run(["git", "-C", base_dir, *args], check=True)
+
+
+def _committed_files(base_dir):
+    out = subprocess.run(["git", "-C", base_dir, "show", "--name-only",
+                          "--format=", "HEAD"], capture_output=True, text=True)
+    return out.stdout.split()
 
 
 def _seed(tmp_path, monkeypatch):
@@ -64,3 +80,19 @@ def test_write_rejects_reserved_slug_on_established_domain(tmp_path, monkeypatch
     assert "error" in out
     assert "reserved" in out["error"] and "exists" not in out["error"]
     assert "[auth](auth.md)" in open(idx_path, encoding="utf-8").read()   # not overwritten
+
+
+def test_reserved_files_land_in_the_same_commit(tmp_path, monkeypatch):
+    # Load-bearing: the generated index.md/log.md must be committed alongside the
+    # page in ONE commit. The default _seed base is not a git repo, so this is the
+    # only test that exercises commit_and_push's `git add -- <domain>` staging the
+    # new untracked reserved files. Guards against a regression to `git add -u`.
+    b = _seed(tmp_path, monkeypatch)
+    _git_init(b)
+    out = server.wiki_write_page("backend", "auth",
+                                 "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
+    assert out.get("committed") is True
+    files = _committed_files(b)
+    assert "backend/index.md" in files
+    assert "backend/log.md" in files
+    assert "backend/auth.md" in files
