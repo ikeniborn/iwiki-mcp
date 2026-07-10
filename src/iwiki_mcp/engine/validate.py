@@ -3,15 +3,14 @@
 Mirrors the structural rules the authoring skills mandate (see the section-formation
 spec). Consumed by ``lint`` (folded into its report) and the ``validate`` subcommand.
 The blocking subset (deep_heading, pre_h2_text) is mirrored inline by the
-iwiki-validate PreToolUse hook; the advisory subset (missing_overview, missing_lead,
-long_lead, and — only when the page has frontmatter — missing_type, unknown_type,
-missing_description) is report-only.
+iwiki-validate PreToolUse hook; the advisory subset (missing_lead, long_lead, and
+— only when the page has frontmatter — missing_type, unknown_type, missing_description,
+unknown_status) is report-only.
 """
 from __future__ import annotations
 import re
 from . import frontmatter as _fm
 
-OVERVIEW_HEADING = "overview"   # keep in sync with chunk.OVERVIEW_HEADING
 LEAD_MAX = 250                  # keep in sync with chunk.LEAD_MAX
 
 _DEEP = re.compile(r"^#{3,}\s", re.MULTILINE)   # ### or deeper
@@ -56,11 +55,9 @@ def validate_page(content: str) -> list[dict]:
                          "text": "indexable text before the first ## (only a single # H1 allowed)"})
 
     secs = _sections(body)
-    if not (secs and secs[0][0].lower() == OVERVIEW_HEADING):
-        findings.append({"type": "missing_overview", "severity": "advisory",
-                         "text": "first ## section is not 'Overview'"})
-
     for heading, sbody in secs:
+        if heading.lower() in _fm.RESERVED_SECTIONS:
+            continue                    # link lists, not prose — no lead expected
         lead = _lead(sbody)
         if not lead:
             findings.append({"type": "missing_lead", "severity": "advisory",
@@ -79,4 +76,8 @@ def validate_page(content: str) -> list[dict]:
         if not meta.get("description"):
             findings.append({"type": "missing_description", "severity": "advisory",
                              "text": "frontmatter has no 'description'"})
+        status = meta.get("status")
+        if isinstance(status, str) and _fm.normalize_status(status) not in _fm.STATUS_VOCAB:
+            findings.append({"type": "unknown_status", "severity": "advisory",
+                             "text": f"status '{status}' not in the status vocabulary"})
     return findings

@@ -31,9 +31,32 @@ def test_single_h1_before_h2_is_allowed():
     assert "pre_h2_text" not in _types(CLEAN)
 
 
-def test_missing_overview_is_advisory():
-    fs = [f for f in validate_page("# T\n\n## A\nlead.\n") if f["type"] == "missing_overview"]
+def test_no_missing_overview_finding():
+    assert "missing_overview" not in _types("# T\n\n## A\nlead.\n")
+
+
+def test_reserved_sections_exempt_from_missing_lead():
+    page = ("# T\n\n## Role\nlead here.\n\n## Outgoing links\n- [x](y.md)\n\n"
+            "## External links\n- https://example.com\n")
+    fs = [f for f in validate_page(page) if f["type"] == "missing_lead"]
+    assert fs == []          # link lists are not prose — no lead expected
+
+
+def test_unknown_status_advisory():
+    page = "---\ntype: person\ndescription: d\nstatus: bogus\n---\n# T\n\n## A\nlead.\n"
+    fs = [f for f in validate_page(page) if f["type"] == "unknown_status"]
     assert fs and fs[0]["severity"] == "advisory"
+
+
+def test_known_status_no_finding():
+    page = "---\ntype: person\ndescription: d\nstatus: stable\n---\n# T\n\n## A\nlead.\n"
+    assert "unknown_status" not in _types(page)
+
+
+def test_status_as_list_does_not_crash():
+    # `status: [a, b]` parses to a list; the isinstance guard skips it, no crash.
+    page = "---\ntype: person\ndescription: d\nstatus: [a, b]\n---\n# T\n\n## A\nlead.\n"
+    assert "unknown_status" not in _types(page)
 
 
 def test_missing_lead_is_advisory():
