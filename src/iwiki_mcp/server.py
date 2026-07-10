@@ -922,6 +922,8 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     original = open(path, encoding="utf-8").read()
     existing_meta, body = _fm.split(original)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
+    apply_desc = existing_meta.get("description")
+    apply_status = existing_meta.get("status")
     resolved = (
         existing_meta.get("resource")
         or okf.latest_source(bind.base, valid_domain, page_file)
@@ -929,6 +931,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     fm_block, _ = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
         source=resolved, explicit_type=type, explicit_tags=apply_tags,
+        explicit_description=apply_desc, explicit_status=apply_status,
         timestamp_path=f"{valid_domain}/{page_file}")
     try:
         with open(path, "w", encoding="utf-8") as fh:
