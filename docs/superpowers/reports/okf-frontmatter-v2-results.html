@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>okf-frontmatter-v2 chain results</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg:#f6f7fb; --surface:#ffffff; --fg:#242836; --muted:#667085;
+      --accent:#176b5d; --border:#d8dde8; --line:#8a94a6; --zebra:#eef2f6;
+      --ok:#277a4d; --warn:#9a6200; --danger:#b42318; --code:#eef2f6;
+      --shadow:rgba(35,45,70,.14);
+    }
+    body:has(#theme-toggle:checked) {
+      color-scheme: dark;
+      --bg:#151922; --surface:#202632; --fg:#e8eef7; --muted:#aab4c3;
+      --accent:#72d6c8; --border:#394252; --line:#7d8797; --zebra:#1a202a;
+      --ok:#8bd6a6; --warn:#e5be6a; --danger:#ff9b91; --code:#293140;
+      --shadow:rgba(0,0,0,.42);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif;
+    }
+    header, main { max-width: 1120px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 22px 0 8px; font-size: 16px; letter-spacing: 0; }
+    h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0 18px; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--zebra); }
+    details { border: 1px solid var(--border); background: var(--surface); padding: 10px 12px; margin: 12px 0; border-radius: 6px; }
+    summary { cursor: pointer; font-weight: 650; }
+    .theme-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--fg);
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .chain-tabs {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .chain-tabs label {
+      cursor: pointer;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: var(--surface);
+      color: var(--muted);
+    }
+    body:has(#tab-intent:checked) label[for="tab-intent"],
+    body:has(#tab-spec:checked) label[for="tab-spec"],
+    body:has(#tab-plan:checked) label[for="tab-plan"],
+    body:has(#tab-result:checked) label[for="tab-result"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      font-weight: 700;
+    }
+    .tab-pane { display: none; }
+    body:has(#tab-intent:checked) #pane-intent,
+    body:has(#tab-spec:checked) #pane-spec,
+    body:has(#tab-plan:checked) #pane-plan,
+    body:has(#tab-result:checked) #pane-result { display: block; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; border: 1px solid currentColor; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .danger { color: var(--danger); }
+    .info { color: var(--muted); }
+    .note { border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); padding: 10px 12px; border-radius: 4px; }
+    figure { margin: 12px 0 18px; }
+    figure svg { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+    figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .g-node { fill: var(--surface); stroke: var(--border); }
+    .g-label { fill: var(--fg); font: 600 12px system-ui, sans-serif; }
+    .g-sub { fill: var(--muted); font: 11px system-ui, sans-serif; }
+    .g-edge { stroke: var(--line); stroke-width: 1.6; fill: none; }
+    .layers { display: flex; flex-direction: column; gap: 0; margin: 12px 0 6px; }
+    .layer { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; }
+    .mods { display: flex; flex-wrap: wrap; gap: 8px; }
+    .mod { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; background: var(--zebra); font-size: 13px; }
+    .flow-arrow { text-align: center; color: var(--muted); font-size: 18px; line-height: 1.2; }
+    @media (max-width: 760px) {
+      header { flex-direction: column; }
+      .chain-tabs { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <input type="checkbox" id="theme-toggle" hidden>
+  <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-spec" class="tab-radio" hidden>
+  <input type="radio" name="chain-tab" id="tab-plan" class="tab-radio" hidden checked>
+  <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+  <header>
+    <div>
+      <h1>okf-frontmatter-v2 chain results</h1>
+      <p>Единый отчёт IDD→SDD. Активная вкладка: <code>spec</code>.</p>
+    </div>
+    <label for="theme-toggle" class="theme-btn" title="Переключить тёмную/светлую тему">тема</label>
+  </header>
+  <nav class="chain-tabs">
+    <label for="tab-intent">Интент</label>
+    <label for="tab-spec">Спека</label>
+    <label for="tab-plan">План</label>
+    <label for="tab-result">Результат</label>
+  </nav>
+  <main>
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:intent END -->
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+  <h2>Проверка spec — 2026-07-10</h2>
+  <p class="note">Спека <code>okf-frontmatter-v2</code> делает frontmatter <code>description</code> единственным авторским источником саммари (в вектора — как префикс каждой prose-секции), убирает <code>## Overview</code> из тела и <strong>исключает его из индекса</strong> как reserved-секцию (без переходного дубля, summary только из <code>description</code>), приводит схему к OKF v0.1 (открытый <code>type</code>, inline <code>tags</code>, scalar <code>resource</code>) + поле <code>status</code>, вводит зарезервированные секции <code>## Outgoing links</code>/<code>## External links</code> (вне векторов, но в графе), сворачивает миграцию в существующий <code>wiki_export_okf</code> sweep и обновляет <code>validate.py</code> + docs + версию 0.2.4→0.3.0. Все 4 фазы пройдены; 0 CRITICAL / 0 WARNING; из 2 INFO — F-001 исправлен ре-синком 2026-07-10 (Overview исключён из индекса), F-002 open.</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/specs/2026-07-10-okf-frontmatter-v2-design.md</code></td></tr>
+    <tr><td>Spec hash</td><td><code>037b7a2df1fbfedb</code> (совпадает с телом — Step-0 quick-exit пройдёт)</td></tr>
+    <tr><td>Intent</td><td><code>n/a</code> (интента для топика нет)</td></tr>
+    <tr><td>Builds on</td><td><code>okf-artifacts-inplace</code> (миграция ложится в его <code>wiki_export_okf</code> sweep)</td></tr>
+    <tr><td>Revises</td><td><code>okf-frontmatter-adoption</code> (description-из-Overview + закрытый type)</td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Резюме спецификации — требования по секциям</h3>
+  <table>
+    <tr><th>Секция</th><th>Требование</th></tr>
+    <tr><td>Goals / Write path / chunk</td><td><strong>R-01</strong>/<strong>R-05</strong> · <code>description</code> — единственный авторский источник саммари; <strong>R-06</strong> · саммари попадает в retrieval как префикс каждой prose-секции; <strong>R-13</strong> · параметры <code>description=</code>/<code>status=</code> на write</td></tr>
+    <tr><td>Body model / chunk</td><td><strong>R-02</strong> · <code>## Overview</code> убран из модели тела; <strong>R-07</strong> · нет back-compat fallback в <code>chunk.py</code></td></tr>
+    <tr><td>Frontmatter schema</td><td><strong>R-03</strong> · <code>type</code> открытый (не clamped; <code>OKF_TYPES</code> — advisory, <code>coerce_type</code>→<code>normalize_type</code>); <strong>R-08</strong> · схема = OKF core (открытый type, inline tags, scalar resource) + <code>status</code></td></tr>
+    <tr><td>status</td><td><strong>R-04</strong> · новое поле <code>status</code> (<code>STATUS_VOCAB</code> stub/developing/stable/deprecated, default <code>stub</code>, advisory <code>unknown_status</code>)</td></tr>
+    <tr><td>Reserved link sections</td><td><strong>R-09</strong> · авторские <code>## Outgoing links</code>/<code>## External links</code> (<code>RESERVED_SECTIONS</code>); <strong>R-10</strong> · исключены из chunking/embedding; <strong>R-11</strong> · <code>parse_links</code> остаётся whole-body → граф видит их без нового инструмента</td></tr>
+    <tr><td>validate.py</td><td><strong>R-12</strong> · убрать <code>missing_overview</code>; добавить advisory <code>unknown_status</code>; освободить reserved-секции от <code>missing_lead</code>; сохранить <code>missing_description</code></td></tr>
+    <tr><td>Migration</td><td><strong>R-14</strong> · миграция в существующем <code>okf.batch_sweep</code> (strip <code>## Overview</code>→<code>description</code>, default <code>status</code>); идемпотентно</td></tr>
+    <tr><td>Non-goals (ограничения)</td><td>YAML-парсер не меняется (tags inline, resource scalar); нет frontmatter-полей <code>outgoing_links</code>/<code>external_links</code>; нет нового relationship-инструмента; <code>[[...]]</code>→markdown без изменений; <code>parse_links</code> whole-body</td></tr>
+    <tr><td>Authoring / README / versioning</td><td><code>resources.py</code> authoring-rules; README EN+RU (схема-таблица + reserved-секции + удаление Overview); minor bump <code>0.2.4</code>→<code>0.3.0</code></td></tr>
+  </table>
+
+  <h3>Success Criteria</h3>
+  <table>
+    <tr><th>ID</th><th>Критерий приёмки</th></tr>
+    <tr><td>SC-1</td><td><code>uv run pytest -q</code> зелёный; <code>uv run flake8 src tests</code> чисто</td></tr>
+    <tr><td>SC-2</td><td>страница с <code>description=</code> и без <code>## Overview</code> чанкуется корректно — текст вектора каждой prose-секции начинается с summary из <code>description</code></td></tr>
+    <tr><td>SC-3</td><td><code>## Outgoing links</code>/<code>## External links</code> отсутствуют в индексе/<code>wiki_search</code>, но их internal-ссылки видны в графе <code>wiki_related</code>/<code>lint</code></td></tr>
+    <tr><td>SC-4</td><td><code>wiki_export_okf</code> мигрирует legacy-страницу (убирает <code>## Overview</code>, ставит <code>description</code> из неё если пусто, default <code>status</code>) и идемпотентен</td></tr>
+    <tr><td>SC-5</td><td>версия <code>0.3.0</code> в <code>pyproject.toml</code> и <code>__init__.py</code>; <code>type</code> принимает free-form (напр. <code>person</code>) c advisory <code>unknown_type</code></td></tr>
+  </table>
+
+  <h3>Схема решения — компоненты и связи</h3>
+  <figure>
+    <div class="layers">
+      <div class="layer">
+        <h4>Write-поверхность · server.py</h4>
+        <div class="mods">
+          <span class="mod">wiki_write_page(description=, status=)</span>
+          <span class="mod">wiki_update_page(description=, status=)</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&#8595; передаёт параметры в build_frontmatter</div>
+      <div class="layer">
+        <h4>Top-layer · okf.py</h4>
+        <div class="mods">
+          <span class="mod">build_frontmatter — description (param&gt;Overview transitional&gt;empty+warn), status (norm/default stub), type (authored, не clamped)</span>
+          <span class="mod">batch_sweep — strip ## Overview → description, default status (миграция, идемпотентно)</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&#8595; использует engine-примитивы</div>
+      <div class="layer">
+        <h4>Engine (stdlib-only)</h4>
+        <div class="mods">
+          <span class="mod">frontmatter.py — normalize_type (no clamp), STATUS_VOCAB / DEFAULT_STATUS / normalize_status, RESERVED_SECTIONS</span>
+          <span class="mod">chunk.py — article_summary из meta["description"]; исключить RESERVED_SECTIONS; убрать Overview-fallback</span>
+          <span class="mod">validate.py — drop missing_overview; add unknown_status; exempt reserved от missing_lead; keep missing_description</span>
+        </div>
+      </div>
+      <div class="flow-arrow">&#8593; граф читает whole-body — без изменений</div>
+      <div class="layer">
+        <h4>Граф (без изменений) · links.py + wiki_related + lint</h4>
+        <div class="mods">
+          <span class="mod">parse_links whole-body → внутренние рёбра включают ## Outgoing links</span>
+          <span class="mod">## External links (non-.md) — display/graph-only</span>
+        </div>
+      </div>
+    </div>
+    <figcaption>Write-параметры <code>description=</code>/<code>status=</code> идут в <code>build_frontmatter</code>; top-layer опирается на engine-примитивы (<code>frontmatter</code>/<code>chunk</code>/<code>validate</code>); граф (<code>parse_links</code> whole-body) не меняется и естественно видит авторские link-секции. Docs (<code>resources.py</code>, README EN/RU) и версия <code>0.3.0</code> — сопровождение.</figcaption>
+  </figure>
+
+  <h3>Граф зависимостей — «A &#8594; B» = A зависит от B</h3>
+  <figure>
+    <svg viewBox="0 0 980 460" role="img" aria-label="Граф зависимостей компонентов спеки">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"></path>
+        </marker>
+        <filter id="ds" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="var(--shadow)"></feDropShadow>
+        </filter>
+      </defs>
+      <!-- edges: A depends on B -->
+      <path class="g-edge" marker-end="url(#arrow)" d="M650,69 C710,90 715,185 750,205"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M650,171 C705,180 715,205 750,216"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M650,316 C705,300 715,262 750,242"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M310,271 C390,285 400,305 460,313"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M310,381 C390,368 400,345 460,332"></path>
+      <path class="g-edge" marker-end="url(#arrow)" d="M310,375 C540,430 690,300 750,252"></path>
+      <!-- nodes -->
+      <g filter="url(#ds)">
+        <rect class="g-node" x="120" y="250" width="190" height="48" rx="7"></rect>
+        <text class="g-label" x="215" y="270" text-anchor="middle">server write</text>
+        <text class="g-sub" x="215" y="286" text-anchor="middle">description=/status= (R-13)</text>
+
+        <rect class="g-node" x="120" y="360" width="190" height="48" rx="7"></rect>
+        <text class="g-label" x="215" y="380" text-anchor="middle">batch_sweep</text>
+        <text class="g-sub" x="215" y="396" text-anchor="middle">миграция (R-14)</text>
+
+        <rect class="g-node" x="460" y="45" width="190" height="48" rx="7"></rect>
+        <text class="g-label" x="555" y="65" text-anchor="middle">chunk.py</text>
+        <text class="g-sub" x="555" y="81" text-anchor="middle">description prefix (R-05/06/07/10)</text>
+
+        <rect class="g-node" x="460" y="150" width="190" height="48" rx="7"></rect>
+        <text class="g-label" x="555" y="170" text-anchor="middle">validate.py</text>
+        <text class="g-sub" x="555" y="186" text-anchor="middle">unknown_status … (R-12)</text>
+
+        <rect class="g-node" x="460" y="295" width="190" height="48" rx="7"></rect>
+        <text class="g-label" x="555" y="315" text-anchor="middle">build_frontmatter</text>
+        <text class="g-sub" x="555" y="331" text-anchor="middle">desc/status/open type (R-01/03/04)</text>
+
+        <rect class="g-node" x="750" y="195" width="200" height="56" rx="7"></rect>
+        <text class="g-label" x="850" y="217" text-anchor="middle">frontmatter.py</text>
+        <text class="g-sub" x="850" y="234" text-anchor="middle">normalize_*/STATUS_VOCAB/RESERVED_SECTIONS</text>
+
+        <rect class="g-node" x="750" y="360" width="200" height="48" rx="7"></rect>
+        <text class="g-label" x="850" y="380" text-anchor="middle">граф (без изменений)</text>
+        <text class="g-sub" x="850" y="396" text-anchor="middle">parse_links whole-body (R-11)</text>
+      </g>
+    </svg>
+    <figcaption>База — <code>engine/frontmatter.py</code> (<code>normalize_type/status</code>, <code>STATUS_VOCAB</code>, <code>RESERVED_SECTIONS</code>): от неё зависят <code>chunk.py</code>, <code>validate.py</code> и <code>build_frontmatter</code>; <code>server write</code> и <code>batch_sweep</code> — от <code>build_frontmatter</code>. Граф (<code>parse_links</code> whole-body) не меняется — изолирован. Циклов нет.</figcaption>
+  </figure>
+
+  <h3>Карта покрытия — задача &#8594; требование(я)</h3>
+  <table>
+    <tr><th>Задача (из контекста)</th><th>Требования</th><th>Покрыто</th></tr>
+    <tr><td>T1 · <code>description</code> — единственный источник + param + chunk-префикс</td><td>R-01, R-05, R-06, R-13</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T2 · <code>## Overview</code> убран, без fallback в chunk.py</td><td>R-02, R-07</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T3 · открытый <code>type</code> + OKF core + YAML не меняется</td><td>R-03, R-08 (+ Non-goals)</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T4 · поле <code>status</code></td><td>R-04</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T5 · reserved-секции вне векторов + граф + без нового инструмента + parse_links whole-body</td><td>R-09, R-10, R-11</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T6 · миграция в batch_sweep, идемпотентно</td><td>R-14</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T7 · изменения <code>validate.py</code></td><td>R-12</td><td><span class="badge ok">✓</span></td></tr>
+    <tr><td>T8 · docs + версия 0.3.0</td><td>Authoring/README/versioning + SC-5</td><td><span class="badge ok">✓</span></td></tr>
+  </table>
+
+  <h3>Результаты проверки — фазы</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th><th>Заметка</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td><td>Нет плейсхолдеров TODO/TBD/FIXME/???; нет битых якорных ссылок; R-01…R-14 без пропусков/дублей; заголовки уникальны (<code>## Outgoing/External links</code> — внутри code-fence, не секции).</td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td><td>Все 8 задач контекста закрыты &#8805;1 требованием; лишних требований нет; R-10 (вне векторов) и R-11 (whole-body граф) сведены непротиворечиво.</td></tr>
+    <tr><td>clarity</td><td><span class="badge ok">passed</span></td><td>Явных вагонных терминов без критерия нет; DoD покрыт SC-1…SC-5 + Testing. Формулировка «no back-compat fallback» → F-001 (INFO); docs-критерии → F-002 (INFO).</td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td><td>Первый прогон — прежнего <code>review:</code>-блока нет, diff секций пуст; все 14 <code>##</code>-секций проанализированы впервые. Явных внутренних противоречий нет.</td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <tr><th>id</th><th>severity</th><th>section</th><th>text</th><th>fix</th><th>verdict</th></tr>
+    <tr>
+      <td>F-001</td>
+      <td><span class="badge info">INFO</span></td>
+      <td>Goals and non-goals</td>
+      <td>Bullet Goals утверждает «no back-compat fallback» безусловно, тогда как <code>build_frontmatter</code> (Write path) и <code>batch_sweep</code> (Migration) делают переходный derive <code>## Overview</code>→<code>description</code>. Spec ограничивает «no fallback» до <code>chunk.py</code> (Body model), так что это не противоречие — но безусловная формулировка Goals может читаться как запрет и на переходный write/migration backfill.</td>
+      <td>Опционально: уточнить bullet как «no chunk-time fallback» и отметить, что разовый <code>## Overview</code>→<code>description</code> backfill живёт только в write-path/migration.</td>
+      <td><span class="badge ok">fixed</span> (ре-синк)</td>
+    </tr>
+    <tr>
+      <td>F-002</td>
+      <td><span class="badge info">INFO</span></td>
+      <td>Authoring rules, README, versioning</td>
+      <td>Docs-деливераблы (<code>resources.py</code> authoring-rules, README EN/RU) не имеют явного критерия приёмки в Success criteria/Testing (только осмотр). Новое поле <code>status</code> тоже без выделенного SC (покрыто Testing, но не SC-1…SC-5).</td>
+      <td>Опционально: добавить inspection-SC (authoring-rules упоминают description/status/reserved-секции; схема-таблица README обновлена) либо принять как inspection-verifiable.</td>
+      <td>open</td>
+    </tr>
+  </table>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 0 CRITICAL open, 0 WARNING open, 1 INFO fixed + 1 INFO open. <strong>Ре-синк 2026-07-10:</strong> спека приведена к строгой модели — <code>## Overview</code> исключается из индекса как reserved-секция (Body model / chunk / Risks / Files touched / Testing переписаны), без переходного дубля; F-001 закрыт. <code>spec_hash</code> <code>037b7a2df1fbfedb</code> совпадает с телом.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> &#8594; <code>spec (OK)</code> &#8594; <code>plan (OK)</code> &#8594; <code>result (–)</code></p>
+</section>
+<!-- TAB:spec END -->
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <h2>Проверка plan — 2026-07-10</h2>
+  <p class="note">План <code>okf-frontmatter-v2</code> раскладывает спеку на <strong>7 задач-коммитов</strong> в фиксированном порядке зависимостей: сначала примитивы схемы (<code>frontmatter.py</code>), затем chunking, validate, сборка+миграция (<code>okf.py</code>), write-параметры (<code>server.py</code>), интеграция+docs+версия, и wiki-сопровождение. Каждая задача завершается независимо проверяемым результатом (TDD: failing test → минимальная реализация → зелёный прогон → коммит). Независимая проверка чистым субагентом: <strong>5/5 фаз passed</strong>, полное покрытие R-01…R-14 + SC-1…SC-5, 0 CRITICAL, 3 WARNING + 2 INFO (все совещательные).</p>
+
+  <h3>Сводка артефакта</h3>
+  <table>
+    <tr><th>Поле</th><th>Значение</th></tr>
+    <tr><td>Путь</td><td><code>docs/superpowers/plans/2026-07-10-okf-frontmatter-v2.md</code></td></tr>
+    <tr><td>Plan hash</td><td><code>be541bffa8ee5b7c</code> (совпадает с телом — Step-0 quick-exit пройдёт)</td></tr>
+    <tr><td>Цепочка</td><td><code>intent (n/a)</code> → <code>spec 037b7a2df1fbfedb</code> → <code>plan be541bffa8ee5b7c</code></td></tr>
+    <tr><td>Исполнение</td><td>subagent-driven-development (рекоменд.) или executing-plans</td></tr>
+    <tr><td>Verdict</td><td><span class="badge ok">OK</span></td></tr>
+  </table>
+
+  <h3>Резюме плана — задачи и Definition of Done</h3>
+  <table>
+    <tr><th>Задача</th><th>Файлы</th><th>Definition of Done</th></tr>
+    <tr><td><strong>T1</strong> · Примитивы схемы frontmatter</td><td><code>engine/frontmatter.py</code> (+ call-sites <code>chunk.py:92</code>, <code>okf.py:40</code>, <code>classify.py:54</code>)</td><td><code>normalize_type</code>/<code>normalize_status</code>/<code>RESERVED_SECTIONS</code>/<code>STATUS_VOCAB</code>/<code>DEFAULT_STATUS</code> добавлены, <code>coerce_type</code> удалён, <code>status</code> в render-order; полный прогон + flake8 green</td></tr>
+    <tr><td><strong>T2</strong> · Chunking: summary из description</td><td><code>engine/chunk.py</code></td><td>summary из <code>meta["description"]</code>, reserved-секции не индексируются, нет Overview-fallback; <code>tests/test_chunk_frontmatter.py</code> green</td></tr>
+    <tr><td><strong>T3</strong> · Validation</td><td><code>engine/validate.py</code></td><td>убран <code>missing_overview</code>, добавлен advisory <code>unknown_status</code>, reserved освобождены от <code>missing_lead</code>; <code>test_validate.py</code>+<code>test_lint.py</code>+<code>test_validate_frontmatter.py</code> green</td></tr>
+    <tr><td><strong>T4</strong> · Сборка + миграция</td><td><code>okf.py</code></td><td><code>build_frontmatter</code> (description/status/open type) + <code>batch_sweep</code> (strip Overview→description, default status) + <code>_strip_overview</code>; <code>test_okf_build_frontmatter.py</code>+<code>test_export_okf.py</code> green, миграция идемпотентна</td></tr>
+    <tr><td><strong>T5</strong> · Write-параметры</td><td><code>server.py</code></td><td><code>description=</code>/<code>status=</code> на <code>wiki_write_page</code>/<code>wiki_update_page</code>; <code>test_server_write_frontmatter.py</code>+<code>test_server_update.py</code> green</td></tr>
+    <tr><td><strong>T6</strong> · Интеграция + docs + версия</td><td><code>test_okf_server.py</code>, <code>resources.py</code>, <code>README.md</code>, <code>docs/README.ru.md</code>, <code>pyproject.toml</code>, <code>__init__.py</code></td><td>SC-3 интеграционный тест, authoring-rules v2, README EN/RU, bump <code>0.3.0</code>; полный прогон + flake8 green</td></tr>
+    <tr><td><strong>T7</strong> · Wiki-сопровождение + финальная сверка</td><td>iwiki MCP (<code>okf-governance.md</code>, <code>indexing.md</code>)</td><td><code>wiki_lint</code> чистый; SC-1…SC-5 подтверждены; полный прогон green</td></tr>
+  </table>
+
+  <h3>Граф зависимостей шагов — «M &#8594; N» = результат M используется в N (M&lt;N)</h3>
+  <figure>
+    <svg viewBox="0 0 980 380" role="img" aria-label="Граф зависимостей задач плана">
+      <defs>
+        <marker id="arrowP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"></path>
+        </marker>
+        <filter id="dsP" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="var(--shadow)"></feDropShadow>
+        </filter>
+      </defs>
+      <!-- edges: M produces something used by N -->
+      <path class="g-edge" marker-end="url(#arrowP)" d="M190,212 C240,120 260,64 300,54"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M190,212 C240,165 270,140 300,134"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M190,212 C235,242 262,268 300,272"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M150,234 C300,360 470,300 540,280"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M450,272 L540,272"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M450,258 C570,205 690,150 770,126"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M690,264 C730,215 750,165 770,132"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M450,50 C600,58 700,88 770,108"></path>
+      <path class="g-edge" marker-end="url(#arrowP)" d="M845,139 L845,300"></path>
+      <!-- nodes -->
+      <g filter="url(#dsP)">
+        <rect class="g-node" x="40" y="190" width="150" height="44" rx="7"></rect>
+        <text class="g-label" x="115" y="210" text-anchor="middle">T1 frontmatter</text>
+        <text class="g-sub" x="115" y="226" text-anchor="middle">normalize_*/RESERVED</text>
+
+        <rect class="g-node" x="300" y="30" width="150" height="44" rx="7"></rect>
+        <text class="g-label" x="375" y="50" text-anchor="middle">T2 chunk</text>
+        <text class="g-sub" x="375" y="66" text-anchor="middle">summary из description</text>
+
+        <rect class="g-node" x="300" y="110" width="150" height="44" rx="7"></rect>
+        <text class="g-label" x="375" y="130" text-anchor="middle">T3 validate</text>
+        <text class="g-sub" x="375" y="146" text-anchor="middle">unknown_status</text>
+
+        <rect class="g-node" x="300" y="250" width="150" height="44" rx="7"></rect>
+        <text class="g-label" x="375" y="270" text-anchor="middle">T4 okf.py</text>
+        <text class="g-sub" x="375" y="286" text-anchor="middle">build_fm + миграция</text>
+
+        <rect class="g-node" x="540" y="250" width="150" height="44" rx="7"></rect>
+        <text class="g-label" x="615" y="270" text-anchor="middle">T5 server</text>
+        <text class="g-sub" x="615" y="286" text-anchor="middle">description=/status=</text>
+
+        <rect class="g-node" x="770" y="95" width="170" height="44" rx="7"></rect>
+        <text class="g-label" x="855" y="115" text-anchor="middle">T6 integ+docs</text>
+        <text class="g-sub" x="855" y="131" text-anchor="middle">SC-3, README, 0.3.0</text>
+
+        <rect class="g-node" x="770" y="300" width="170" height="44" rx="7"></rect>
+        <text class="g-label" x="855" y="320" text-anchor="middle">T7 wiki+сверка</text>
+        <text class="g-sub" x="855" y="336" text-anchor="middle">wiki_lint, SC-1…5</text>
+      </g>
+    </svg>
+    <figcaption>База — <strong>T1</strong> (<code>normalize_type/status</code>, <code>STATUS_VOCAB</code>, <code>RESERVED_SECTIONS</code>): от неё зависят T2, T3, T4, T5. <strong>T4</strong>→<strong>T5</strong> (kwargs <code>explicit_description/explicit_status</code>). T2/T4/T5 сходятся в <strong>T6</strong> (интеграция+docs), T6→<strong>T7</strong> (сопровождение). Порядок M&lt;N выдержан, циклов нет.</figcaption>
+  </figure>
+
+  <h3>Пересечения — задачи, делящие файл или требование</h3>
+  <table>
+    <tr><th>Артефакт / требование</th><th>Задачи</th><th>Тип пересечения</th></tr>
+    <tr><td><code>engine/frontmatter.py</code></td><td>T1 (пишет) · T2/T3 (ссылаются на символы)</td><td>определение → использование</td></tr>
+    <tr><td><code>engine/chunk.py</code></td><td>T1 (call-site :92) · T2 (переписывает summary/section-логику)</td><td>один файл, разные коммиты</td></tr>
+    <tr><td><code>okf.py</code></td><td>T1 (call-site :40) · T4 (build_frontmatter + batch_sweep)</td><td>один файл, разные коммиты</td></tr>
+    <tr><td>R-01 / R-05</td><td>T4 + T5 (+ T2 для R-05)</td><td>требование закрыто несколькими задачами</td></tr>
+    <tr><td>R-02</td><td>T2 + T4 (chunk + миграция)</td><td>требование закрыто несколькими задачами</td></tr>
+    <tr><td>R-04</td><td>T1 + T4 + T5</td><td>требование закрыто несколькими задачами</td></tr>
+    <tr><td>R-09</td><td>T1 (константа) + T2 (исключение)</td><td>требование закрыто несколькими задачами</td></tr>
+    <tr><td>SC-1 / flake8</td><td>каждая задача завершается прогоном</td><td>критерий во всех задачах</td></tr>
+  </table>
+
+  <h3>Результаты проверки — фазы</h3>
+  <table>
+    <tr><th>Phase</th><th>Status</th><th>Заметка</th></tr>
+    <tr><td>structure</td><td><span class="badge ok">passed</span></td><td>Нумерация Task 1..7 без пропусков/дублей; в шагах плана нет незаполненных плейсхолдеров TODO/TBD/FIXME (упоминания <code>missing_*</code>/анти-паттернов — по делу).</td></tr>
+    <tr><td>coverage</td><td><span class="badge ok">passed</span></td><td>R-01…R-14 и SC-1…SC-5 покрыты &#8805;1 шагом; «лишняя» только T7 (wiki-сопровождение) — по конвенции CLAUDE.md, зафиксировано F-001.</td></tr>
+    <tr><td>dependencies</td><td><span class="badge ok">passed</span></td><td>Порядок M&lt;N выдержан, циклов нет; каждый символ (<code>normalize_type</code>, <code>RESERVED_SECTIONS</code>, <code>_strip_overview</code>, kwargs) определяется раньше использования.</td></tr>
+    <tr><td>verifiability</td><td><span class="badge ok">passed</span></td><td>Каждый шаг с run-командой + ожидаемым PASS/FAIL или конкретной правкой. Мягкие DoD в T6/T7 → F-002/F-003 (advisory).</td></tr>
+    <tr><td>consistency</td><td><span class="badge ok">passed</span></td><td>Сигнатуры/имена согласованы между определением и вызовом (<code>build_frontmatter</code> kwargs ↔ server call-sites; <code>_strip_overview</code> определён и вызван в T4). INFO-заметки по трассируемости → F-004/F-005.</td></tr>
+  </table>
+
+  <h3>Findings</h3>
+  <table>
+    <tr><th>id</th><th>severity</th><th>phase</th><th>section</th><th>text</th><th>fix</th><th>verdict</th></tr>
+    <tr>
+      <td>F-001</td><td><span class="badge warn">WARNING</span></td><td>coverage</td><td>Task 7</td>
+      <td>Task 7 правит wiki-страницы (<code>okf-governance.md</code>, <code>indexing.md</code>), которых нет в spec «Files touched» и которые не покрыты требованиями — вне scope спеки, по конвенции CLAUDE.md.</td>
+      <td>Принять как намеренный project-convention шаг (out-of-spec, трассируем к конвенции), не пробел.</td>
+      <td>open</td>
+    </tr>
+    <tr>
+      <td>F-002</td><td><span class="badge warn">WARNING</span></td><td>verifiability</td><td>Task 7 · Steps 1-2</td>
+      <td>Тело wiki-секций задано только angle-bracket наброском, без точного текста и run-команды; проверяет лишь Step 3 (<code>wiki_lint</code>) — слабый DoD.</td>
+      <td>Приемлемо для authoring через MCP-инструменты (тело собирается при записи); <code>wiki_lint</code> — объективный гейт. Опц. зафиксировать точные тела секций.</td>
+      <td>open</td>
+    </tr>
+    <tr>
+      <td>F-003</td><td><span class="badge warn">WARNING</span></td><td>verifiability</td><td>Task 6 · Step 1</td>
+      <td>Точный assert SC-3 теста (какой <code>section_id</code> резолвит <code>wiki_related</code>: reserved-узел vs <code>alice.md#role</code>) оставлен на runtime — PASS-условие недоопределено до запуска.</td>
+      <td>При исполнении зафиксировать резолюцию (assert по <code>alice.md#role</code>). Non-blocking — инвариант (reserved-проза не в индексе, ссылка в графе) тестируем.</td>
+      <td>open</td>
+    </tr>
+    <tr>
+      <td>F-004</td><td><span class="badge info">INFO</span></td><td>consistency</td><td>Task 1 · Step 4</td>
+      <td><code>classify.py</code> правится (<code>coerce_type</code>→<code>normalize_type</code>), но файла нет в spec «Files touched»; правка — следствие R-03 (удаление <code>coerce_type</code>; <code>classify.py:54</code> — живой call-site).</td>
+      <td>Для сборки не требуется; опц. добавить <code>classify.py</code> в files-touched спеки.</td>
+      <td>open</td>
+    </tr>
+    <tr>
+      <td>F-005</td><td><span class="badge info">INFO</span></td><td>consistency</td><td>Task 1 · Step 3</td>
+      <td><code>OVERVIEW_HEADING</code> остаётся в <code>frontmatter.py</code> (верно — его использует <code>derive_description</code>), но комментарий «keep in sync with chunk.OVERVIEW_HEADING» устаревает после удаления копий в chunk/validate.</td>
+      <td>Опц. обновить комментарий при правке <code>frontmatter.py</code> в Task 1.</td>
+      <td>open</td>
+    </tr>
+  </table>
+
+  <h3>Summary</h3>
+  <p><span class="badge ok">OK</span> — 0 CRITICAL open, 3 WARNING open, 2 INFO open. Все findings advisory — гейт не блокируют. Независимая проверка (clean-context субагент) подтвердила 5/5 фаз passed и полное покрытие R-01…R-14 + SC-1…SC-5. <code>plan_hash</code> <code>be541bffa8ee5b7c</code> совпадает с телом.</p>
+  <p class="note"><strong>Перепроверка (2 субагента):</strong> hardening <code>validate unknown_status</code> guard <code>isinstance(status, str)</code> (list-status не роняет <code>normalize_status</code>) → Task 3; хрупкие authoring-тесты <code>test_resources</code> + <code>test_server_lint_sync</code> (литерал <code>## Overview</code>) → Task 6. Корректность hunk'ов: 0 BUG, line-targets/flake8/идемпотентность подтверждены.</p>
+  <p class="note"><strong>Уточнение требования (строже approved-спеки):</strong> <code>## Overview</code> <strong>никогда не попадает в индекс</strong> — даже для немигрированной страницы. <code>chunk.py</code> исключает его как reserved-секции (<code>excluded = (*RESERVED_SECTIONS, OVERVIEW_HEADING)</code>), summary — только из <code>description</code>; миграция дополнительно стрипает Overview из тела. Спека допускала «переходный дубль» (Body-model/Risks) — её формулировку «treated as an ordinary prose section (indexed)» надо синхронизировать. Под строгой моделью ломаются лишь 3 Overview-as-summary теста в <code>engine/test_chunk.py</code> (→ description); <code>test_indexer</code>/<code>test_server_search</code> остаются валидны без правок (Overview всё так же не в индексе → 1 чанк). plan_hash <code>be541bffa8ee5b7c</code>.</p>
+
+  <h3>Цепочка</h3>
+  <p><code>intent (n/a)</code> &#8594; <code>spec (OK)</code> &#8594; <code>plan (OK)</code> &#8594; <code>result (–)</code></p>
+  <p class="note">Next step: <code>superpowers:subagent-driven-development</code> (рекоменд.) или <code>superpowers:executing-plans</code> — поэтапное исполнение.</p>
+</section>
+<!-- TAB:plan END -->
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <p class="note">Этап ещё не проверен.</p>
+</section>
+<!-- TAB:result END -->
+  </main>
+</body>
+</html>

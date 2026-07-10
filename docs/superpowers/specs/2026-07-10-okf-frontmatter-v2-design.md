@@ -1,3 +1,55 @@
+---
+review:
+  stage: spec
+  spec_hash: 037b7a2df1fbfedb
+  last_run: 2026-07-10
+  chain:
+    intent: n/a
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: INFO
+      section: "## Goals and non-goals"
+      section_hash: f53f27ac9815d542
+      fragment: "`## Overview` is removed from the body model — no back-compat fallback (R-02, R-07)."
+      text: >-
+        The Goals bullet states "no back-compat fallback" unqualified, while build_frontmatter
+        (Write path) and batch_sweep (Migration) both perform a transitional `## Overview` ->
+        `description` derive. The spec does scope the "no fallback" to chunk.py (Body model:
+        "no back-compat fallback in chunk.py"), so this is not a contradiction — but the
+        unqualified Goals wording could be read as forbidding the transitional write/migration
+        backfill too.
+      fix: >-
+        Optional: qualify the Goals bullet as "no chunk-time fallback" and note the one-time
+        `## Overview` -> `description` backfill happens only in the write path / migration sweep.
+      verdict: fixed
+      verdict_at: 2026-07-10
+    - id: F-002
+      phase: clarity
+      severity: INFO
+      section: "## Authoring rules, README, versioning"
+      section_hash: cd971c17add45542
+      fragment: "resources.py authoring-rules + README EN/RU updates (documentation of the schema change)"
+      text: >-
+        The docs deliverables (resources.py authoring-rules, README EN/RU) have no explicit
+        acceptance criterion in Success criteria / Testing — they are inspection-only. The new
+        `status` field likewise has no dedicated Success Criterion (covered by the Testing
+        section but not SC-1..SC-5).
+      fix: >-
+        Optional: add an inspection SC (authoring-rules mention description/status/reserved
+        sections; README schema table updated), or accept as inspection-verifiable.
+      verdict: open
+      verdict_at: null
+---
 # OKF Frontmatter v2 — Design
 
 **Date:** 2026-07-10
@@ -26,7 +78,8 @@ producers may add extra keys. `status` and the reserved link sections are iwiki 
 **Goals**
 - `description` is the single, authored source of the article summary (R-01, R-05).
 - The summary reaches retrieval via each prose section's chunk prefix (R-06).
-- `## Overview` is removed from the body model — no back-compat fallback (R-02, R-07).
+- `## Overview` is removed from the body and **excluded from the index** like a reserved
+  section — no back-compat fallback, no transitional double-index (R-02, R-07).
 - Frontmatter matches OKF core: open `type`, inline `tags`, scalar `resource`; plus a
   `status` field (R-03, R-04, R-08).
 - Relationship links live in reserved `## Outgoing links` / `## External links` sections,
@@ -89,9 +142,10 @@ field defaults to `stub`. A value outside `STATUS_VOCAB` is kept as-is and flagg
 ### `## Overview` removed (R-02, R-07)
 
 Pages no longer carry a `## Overview` section; the summary lives only in `description`.
-There is **no** back-compat fallback in `chunk.py`. Until an existing page is migrated, its
-`## Overview` is treated as an ordinary prose section (indexed) — a transitional double with
-`description`, resolved by the migration sweep. `validate` drops the `missing_overview`
+`chunk.py` **excludes `## Overview` from the index** exactly like the reserved link
+sections, so an un-migrated page's Overview never enters the vectors — there is **no**
+back-compat fallback and **no** transitional double-index. The migration sweep
+additionally strips `## Overview` from the body. `validate` drops the `missing_overview`
 finding.
 
 ### Reserved link sections (R-09, R-10)
@@ -117,8 +171,9 @@ Two reserved `##` sections, **authored** by the host agent:
 
 - `article_summary = meta.get("description", "")` — the **only** source; no `## Overview`
   fallback.
-- Sections whose heading (lower-cased) is in `RESERVED_SECTIONS` are dropped before chunking
-  (excluded from the index).
+- Sections whose heading (lower-cased) is in `RESERVED_SECTIONS` **or equals `overview`
+  (`OVERVIEW_HEADING`)** are dropped before chunking (excluded from the index), so a stray or
+  un-migrated `## Overview` never enters the vectors.
 - Each remaining prose section's sub-chunks are prefixed with `# {title}` + `description` +
   `## {heading}` + `lead`, as today — only the summary source changes. No standalone summary
   chunk.
@@ -182,8 +237,8 @@ Idempotent: a migrated page (no `## Overview`, has `status`) is a no-op.
 
 - `engine/frontmatter.py` — `normalize_type` (no clamp), `STATUS_VOCAB` / `DEFAULT_STATUS` /
   `normalize_status`, `RESERVED_SECTIONS`.
-- `engine/chunk.py` — `article_summary` from `meta["description"]`; exclude `RESERVED_SECTIONS`;
-  drop the Overview fallback + exclusion.
+- `engine/chunk.py` — `article_summary` from `meta["description"]`; exclude `RESERVED_SECTIONS`
+  **and `## Overview`** from the index; drop the Overview-as-summary fallback.
 - `engine/validate.py` — drop `missing_overview`; add `unknown_status`; exempt reserved
   sections from `missing_lead`; keep `missing_description`.
 - `okf.py` — `build_frontmatter` (`description` / `status` / open `type` precedence);
@@ -209,8 +264,8 @@ Idempotent: a migrated page (no `## Overview`, has `status`) is a no-op.
 ## Testing
 
 - `frontmatter`: `normalize_type` (no clamp), `normalize_status`, `RESERVED_SECTIONS`.
-- `chunk_markdown`: summary from `description`; no `## Overview` fallback; reserved link
-  sections excluded; prose sections carry the description prefix.
+- `chunk_markdown`: summary from `description`; no `## Overview` fallback; `## Overview` and
+  reserved link sections excluded from the index; prose sections carry the description prefix.
 - `validate_page`: no `missing_overview`; `unknown_status` advisory; reserved sections don't
   trigger `missing_lead`; `missing_description` still fires.
 - Write: `wiki_write_page(description=, status=)` writes the fields; missing `status` →
@@ -222,8 +277,9 @@ Idempotent: a migrated page (no `## Overview`, has `status`) is a no-op.
 
 ## Risks and mitigations
 
-- **Transitional double-index of un-migrated `## Overview`** — accepted (no back-compat by
-  decision); the sweep resolves it; documented as a required post-upgrade step.
+- **Un-migrated `## Overview` in the body** — `chunk.py` excludes it from the index (like a
+  reserved section), so it never enters the vectors even before migration; the sweep then
+  strips it from the body. No transitional double-index.
 - **`description` now embedded** — intentional; only the `description` string enters the
   prefix, mirroring the old Overview-prefix behavior, so vector size is comparable.
 - **Open `type` drift** — mitigated by the advisory `unknown_type` lint and the retained
