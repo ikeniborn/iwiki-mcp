@@ -186,8 +186,11 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | Variable | Default | Meaning |
 |---|---|---|
 | `IWIKI_TOP_K` | `8` | Default maximum results for search and related-section lookup. |
-| `IWIKI_SCORE_THRESHOLD` | `0.2` | Default minimum vector similarity for search results. |
-| `IWIKI_GRAPH_DEPTH` | `2` | Link-hop depth used by related-section expansion. |
+| `IWIKI_SCORE_THRESHOLD` | `0.2` | Default minimum vector similarity for a returned section hit. |
+| `IWIKI_GRAPH_DEPTH` | `2` | Wiki-link hop depth for the retrieval graph-expansion and related-section lookup. |
+| `IWIKI_SEED_TOP_K` | `5` | How many articles the summary-vector pass seeds before graph expansion. |
+| `IWIKI_BFS_TOP_K` | `10` | Cap on graph-expanded (non-seed) articles added to the candidate pool. |
+| `IWIKI_SEED_THRESHOLD` | `0.15` | Minimum summary-vector similarity for an article to seed the search. |
 
 **Indexing**
 
@@ -208,7 +211,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Tool | What it does |
 |---|---|
-| `wiki_search` | Search with `hybrid` (default), `vector`, or `lexical` mode. `scope` selects domains: `project` (default, the bound `read` set) or `all` (every domain in the base); an explicit `domains` list overrides `scope`. Accepts `k` and threshold overrides. |
+| `wiki_search` | **Two-level hierarchical search.** A per-page `summary` vector (from the frontmatter `description`) seeds candidate articles, the wiki-link graph expands the candidate pool, and clean `section` vectors (heading + body, no article prefix) are ranked inside it; each hit carries its `source` (`seed`/`graph`). Modes: `hybrid` (default), `vector`, `lexical`. `scope` selects domains: `project` (default, the bound `read` set) or `all`; an explicit `domains` list overrides `scope`. Accepts `k` and threshold overrides. **Existing domains need a one-time re-index (`wiki_index` per domain, or `wiki_export_okf`) to build the two-level index.** |
 | `wiki_read_page` | Read one Markdown page by domain and slug. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain. |
