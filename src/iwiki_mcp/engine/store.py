@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass, asdict, field
 
 
+SCHEMA_VERSION = 2
+
+
 @dataclass
 class Record:
     id: str
@@ -18,6 +21,9 @@ class Record:
     q: list[int]         # int8 quantized vector
     type: str | None = None
     tags: list = field(default_factory=list)
+    kind: str = "section"
+    ordinal: int = 0
+    v: int = 1
 
 
 def quantize(vec: list[float]) -> tuple[float, list[int]]:
@@ -36,7 +42,9 @@ def make_record(c, vec: list[float]) -> Record:
     scale, q = quantize(vec)
     return Record(id=c.id, file=c.file, heading=c.heading, chunk=c.chunk,
                   hash=c.hash, dim=len(vec), scale=scale, q=q,
-                  type=getattr(c, "type", None), tags=list(getattr(c, "tags", [])))
+                  type=getattr(c, "type", None), tags=list(getattr(c, "tags", [])),
+                  kind=getattr(c, "kind", "section"),
+                  ordinal=getattr(c, "ordinal", 0), v=SCHEMA_VERSION)
 
 
 def load_index(path: str) -> list[Record]:
