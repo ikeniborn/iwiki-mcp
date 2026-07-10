@@ -67,8 +67,8 @@ footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px so
 <body>
 <input type="checkbox" id="theme-toggle" hidden>
 <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
-<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden checked>
-<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden checked>
 <input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
 <header>
   <label for="theme-toggle" class="theme-btn" title="Тёмная/светлая тема">🌙 / ☀️</label>
@@ -197,7 +197,84 @@ footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px so
 <!-- TAB:spec END -->
 
 <!-- TAB:plan START -->
-<section class="tab-pane" id="pane-plan"><p class="note">Этап ещё не проверен.</p></section>
+<section class="tab-pane" id="pane-plan">
+  <p class="lead">План <code>2026-07-10-okf-unit-b.md</code> — вердикт <span class="verdict-ok">OK</span>.</p>
+  <p class="sub">plan_hash <code>42a4e74b24f9dcf3</code> · chain intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span></p>
+
+  <h2>Резюме плана</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Задача</th><th>Действие</th><th>DoD</th></tr></thead>
+    <tbody>
+      <tr><td>T1 store</td><td><code>Record.kind/ordinal/v</code> + <code>SCHEMA_VERSION=2</code></td><td>make_record несёт поля; старый JSONL грузится с дефолтами</td></tr>
+      <tr><td>T2 chunk</td><td>summary-чанк (description) + section без title/desc-префикса</td><td>section-текст = <code>## heading\nbody</code>, без Big Title/desc</td></tr>
+      <tr><td>T3 indexer</td><td>эмбед обоих kind; reuse требует <code>v==SCHEMA_VERSION</code></td><td>реиндекс старого v=1 → re-embed + summary; reused=0</td></tr>
+      <tr><td>T4 hier.py</td><td>seed / undirected BFS expand / section-rank + tie-break</td><td>тесты seed-threshold, undirected+cap, pool-filter+seed-first</td></tr>
+      <tr><td>T5 retrieval</td><td>единый flow в 3 режимах + config seed_top_k/bfs_top_k/threshold</td><td>vector → секции из пула с <code>source</code></td></tr>
+      <tr><td>T6 eval</td><td>детерминир. харнес recall@k</td><td>article_recall≥0.8, section_recall≥0.6, mrr&gt;0</td></tr>
+      <tr><td>T7 docs</td><td>README EN/RU, вики, 0.5.0, реиндекс-note, PR</td><td>pytest+flake8 зелёные; PR</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Схемы зависимостей</h2>
+  <h3>Граф зависимостей задач</h3>
+  <figure class="rpt-graph">
+    <svg viewBox="0 0 620 130" width="620" role="img" aria-label="граф задач Unit B">
+      <defs>
+        <marker id="arbp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+        <filter id="dbp" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"/></filter>
+      </defs>
+      <line x1="72"  y1="55" x2="90"  y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="162" y1="55" x2="180" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="252" y1="55" x2="270" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="342" y1="55" x2="360" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="432" y1="55" x2="450" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="522" y1="55" x2="540" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <g filter="url(#dbp)">
+        <rect x="12"  y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="102" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="192" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="282" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="372" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="462" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="552" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      </g>
+      <text x="42"  y="58" text-anchor="middle">T1 store</text>
+      <text x="132" y="58" text-anchor="middle">T2 chunk</text>
+      <text x="222" y="58" text-anchor="middle">T3 index</text>
+      <text x="312" y="58" text-anchor="middle">T4 hier</text>
+      <text x="402" y="58" text-anchor="middle">T5 retr</text>
+      <text x="492" y="58" text-anchor="middle">T6 eval</text>
+      <text x="582" y="58" text-anchor="middle">T7 docs</text>
+    </svg>
+  </figure>
+  <p class="sub">Линейная цепочка зависимостей (результат M нужен в N, M&lt;N); циклов нет. T4 <code>hier</code> ← store/chunk/links; T5 ← hier; T6 ← chunk/hier.</p>
+
+  <h3>Пересечения</h3>
+  <table class="rpt-table">
+    <thead><tr><th>Файл</th><th>Задачи</th></tr></thead>
+    <tbody>
+      <tr><td><code>engine/store.py</code></td><td>T1 (kind/v) · T3 (reuse guard)</td></tr>
+      <tr><td><code>engine/chunk.py</code></td><td>T2 (two-level) · T6 (eval строит записи)</td></tr>
+      <tr><td><code>engine/hier.py</code></td><td>T4 (ядро) · T5 (retrieval) · T6 (eval)</td></tr>
+      <tr><td><code>pyproject.toml</code></td><td>T6 (pythonpath eval) · T7 (0.5.0)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Результаты проверки</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>dependencies</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>verifiability</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Находок нет.</b> CRITICAL 0 · WARNING 0 · INFO 0 open. Вердикт <span class="verdict-ok">OK</span>. Цепочка: intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span>.</div>
+  <footer>Next step: superpowers:subagent-driven-development (или executing-plans)</footer>
+</section>
 <!-- TAB:plan END -->
 
 <!-- TAB:result START -->
