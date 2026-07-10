@@ -24,10 +24,12 @@ def _seed_two_typed_pages(tmp_path, monkeypatch):
     monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts])
     (tmp_path / "d" / ".iwiki").mkdir(parents=True)
     (tmp_path / "d" / "a.md").write_text(
-        "---\ntype: api\ntags: [alpha]\n---\n# A\n\n## Overview\ns\n\n## B\nwidget content here\n",
+        "---\ntype: api\ntags: [alpha]\ndescription: widget notes a\n---\n"
+        "# A\n\n## Overview\ns\n\n## B\nwidget content here\n",
         encoding="utf-8")
     (tmp_path / "d" / "b.md").write_text(
-        "---\ntype: guide\ntags: [beta]\n---\n# B\n\n## Overview\ns\n\n## C\nwidget content here\n",
+        "---\ntype: guide\ntags: [beta]\ndescription: widget notes b\n---\n"
+        "# B\n\n## Overview\ns\n\n## C\nwidget content here\n",
         encoding="utf-8")
     indexer.index_domain(_cfg(), str(tmp_path), "d")
 

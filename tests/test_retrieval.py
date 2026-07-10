@@ -14,7 +14,8 @@ def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     for d, body in (("a", "alpha refresh_token here"), ("b", "beta gamma")):
         (b / d / ".iwiki").mkdir(parents=True)
-        (b / d / "p.md").write_text(f"# P\n## Overview\no\n## S\n{body}\n")
+        (b / d / "p.md").write_text(
+            f"---\ndescription: {d} page summary\n---\n# P\n## Overview\no\n## S\n{body}\n")
     monkeypatch.setattr(indexer, "embed_texts",
                         lambda cfg, texts: [[1.0, 0.0] for _ in texts])
     indexer.index_domain(_cfg(), str(b), "a")
@@ -79,3 +80,26 @@ def test_hybrid_rejects_invalid_mode():
         retrieval.hybrid_search(
             _cfg(), "base", ["a"], "q", top_k=10, threshold=0.0, mode="bogus"
         )
+
+
+def test_hierarchical_vector_returns_pool_sections_with_source(tmp_path, monkeypatch):
+    b = tmp_path / "wiki"
+    (b / "d" / ".iwiki").mkdir(parents=True)
+    (b / "d" / "a.md").write_text(
+        "---\ndescription: alpha topic overview\n---\n"
+        "# A\n\n## Alpha\nalpha topic details\n\n[B](b.md)\n"
+    )
+    (b / "d" / "b.md").write_text(
+        "---\ndescription: unrelated other page\n---\n"
+        "# B\n\n## Beta\nbeta topic details\n"
+    )
+    monkeypatch.setattr(indexer, "embed_texts",
+                        lambda cfg, texts: [[1.0, 0.0] for _ in texts])
+    indexer.index_domain(_cfg(), str(b), "d")
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    hits = retrieval.hybrid_search(_cfg(), str(b), ["d"], "alpha topic",
+                                   top_k=5, threshold=0.0, mode="vector")
+    files = {h["file"] for h in hits}
+    assert "a.md" in files                      # seed article's section
+    assert all("source" in h for h in hits)      # source tag present
