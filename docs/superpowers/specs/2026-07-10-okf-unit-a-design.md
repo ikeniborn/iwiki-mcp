@@ -4,10 +4,14 @@ review:
   spec_hash: 7f1046171e6c79ad
   last_run: 2026-07-10
   phases:
-    structure: passed
-    coverage: passed
-    clarity: passed
-    consistency: passed
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
   findings: []
 chain:
   intent: n/a
