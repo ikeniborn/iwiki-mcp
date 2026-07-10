@@ -237,8 +237,8 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 |---|---|
 | `type` | Required. **Open** vocabulary: prefer `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default), but any value is accepted (e.g. `person`); off-list values get only an advisory `unknown_type`. |
 | `title` | Derived from the page's `# Title` H1. |
-| `description` | The authored article summary — the single source of the summary, embedded as each section's context prefix. Falls back to a `## Overview` section only transitionally (migration). |
-| `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. |
+| `description` | The authored article summary — the single source of the summary, embedded as each section's context prefix. Stored in full (never truncated). Falls back to a `## Overview` section only transitionally (migration). |
+| `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. The stored path is project-relative — an absolute path under the project is relativized, and an absolute path outside the project is rejected. |
 | `tags` | Lowercase kebab-case labels, at most 5 per page. |
 | `status` | Optional iwiki extension: `stub` (default), `developing`, `stable`, `deprecated`. |
 | `timestamp` | On create (`wiki_write_page`, `wiki_apply_okf`, `wiki_migrate_okf`): the page file's last git-commit date, or today's date if not yet committed. On edit (`wiki_update_page`): always today's date. |
