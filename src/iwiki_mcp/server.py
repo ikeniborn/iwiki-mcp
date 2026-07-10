@@ -321,6 +321,7 @@ def _fresh_warn(fresh: dict) -> dict:
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None,
     type: str | None = None, tags: list[str] | None = None,
+    description: str | None = None, status: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
@@ -369,6 +370,7 @@ def wiki_write_page(
     fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, markdown,
         source=source, explicit_type=type, explicit_tags=tags,
+        explicit_description=description, explicit_status=status,
         timestamp_path=f"{valid_domain}/{page_file}")
     full_md = fm_block + markdown
     log_source = source or ""
@@ -420,7 +422,8 @@ def wiki_write_page(
 
 @_safe
 def wiki_update_page(
-    domain: str, slug: str, heading: str, new_body: str, source: str | None = None
+    domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
+    description: str | None = None, status: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
@@ -464,9 +467,10 @@ def wiki_update_page(
         }
     cfg = Config.load()
     if meta:
-        desc = _fm.derive_description(new_body, cfg.summary_max)
-        if desc:
-            meta["description"] = desc
+        if description is not None:
+            meta["description"] = description
+        if status is not None:
+            meta["status"] = _fm.normalize_status(status)
         meta["timestamp"] = _dt.date.today().isoformat()
         new_md = _fm.render(meta) + new_body
     else:

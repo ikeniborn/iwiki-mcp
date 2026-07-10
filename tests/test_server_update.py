@@ -125,3 +125,17 @@ def test_update_normalizes_wikilinks_in_edited_section(tmp_path, monkeypatch):
     content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
     assert "[the core](core.md)" in content
     assert "[[core|the core]]" not in content
+
+
+def test_update_sets_description_and_status(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    server.wiki_write_page("backend", "alice", "# Alice\n\n## Role\nwork.\n",
+                           source=None, type="person", description="old desc")
+    res = server.wiki_update_page("backend", "alice", "Role", "new role prose.\n",
+                                  description="new desc", status="deprecated")
+    assert "error" not in res
+    path = os.path.join(b, "backend", "alice.md")
+    content = open(path, encoding="utf-8").read()
+    meta, _ = server._fm.split(content)
+    assert meta["description"] == "new desc"
+    assert meta["status"] == "deprecated"

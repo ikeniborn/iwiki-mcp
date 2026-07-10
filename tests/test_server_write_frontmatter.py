@@ -78,3 +78,31 @@ def test_explicit_tags_win_over_classifier(tmp_path, monkeypatch):
     meta, _ = fm.split((tmp_path / "d" / "p.md").read_text(encoding="utf-8"))
     assert meta["tags"] == ["explicit"]        # normalized explicit, not classifier's
     assert meta["type"] == "guide"             # type still from classifier
+
+
+def test_write_with_description_and_status(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    body = "# Alice\n\n## Role\nBilling engineer work.\n"
+    res = server.wiki_write_page("d", "alice", body, source=None, type="person",
+                                 description="Alice covers AR ledger.", status="stable")
+    assert "error" not in res
+    meta, _ = fm.split((tmp_path / "d" / "alice.md").read_text(encoding="utf-8"))
+    assert meta["type"] == "person"                       # open type kept
+    assert meta["description"] == "Alice covers AR ledger."
+    assert meta["status"] == "stable"
+
+
+def test_write_missing_status_defaults_stub(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    body = "# Alice\n\n## Role\nwork.\n"
+    server.wiki_write_page("d", "alice", body, source=None, type="person",
+                           description="d")
+    meta, _ = fm.split((tmp_path / "d" / "alice.md").read_text(encoding="utf-8"))
+    assert meta["status"] == "stub"
+
+
+def test_write_missing_description_warns(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    body = "# Alice\n\n## Role\nwork.\n"          # no Overview, no description param
+    res = server.wiki_write_page("d", "alice", body, source=None, type="person")
+    assert "warning" in res and "description" in res["warning"]
