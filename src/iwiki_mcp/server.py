@@ -357,12 +357,10 @@ def wiki_write_page(
             "findings": blocking,
             "hint": "use only ## headings; no text before the first ##",
         }
-    if source is not None:
-        try:
-            source = _normalize_source(bind.project_dir, source)
-        except ValueError as exc:
-            return {"error": str(exc),
-                    "hint": "pass a source path inside the bound project"}
+    # The .iwikiignore gate must see the source exactly as the caller gave it:
+    # ignore.is_ignored abspath-resolves a relative source against the process
+    # CWD (not project_dir), so a path-anchored pattern would miss once the
+    # source is relativized. Check ignore first, then normalize for storage.
     if source:
         spec = ignore.load_project_ignore(bind.project_dir)
         if ignore.is_ignored(spec, source, bind.project_dir):
@@ -371,6 +369,12 @@ def wiki_write_page(
                 "hint": f"'{source}' is excluded by .iwikiignore; "
                         "remove the pattern to ingest, or omit source",
             }
+    if source is not None:
+        try:
+            source = _normalize_source(bind.project_dir, source)
+        except ValueError as exc:
+            return {"error": str(exc),
+                    "hint": "pass a source path inside the bound project"}
     path = _page_path(bind.base, valid_domain, slug)
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     # Reject reserved slugs BEFORE the exists check: refresh_artifacts generates
@@ -457,12 +461,7 @@ def wiki_update_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
-    if source is not None:
-        try:
-            source = _normalize_source(bind.project_dir, source)
-        except ValueError as exc:
-            return {"error": str(exc),
-                    "hint": "pass a source path inside the bound project"}
+    # See wiki_write_page: ignore gate on the raw source first, then normalize.
     if source:
         spec = ignore.load_project_ignore(bind.project_dir)
         if ignore.is_ignored(spec, source, bind.project_dir):
@@ -471,6 +470,12 @@ def wiki_update_page(
                 "hint": f"'{source}' is excluded by .iwikiignore; "
                         "remove the pattern to ingest, or omit source",
             }
+    if source is not None:
+        try:
+            source = _normalize_source(bind.project_dir, source)
+        except ValueError as exc:
+            return {"error": str(exc),
+                    "hint": "pass a source path inside the bound project"}
     path = _page_path(bind.base, valid_domain, slug)
     if not os.path.isfile(path):
         return {
