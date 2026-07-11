@@ -40,6 +40,10 @@ review:
       severity: WARNING
       text: "Plan-mode 'no writes' contract reconciled: deterministic layout applied, no LLM adoption."
       verdict: fixed
+result_check:
+  verdict: OK
+  plan_hash: 11fe8da06c61e900
+  last_run: 2026-07-11
 chain:
   intent: n/a
   spec: docs/superpowers/specs/2026-07-11-iwiki-layout-retrieval-overhaul-design.md

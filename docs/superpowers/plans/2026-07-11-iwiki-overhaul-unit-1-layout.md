@@ -30,6 +30,10 @@ review:
       severity: WARNING
       text: "Task 3 test_lint fixture line-list corrected to grep-driven (~10 blocks)."
       verdict: fixed
+result_check:
+  verdict: OK
+  plan_hash: 06057015eea0f844
+  last_run: 2026-07-11
 chain:
   intent: n/a
   spec: docs/superpowers/specs/2026-07-11-iwiki-layout-retrieval-overhaul-design.md

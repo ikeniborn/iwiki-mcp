@@ -35,6 +35,10 @@ review:
       severity: INFO
       text: "Write target run through _validate_domain; intent=write branch placed before empty-scope guard."
       verdict: fixed
+result_check:
+  verdict: OK
+  plan_hash: e09791f0f93194c9
+  last_run: 2026-07-11
 chain:
   intent: n/a
   spec: docs/superpowers/specs/2026-07-11-iwiki-layout-retrieval-overhaul-design.md
