@@ -48,6 +48,6 @@ def test_write_page_on_legacy_domain_preserves_prior_log_history(tmp_path, monke
     assert len(recs) == 3
     for legacy_rec in legacy_records:
         assert legacy_rec in recs
-    assert any(r.get("page") == "auth.md" for r in recs)
+    assert any(r.get("page") == "concept/auth.md" for r in recs)
     # The legacy .iwiki dir is fully migrated away.
     assert not (tmp_path / "wiki" / "backend" / ".iwiki").exists()

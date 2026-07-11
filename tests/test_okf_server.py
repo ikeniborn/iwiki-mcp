@@ -46,7 +46,8 @@ def test_export_refreshes_okf_artifacts(tmp_path, monkeypatch):
     server.wiki_export_okf("backend")
     assert os.path.isfile(os.path.join(dom, "index.md"))
     assert os.path.isfile(os.path.join(dom, "log.md"))
-    assert "[auth](auth.md)" in open(os.path.join(dom, "index.md"), encoding="utf-8").read()
+    index_text = open(os.path.join(dom, "index.md"), encoding="utf-8").read()
+    assert "[concept/auth](concept/auth.md)" in index_text
 
 
 def test_reserved_files_not_indexed(tmp_path, monkeypatch):
@@ -66,13 +67,14 @@ def test_delete_does_not_refresh_index(tmp_path, monkeypatch):
     server.wiki_write_page("backend", "auth", "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
     server.wiki_write_page("backend", "db", "# DB\n\n## Overview\ns\n\n## Schema\nx\n")
     server.wiki_export_okf("backend")
-    server.wiki_delete_page("backend", "auth")
+    # both default to type "concept" (no chat model); addressed by full identity.
+    server.wiki_delete_page("backend", "concept/auth")
     idx_path = os.path.join(b, "backend", "index.md")
     idx = open(idx_path, encoding="utf-8").read()
     assert "auth.md" in idx                       # stale until re-export
     server.wiki_export_okf("backend")
     idx = open(idx_path, encoding="utf-8").read()
-    assert "[db](db.md)" in idx and "auth.md" not in idx
+    assert "[concept/db](concept/db.md)" in idx and "auth.md" not in idx
 
 
 def test_write_rejects_reserved_slug(tmp_path, monkeypatch):
@@ -94,7 +96,8 @@ def test_write_rejects_reserved_slug_on_established_domain(tmp_path, monkeypatch
     out = server.wiki_write_page("backend", "index", "# I\n\n## Overview\nx\n")
     assert "error" in out
     assert "reserved" in out["error"] and "exists" not in out["error"]
-    assert "[auth](auth.md)" in open(idx_path, encoding="utf-8").read()   # not overwritten
+    idx_text = open(idx_path, encoding="utf-8").read()
+    assert "[concept/auth](concept/auth.md)" in idx_text   # not overwritten
 
 
 def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
@@ -116,12 +119,12 @@ def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
                            description="Alice covers billing.")
     recs = VectorStore(base.index_path(b, "backend")).load()
     # target's reserved section is never indexed as a section (only its summary lands)
-    assert not any(r.file == "target.md" and r.kind == "section" for r in recs)
-    alice_secs = [r for r in recs if r.file == "alice.md" and r.kind == "section"]
+    assert not any(r.file == "concept/target.md" and r.kind == "section" for r in recs)
+    alice_secs = [r for r in recs if r.file == "person/alice.md" and r.kind == "section"]
     headings = {r.heading for r in alice_secs}
     assert headings == {"Role"}                      # link sections not indexed
     # the authored outgoing link still feeds the graph
-    rel = server.wiki_related("backend", "alice.md#Role")
+    rel = server.wiki_related("backend", "person/alice.md#Role")
     assert rel["graph"] == ["target"]
     assert "target" in str(rel)
 

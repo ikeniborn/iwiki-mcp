@@ -74,7 +74,7 @@ def test_write_fast_forwards_when_behind_then_writes(tmp_path, monkeypatch):
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
     out = server.wiki_write_page("backend", "auth", md)
 
-    assert out["page"] == "backend/auth.md"
-    assert os.path.isfile(b / "backend" / "auth.md")
+    assert out["page"] == "backend/concept/auth.md"
+    assert os.path.isfile(b / "backend" / "concept" / "auth.md")
     assert os.path.isfile(b / "neighbor.md")  # ff pulled the neighbor commit in
     assert out["pushed"] is True

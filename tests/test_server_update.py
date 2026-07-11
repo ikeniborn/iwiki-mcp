@@ -30,11 +30,12 @@ BASE_MD = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
 def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     _write(BASE_MD)
-    out = server.wiki_update_page("backend", "auth", "Flow", "refreshed flow text")
-    assert out["page"] == "backend/auth.md"
+    # no type/chat model -> default "concept"; addressed by full identity.
+    out = server.wiki_update_page("backend", "concept/auth", "Flow", "refreshed flow text")
+    assert out["page"] == "backend/concept/auth.md"
     assert out["heading"] == "Flow"
     assert "pushed" in out and "committed" in out
-    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "refreshed flow text" in content
     assert "login then token" not in content
 
@@ -48,14 +49,14 @@ def test_update_page_not_found(tmp_path, monkeypatch):
 def test_update_missing_heading(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     _write(BASE_MD)
-    out = server.wiki_update_page("backend", "auth", "Nonexistent", "y")
+    out = server.wiki_update_page("backend", "concept/auth", "Nonexistent", "y")
     assert "error" in out and "not found" in out["error"]
 
 
 def test_update_rejects_deep_heading_in_body(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     _write(BASE_MD)
-    out = server.wiki_update_page("backend", "auth", "Flow", "### too deep\ny")
+    out = server.wiki_update_page("backend", "concept/auth", "Flow", "### too deep\ny")
     assert "error" in out
 
 
@@ -66,12 +67,12 @@ def test_update_upserts_log_when_source_given(tmp_path, monkeypatch):
     _write(BASE_MD, source=src)
     open(src, "w").write("v2")
 
-    out = server.wiki_update_page("backend", "auth", "Flow", "new", source=src)
+    out = server.wiki_update_page("backend", "concept/auth", "Flow", "new", source=src)
     assert "error" not in out
 
     text = open(base.log_path(b, "backend"), encoding="utf-8").read()
     recs = [json.loads(line) for line in text.splitlines() if line.strip()]
-    ingest = [r for r in recs if r.get("op") == "ingest" and r["page"] == "auth.md"]
+    ingest = [r for r in recs if r.get("op") == "ingest" and r["page"] == "concept/auth.md"]
     assert len(ingest) == 1
     assert ingest[0]["source"] == "src.txt"
 
@@ -88,10 +89,10 @@ def test_update_rolls_back_file_and_log_on_index_failure(tmp_path, monkeypatch):
         lambda cfg, base, domain: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     open(src, "w").write("v2")
-    out = server.wiki_update_page("backend", "auth", "Flow", "newbody", source=src)
+    out = server.wiki_update_page("backend", "concept/auth", "Flow", "newbody", source=src)
 
     assert "error" in out
-    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "login then token" in content and "newbody" not in content
     assert open(base.log_path(b, "backend"), encoding="utf-8").read() == log_before
 
@@ -121,8 +122,8 @@ def test_update_removes_log_it_created_on_rollback(tmp_path, monkeypatch):
 def test_update_normalizes_wikilinks_in_edited_section(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     _write(BASE_MD)
-    server.wiki_update_page("backend", "auth", "Flow", "see [[core|the core]] now")
-    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    server.wiki_update_page("backend", "concept/auth", "Flow", "see [[core|the core]] now")
+    content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "[the core](core.md)" in content
     assert "[[core|the core]]" not in content
 
@@ -131,10 +132,10 @@ def test_update_sets_description_and_status(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "alice", "# Alice\n\n## Role\nwork.\n",
                            source=None, type="person", description="old desc")
-    res = server.wiki_update_page("backend", "alice", "Role", "new role prose.\n",
+    res = server.wiki_update_page("backend", "person/alice", "Role", "new role prose.\n",
                                   description="new desc", status="deprecated")
     assert "error" not in res
-    path = os.path.join(b, "backend", "alice.md")
+    path = os.path.join(b, "backend", "person", "alice.md")
     content = open(path, encoding="utf-8").read()
     meta, _ = server._fm.split(content)
     assert meta["description"] == "new desc"

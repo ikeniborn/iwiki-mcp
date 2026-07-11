@@ -24,9 +24,9 @@ def test_write_page_indexes_and_logs(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
     out = server.wiki_write_page("backend", "auth", md)
-    assert out["page"] == "backend/auth.md"
+    assert out["page"] == "backend/concept/auth.md"    # no type/chat model -> default "concept"
     assert out["indexed_chunks"] >= 1
-    assert os.path.isfile(os.path.join(b, "backend", "auth.md"))
+    assert os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))
     assert os.path.isfile(os.path.join(b, "backend", "log.jsonl"))
 
 
@@ -162,7 +162,7 @@ def test_write_page_removes_new_file_when_indexing_fails(tmp_path, monkeypatch):
         open(log_path, encoding="utf-8").read() if os.path.exists(log_path) else ""
     )
     assert "error" in out
-    assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+    assert not os.path.exists(os.path.join(b, "backend", "concept", "auth.md"))
     assert "auth.md" not in log_text
 
 
@@ -191,7 +191,7 @@ def test_write_page_does_not_leave_index_record_when_logging_fails(
         else ""
     )
     assert "error" in out
-    assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+    assert not os.path.exists(os.path.join(b, "backend", "concept", "auth.md"))
     assert "auth.md" not in index_text
 
 
@@ -207,7 +207,7 @@ def test_write_normalizes_wikilinks_to_markdown(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     md = "# Auth\n## Overview\nsummary\n## Flow\nsee [[core#Token Store]] here\n"
     server.wiki_write_page("backend", "auth", md)
-    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "[Token Store](core.md#token-store)" in content
     assert "[[core#Token Store]]" not in content
 

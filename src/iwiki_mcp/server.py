@@ -123,6 +123,27 @@ def _page_path(b: str, domain: str, slug: str) -> str:
     return str(path)
 
 
+def _resolve_identity(slug: str, resolved_type: str) -> str:
+    """Domain-relative identity '<type>/<tail>'. A bare slug is prefixed with the
+    resolved type; a slug that already carries a leading segment must match it.
+    The resolved type must be a safe SINGLE path segment (guards the invariant
+    'first path segment == frontmatter type': normalize_type lowercases but does
+    NOT reject '/' or a leading '.', so validate it here)."""
+    if (not resolved_type or "/" in resolved_type or "\\" in resolved_type
+            or resolved_type.startswith(".")):
+        raise ValueError(
+            f"invalid frontmatter type '{resolved_type}': must be a safe single "
+            "path segment (no '/', '\\', or leading '.')")
+    parts = _slug_parts(slug)
+    if len(parts) == 1:
+        return f"{resolved_type}/{parts[0]}"
+    if parts[0] != resolved_type:
+        raise ValueError(
+            f"slug type-segment '{parts[0]}' does not match frontmatter type "
+            f"'{resolved_type}'")
+    return PurePosixPath(*parts).as_posix()
+
+
 def _normalize_source(project_dir: str, source: str) -> str:
     """Store the ingest source relative to the project. An already-relative
     path passes through; an absolute path under the project is relativized; an
@@ -378,28 +399,36 @@ def wiki_write_page(
         except ValueError as exc:
             return {"error": str(exc),
                     "hint": "pass a source path inside the bound project"}
-    path = _page_path(bind.base, valid_domain, slug)
-    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    cfg = Config.load()
+    fm_block, fm_warning = okf.build_frontmatter(
+        cfg, bind.base, valid_domain, _slug_parts(slug)[-1], markdown,
+        source=source, explicit_type=type, explicit_tags=tags,
+        explicit_description=description, explicit_status=status,
+        timestamp_path=f"{valid_domain}/{slug}.md")
+    meta, _ = _fm.split(fm_block)
+    resolved_type = meta.get("type")
+    try:
+        identity = _resolve_identity(slug, resolved_type)
+    except ValueError as exc:
+        return {"error": str(exc),
+                "hint": "pass a bare slug with a matching `type`, or a slug whose "
+                        "first segment equals the frontmatter type"}
+    page_file = identity + ".md"
     # Reject reserved slugs BEFORE the exists check: index.md/log.md may already
     # exist from a prior wiki_export_okf run, so on such a domain the exists
     # check would otherwise mask this with a misleading "page exists" error.
-    if page_file in RESERVED_OKF:
+    if PurePosixPath(page_file).name in RESERVED_OKF:
         return {
-            "error": f"slug '{slug}' is reserved for the generated OKF file "
-                     f"'{page_file}'",
+            "error": f"slug tail is reserved for the generated OKF file "
+                     f"'{PurePosixPath(page_file).name}'",
             "hint": "choose another slug; index/log are generated, not authored",
         }
+    path = _page_path(bind.base, valid_domain, identity)
     if os.path.exists(path):
         return {
-            "error": f"page '{valid_domain}/{slug}' exists",
+            "error": f"page '{valid_domain}/{identity}' exists",
             "hint": "editing an existing page is a guarded op; confirm with the user",
         }
-    cfg = Config.load()
-    fm_block, fm_warning = okf.build_frontmatter(
-        cfg, bind.base, valid_domain, slug, markdown,
-        source=source, explicit_type=type, explicit_tags=tags,
-        explicit_description=description, explicit_status=status,
-        timestamp_path=f"{valid_domain}/{page_file}")
     full_md = fm_block + markdown
     log_source = source or ""
     log_src_hash = indexer.src_hash(source) if source else None
