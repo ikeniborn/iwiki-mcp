@@ -7,7 +7,7 @@ import json
 import os
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .engine import classify, frontmatter as fm
 from .engine import okf_artifacts as _oa
@@ -125,18 +125,79 @@ def _page_slugs(dom_path: Path) -> list[str]:
     return out
 
 
+def _within(parent: Path, child: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _is_safe_type_segment(t: str) -> bool:
+    """Is `t` safe to use as a single path segment (the invariant a frontmatter
+    `type` must satisfy before it is joined into a page identity)? Rejects
+    '/', '\\', '.'/'..' , a leading '.', and absolute/drive-rooted forms.
+    Mirrors server._resolve_identity's guard -- kept independent here so okf.py
+    does not import server.py (circular)."""
+    if not t or "/" in t or "\\" in t or t in (".", "..") or t.startswith("."):
+        return False
+    if (PurePosixPath(t).is_absolute() or PureWindowsPath(t).is_absolute()
+            or PureWindowsPath(t).drive):
+        return False
+    return True
+
+
+def _rekey_log(base_dir, domain, old_identity: str, new_identity: str) -> None:
+    """Re-key <domain>/log.jsonl records for a moved page: any record whose
+    `page` equals old_identity + '.md' is rewritten to new_identity + '.md', so
+    lint's stale/missing_source checks (keyed off the log) keep finding the
+    page after a layout move. Best-effort: a missing/unreadable log is a no-op;
+    non-JSON lines pass through unchanged."""
+    path = _base.log_path(base_dir, domain)
+    old_page = f"{old_identity}.md"
+    new_page = f"{new_identity}.md"
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return
+    out, changed = [], False
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            rec = json.loads(s)
+        except ValueError:
+            out.append(s)
+            continue
+        if rec.get("page") == old_page:
+            rec["page"] = new_page
+            changed = True
+        out.append(json.dumps(rec, ensure_ascii=False))
+    if changed:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+
+
 def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
     """Rename <domain>/<old_identity>.md to <new_identity>.md and rewrite every
     intra-domain link old_identity -> new_identity across the domain's pages.
     No-op when old == new. The rename is authoritative; link rewrite is best-effort.
     Raises FileExistsError if new_identity already names an existing page (and
-    old != new) -- callers must not silently clobber a type-change collision."""
+    old != new) -- callers must not silently clobber a type-change collision.
+    Raises ValueError if either identity would resolve outside the domain
+    (defense-in-depth: the honest callers already validate/contain the slug and
+    type before calling this, but this guard makes the invariant load-bearing
+    here too)."""
     from .engine.links import rewrite_link_targets
     if old_identity == new_identity:
         return
     dom = Path(base_dir) / domain
     old_p = dom / f"{old_identity}.md"
     new_p = dom / f"{new_identity}.md"
+    if not _within(dom, old_p) or not _within(dom, new_p):
+        raise ValueError(
+            f"move_page: '{old_identity}' -> '{new_identity}' escapes domain '{domain}'")
     if new_p.exists():
         raise FileExistsError(f"page '{domain}/{new_identity}' exists")
     new_p.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +212,7 @@ def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
         new_text = rewrite_link_targets(text, mapping)
         if new_text != text:
             p.write_text(new_text, encoding="utf-8")
+    _rekey_log(base_dir, domain, old_identity, new_identity)
 
 
 def migrate_layout(base_dir, domain) -> dict:
@@ -160,11 +222,15 @@ def migrate_layout(base_dir, domain) -> dict:
     links. Also relocates the store/log to the domain root. Idempotent. When the
     resolved '<type>/<slug>' target already exists (a distinct page collides on
     tail), the move is SKIPPED and recorded under "collisions" instead of
-    clobbering the existing page."""
+    clobbering the existing page. When the frontmatter `type` is not a safe
+    single path segment (e.g. carries '/', '..', or a leading '.'), the move is
+    SKIPPED and recorded under "skipped_unsafe" instead of moving the page
+    outside the domain."""
     _base.migrate_store_location(base_dir, domain)
     dom = Path(base_dir) / domain
     moved = []
     collisions = []
+    skipped_unsafe = []
     for slug in _page_slugs(dom):
         if "/" in slug:                     # already under a type dir
             continue
@@ -173,13 +239,17 @@ def migrate_layout(base_dir, domain) -> dict:
         ptype = meta.get("type")
         if not ptype:
             continue
-        new_identity = f"{fm.normalize_type(ptype)}/{slug}"
+        ntype = fm.normalize_type(ptype)
+        if not _is_safe_type_segment(ntype):
+            skipped_unsafe.append(f"{slug} (unsafe type {ptype!r})")
+            continue
+        new_identity = f"{ntype}/{slug}"
         if (dom / f"{new_identity}.md").exists():
             collisions.append(f"{slug} -> {new_identity}")
             continue
         move_page(base_dir, domain, slug, new_identity)
         moved.append(f"{slug} -> {new_identity}")
-    return {"moved": moved, "collisions": collisions}
+    return {"moved": moved, "collisions": collisions, "skipped_unsafe": skipped_unsafe}
 
 
 def _read_log(dom_path: Path) -> list:

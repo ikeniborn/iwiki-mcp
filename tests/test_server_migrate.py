@@ -211,8 +211,9 @@ def test_apply_okf_sets_resource_from_log(tmp_path, monkeypatch):
     }) + "\n", encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "guide")
     assert "error" not in res
-    # bare slug -> moved under the new type dir; the log lookup still resolves
-    # by the PRE-move page name ("a.md"), since that is what ingest recorded.
+    # bare slug -> moved under the new type dir; move_page re-keys the ingest
+    # log from "a.md" to "guide/a.md", so the post-move lookup under the NEW
+    # identity still resolves the source recorded at ingest time.
     meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["resource"] == "/src/a.py"
 

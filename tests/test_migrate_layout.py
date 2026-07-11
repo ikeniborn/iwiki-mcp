@@ -57,3 +57,28 @@ def test_migrate_layout_is_idempotent(tmp_path, monkeypatch):
 
     assert (dom / "concept" / "alpha.md").is_file()
     assert res2["moved"] == []
+
+
+def test_migrate_layout_rejects_path_escape_via_frontmatter_type(tmp_path, monkeypatch):
+    # SECURITY (holistic review finding 1): a page's frontmatter `type` is
+    # attacker-controlled content, not a validated identifier. fm.normalize_type
+    # only strips/lower-cases it -- it does NOT reject '/', '..', or a leading
+    # '.'. Before the fix, migrate_layout joined it straight into
+    # "<type>/<slug>" and move_page's os.replace() happily relocated the file
+    # OUTSIDE the domain (and outside the base entirely).
+    _bind(tmp_path, monkeypatch, "d")
+    dom = tmp_path / "d"
+    (dom / "victim.md").write_text(
+        "---\ntype: ../../escape\ntitle: Victim\n---\n# Victim\n\n## S\n\nBody.\n",
+        encoding="utf-8")
+
+    res = server.wiki_migrate_okf("d")
+
+    # must NOT have escaped the domain (two '..' from <base>/d -> <base>'s parent)
+    escaped = tmp_path.parent / "escape" / "victim.md"
+    assert not escaped.exists()
+    assert not (tmp_path / "escape").exists()
+    # the original page stays exactly where it was -- never silently moved
+    assert (dom / "victim.md").is_file()
+    assert res["moved"] == []
+    assert any("victim" in s for s in res.get("layout_skipped_unsafe", []))

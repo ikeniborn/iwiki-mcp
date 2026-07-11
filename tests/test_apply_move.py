@@ -1,6 +1,8 @@
+import json
 import os
 
-from iwiki_mcp import base, indexer, server
+from iwiki_mcp import base, indexer, okf, server
+from iwiki_mcp.engine.lint import lint
 
 
 def _bind(tmp_path, monkeypatch, dom):
@@ -74,3 +76,46 @@ def test_apply_okf_not_found_error_precedes_config_halt(tmp_path, monkeypatch):
         "error": "page 'd/missing' not found",
         "hint": "list pages with wiki_list_pages",
     }
+
+
+def test_move_page_rekeys_ingest_log(tmp_path, monkeypatch):
+    # CORRECTNESS (holistic review finding 3): move_page used to rename the
+    # file + rewrite links but never re-key log.jsonl, so the ingest record
+    # stayed under the pre-move page name -- lint's stale/missing_source
+    # checks (keyed off the log) silently stopped finding the page post-move.
+    _bind(tmp_path, monkeypatch, "d")
+    dom = tmp_path / "d"
+    (dom / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    (dom / "log.jsonl").write_text(json.dumps({
+        "op": "ingest", "source": "/src/a.py", "page": "a.md",
+        "date": "2020-01-01", "src_hash": "abc",
+    }) + "\n", encoding="utf-8")
+
+    okf.move_page(str(tmp_path), "d", "a", "guide/a")
+
+    recs = [json.loads(ln) for ln in (dom / "log.jsonl").read_text().splitlines() if ln.strip()]
+    assert any(r["page"] == "guide/a.md" for r in recs)
+    assert not any(r["page"] == "a.md" for r in recs)
+
+
+def test_apply_okf_move_rekeys_log_and_lint_still_flags_stale(tmp_path, monkeypatch):
+    _bind(tmp_path, monkeypatch, "d")
+    dom = tmp_path / "d"
+    (dom / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    src = tmp_path / "src.py"
+    src.write_text("v1", encoding="utf-8")
+    (dom / "log.jsonl").write_text(json.dumps({
+        "op": "ingest", "source": str(src), "page": "a.md",
+        "date": "2020-01-01", "src_hash": None,
+    }) + "\n", encoding="utf-8")
+
+    server.wiki_apply_okf("d", "a", type="guide")
+
+    recs = [json.loads(ln) for ln in (dom / "log.jsonl").read_text().splitlines() if ln.strip()]
+    assert any(r["page"] == "guide/a.md" for r in recs)
+    assert not any(r["page"] == "a.md" for r in recs)
+
+    src.write_text("v2 -- source drifted after ingest", encoding="utf-8")
+    report = lint(str(dom))
+    stale_pages = [os.path.relpath(s["page"], str(dom)) for s in report.get("stale", [])]
+    assert "guide/a.md" in stale_pages

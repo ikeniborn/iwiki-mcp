@@ -220,3 +220,23 @@ def test_normalize_source(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         server._normalize_source(proj, "/etc/passwd")
+
+
+def test_normalize_source_rejects_relative_escape(tmp_path):
+    # SECURITY (holistic review finding 2): a RELATIVE source containing '..'
+    # used to pass through unchanged, escaping the project (and dodging the
+    # anchored .iwikiignore patterns, which resolve relative to project_dir).
+    proj = str(tmp_path / "proj")
+    os.makedirs(proj)
+    import pytest
+    with pytest.raises(ValueError):
+        server._normalize_source(proj, "../../../../etc/hosts")
+
+
+def test_write_page_rejects_relative_source_escape(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    md = "# Auth\n## Overview\no\n## Flow\nx\n"
+    out = server.wiki_write_page("backend", "auth", md, source="../../../../etc/hosts")
+    assert "error" in out
+    assert "outside project" in out["error"]
+    assert not os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))

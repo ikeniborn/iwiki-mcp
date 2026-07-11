@@ -145,16 +145,16 @@ def _resolve_identity(slug: str, resolved_type: str) -> str:
 
 
 def _normalize_source(project_dir: str, source: str) -> str:
-    """Store the ingest source relative to the project. An already-relative
-    path passes through; an absolute path under the project is relativized; an
-    absolute path outside the project is rejected (the server works only within
-    the bound project)."""
-    p = Path(source)
-    if not p.is_absolute():
-        return source
+    """Store the ingest source relative to the project. A relative path is
+    resolved against the project dir and confirmed to stay inside it (rejects
+    an escape via '..'); an absolute path under the project is relativized; a
+    path (relative or absolute) that resolves outside the project is rejected
+    (the server works only within the bound project)."""
     proj = Path(project_dir).resolve()
+    p = Path(source)
+    resolved = p.resolve() if p.is_absolute() else (proj / p).resolve()
     try:
-        return p.resolve().relative_to(proj).as_posix()
+        return resolved.relative_to(proj).as_posix()
     except ValueError:
         raise ValueError("source outside project")
 
@@ -425,10 +425,13 @@ def wiki_write_page(
     # Reject reserved slugs BEFORE the exists check: index.md/log.md may already
     # exist from a prior wiki_export_okf run, so on such a domain the exists
     # check would otherwise mask this with a misleading "page exists" error.
-    if PurePosixPath(page_file).name in RESERVED_OKF:
+    # RESERVED_OKF holds domain-ROOT-relative names ("index.md"/"log.md"); compare
+    # the full identity, not its basename -- a type-dir identity like
+    # "concept/index.md" is a distinct, non-reserved page (basename comparison
+    # would wrongly reject it).
+    if page_file in RESERVED_OKF:
         return {
-            "error": f"slug tail is reserved for the generated OKF file "
-                     f"'{PurePosixPath(page_file).name}'",
+            "error": f"slug tail is reserved for the generated OKF file '{page_file}'",
             "hint": "choose another slug; index/log are generated, not authored",
         }
     path = _page_path(bind.base, valid_domain, identity)
@@ -914,6 +917,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
         result = {"domain": target, "mode": "autonomous", "migrated": migrated,
                   "skipped": skipped, "warnings": warnings, "moved": layout["moved"],
                   "layout_collisions": layout.get("collisions", []),
+                  "layout_skipped_unsafe": layout.get("skipped_unsafe", []),
                   "indexed_chunks": stats["indexed_chunks"],
                   "committed": commit.get("committed", False),
                   "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
@@ -947,6 +951,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     return {"domain": target, "mode": "plan", "candidates": candidates,
             "moved": layout["moved"],
             "layout_collisions": layout.get("collisions", []),
+            "layout_skipped_unsafe": layout.get("skipped_unsafe", []),
             "type_vocabulary": list(_fm.OKF_TYPES),
             "authoring_rules": AUTHORING_RULES,
             "next_steps": ["Classify each candidate's type (from type_vocabulary) "
@@ -1001,10 +1006,10 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     apply_status = existing_meta.get("status")
     resolved = (
         existing_meta.get("resource")
-        # log entries are keyed by the page name at ingest time, i.e. the
-        # PRE-move name when this call also moved the page: look up under
-        # current_identity, not the (possibly moved-to) page_file.
-        or okf.latest_source(bind.base, valid_domain, current_identity + ".md")
+        # move_page re-keys the log to the NEW identity as part of the move
+        # above, so the ingest record (if any) is now found under page_file,
+        # not the pre-move current_identity.
+        or okf.latest_source(bind.base, valid_domain, page_file)
     )
     cfg = Config.load()
     fm_block, _ = okf.build_frontmatter(
