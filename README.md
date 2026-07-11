@@ -104,20 +104,22 @@ Codex does not set the server `cwd` to your project, so pass `iwiki-mcp --projec
 
 `IWIKI_BASE_DIR` points at the shared wiki base. The base is intended to be a git repository, so writes can be committed and synced between machines or projects.
 
-Each domain is a subdirectory under the base:
+Each domain is a subdirectory under the base. A page's identity is its domain-relative `<type>/<slug>` path: `wiki_write_page` places the file under a directory named for its (resolved) frontmatter `type`, and that same `<type>/<slug>` value — without the `.md` suffix — is what `wiki_list_pages` returns and what `wiki_read_page` / `wiki_update_page` / `wiki_delete_page` expect as `slug`. Each domain's vector store (`index.jsonl`) and ingest log (`log.jsonl`) live at the domain root; a legacy `.iwiki/index.jsonl` / `.iwiki/log.jsonl` domain is migrated to the root automatically the first time any tool touches it. (The base itself keeps a separate `.iwiki/lock` at its own root for the cross-process git lock — unrelated to per-domain storage.)
 
 ```text
 /home/user/wiki/
   backend/
-    auth.md
-    .iwiki/
-      index.jsonl
-      log.jsonl
+    architecture/
+      auth.md
+    guide/
+      onboarding.md
+    index.jsonl
+    log.jsonl
   frontend/
-    routing.md
-    .iwiki/
-      index.jsonl
-      log.jsonl
+    concept/
+      routing.md
+    index.jsonl
+    log.jsonl
 ```
 
 Use one base across projects. Bind each project to the domains it should read from and the domain it should write to.
@@ -191,6 +193,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `IWIKI_SEED_TOP_K` | `5` | How many articles the summary-vector pass seeds before graph expansion. |
 | `IWIKI_BFS_TOP_K` | `10` | Cap on graph-expanded (non-seed) articles added to the candidate pool. |
 | `IWIKI_SEED_THRESHOLD` | `0.15` | Minimum summary-vector similarity for an article to seed the search. |
+| `IWIKI_WRITE_SEED_THRESHOLD` | `0.35` | Minimum summary-vector similarity to seed the precise write-target locate path used by `wiki_search(intent="write")`. Higher than `IWIKI_SEED_THRESHOLD` so an unrelated page is not offered as an upsert target. |
 
 **Indexing**
 
@@ -211,7 +214,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Tool | What it does |
 |---|---|
-| `wiki_search` | **Two-level hierarchical search.** A per-page `summary` vector (from the frontmatter `description`) seeds candidate articles, the wiki-link graph expands the candidate pool, and clean `section` vectors (heading + body, no article prefix) are ranked inside it; each hit carries its `source` (`seed`/`graph`). Modes: `hybrid` (default), `vector`, `lexical`. `scope` selects domains: `project` (default, the bound `read` set) or `all`; an explicit `domains` list overrides `scope`. Accepts `k` and threshold overrides. **Existing domains need a one-time re-index (`wiki_index` per domain, or `wiki_export_okf`) to build the two-level index.** A page with no `description` produces no summary vector, so it is not reachable by `vector`-mode seeding (it remains findable via `lexical`/`hybrid` grep); a lexical seed fallback is a planned follow-up. |
+| `wiki_search` | **Two-level hierarchical search.** A per-page `summary` vector (from the frontmatter `description`) seeds candidate articles, the wiki-link graph expands the candidate pool, and clean `section` vectors (heading + body, no article prefix) are ranked inside it; each hit carries its `source` (`seed`/`graph`). Modes: `hybrid` (default), `vector`, `lexical`. `scope` selects domains: `project` (default, the bound `read` set) or `all`; an explicit `domains` list overrides `scope`. Accepts `k` and threshold overrides. **Existing domains need a one-time re-index (`wiki_index` per domain, or `wiki_export_okf`) to build the two-level index.** A page with no `description` produces no summary vector, so it is not reachable by `vector`-mode seeding (it remains findable via `lexical`/`hybrid` grep); a lexical seed fallback is a planned follow-up. Pass `intent="write"` for the precise write-target mode: it seeds with the higher `IWIKI_WRITE_SEED_THRESHOLD`, keeps only an exact (case-insensitive) heading match when `heading` is given, and returns a single `target` — `{domain, file, heading, score, exists}` — for a write tool to decide create-vs-update; `scope`/`mode`/`k`/`threshold`/`type`/`tags` are ignored in this mode, and the target domain is the bound `write` domain (or the first entry of an explicit `domains` list when there is no write binding). |
 | `wiki_read_page` | Read one Markdown page by domain and slug. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain. |
@@ -220,7 +223,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_delete_page` | Delete one page by domain and slug: remove the file, append a `delete` log op, reindex the domain, commit and push. Rolls back on failure. |
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
-| `wiki_create_domain` | Create a domain directory with `.iwiki/` metadata and return whether the base auto-commit succeeded. |
+| `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
 | `wiki_bind` | Write or update `.iwiki.toml` for the current project after validating domains. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
 | `wiki_lint` | Report domain health: broken links, orphans, stale pages, `missing_source` (pages whose ingest source no longer exists on disk — deletion candidates), and section gaps. |
@@ -238,7 +241,7 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 
 | Field | Meaning |
 |---|---|
-| `type` | Required. **Open** vocabulary: prefer `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default), but any value is accepted (e.g. `person`); off-list values get only an advisory `unknown_type`. |
+| `type` | Required. **Open** vocabulary: prefer `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default), but any value is accepted (e.g. `person`); off-list values get only an advisory `unknown_type`. Also the page's directory: `wiki_write_page` places the file at `<type>/<slug>.md` under the domain root — a bare `slug` is prefixed with the resolved `type`, and a `slug` that already carries a leading segment must match it. |
 | `title` | Derived from the page's `# Title` H1. |
 | `description` | The authored article summary — the single source of the summary, embedded as each section's context prefix. Stored in full (never truncated). Falls back to a `## Overview` section only transitionally (migration). |
 | `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. The stored path is project-relative — an absolute path under the project is relativized, and an absolute path outside the project is rejected. |
@@ -246,7 +249,7 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 | `status` | Optional iwiki extension: `stub` (default), `developing`, `stable`, `deprecated`. |
 | `timestamp` | On create (`wiki_write_page`, `wiki_apply_okf`, `wiki_migrate_okf`): the page file's last git-commit date, or today's date if not yet committed. On edit (`wiki_update_page`): always today's date. |
 
-The reserved OKF files `index.md` (navigation) and `log.md` (history) are kept fresh in the domain directory on every write, so a git-synced domain is always a complete OKF bundle read directly by external consumers — there is no separate export copy. The `index` and `log` slugs are reserved and rejected by `wiki_write_page`.
+The reserved OKF files `index.md` (navigation) and `log.md` (history) are export-only: `wiki_write_page` / `wiki_update_page` / `wiki_delete_page` no longer regenerate them on every change. Run `wiki_export_okf` to (re)generate current `index.md` / `log.md` in the domain root before treating the domain as a complete OKF bundle for an external consumer. The `index` and `log` slugs stay reserved and rejected by `wiki_write_page`.
 
 Pages no longer carry a `## Overview` section: the summary lives in `description`.
 Relationship links go in two reserved `##` sections — `## Outgoing links` (Markdown
@@ -266,7 +269,7 @@ Tools for adopting OKF frontmatter on an existing domain:
 
 | Tool | What it does |
 |---|---|
-| `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. In autonomous mode, each page's `resource` falls back to its last logged ingest source, and tags coined for one page are reused as vocabulary for later pages in the same run. |
+| `wiki_migrate_okf(domain=None)` | Backfill frontmatter for every page missing it. Dual-mode: **autonomous** (writes frontmatter directly) when `IWIKI_CHAT_MODEL` is set; otherwise returns a **plan** — a list of candidates with derived title/description/timestamp and the domain's existing tag vocabulary — for the calling agent to classify and apply. In autonomous mode, each page's `resource` falls back to its last logged ingest source, and tags coined for one page are reused as vocabulary for later pages in the same run. In both modes it also deterministically moves any flat page (a bare `<slug>.md` at the domain root) that already carries a frontmatter `type` under `<type>/<slug>.md`, rewriting intra-domain links; a page whose move target already exists is skipped and reported under `layout_collisions` instead of being clobbered. |
 | `wiki_apply_okf(domain, slug, type, tags)` | Apply agent-classified `type`/`tags` (plus derived fields) as frontmatter to one page, reindex, commit and push. Omitting `tags` preserves the page's existing tags instead of clearing them; the existing `description` and `status` are always carried over unchanged. |
 | `wiki_export_okf(domain=None)` | Whole-domain, in-place OKF conformance sweep (no copy, no `dest`): converts any residual `[[wikilink]]` to Markdown links and guarantees frontmatter on every page (deterministic `type: concept` where missing; existing `type`/`tags` preserved), then regenerates the reserved `index.md` / `log.md`. Deterministic — never calls the chat model. Returns `fixed_links`, `added_frontmatter`, and `still_missing_frontmatter` / `still_legacy_wikilink`, with a `next_steps` hint to `wiki_migrate_okf` for better `type`/`tags`. The domain directory is itself the OKF bundle. It also migrates each page to the v2 body model: strips a `## Overview` section, backfilling `description` from it when empty, and defaults `status` to `stub`. |
 
@@ -306,9 +309,12 @@ wiki_write_page(
   domain="backend",
   slug="auth",
   markdown="# Auth\n\n## Purpose\nAuth verifies users and protects private routes.\n",
-  description="Token authentication flow."
+  description="Token authentication flow.",
+  type="architecture"
 )
 ```
+
+This writes `backend/architecture/auth.md`; pass that same `architecture/auth` identity as `slug` to `wiki_read_page` / `wiki_update_page` / `wiki_delete_page`.
 
 5. Search it:
 
@@ -318,6 +324,6 @@ wiki_search(query="how does auth work?")
 
 ## Limitations (v1)
 
-- Wiki links are intra-domain: use `[Heading](slug.md#heading)` within the same domain.
+- Wiki links are intra-domain: use `[Heading](<type>/<slug>.md#heading)` — the page's domain-relative `<type>/<slug>` identity — within the same domain.
 - Vector search uses numpy brute force, not an external vector database.
 - Staleness checks are project-local and depend on available source paths and ingest logs.
