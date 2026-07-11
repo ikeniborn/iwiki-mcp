@@ -34,8 +34,7 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
     existing = {f"{r.id}#{r.chunk}": r for r in store.load()}
     files = sorted(
         path for path in dom_path.rglob("*.md")
-        if ".iwiki" not in path.relative_to(dom_path).parts
-        and path.relative_to(dom_path).as_posix() not in RESERVED_OKF
+        if path.relative_to(dom_path).as_posix() not in RESERVED_OKF
     )
     chunks = []
     for md in files:

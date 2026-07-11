@@ -26,14 +26,6 @@ def test_grep_returns_nested_file_with_posix_separator(tmp_path):
     assert hits[0]["file"] == "nested/auth.md"
 
 
-def test_grep_excludes_iwiki_markdown(tmp_path):
-    iwiki = tmp_path / ".iwiki"
-    iwiki.mkdir()
-    (iwiki / "hidden.md").write_text("# Hidden\n## Token\nrefresh_token\n")
-
-    assert grep_sections(str(tmp_path), "refresh_token", top_k=5) == []
-
-
 def test_grep_empty_for_non_positive_top_k(tmp_path):
     (tmp_path / "auth.md").write_text("# Auth\n## Token\nrefresh_token\n")
     (tmp_path / "other.md").write_text("# Other\n## Token\nrefresh_token\n")

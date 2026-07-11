@@ -205,7 +205,7 @@ def wiki_list_pages(domain: str) -> dict:
     pages = []
     for path in sorted(dom_path.rglob("*.md")):
         rel_path = path.relative_to(dom_path)
-        if ".iwiki" in rel_path.parts or rel_path.as_posix() in RESERVED_OKF:
+        if rel_path.as_posix() in RESERVED_OKF:
             continue
         rel = rel_path.as_posix()
         pages.append({"slug": rel[:-3], "file": rel})
@@ -639,7 +639,7 @@ def wiki_create_domain(name: str) -> dict:
     dom_path = _domain_path(bind.base, valid_domain)
     if dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' already exists"}
-    os.makedirs(dom_path / ".iwiki", exist_ok=True)
+    os.makedirs(dom_path, exist_ok=True)
     ignore.ensure_iwikiignore(bind.project_dir)
     commit = sync.commit_and_push(bind.base, f"iwiki: create domain {valid_domain}",
                                   pathspec=valid_domain)
@@ -820,7 +820,7 @@ def _unmigrated_pages(dom_path: Path):
     """Yield (slug, page_file, body, has_frontmatter) for each page."""
     for path in sorted(dom_path.rglob("*.md")):
         rel = path.relative_to(dom_path)
-        if ".iwiki" in rel.parts or rel.as_posix() in RESERVED_OKF:
+        if rel.as_posix() in RESERVED_OKF:
             continue
         meta, body = _fm.split(path.read_text(encoding="utf-8"))
         yield rel.with_suffix("").as_posix(), rel.as_posix(), body, bool(meta)
