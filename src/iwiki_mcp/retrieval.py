@@ -92,10 +92,10 @@ def locate_target(cfg: Config, base: str, domain: str, query: str,
         return {"domain": domain, "exists": False}
     pool = hier.expand_graph([f for f, _ in seeds], domain_dir(base, domain),
                              cfg.graph_depth, cfg.bfs_top_k)
-    ranked = hier.rank_sections(qv, secs, pool, cfg.top_k)
     if heading is not None:
         want = heading.strip().lower()
-        ranked = [h for h in ranked if h["heading"].lower() == want]
+        secs = [r for r in secs if r.heading.lower() == want]
+    ranked = hier.rank_sections(qv, secs, pool, cfg.top_k)
     if not ranked:
         return {"domain": domain, "exists": False}
     best = ranked[0]

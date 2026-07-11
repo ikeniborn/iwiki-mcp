@@ -81,3 +81,65 @@ def test_locate_target_case_insensitive_heading(tmp_path, monkeypatch):
 
     assert hit["exists"] is True
     assert hit["heading"] == "Purpose"
+
+
+def test_locate_target_empty_domain_returns_exists_false(tmp_path, monkeypatch):
+    """No index.jsonl / no records at all (un-indexed domain) -> the
+    `not summ or not secs` early return, not a crash."""
+    _cfg_env(monkeypatch)
+    b = tmp_path
+    (b / "d").mkdir(parents=True)
+    monkeypatch.setattr(retrieval, "embed_texts", _fake_embed)
+    cfg = Config.load()
+
+    hit = retrieval.locate_target(cfg, str(b), "d", "anything", heading="Whatever")
+
+    assert hit == {"domain": "d", "exists": False}
+
+
+def _fake_embed_graded(cfg, texts):
+    """Deterministic stub with a wide score gap: text mentioning 'target-topic'
+    embeds far from the query (cos ~0.77), everything else (8 filler sections +
+    the description + the query) embeds identical to the query (cos ~1.0). Used
+    to build a pool where the exact-heading target section scores BELOW all 8
+    filler sections, so with the default IWIKI_TOP_K=8 it is the 9th-ranked
+    section -- truncated out of `rank_sections` unless the heading filter runs
+    before ranking."""
+    vecs = []
+    for t in texts:
+        if "target-topic" in t.lower():
+            vecs.append([1.0, 1.0, 0.0])
+        else:
+            vecs.append([1.0, 0.1, 0.0])
+    return vecs
+
+
+def test_locate_target_heading_filter_runs_before_top_k_truncation(tmp_path, monkeypatch):
+    """RED under the old order (rank_sections(..., cfg.top_k) THEN filter by
+    heading): 8 filler sections all out-score the 'Target' section, so ranking
+    first truncates 'Target' out of the top-8 before the heading filter ever
+    sees it -> exists=False for a section that exists. GREEN with the fix:
+    filtering `secs` down to the exact heading BEFORE ranking means 'Target' is
+    the only candidate and is always found."""
+    _cfg_env(monkeypatch)
+    b = tmp_path
+    (b / "d").mkdir(parents=True)
+    fillers = "\n\n".join(
+        f"## Filler{i}\nfiller-topic body number {i}." for i in range(1, 9)
+    )
+    (b / "d" / "p.md").write_text(
+        "---\ndescription: filler-topic summary for this page.\n---\n"
+        "# P\n\n"
+        f"{fillers}\n\n"
+        "## Target\ntarget-topic body holds the real section text.\n"
+    )
+    monkeypatch.setattr(indexer, "embed_texts", _fake_embed_graded)
+    cfg = Config.load()
+    indexer.index_domain(cfg, str(b), "d")
+    monkeypatch.setattr(retrieval, "embed_texts", _fake_embed_graded)
+
+    hit = retrieval.locate_target(cfg, str(b), "d", "filler-topic query", heading="Target")
+
+    assert hit["exists"] is True
+    assert hit["heading"] == "Target"
+    assert hit["file"] == "p.md"

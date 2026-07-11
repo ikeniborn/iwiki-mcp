@@ -265,7 +265,7 @@ def wiki_search(
 ) -> dict:
     bind = base.resolve_binding()
     cfg = Config.load()
-    if intent == "write":
+    if intent.strip().lower() == "write":
         target = bind.write or (domains[0] if domains else None)
         if not target:
             return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
