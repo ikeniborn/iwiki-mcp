@@ -7,7 +7,7 @@ def _seed(tmp_path, monkeypatch, with_domain=True):
     b = tmp_path / "wiki"
     b.mkdir()
     if with_domain:
-        (b / "backend" / ".iwiki").mkdir(parents=True)
+        (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
@@ -27,7 +27,7 @@ def test_write_page_indexes_and_logs(tmp_path, monkeypatch):
     assert out["page"] == "backend/auth.md"
     assert out["indexed_chunks"] >= 1
     assert os.path.isfile(os.path.join(b, "backend", "auth.md"))
-    assert os.path.isfile(os.path.join(b, "backend", ".iwiki", "log.jsonl"))
+    assert os.path.isfile(os.path.join(b, "backend", "log.jsonl"))
 
 
 def test_write_rejects_deep_heading(tmp_path, monkeypatch):
@@ -53,7 +53,7 @@ def test_create_domain(tmp_path, monkeypatch):
 
 def test_bind_writes_config_for_current_project_domain(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
 
     out = server.wiki_bind(read=["backend", "proj"], write="proj")
 
@@ -78,7 +78,7 @@ def test_bind_rejects_missing_domain_without_writing(tmp_path, monkeypatch):
 
 def test_bind_preserves_existing_read_when_adding_current_project(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
 
     out = server.wiki_bind(read=["proj"], write="proj")
 
@@ -92,7 +92,7 @@ def test_bind_does_not_remove_existing_read_when_current_already_present(
     tmp_path, monkeypatch
 ):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
     config_path = os.path.join(proj, ".iwiki.toml")
     open(config_path, "w").write('read = ["backend", "proj"]\nwrite = "proj"\n')
 
@@ -104,7 +104,7 @@ def test_bind_does_not_remove_existing_read_when_current_already_present(
 
 def test_bind_rejects_new_non_current_read_without_writing(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared", ".iwiki"))
+    os.makedirs(os.path.join(b, "shared"))
     config_path = os.path.join(proj, ".iwiki.toml")
 
     out = server.wiki_bind(read=["shared"], write="proj")
@@ -117,7 +117,7 @@ def test_bind_rejects_new_non_current_read_without_writing(tmp_path, monkeypatch
 
 def test_bind_rejects_non_current_write_without_writing(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared", ".iwiki"))
+    os.makedirs(os.path.join(b, "shared"))
     config_path = os.path.join(proj, ".iwiki.toml")
 
     out = server.wiki_bind(write="shared")
@@ -132,7 +132,7 @@ def test_bind_rejects_existing_non_current_write_without_current_override(
     tmp_path, monkeypatch
 ):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
     config_path = os.path.join(proj, ".iwiki.toml")
 
     out = server.wiki_bind(read=["proj"])

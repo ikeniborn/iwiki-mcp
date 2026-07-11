@@ -4,7 +4,7 @@ from iwiki_mcp.engine import frontmatter as fm
 
 
 def _bind(tmp_path):
-    (tmp_path / "d" / ".iwiki").mkdir(parents=True)
+    (tmp_path / "d").mkdir(parents=True)
     return server.base.Binding(base=str(tmp_path), read=("d",), write="d",
                                project_dir=str(tmp_path))
 

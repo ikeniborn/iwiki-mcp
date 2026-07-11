@@ -15,7 +15,7 @@ def _cfg():
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     for d, body in (("a", "alpha refresh_token here"), ("b", "beta gamma")):
-        (b / d / ".iwiki").mkdir(parents=True)
+        (b / d).mkdir(parents=True)
         (b / d / "p.md").write_text(
             f"---\ndescription: {d} page summary\n---\n# P\n## Overview\no\n## S\n{body}\n")
     monkeypatch.setattr(indexer, "embed_texts",
@@ -88,7 +88,7 @@ def test_hybrid_rejects_invalid_mode():
 
 def test_hierarchical_vector_returns_pool_sections_with_source(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "d" / ".iwiki").mkdir(parents=True)
+    (b / "d").mkdir(parents=True)
     (b / "d" / "a.md").write_text(
         "---\ndescription: alpha topic overview\n---\n"
         "# A\n\n## Alpha\nalpha topic details\n\n[B](b.md)\n"
@@ -114,7 +114,7 @@ def test_vector_hybrid_score_is_a_json_serializable_float(tmp_path, monkeypatch)
     must not leak into hit['score'] — FastMCP's JSON encoder stringifies
     numpy scalars instead of emitting a number."""
     b = tmp_path / "wiki"
-    (b / "d" / ".iwiki").mkdir(parents=True)
+    (b / "d").mkdir(parents=True)
     (b / "d" / "a.md").write_text(
         "---\ndescription: alpha topic overview\n---\n"
         "# A\n\n## Alpha\nalpha topic details\n\n[B](b.md)\n"

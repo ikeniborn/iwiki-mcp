@@ -7,7 +7,7 @@ from iwiki_mcp.engine import lint as lint_engine
 
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / "backend" / "auth.md").write_text("# Auth\n## Overview\no\n## Flow\nx\n")
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -32,7 +32,7 @@ def test_sync_no_repo(tmp_path, monkeypatch):
 def _seed_remediation(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     domain = b / "backend"
-    (domain / ".iwiki").mkdir(parents=True)
+    domain.mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text(
@@ -45,7 +45,7 @@ def _seed_remediation(tmp_path, monkeypatch):
 
 
 def _write_log(domain_path, records):
-    log = domain_path / ".iwiki" / "log.jsonl"
+    log = domain_path / "log.jsonl"
     with open(log, "w", encoding="utf-8") as fh:
         for rec in records:
             fh.write(json.dumps(rec) + "\n")
@@ -67,7 +67,7 @@ def test_remediation_plan_empty_when_lint_has_no_candidates(tmp_path, monkeypatc
 
 def test_remediation_plan_rejects_non_write_domain(tmp_path, monkeypatch):
     b, _, proj = _seed_remediation(tmp_path, monkeypatch)
-    (b / "other" / ".iwiki").mkdir(parents=True)
+    (b / "other").mkdir(parents=True)
     (proj / ".iwiki.toml").write_text(
         'read = ["backend", "other"]\nwrite = "backend"\n',
         encoding="utf-8",
@@ -103,7 +103,7 @@ def test_remediation_plan_does_not_mutate_page_or_log(tmp_path, monkeypatch):
         "page": "auth.md",
         "src_hash": "oldhash",
     }])
-    log_before = (domain / ".iwiki" / "log.jsonl").read_text(encoding="utf-8")
+    log_before = (domain / "log.jsonl").read_text(encoding="utf-8")
     page_before = page.read_text(encoding="utf-8")
     index_path = base.index_path(str(b), "backend")
     assert not os.path.exists(index_path)
@@ -112,7 +112,7 @@ def test_remediation_plan_does_not_mutate_page_or_log(tmp_path, monkeypatch):
 
     assert "error" not in out
     assert page.read_text(encoding="utf-8") == page_before
-    assert (domain / ".iwiki" / "log.jsonl").read_text(encoding="utf-8") == log_before
+    assert (domain / "log.jsonl").read_text(encoding="utf-8") == log_before
     assert not os.path.exists(index_path)
 
 

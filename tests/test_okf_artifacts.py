@@ -13,7 +13,7 @@ def _seed_backend(tmp_path, monkeypatch):
     """Network-free harness (mirrors tests/test_server_write.py::_seed): a
     `backend` domain bound via .iwiki.toml, dummy LLM env, stubbed embeddings."""
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
@@ -85,7 +85,7 @@ def test_index_domain_skips_reserved_keeps_nested(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, t: [[1.0, 0.0] for _ in t])
     base_dir = tmp_path / "wiki"
     dom = base_dir / "d"
-    (dom / ".iwiki").mkdir(parents=True)
+    dom.mkdir(parents=True)
     (dom / "a.md").write_text(
         "# A\n\n## Overview\nsummary\n\n## Body\ncontent\n", encoding="utf-8")
     # Reserved root files carry an indexable ## section: they would produce records
@@ -136,8 +136,8 @@ def test_unmigrated_pages_skips_reserved(tmp_path):
 
 def test_refresh_artifacts_writes_index_and_log(tmp_path):
     dom = tmp_path / "wiki" / "d"
-    (dom / ".iwiki").mkdir(parents=True)
-    (dom / ".iwiki" / "log.jsonl").write_text(
+    dom.mkdir(parents=True)
+    (dom / "log.jsonl").write_text(
         '{"op":"ingest","page":"a.md","date":"2026-07-01"}\n', encoding="utf-8")
     (dom / "a.md").write_text(
         "---\ntype: concept\n---\n# A\n\n## Overview\ns\n", encoding="utf-8")
@@ -150,7 +150,7 @@ def test_refresh_artifacts_writes_index_and_log(tmp_path):
 
 def test_refresh_artifacts_excludes_reserved_from_index(tmp_path):
     dom = tmp_path / "wiki" / "d"
-    (dom / ".iwiki").mkdir(parents=True)
+    dom.mkdir(parents=True)
     (dom / "a.md").write_text("# A\n\n## Overview\ns\n", encoding="utf-8")
     okf.refresh_artifacts(str(tmp_path / "wiki"), "d")           # first run
     okf.refresh_artifacts(str(tmp_path / "wiki"), "d")           # idempotent re-run
@@ -177,7 +177,7 @@ def test_orphans_survive_generated_index(tmp_path):
 
 def test_refresh_artifacts_warns_on_authored_reserved(tmp_path):
     dom = tmp_path / "wiki" / "d"
-    (dom / ".iwiki").mkdir(parents=True)
+    dom.mkdir(parents=True)
     (dom / "index.md").write_text(
         "---\ntype: concept\n---\n# Real\n\n## Overview\nx\n", encoding="utf-8")
     warn = okf.refresh_artifacts(str(tmp_path / "wiki"), "d")

@@ -2,7 +2,6 @@ from iwiki_mcp.engine.grep import grep_sections
 
 
 def test_grep_finds_exact_symbol(tmp_path):
-    (tmp_path / ".iwiki").mkdir()
     (tmp_path / "auth.md").write_text(
         "# Auth\n## Overview\ngeneral\n## Token\nthe refresh_token rotates\n")
     (tmp_path / "ui.md").write_text("# UI\n## Layout\nbuttons and panels\n")

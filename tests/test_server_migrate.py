@@ -14,7 +14,7 @@ def _patch(monkeypatch, tmp_path):
     # Eager: tests write fixture pages into tmp_path/d/ before calling the
     # tool, so the domain dir must exist before resolve_binding() is (lazily)
     # invoked inside the handler.
-    (tmp_path / "d" / ".iwiki").mkdir(parents=True)
+    (tmp_path / "d").mkdir(parents=True)
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
     monkeypatch.setenv("IWIKI_LLM_KEY", "k")
     monkeypatch.setattr(server.base, "resolve_binding", lambda: _bind(tmp_path))
@@ -81,7 +81,7 @@ def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
         }
     )
     (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
-    log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
+    log_path = tmp_path / "d" / "log.jsonl"
     log_path.write_text(json.dumps({
         "op": "ingest", "source": "/src/a.py", "page": "a.md",
         "date": "2020-01-01", "src_hash": "abc",
@@ -135,7 +135,7 @@ def test_apply_okf_sets_resource_from_log(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
     (tmp_path / "d" / "a.md").write_text(body, encoding="utf-8")
-    log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
+    log_path = tmp_path / "d" / "log.jsonl"
     log_path.write_text(json.dumps({
         "op": "ingest", "source": "/src/a.py", "page": "a.md",
         "date": "2020-01-01", "src_hash": "abc",

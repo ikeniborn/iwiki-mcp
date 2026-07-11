@@ -7,7 +7,7 @@ def _chunk(heading, text):
 
 
 def test_store_roundtrip_and_query(tmp_path):
-    idx = str(tmp_path / ".iwiki" / "index.jsonl")
+    idx = str(tmp_path / "index.jsonl")
     store = VectorStore(idx)
     recs = [
         make_record(_chunk("One", "x"), [1.0, 0.0]),

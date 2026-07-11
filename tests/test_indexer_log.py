@@ -10,7 +10,7 @@ def _recs(b, domain):
 
 def test_upsert_replaces_prior_ingest_for_page(tmp_path):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     indexer.append_log(str(b), "backend", "ingest", "s1", "p.md", "h1")
     indexer.append_log(str(b), "backend", "ingest", "s2", "other.md", "h2")
 
@@ -26,7 +26,7 @@ def test_upsert_replaces_prior_ingest_for_page(tmp_path):
 
 def test_upsert_creates_log_when_absent(tmp_path):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
 
     indexer.upsert_ingest_log(str(b), "backend", "s", "p.md", "h")
 

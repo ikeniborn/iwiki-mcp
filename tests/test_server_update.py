@@ -7,7 +7,7 @@ from iwiki_mcp import base, indexer, server
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     b.mkdir()
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')

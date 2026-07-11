@@ -5,7 +5,7 @@ from iwiki_mcp import base
 def _mkbase(tmp_path, *domains):
     b = tmp_path / "wiki"
     for d in domains:
-        (b / d / ".iwiki").mkdir(parents=True)
+        (b / d).mkdir(parents=True)
         (b / d / "page.md").write_text("# P\n## Overview\nx\n")
     b.mkdir(exist_ok=True)
     return str(b)

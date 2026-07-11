@@ -13,7 +13,7 @@ def _cfg():
 def test_reindex_refreshes_facets_without_reembed(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[0.1, 0.2] for _ in texts])
     base = tmp_path
-    (base / "d" / ".iwiki").mkdir(parents=True)
+    (base / "d").mkdir(parents=True)
     page = base / "d" / "p.md"
     page.write_text(
         "---\ntype: api\ntags: [a]\n---\n# T\n\n## Overview\ns\n\n## B\nwords here\n",
