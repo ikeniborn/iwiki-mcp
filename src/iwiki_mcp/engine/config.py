@@ -39,6 +39,9 @@ class Config:
     score_threshold: float
     graph_depth: int
     ignore: PathSpec | None   # gitignore-style ignore (.iwikiignore); None = index all
+    seed_top_k: int = 5
+    bfs_top_k: int = 10
+    seed_threshold: float = 0.15
     chat_model: str = ""
 
     @staticmethod
@@ -65,5 +68,8 @@ class Config:
             score_threshold=float(getenv("IWIKI_SCORE_THRESHOLD", "0.2")),
             graph_depth=int(getenv("IWIKI_GRAPH_DEPTH", "2")),
             ignore=_load_ignore(".iwikiignore") if load_ignore else None,
+            seed_top_k=int(getenv("IWIKI_SEED_TOP_K", "5")),
+            bfs_top_k=int(getenv("IWIKI_BFS_TOP_K", "10")),
+            seed_threshold=float(getenv("IWIKI_SEED_THRESHOLD", "0.15")),
             chat_model=getenv("IWIKI_CHAT_MODEL", "").strip(),
         )

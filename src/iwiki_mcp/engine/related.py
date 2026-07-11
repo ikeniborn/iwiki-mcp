@@ -42,6 +42,9 @@ def related(target_id: str, recs: list[Record], top_k: int, graph_depth: int) ->
     target = next((r for r in recs if r.id == target_id), None)
     if target is None:
         return {"vector": [], "graph": []}
-    vec = _vector_neighbours(target, recs, top_k)
+    # `wiki_related` finds related *sections*: summary records (one per page, from
+    # the frontmatter description) must never be vector-neighbour candidates.
+    section_recs = [r for r in recs if r.kind == "section"]
+    vec = _vector_neighbours(target, section_recs, top_k)
     graph = _graph_neighbours(target.file, graph_depth) if not vec else []
     return {"vector": vec, "graph": graph}

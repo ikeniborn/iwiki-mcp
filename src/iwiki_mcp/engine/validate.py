@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from . import frontmatter as _fm
 
-LEAD_MAX = 250                  # keep in sync with chunk.LEAD_MAX
+LEAD_MAX = 250                  # section-lead advisory cap (validate-local)
 
 _DEEP = re.compile(r"^#{3,}\s", re.MULTILINE)   # ### or deeper
 _H1_LINE = re.compile(r"^#\s+\S")               # a single-# H1 line

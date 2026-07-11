@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>okf-unit-b — IDD→SDD chain</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{ margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px; font:16px/1.55 system-ui, sans-serif;
+  background:radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent), var(--bg);
+  color:var(--fg); transition:background .3s, color .3s; }
+.theme-btn{ position:sticky; top:.5rem; float:right; cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--surface); }
+h1{ font-size:1.4rem; margin:.2rem 0 1rem; }
+h2{ font-size:1.12rem; color:var(--accent); border-bottom:1px solid var(--border); padding-bottom:.3rem; margin-top:1.8rem; }
+h3{ font-size:1rem; margin:1.2rem 0 .5rem; }
+.sub{ color:var(--muted); font-size:.95rem; } .lead{ font-size:1.08rem; }
+code{ background:color-mix(in srgb,var(--accent) 10%,var(--surface)); padding:.05rem .3rem; border-radius:4px; font-size:.9em; }
+.tab-radio{ display:none; }
+.chain-tabs{ display:flex; gap:.3rem; margin-top:.5rem; flex-wrap:wrap; }
+.chain-tabs label{ cursor:pointer; padding:.4rem .9rem; border:1px solid var(--border); border-bottom:none;
+  border-radius:8px 8px 0 0; background:var(--surface); color:var(--muted); }
+body:has(#tab-intent:checked) label[for="tab-intent"],
+body:has(#tab-spec:checked)   label[for="tab-spec"],
+body:has(#tab-plan:checked)   label[for="tab-plan"],
+body:has(#tab-result:checked) label[for="tab-result"]{ color:var(--accent); border-color:var(--accent); font-weight:600; }
+.tab-pane{ display:none; border:1px solid var(--border); border-radius:0 10px 10px 10px; padding:1.2rem 1.4rem; background:color-mix(in srgb,var(--surface) 60%,transparent); }
+body:has(#tab-intent:checked) #pane-intent,
+body:has(#tab-spec:checked)   #pane-spec,
+body:has(#tab-plan:checked)   #pane-plan,
+body:has(#tab-result:checked) #pane-result{ display:block; }
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface); margin:1rem 0; font-size:.9rem;
+  border:1px solid var(--border); border-radius:10px; overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.5rem .7rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table td.c{ text-align:center; }
+.rpt-c4 .boundary{ border:1.6px dashed var(--accent); border-radius:12px; padding:1.8rem 1rem 1rem; margin:.7rem 0;
+  position:relative; display:flex; flex-wrap:wrap; gap:.6rem; background:color-mix(in srgb, var(--accent) 5%, transparent); }
+.rpt-c4 .boundary::before{ content:attr(data-label); position:absolute; top:-.7rem; left:.9rem;
+  background:var(--bg); padding:0 .45rem; font-size:.8rem; color:var(--accent); font-weight:600; }
+.rpt-c4 .comp{ background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:.55rem .85rem;
+  min-width:6rem; font-size:.82rem; box-shadow:0 1px 6px var(--shadow); border-left:4px solid var(--accent); }
+.rpt-c4 .comp b{ color:var(--accent); } .rpt-c4 .comp .sub{ font-size:.75rem; }
+.rpt-graph{ margin:1rem 0; overflow-x:auto; }
+.rpt-graph text{ fill:var(--fg); font:11px system-ui, sans-serif; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0; box-shadow:0 1px 8px var(--shadow); }
+.badge{ display:inline-block; font-size:.72rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); }
+.badge.ok{ color:var(--ok-2); border-color:var(--ok); } .badge.na{ color:var(--muted); }
+.verdict-ok{ color:var(--ok-2); font-weight:700; }
+footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px solid var(--border); padding-top:.6rem; }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
+<header>
+  <label for="theme-toggle" class="theme-btn" title="Тёмная/светлая тема">🌙 / ☀️</label>
+  <h1>okf-unit-b — цепочка IDD→SDD</h1>
+  <p class="sub">Иерархический ретрив (порт obsidian-ai-wiki). Ветка <code>dev-okf-unit-b</code> от master (v0.4.1).</p>
+</header>
+<nav class="chain-tabs">
+  <label for="tab-intent">Intent</label>
+  <label for="tab-spec">Spec</label>
+  <label for="tab-plan">Plan</label>
+  <label for="tab-result">Result</label>
+</nav>
+
+<!-- TAB:intent START -->
+<section class="tab-pane" id="pane-intent"><p class="note">Этап ещё не проверен.</p></section>
+<!-- TAB:intent END -->
+
+<!-- TAB:spec START -->
+<section class="tab-pane" id="pane-spec">
+  <p class="lead">Спецификация <code>2026-07-10-okf-unit-b-design.md</code> — вердикт <span class="verdict-ok">OK</span>.</p>
+  <p class="sub">spec_hash <code>8395e0b1ce93a6bf</code> · chain intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span></p>
+
+  <h2>Резюме спецификации</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Раздел</th><th>Требование</th><th>Решение</th></tr></thead>
+    <tbody>
+      <tr><td>Модель индекса</td><td>2 kind: <code>summary</code> (вектор из description) + <code>section</code> (чистый heading+body, без article-префикса)</td><td><code>Record.kind</code>, disjoint embed-inputs</td></tr>
+      <tr><td>chunk.py</td><td>section без <code>#title</code>+summary-префикса; отдельный summary-чанк</td><td><code>kind</code>/<code>ordinal</code>, word-based окна</td></tr>
+      <tr><td>Ретрив (единый flow)</td><td>seed → graph-expand → section-rank; embeddings + grep/Jaccard fallback на обоих этапах</td><td><code>retrieval.py</code> + новый <code>engine/hier.py</code></td></tr>
+      <tr><td>Graph-expand</td><td>undirected BFS по wiki-графу от seed, <code>graph_depth</code> хопов, кап <code>bfs_top_k</code></td><td>reuse <code>links.py</code>/<code>related.py</code></td></tr>
+      <tr><td>Миграция</td><td>hash-reuse re-embed + summary новые + drop stale; <code>SCHEMA_VERSION</code> guard</td><td>один <code>wiki_index</code> на домен</td></tr>
+      <tr><td>Config</td><td><code>seed_top_k</code> 5, <code>bfs_top_k</code> 10, <code>seed_threshold</code>, <code>graph_depth</code></td><td><code>engine/config.py</code></td></tr>
+      <tr><td>Мини-eval</td><td>детерминир. харнес (fake-embedder), recall@k статей+секций</td><td><code>eval/hierarchical/</code></td></tr>
+    </tbody>
+  </table>
+  <h3>Success Criteria</h3>
+  <table class="rpt-table">
+    <thead><tr><th>#</th><th>Критерий</th></tr></thead>
+    <tbody>
+      <tr><td>SC-1</td><td>section-вектор не содержит title/description (chunk-тест)</td></tr>
+      <tr><td>SC-2</td><td>summary+section записи round-trip через стор с <code>kind</code></td></tr>
+      <tr><td>SC-3</td><td>flow возвращает секции только из seed+graph пула, с <code>source</code>, в порядке tie-break</td></tr>
+      <tr><td>SC-4</td><td><code>wiki_search</code> все 3 режима на реальном домене после реиндекса (live)</td></tr>
+      <tr><td>SC-5</td><td>мини-eval проходит floor recall/ranking</td></tr>
+      <tr><td>SC-6</td><td><code>pytest -q</code> зелёный; <code>flake8</code> чисто</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Схемы решения и зависимостей</h2>
+  <h3>Схема решения</h3>
+  <figure class="rpt-c4">
+    <div class="boundary" data-label="engine/ · framework-free">
+      <div class="comp"><b>chunk.py</b><br><span class="sub">summary + clean section</span></div>
+      <div class="comp"><b>store.py</b><br><span class="sub">Record.kind + SCHEMA_VERSION</span></div>
+      <div class="comp"><b>hier.py (new)</b><br><span class="sub">seed·graph·section-rank</span></div>
+      <div class="comp"><b>links/related</b><br><span class="sub">BFS graph expand</span></div>
+    </div>
+    <div class="boundary" data-label="top layer">
+      <div class="comp"><b>retrieval.py</b><br><span class="sub">unified hierarchical flow</span></div>
+      <div class="comp"><b>indexer.py</b><br><span class="sub">embed summary+section, migrate</span></div>
+      <div class="comp"><b>config.py</b><br><span class="sub">seed_top_k / bfs_top_k / threshold</span></div>
+    </div>
+    <div class="boundary" data-label="eval + data">
+      <div class="comp"><b>eval/hierarchical</b><br><span class="sub">recall@k harness</span></div>
+      <div class="comp"><b>.iwiki/index.jsonl</b><br><span class="sub">summary + section records</span></div>
+    </div>
+  </figure>
+
+  <h3>Граф зависимостей</h3>
+  <figure class="rpt-graph">
+    <svg viewBox="0 0 560 200" width="560" role="img" aria-label="граф зависимостей компонентов">
+      <defs>
+        <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+        <filter id="dsb" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"/></filter>
+      </defs>
+      <line x1="110" y1="40"  x2="150" y2="70"  stroke="var(--line)" stroke-width="2" marker-end="url(#arb)"/>
+      <line x1="110" y1="100" x2="150" y2="85"  stroke="var(--line)" stroke-width="2" marker-end="url(#arb)"/>
+      <line x1="260" y1="80"  x2="330" y2="80"  stroke="var(--line)" stroke-width="2" marker-end="url(#arb)"/>
+      <line x1="110" y1="160" x2="330" y2="92"  stroke="var(--line)" stroke-width="2" marker-end="url(#arb)"/>
+      <line x1="440" y1="80"  x2="490" y2="80"  stroke="var(--line)" stroke-width="2" marker-end="url(#arb)"/>
+      <g filter="url(#dsb)">
+        <rect x="20"  y="24"  width="90" height="32" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="20"  y="86"  width="90" height="32" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="20"  y="146" width="90" height="32" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="152" y="62"  width="108" height="38" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="332" y="62"  width="108" height="38" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="490" y="64"  width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      </g>
+      <text x="65"  y="44"  text-anchor="middle">chunk</text>
+      <text x="65"  y="106" text-anchor="middle">store</text>
+      <text x="65"  y="166" text-anchor="middle">links</text>
+      <text x="206" y="85"  text-anchor="middle">hier.py</text>
+      <text x="386" y="85"  text-anchor="middle">retrieval</text>
+      <text x="520" y="85"  text-anchor="middle">eval</text>
+    </svg>
+  </figure>
+  <p class="sub">Рёбра «зависит от»: <code>hier</code> ← chunk/store/links; <code>retrieval</code> ← hier; <code>eval</code> ← retrieval. Циклов нет.</p>
+
+  <h3>Карта покрытия (компонент → требование)</h3>
+  <table class="rpt-table">
+    <thead><tr><th>Компонент</th><th>Модель</th><th>Flow</th><th>Graph</th><th>Миграц.</th><th>Eval</th></tr></thead>
+    <tbody>
+      <tr><td>chunk.py</td><td class="c">✓</td><td class="c">·</td><td class="c">·</td><td class="c">✓</td><td class="c">·</td></tr>
+      <tr><td>store.py</td><td class="c">✓</td><td class="c">·</td><td class="c">·</td><td class="c">✓</td><td class="c">·</td></tr>
+      <tr><td>hier.py</td><td class="c">·</td><td class="c">✓</td><td class="c">✓</td><td class="c">·</td><td class="c">·</td></tr>
+      <tr><td>retrieval.py</td><td class="c">·</td><td class="c">✓</td><td class="c">✓</td><td class="c">·</td><td class="c">·</td></tr>
+      <tr><td>indexer.py</td><td class="c">✓</td><td class="c">·</td><td class="c">·</td><td class="c">✓</td><td class="c">·</td></tr>
+      <tr><td>eval/</td><td class="c">·</td><td class="c">·</td><td class="c">·</td><td class="c">·</td><td class="c">✓</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Результаты проверки</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>clarity</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Находок нет.</b> CRITICAL 0 · WARNING 0 · INFO 0 open. Вердикт <span class="verdict-ok">OK</span>. Цепочка: intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span>.</div>
+  <footer>Next step: superpowers:writing-plans</footer>
+</section>
+<!-- TAB:spec END -->
+
+<!-- TAB:plan START -->
+<section class="tab-pane" id="pane-plan">
+  <p class="lead">План <code>2026-07-10-okf-unit-b.md</code> — вердикт <span class="verdict-ok">OK</span>.</p>
+  <p class="sub">plan_hash <code>42a4e74b24f9dcf3</code> · chain intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span></p>
+
+  <h2>Резюме плана</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Задача</th><th>Действие</th><th>DoD</th></tr></thead>
+    <tbody>
+      <tr><td>T1 store</td><td><code>Record.kind/ordinal/v</code> + <code>SCHEMA_VERSION=2</code></td><td>make_record несёт поля; старый JSONL грузится с дефолтами</td></tr>
+      <tr><td>T2 chunk</td><td>summary-чанк (description) + section без title/desc-префикса</td><td>section-текст = <code>## heading\nbody</code>, без Big Title/desc</td></tr>
+      <tr><td>T3 indexer</td><td>эмбед обоих kind; reuse требует <code>v==SCHEMA_VERSION</code></td><td>реиндекс старого v=1 → re-embed + summary; reused=0</td></tr>
+      <tr><td>T4 hier.py</td><td>seed / undirected BFS expand / section-rank + tie-break</td><td>тесты seed-threshold, undirected+cap, pool-filter+seed-first</td></tr>
+      <tr><td>T5 retrieval</td><td>единый flow в 3 режимах + config seed_top_k/bfs_top_k/threshold</td><td>vector → секции из пула с <code>source</code></td></tr>
+      <tr><td>T6 eval</td><td>детерминир. харнес recall@k</td><td>article_recall≥0.8, section_recall≥0.6, mrr&gt;0</td></tr>
+      <tr><td>T7 docs</td><td>README EN/RU, вики, 0.5.0, реиндекс-note, PR</td><td>pytest+flake8 зелёные; PR</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Схемы зависимостей</h2>
+  <h3>Граф зависимостей задач</h3>
+  <figure class="rpt-graph">
+    <svg viewBox="0 0 620 130" width="620" role="img" aria-label="граф задач Unit B">
+      <defs>
+        <marker id="arbp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+        <filter id="dbp" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"/></filter>
+      </defs>
+      <line x1="72"  y1="55" x2="90"  y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="162" y1="55" x2="180" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="252" y1="55" x2="270" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="342" y1="55" x2="360" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="432" y1="55" x2="450" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <line x1="522" y1="55" x2="540" y2="55" stroke="var(--line)" stroke-width="2" marker-end="url(#arbp)"/>
+      <g filter="url(#dbp)">
+        <rect x="12"  y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="102" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="192" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="282" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="372" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="462" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="552" y="38" width="60" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      </g>
+      <text x="42"  y="58" text-anchor="middle">T1 store</text>
+      <text x="132" y="58" text-anchor="middle">T2 chunk</text>
+      <text x="222" y="58" text-anchor="middle">T3 index</text>
+      <text x="312" y="58" text-anchor="middle">T4 hier</text>
+      <text x="402" y="58" text-anchor="middle">T5 retr</text>
+      <text x="492" y="58" text-anchor="middle">T6 eval</text>
+      <text x="582" y="58" text-anchor="middle">T7 docs</text>
+    </svg>
+  </figure>
+  <p class="sub">Линейная цепочка зависимостей (результат M нужен в N, M&lt;N); циклов нет. T4 <code>hier</code> ← store/chunk/links; T5 ← hier; T6 ← chunk/hier.</p>
+
+  <h3>Пересечения</h3>
+  <table class="rpt-table">
+    <thead><tr><th>Файл</th><th>Задачи</th></tr></thead>
+    <tbody>
+      <tr><td><code>engine/store.py</code></td><td>T1 (kind/v) · T3 (reuse guard)</td></tr>
+      <tr><td><code>engine/chunk.py</code></td><td>T2 (two-level) · T6 (eval строит записи)</td></tr>
+      <tr><td><code>engine/hier.py</code></td><td>T4 (ядро) · T5 (retrieval) · T6 (eval)</td></tr>
+      <tr><td><code>pyproject.toml</code></td><td>T6 (pythonpath eval) · T7 (0.5.0)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Результаты проверки</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Фаза</th><th>Статус</th></tr></thead>
+    <tbody>
+      <tr><td>structure</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>coverage</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>dependencies</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>verifiability</td><td><span class="badge ok">passed</span></td></tr>
+      <tr><td>consistency</td><td><span class="badge ok">passed</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Находок нет.</b> CRITICAL 0 · WARNING 0 · INFO 0 open. Вердикт <span class="verdict-ok">OK</span>. Цепочка: intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span>.</div>
+  <footer>Next step: superpowers:subagent-driven-development (или executing-plans)</footer>
+</section>
+<!-- TAB:plan END -->
+
+<!-- TAB:result START -->
+<section class="tab-pane" id="pane-result">
+  <p class="lead">Сверка внедрения — вердикт <span class="verdict-ok">OK</span>.</p>
+  <p class="sub">plan_hash <code>42a4e74b24f9dcf3</code> · diff base <code>5f0589a</code> (merge-base master) · chain intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span> → result <span class="badge ok">OK</span></p>
+
+  <h2>Резюме внедрения</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Артефакт</th><th>Путь</th></tr></thead>
+    <tbody>
+      <tr><td>spec</td><td><code>2026-07-10-okf-unit-b-design.md</code></td></tr>
+      <tr><td>plan</td><td><code>2026-07-10-okf-unit-b.md</code></td></tr>
+      <tr><td>diff base</td><td><code>5f0589a</code> · 28 файлов, +507/−132 · v0.5.1</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Выполненные изменения</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Файл</th><th>Что делает</th></tr></thead>
+    <tbody>
+      <tr><td><code>engine/store.py</code></td><td>Record.kind/ordinal/v + SCHEMA_VERSION=2</td></tr>
+      <tr><td><code>engine/chunk.py</code></td><td>summary-чанк + чистые section-чанки (без article-префикса)</td></tr>
+      <tr><td><code>engine/related.py</code></td><td>vector-соседи фильтруются на kind=="section"</td></tr>
+      <tr><td><code>indexer.py</code></td><td>reuse-guard v==SCHEMA_VERSION (миграция v1→v2)</td></tr>
+      <tr><td><code>engine/hier.py</code> (new)</td><td>seed / undirected graph-expand / section-rank; sim→float()</td></tr>
+      <tr><td><code>retrieval.py</code> + <code>config.py</code></td><td>единый иерарх. flow 3 режима; seed_top_k/bfs_top_k/seed_threshold</td></tr>
+      <tr><td><code>eval/hierarchical/</code></td><td>детерминир. recall@k харнес</td></tr>
+      <tr><td><code>README.md</code>/<code>docs/README.ru.md</code></td><td>two-level модель + env vars + re-index note</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Результаты</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Шаг</th><th>Статус</th><th>Коммит</th></tr></thead>
+    <tbody>
+      <tr><td>T1 store</td><td><span class="badge ok">DONE</span></td><td><code>631bee9</code></td></tr>
+      <tr><td>T2 chunk (+related fix)</td><td><span class="badge ok">DONE</span></td><td><code>d7274b4</code></td></tr>
+      <tr><td>T3 indexer migrate</td><td><span class="badge ok">DONE</span></td><td><code>01754b0</code></td></tr>
+      <tr><td>T4 hier core</td><td><span class="badge ok">DONE</span></td><td><code>25780b5</code></td></tr>
+      <tr><td>T5 retrieval + config</td><td><span class="badge ok">DONE</span></td><td><code>ebfc7ed</code></td></tr>
+      <tr><td>T6 eval harness</td><td><span class="badge ok">DONE</span></td><td><code>13d7115</code></td></tr>
+      <tr><td>T7 docs/version/wiki</td><td><span class="badge ok">DONE</span></td><td><code>f915f9e</code>+fixes</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Покрытие spec:</b> SC-1..SC-6 ✓ (section-вектор без title/desc; kind round-trip; seed→graph→section с source; live 3 режима; eval recall floor; 343 tests+flake8). <b>Excess:</b> related.py fix (одобрен mid-run), final-fix. <b>Final review (opus):</b> MERGE WITH FIXES → Critical score-строка ИСПРАВЛЕН (hier.sim float-cast, подтверждён live числовым score). 0 open crit. Вердикт <span class="verdict-ok">OK</span>.</div>
+
+  <h2>Влияние на систему</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Область</th><th>Изменение</th><th>Риск / follow-up</th></tr></thead>
+    <tbody>
+      <tr><td>Индекс</td><td>два уровня: summary (page) + чистые section записи; формат v2</td><td>нужен однократный <code>wiki_index</code> на домен (миграция)</td></tr>
+      <tr><td>Поиск</td><td>иерарх. seed→graph→section, source-тег, embeddings+grep fallback</td><td>страница без description не seed-ится в vector (fallback = follow-up)</td></tr>
+      <tr><td>Качество вектора</td><td>section-вектор без article-префикса → нет размытия</td><td>expand_graph cap по BFS-порядку, не relevance (follow-up)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Схема потока</h2>
+  <figure class="rpt-graph">
+    <svg viewBox="0 0 560 90" width="560" role="img" aria-label="иерархический поток поиска">
+      <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+      <filter id="ds2" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"/></filter></defs>
+      <line x1="112" y1="45" x2="150" y2="45" stroke="var(--line)" stroke-width="2" marker-end="url(#arr2)"/>
+      <line x1="300" y1="45" x2="338" y2="45" stroke="var(--line)" stroke-width="2" marker-end="url(#arr2)"/>
+      <line x1="470" y1="45" x2="508" y2="45" stroke="var(--line)" stroke-width="2" marker-end="url(#arr2)"/>
+      <g filter="url(#ds2)">
+        <rect x="12"  y="28" width="100" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="150" y="28" width="150" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="338" y="28" width="132" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="508" y="28" width="44" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      </g>
+      <text x="62"  y="49" text-anchor="middle">query</text>
+      <text x="225" y="49" text-anchor="middle">seed (summary)</text>
+      <text x="404" y="49" text-anchor="middle">graph-expand</text>
+      <text x="530" y="49" text-anchor="middle">rank</text>
+    </svg>
+  </figure>
+  <p class="sub">query → seed-статьи (summary-вектора) → graph-expand (wiki-BFS) → section-rank в пуле → секции с <code>source</code>.</p>
+  <footer>Chain closed: intent n/a → spec ✓ → plan ✓ → result OK. Next: PR dev-okf-unit-b → master.</footer>
+</section>
+<!-- TAB:result END -->
+</body>
+</html>

@@ -13,7 +13,7 @@ from .engine.okf_artifacts import RESERVED_OKF
 from .engine.chunk import chunk_markdown
 from .engine.config import Config
 from .engine.embed import embed_texts
-from .engine.store import VectorStore, index_bytes, make_record
+from .engine.store import SCHEMA_VERSION, VectorStore, index_bytes, make_record
 
 CAP_BYTES = 8 * 1024 * 1024
 
@@ -47,7 +47,8 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
     for c in chunks:
         key = f"{c.id}#{c.chunk}"
         prev = existing.get(key)
-        if prev and prev.hash == c.hash and prev.dim == cfg.dimensions:
+        if (prev and prev.hash == c.hash and prev.dim == cfg.dimensions
+                and prev.v == SCHEMA_VERSION):
             prev.type = c.type          # refresh facets without re-embedding
             prev.tags = list(c.tags)
             fresh.append(prev)

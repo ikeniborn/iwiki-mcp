@@ -1,5 +1,7 @@
-"""Multi-domain retrieval: numpy-merged vector search across the in-scope
-domains' indices, plus a lexical (grep) path, combined into hybrid results.
+"""Multi-domain hierarchical retrieval: per domain, seed article summaries by
+cosine similarity, expand the wiki-link graph from those seeds into a
+candidate pool, then rank clean section vectors inside that pool. Plus a
+lexical (grep) path, combined into hybrid results.
 
 Vector and lexical scores live on different scales, so hybrid ranks vector/both
 hits first (by cosine), then lexical hits (by term-frequency), deduped by
@@ -15,7 +17,8 @@ from .base import domain_dir, index_path
 from .engine.config import Config
 from .engine.embed import embed_texts
 from .engine.grep import grep_sections
-from .engine.store import VectorStore, dequantize
+from .engine.store import VectorStore
+from .engine import hier
 
 _VALID_MODES = {"hybrid", "vector", "lexical"}
 
@@ -38,48 +41,51 @@ def _hit_facets(base, domain, file):
     return meta.get("type"), fm.normalize_tags(meta.get("tags", []) or [])
 
 
+def _hier_vector(cfg: Config, base: str, domain: str, qv: list, top_k: int,
+                 threshold: float, type: str | None, tags: list | None) -> list[dict]:
+    recs = [r for r in VectorStore(index_path(base, domain)).load()
+            if r.dim == len(qv) and _facet_ok(r.type, r.tags, type, tags)]
+    summ = [r for r in recs if r.kind == "summary"]
+    secs = [r for r in recs if r.kind == "section"]
+    if not summ or not secs:
+        return []
+    seeds = hier.seed_articles(qv, summ, cfg.seed_top_k, cfg.seed_threshold)
+    if not seeds:
+        return []
+    pool = hier.expand_graph([f for f, _ in seeds], domain_dir(base, domain),
+                             cfg.graph_depth, cfg.bfs_top_k)
+    ranked = hier.rank_sections(qv, secs, pool, top_k)
+    return [{"domain": domain, "file": h["file"], "heading": h["heading"],
+             "chunk": h["chunk"], "score": h["score"], "hit": "vector",
+             "source": h["source"]} for h in ranked
+            if h["score"] >= threshold]
+
+
 def vector_search(cfg: Config, base: str, domains: list[str], query: str,
                   top_k: int, threshold: float,
                   type: str | None = None, tags: list | None = None) -> list[dict]:
     if top_k <= 0 or not domains:
         return []
-    qv = np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32)
-    qnorm = float(np.linalg.norm(qv)) or 1.0
+    qv = list(np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32))
     hits: list[dict] = []
     for d in domains:
-        recs = [
-            r for r in VectorStore(index_path(base, d)).load()
-            if r.dim == qv.size and _facet_ok(r.type, r.tags, type, tags)
-        ]
-        if not recs:
-            continue
-        mat = np.asarray([dequantize(r.scale, r.q) for r in recs], dtype=np.float32)
-        norms = np.linalg.norm(mat, axis=1)
-        norms[norms == 0] = 1.0
-        sims = (mat @ qv) / (norms * qnorm)
-        for r, s in zip(recs, sims):
-            if s >= threshold:
-                hits.append({"domain": d, "file": r.file, "heading": r.heading,
-                             "chunk": r.chunk, "score": round(float(s), 4),
-                             "hit": "vector"})
-    hits.sort(key=lambda h: (-h["score"], h["domain"], h["file"],
-                             h["heading"], h["chunk"]))
+        hits.extend(_hier_vector(cfg, base, d, qv, top_k, threshold, type, tags))
+    hits.sort(key=lambda h: (-h["score"], h["domain"], h["file"], h["heading"]))
     return hits[:top_k]
 
 
-def lexical_search(base: str, domains: list[str], query: str,
-                   top_k: int,
+def lexical_search(base: str, domains: list[str], query: str, top_k: int,
                    type: str | None = None, tags: list | None = None) -> list[dict]:
     if top_k <= 0:
         return []
     hits: list[dict] = []
     for d in domains:
-        for h in grep_sections(domain_dir(base, d), query, top_k):
+        for h in grep_sections(domain_dir(base, d), query, top_k * 3):
             if type is not None or tags:
                 rt, rtags = _hit_facets(base, d, h["file"])
                 if not _facet_ok(rt, rtags, type, tags):
                     continue
-            hits.append({"domain": d, **h})
+            hits.append({"domain": d, **h, "source": "lexical"})
     hits.sort(key=lambda h: (-h["score"], h["domain"], h["file"], h["heading"]))
     return hits[:top_k]
 
