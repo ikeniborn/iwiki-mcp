@@ -4,23 +4,23 @@
 
 This evidence checks whether a credential-context difference can explain wiki push failures. Probes emitted categories and booleans only. They did not print or store environment values, authentication socket paths, remote URLs, usernames, tokens, credential-helper names, or helper output.
 
-The connected MCP process environment is not an introspection contract. A running MCP-like process was the best available comparison target, but process matching cannot prove that it is the exact process serving the current connection.
+The connected MCP process environment has no safe public introspection interface. This procedure deliberately does not inspect another process's environment or process metadata. Exact MCP credential-context comparison is therefore blocked by design.
 
 ## Sanitized probes
 
-| Probe | Current shell | Best available MCP-like context |
-| --- | --- | --- |
-| Remote transport category | HTTP(S) | Same repository configuration |
-| Credential helper configured | Yes | Configuration-level fact only |
-| `SSH_AUTH_SOCK` present | Yes | No |
-| `SSH_AUTH_SOCK` usable | Yes | No |
+| Probe | Current shell / repository result |
+| --- | --- |
+| Remote transport category | HTTP(S) |
+| Credential helper configured | Yes |
+| `SSH_AUTH_SOCK` present | Yes |
+| `SSH_AUTH_SOCK` usable | Yes |
+| Exact connected MCP credential context | Not probed; blocked |
 
 Commands were bounded to these output forms:
 
 - Parse the configured remote in memory and emit only `ssh`, `http(s)`, `local/file`, `other`, or `none`.
 - Test whether any credential helper is configured while discarding helper names and output; emit one boolean.
-- Test `SSH_AUTH_SOCK` presence and Unix-socket connectivity without emitting its value; emit two booleans per context.
-- Search process metadata only to select an MCP-like process; emit no PID, command line, environment value, or local path.
+- Test the current shell's `SSH_AUTH_SOCK` presence and Unix-socket connectivity without emitting its value; emit two booleans.
 
 ### Repository and current-shell probe
 
@@ -78,63 +78,9 @@ print(f"current_shell_ssh_auth_sock_usable={str(usable).lower()}")
 PY
 ```
 
-### MCP-like process probe
-
-This probe selects the first readable `/proc` entry whose command line contains `iwiki-mcp` or `iwiki_mcp`. It emits only selection and socket-state booleans. It does not emit the PID, command line, environment value, or socket path. Selection is best-effort and cannot establish that the chosen process serves the current MCP connection.
-
-```bash
-uv run --quiet python - <<'PY'
-import os
-import socket
-import stat
-from pathlib import Path
-
-
-def socket_state(value):
-    present = bool(value)
-    usable = False
-    if present:
-        try:
-            if stat.S_ISSOCK(os.stat(value).st_mode):
-                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                client.settimeout(0.2)
-                try:
-                    client.connect(value)
-                    usable = True
-                finally:
-                    client.close()
-        except OSError:
-            pass
-    return present, usable
-
-
-selected_value = None
-selected = False
-for proc in Path("/proc").iterdir():
-    if not proc.name.isdigit() or int(proc.name) == os.getpid():
-        continue
-    try:
-        command = (proc / "cmdline").read_bytes().lower()
-        if b"iwiki-mcp" not in command and b"iwiki_mcp" not in command:
-            continue
-        for item in (proc / "environ").read_bytes().split(b"\0"):
-            if item.startswith(b"SSH_AUTH_SOCK="):
-                selected_value = os.fsdecode(item.split(b"=", 1)[1])
-                break
-        selected = True
-        break
-    except (OSError, ValueError):
-        continue
-present, usable = socket_state(selected_value)
-print(f"mcp_like_context_available={str(selected).lower()}")
-print(f"mcp_like_ssh_auth_sock_present={str(present).lower()}")
-print(f"mcp_like_ssh_auth_sock_usable={str(usable).lower()}")
-PY
-```
-
 ## Verdict
 
-**Blocked.** The evidence disproves an SSH-agent-context mismatch as the explanation for this repository's HTTP(S) transport. It does not confirm or disprove whether the exact connected MCP process can obtain HTTP(S) credentials: a configured helper is not proof of successful non-interactive credential retrieval, and safely collecting helper output or a live push failure could disclose protected data or change remote state.
+**Blocked.** The reproducible facts establish HTTP(S) transport and current-shell credential configuration only. SSH-agent state does not establish HTTP(S) credential availability. The evidence cannot confirm or disprove whether the exact connected MCP process can obtain HTTP(S) credentials: no safe public interface exposes that context, a configured helper is not proof of successful non-interactive credential retrieval, and inspecting a target process environment is outside the safety boundary.
 
 ## Implementation boundary
 
@@ -149,4 +95,4 @@ PY
 
 ## Version decision
 
-This documentation follow-up bumps the repository patch version to `0.6.5`, as required for every repository change.
+This documentation follow-up bumps the repository patch version to `0.6.6`, as required for every repository change.
