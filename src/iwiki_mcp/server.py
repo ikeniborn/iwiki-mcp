@@ -912,6 +912,8 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     # relocation ARE applied below.
     layout = okf.migrate_layout(bind.base, target)
     indexer.index_domain(cfg, bind.base, target)   # store reflects moved paths
+    commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
+                                  pathspec=target)
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
     for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
@@ -936,6 +938,8 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
                            "and tags (reuse tag_vocab first), then call "
                            "wiki_apply_okf(domain, slug, type, tags).",
                            "Run wiki_lint to confirm no missing_frontmatter remains."],
+            "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False),
             **_fresh_warn(fresh)}
 
 

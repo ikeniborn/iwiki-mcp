@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
@@ -37,6 +38,47 @@ def test_migrate_plan_mode_lists_candidates(tmp_path, monkeypatch):
     slugs = [c["slug"] for c in res["candidates"]]
     assert "a" in slugs
     assert (tmp_path / "d" / "a.md").read_text(encoding="utf-8").startswith("# A")  # no write
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _seed_git_base(tmp_path):
+    """``tmp_path`` becomes a real (remoteless) git repo with domain `d`,
+    holding one already-typed flat page so migrate_layout has a move to make."""
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "d").mkdir(parents=True)
+    meta = {"type": "guide", "title": "A"}
+    body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
+    (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed")
+
+
+def test_migrate_plan_mode_commits_layout_move(tmp_path, monkeypatch):
+    # Real git base (no remote), so the commit path is actually exercised
+    # here rather than short-circuited by a mocked sync.commit_and_push.
+    _seed_git_base(tmp_path)
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
+    monkeypatch.setenv("IWIKI_LLM_KEY", "k")
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: _bind(tmp_path))
+    monkeypatch.setattr(
+        indexer, "embed_texts",
+        lambda cfg, texts: [[0.1, 0.2] for _ in texts]
+    )
+    res = server.wiki_migrate_okf("d")   # no IWIKI_CHAT_MODEL -> plan mode
+    assert res["mode"] == "plan"
+    assert res["moved"] == ["a -> guide/a"]
+    assert res["committed"] is True
+    assert res["pushed"] is False
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path,
+        capture_output=True, text=True, check=True,
+    )
+    assert status.stdout.strip() == ""
 
 
 def test_apply_okf_writes_frontmatter(tmp_path, monkeypatch):
