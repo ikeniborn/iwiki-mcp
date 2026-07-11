@@ -3,6 +3,8 @@ sync (pull --rebase + push). Fail-soft: a non-repo or missing remote degrades
 to a warning, never an exception."""
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,8 +14,11 @@ from .lock import base_lock
 
 
 def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(["git", "-C", base, *args], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                          env=env)
 
 
 def is_git_repo(base: str) -> bool:
@@ -65,12 +70,32 @@ def _has_rebase_state(base: str) -> bool:
 
 
 def _output(r: subprocess.CompletedProcess) -> str:
-    return r.stderr.strip() or r.stdout.strip() or "git command failed"
+    output = r.stderr.strip() or r.stdout.strip() or "git command failed"
+    return _sanitize_git_output(output)
+
+
+def _sanitize_git_output(output: str) -> str:
+    return re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1", output,
+                  flags=re.IGNORECASE)
+
+
+def _classify_remote_failure(output: str) -> str:
+    text = output.lower()
+    if any(signature in text for signature in
+           ("non-fast-forward", "fetch first", "[rejected]")):
+        return "non_fast_forward"
+    if any(signature in text for signature in
+           ("permission denied (publickey)", "could not read username")):
+        return "credential_unavailable"
+    if "could not resolve host" in text:
+        return "transport_unavailable"
+    if "does not appear to be a git repository" in text:
+        return "permanent"
+    return "unknown"
 
 
 def _is_non_ff(r: subprocess.CompletedProcess) -> bool:
-    text = (r.stderr + r.stdout).lower()
-    return any(s in text for s in ("non-fast-forward", "fetch first", "rejected"))
+    return _classify_remote_failure(r.stderr + r.stdout) == "non_fast_forward"
 
 
 def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
@@ -97,7 +122,7 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                     return {"pulled": True, "pushed": True}
                 if _is_non_ff(push) and attempt < push_retries - 1:
                     continue
-                return {"pulled": True, "pushed": False, "warning": push.stderr.strip()}
+                return {"pulled": True, "pushed": False, "warning": _output(push)}
             # only reachable if push_retries <= 0; loop otherwise always returns inside
             return {"pulled": True, "pushed": False, "warning": "push retries exhausted"}
     except Timeout:
