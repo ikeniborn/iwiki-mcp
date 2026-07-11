@@ -1,5 +1,3 @@
-import os
-
 import pytest
 from iwiki_mcp import base
 
@@ -139,7 +137,7 @@ def test_write_project_config_removes_multiline_core_assignment(
 
 def test_index_path_uses_jsonl_index():
     assert base.index_path("/wiki", "backend").endswith(
-        os.path.join(".iwiki", "index.jsonl")
+        "index.jsonl"
     )
 
 

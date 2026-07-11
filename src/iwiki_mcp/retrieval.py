@@ -13,7 +13,7 @@ import os
 
 import numpy as np
 
-from .base import domain_dir, index_path
+from .base import domain_dir, index_path, migrate_store_location
 from .engine.config import Config
 from .engine.embed import embed_texts
 from .engine.grep import grep_sections
@@ -69,6 +69,7 @@ def vector_search(cfg: Config, base: str, domains: list[str], query: str,
     qv = list(np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32))
     hits: list[dict] = []
     for d in domains:
+        migrate_store_location(base, d)
         hits.extend(_hier_vector(cfg, base, d, qv, top_k, threshold, type, tags))
     hits.sort(key=lambda h: (-h["score"], h["domain"], h["file"], h["heading"]))
     return hits[:top_k]

@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from .base import index_path, log_path
+from .base import index_path, log_path, migrate_store_location
 from .engine.okf_artifacts import RESERVED_OKF
 from .engine.chunk import chunk_markdown
 from .engine.config import Config
@@ -27,6 +27,7 @@ def src_hash(path: str) -> str | None:
 
 
 def index_domain(cfg: Config, base: str, domain: str) -> dict:
+    migrate_store_location(base, domain)
     dom_path = Path(base) / domain
     idx = index_path(base, domain)
     store = VectorStore(idx)
