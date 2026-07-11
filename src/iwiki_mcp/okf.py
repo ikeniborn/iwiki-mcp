@@ -128,13 +128,17 @@ def _page_slugs(dom_path: Path) -> list[str]:
 def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
     """Rename <domain>/<old_identity>.md to <new_identity>.md and rewrite every
     intra-domain link old_identity -> new_identity across the domain's pages.
-    No-op when old == new. The rename is authoritative; link rewrite is best-effort."""
+    No-op when old == new. The rename is authoritative; link rewrite is best-effort.
+    Raises FileExistsError if new_identity already names an existing page (and
+    old != new) -- callers must not silently clobber a type-change collision."""
     from .engine.links import rewrite_link_targets
     if old_identity == new_identity:
         return
     dom = Path(base_dir) / domain
     old_p = dom / f"{old_identity}.md"
     new_p = dom / f"{new_identity}.md"
+    if new_p.exists():
+        raise FileExistsError(f"page '{domain}/{new_identity}' exists")
     new_p.parent.mkdir(parents=True, exist_ok=True)
     os.replace(old_p, new_p)
     mapping = {old_identity: new_identity}
@@ -153,10 +157,14 @@ def migrate_layout(base_dir, domain) -> dict:
     """Deterministic flat->type layout migration. For each page whose identity has
     no type segment (a bare '<slug>.md' at the domain root) and carries a
     frontmatter 'type', move it under '<type>/<slug>.md' and rewrite intra-domain
-    links. Also relocates the store/log to the domain root. Idempotent."""
+    links. Also relocates the store/log to the domain root. Idempotent. When the
+    resolved '<type>/<slug>' target already exists (a distinct page collides on
+    tail), the move is SKIPPED and recorded under "collisions" instead of
+    clobbering the existing page."""
     _base.migrate_store_location(base_dir, domain)
     dom = Path(base_dir) / domain
     moved = []
+    collisions = []
     for slug in _page_slugs(dom):
         if "/" in slug:                     # already under a type dir
             continue
@@ -166,9 +174,12 @@ def migrate_layout(base_dir, domain) -> dict:
         if not ptype:
             continue
         new_identity = f"{fm.normalize_type(ptype)}/{slug}"
+        if (dom / f"{new_identity}.md").exists():
+            collisions.append(f"{slug} -> {new_identity}")
+            continue
         move_page(base_dir, domain, slug, new_identity)
         moved.append(f"{slug} -> {new_identity}")
-    return {"moved": moved}
+    return {"moved": moved, "collisions": collisions}
 
 
 def _read_log(dom_path: Path) -> list:

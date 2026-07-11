@@ -859,7 +859,9 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     else a plan of candidates) and, in both modes, deterministically move every
     flat page that already carries a frontmatter `type` under `<type>/<slug>.md`
     (see okf.migrate_layout). Plan mode makes no LLM writes; the deterministic
-    layout move is applied regardless of mode."""
+    layout move is applied regardless of mode. Note: even in plan mode this
+    layout move is itself a write -- the domain is always reindexed, and
+    committed only when something actually moved."""
     bind = base.resolve_binding()
     target = domain or bind.write
     if not target:
@@ -903,6 +905,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
                                       pathspec=target)
         result = {"domain": target, "mode": "autonomous", "migrated": migrated,
                   "skipped": skipped, "warnings": warnings, "moved": layout["moved"],
+                  "layout_collisions": layout.get("collisions", []),
                   "indexed_chunks": stats["indexed_chunks"],
                   "committed": commit.get("committed", False),
                   "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
@@ -912,8 +915,11 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     # relocation ARE applied below.
     layout = okf.migrate_layout(bind.base, target)
     indexer.index_domain(cfg, bind.base, target)   # store reflects moved paths
-    commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
-                                  pathspec=target)
+    if layout["moved"]:
+        commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
+                                      pathspec=target)
+    else:
+        commit = {"committed": False, "pushed": False}
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
     for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
@@ -932,6 +938,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
         })
     return {"domain": target, "mode": "plan", "candidates": candidates,
             "moved": layout["moved"],
+            "layout_collisions": layout.get("collisions", []),
             "type_vocabulary": list(_fm.OKF_TYPES),
             "authoring_rules": AUTHORING_RULES,
             "next_steps": ["Classify each candidate's type (from type_vocabulary) "
@@ -956,7 +963,6 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
     base.migrate_store_location(bind.base, valid_domain)
-    cfg = Config.load()
     current_identity = PurePosixPath(*_slug_parts(slug)).as_posix()
     current_path = _page_path(bind.base, valid_domain, current_identity)
     # not-found guard MUST run on the CURRENT path BEFORE move_page: os.replace on a
@@ -967,6 +973,10 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
                 "hint": "list pages with wiki_list_pages"}
     new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
     if current_identity != new_identity:
+        new_path = _page_path(bind.base, valid_domain, new_identity)
+        if os.path.exists(new_path):
+            return {"error": f"page '{valid_domain}/{new_identity}' exists",
+                    "hint": "delete or rename the colliding page first"}
         # move_page's link rewrite is best-effort; if a later step (frontmatter
         # write, index) fails below, the rollback restores the original bytes at
         # the NEW path but does not move the file back — acceptable, the page
@@ -988,11 +998,15 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         # current_identity, not the (possibly moved-to) page_file.
         or okf.latest_source(bind.base, valid_domain, current_identity + ".md")
     )
+    cfg = Config.load()
     fm_block, _ = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
         source=resolved, explicit_type=type, explicit_tags=apply_tags,
         explicit_description=apply_desc, explicit_status=apply_status,
-        timestamp_path=f"{valid_domain}/{page_file}")
+        # git has no history yet at the NEW (just-moved) path -- look up the
+        # PRE-move identity so an existing page's original timestamp survives
+        # a type change instead of resetting to today.
+        timestamp_path=f"{valid_domain}/{current_identity}.md")
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(fm_block + body)

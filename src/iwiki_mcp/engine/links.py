@@ -155,7 +155,14 @@ def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
         clean = path[2:] if path.startswith("./") else path
         slug = clean[:-3] if clean.endswith(".md") else clean
         if slug in mapping:
-            return m.group(0).replace(target, f"{mapping[slug]}.md{sep}{anchor}")
+            # Replace exactly the captured target span, not a naive substring
+            # replace: when the link text equals the target ([alpha.md](alpha.md))
+            # `.replace(target, ...)` (with or without count=1) touches the wrong
+            # occurrence or both -- slicing on the group's own span always hits
+            # only the href, leaving visible link text untouched.
+            new_target = f"{mapping[slug]}.md{sep}{anchor}"
+            start, end = m.start(2) - m.start(), m.end(2) - m.start()
+            return m.group(0)[:start] + new_target + m.group(0)[end:]
         return m.group(0)
 
     def _legacy(m: re.Match) -> str:

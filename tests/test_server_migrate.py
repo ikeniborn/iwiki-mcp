@@ -40,6 +40,23 @@ def test_migrate_plan_mode_lists_candidates(tmp_path, monkeypatch):
     assert (tmp_path / "d" / "a.md").read_text(encoding="utf-8").startswith("# A")  # no write
 
 
+def test_migrate_plan_mode_skips_commit_when_nothing_moved(tmp_path, monkeypatch):
+    # Untyped flat pages give migrate_layout nothing to move; plan mode must not
+    # call commit_and_push in that case (shape parity: committed/pushed still False).
+    _patch(monkeypatch, tmp_path)   # no IWIKI_CHAT_MODEL
+    (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        server.sync, "commit_and_push",
+        lambda *a, **k: calls.append((a, k)) or {"committed": True, "pushed": True}
+    )
+    res = server.wiki_migrate_okf("d")
+    assert res["mode"] == "plan"
+    assert res["moved"] == []
+    assert calls == []                     # commit_and_push never called
+    assert res["committed"] is False and res["pushed"] is False
+
+
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 

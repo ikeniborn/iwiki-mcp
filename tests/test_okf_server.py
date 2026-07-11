@@ -108,12 +108,15 @@ def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
     # description); `alice.md#Role` is the domain's only section record, so
     # `related()`'s vector-neighbour lookup (section-only) is empty and its graph
     # fallback runs -- proving the edge, not a vector-similarity coincidence.
+    # The link target is the page's REAL identity (concept/target.md, per the
+    # type-dir layout) -- a bare "target.md" would be dangling and the graph
+    # assertion below would pass vacuously without ever resolving a real edge.
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "target",
                            "# Target\n\n## External links\n- https://example.com/target\n",
                            source=None, type="concept", description="target page")
     page = ("# Alice\n\n## Role\nbilling prose here.\n\n"
-            "## Outgoing links\n- [Target](target.md)\n\n"
+            "## Outgoing links\n- [Target](concept/target.md)\n\n"
             "## External links\n- https://example.com/docs\n")
     server.wiki_write_page("backend", "alice", page, source=None, type="person",
                            description="Alice covers billing.")
@@ -125,8 +128,8 @@ def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
     assert headings == {"Role"}                      # link sections not indexed
     # the authored outgoing link still feeds the graph
     rel = server.wiki_related("backend", "person/alice.md#Role")
-    assert rel["graph"] == ["target"]
-    assert "target" in str(rel)
+    assert rel["graph"] == ["concept/target"]
+    assert "concept/target" in str(rel)
 
 
 def test_reserved_files_land_in_the_same_commit(tmp_path, monkeypatch):
