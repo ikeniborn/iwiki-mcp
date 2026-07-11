@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import pytest
@@ -19,6 +20,8 @@ def _init_repo(path):
 
 def test_run_disables_git_prompts_and_stdin(monkeypatch):
     calls = []
+    monkeypatch.setenv("IWIKI_TEST_SENTINEL", "preserved")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -32,6 +35,8 @@ def test_run_disables_git_prompts_and_stdin(monkeypatch):
     assert argv == ["git", "-C", "/base", "status"]
     assert "shell" not in kwargs
     assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["env"] is not os.environ
+    assert kwargs["env"]["IWIKI_TEST_SENTINEL"] == "preserved"
     assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
 
 
@@ -52,6 +57,8 @@ def test_run_disables_git_prompts_and_stdin(monkeypatch):
             "fatal: remote origin does not appear to be a git repository",
             "permanent",
         ),
+        ("! [rejected] main -> main (hook declined)", "unknown"),
+        ("fatal: could not read Username for 'https://host'", "unknown"),
         ("unexpected text", "unknown"),
     ],
 )

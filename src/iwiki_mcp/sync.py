@@ -82,10 +82,11 @@ def _sanitize_git_output(output: str) -> str:
 def _classify_remote_failure(output: str) -> str:
     text = output.lower()
     if any(signature in text for signature in
-           ("non-fast-forward", "fetch first", "[rejected]")):
+           ("non-fast-forward", "fetch first")):
         return "non_fast_forward"
-    if any(signature in text for signature in
-           ("permission denied (publickey)", "could not read username")):
+    if ("permission denied (publickey)" in text or
+            ("could not read username" in text and
+             "terminal prompts disabled" in text)):
         return "credential_unavailable"
     if "could not resolve host" in text:
         return "transport_unavailable"
