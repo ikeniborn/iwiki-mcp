@@ -329,6 +329,7 @@ def test_sync_pull_timeout_preserves_live_attempt_state(monkeypatch, tmp_path):
     timeout = subprocess.TimeoutExpired(
         ["git", "pull"], 30, stderr="fatal: unable to access 'https://host/repo'"
     )
+
     def raise_timeout(*args, **kwargs):
         raise timeout
 
