@@ -102,6 +102,21 @@ def test_sanitize_git_output_redacts_scp_remote_without_false_positives():
     assert sync._sanitize_git_output(r"C:\repo\page.md") == r"C:\repo\page.md"
 
 
+def test_sanitize_git_output_redacts_unquoted_scp_remote_without_user():
+    output = "fatal: repository host.example:private/repo.git not found"
+
+    sanitized = sync._sanitize_git_output(output)
+
+    assert "host.example" not in sanitized
+    assert "private/repo.git" not in sanitized
+    assert sanitized == "fatal: repository <remote> not found"
+    assert (
+        sync._sanitize_git_output("fatal: operation failed")
+        == "fatal: operation failed"
+    )
+    assert sync._sanitize_git_output(r"C:\repo\page.md") == r"C:\repo\page.md"
+
+
 def test_auto_commit_in_repo(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / "x.md").write_text("hi")

@@ -85,8 +85,14 @@ def _sanitize_git_output(output: str) -> str:
         output,
         flags=re.IGNORECASE,
     )
-    return re.sub(
+    output = re.sub(
         r"(?<![a-z0-9._-])[a-z0-9._-]+@[a-z0-9.-]+:[^\s'\"]+",
+        "<remote>",
+        output,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"(?<![a-z0-9.-])[a-z0-9-]+(?:\.[a-z0-9-]+)+:[^\s'\"]+",
         "<remote>",
         output,
         flags=re.IGNORECASE,
