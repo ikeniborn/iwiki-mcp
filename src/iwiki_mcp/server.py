@@ -260,9 +260,17 @@ def wiki_search(
     threshold: float | None = None,
     type: str | None = None,
     tags: list[str] | None = None,
+    intent: str = "read",
+    heading: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     cfg = Config.load()
+    if intent == "write":
+        target = bind.write or (domains[0] if domains else None)
+        if not target:
+            return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
+        target = _validate_domain(target)      # path guards are load-bearing
+        return {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
     doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
         return {"results": [], "hint": "no domains in scope"}
