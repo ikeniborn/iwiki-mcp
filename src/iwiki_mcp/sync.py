@@ -285,13 +285,24 @@ def commit_and_push(base: str, message: str, pathspec: str | None = None) -> dic
     """
     commit = auto_commit(base, message, pathspec)
     if not commit.get("committed"):
-        out = {"committed": False, "pushed": False}
+        out = {"committed": False, "pushed": False,
+               "sync_attempts": 0, "push_attempts": 0}
         if commit.get("warning"):
             out["warning"] = commit["warning"]
         return out
     result = sync(base)
-    out = {"committed": True, "pushed": bool(result.get("pushed"))}
+    out = {
+        "committed": True,
+        "pushed": bool(result.get("pushed")),
+        "sync_attempts": result.get("sync_attempts", 0),
+        "push_attempts": result.get("push_attempts", 0),
+    }
+    for key in ("failure_class", "conflict", "hint"):
+        if key in result:
+            out[key] = result[key]
+    if "hint" in out:
+        out["hint"] = _sanitize_git_output(str(out["hint"]))
     warn = result.get("warning") or result.get("error")
     if warn:
-        out["warning"] = warn
+        out["warning"] = _sanitize_git_output(str(warn))
     return out
