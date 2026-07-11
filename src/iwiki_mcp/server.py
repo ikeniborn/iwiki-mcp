@@ -183,6 +183,7 @@ def wiki_list_domains() -> dict:
     bind = base.resolve_binding()
     out = []
     for d in base.list_domains(bind.base):
+        base.migrate_store_location(bind.base, d)
         out.append(
             {"domain": d, "index_bytes": _index_bytes(base.index_path(bind.base, d))}
         )
@@ -270,6 +271,7 @@ def wiki_related(domain: str, section_id: str) -> dict:
     cfg = Config.load()
     valid_domain = _validate_domain(domain)
     dom_path = _domain_path(bind.base, valid_domain)
+    base.migrate_store_location(bind.base, valid_domain)
     recs = VectorStore(base.index_path(bind.base, valid_domain)).load()
     cwd = os.getcwd()
     try:
