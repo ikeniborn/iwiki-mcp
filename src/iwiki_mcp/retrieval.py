@@ -75,6 +75,34 @@ def vector_search(cfg: Config, base: str, domains: list[str], query: str,
     return hits[:top_k]
 
 
+def locate_target(cfg: Config, base: str, domain: str, query: str,
+                  heading: str | None = None) -> dict:
+    """Precise write-target locate: seed with the higher write_seed_threshold and,
+    when a heading hint is given, keep only the exact (case-insensitive) heading
+    match. Returns the single best hit with exists=True, else {exists: False}."""
+    migrate_store_location(base, domain)
+    qv = list(np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32))
+    recs = [r for r in VectorStore(index_path(base, domain)).load() if r.dim == len(qv)]
+    summ = [r for r in recs if r.kind == "summary"]
+    secs = [r for r in recs if r.kind == "section"]
+    if not summ or not secs:
+        return {"domain": domain, "exists": False}
+    seeds = hier.seed_articles(qv, summ, cfg.seed_top_k, cfg.write_seed_threshold)
+    if not seeds:
+        return {"domain": domain, "exists": False}
+    pool = hier.expand_graph([f for f, _ in seeds], domain_dir(base, domain),
+                             cfg.graph_depth, cfg.bfs_top_k)
+    ranked = hier.rank_sections(qv, secs, pool, cfg.top_k)
+    if heading is not None:
+        want = heading.strip().lower()
+        ranked = [h for h in ranked if h["heading"].lower() == want]
+    if not ranked:
+        return {"domain": domain, "exists": False}
+    best = ranked[0]
+    return {"domain": domain, "file": best["file"], "heading": best["heading"],
+            "score": best["score"], "exists": True}
+
+
 def lexical_search(base: str, domains: list[str], query: str, top_k: int,
                    type: str | None = None, tags: list | None = None) -> list[dict]:
     if top_k <= 0:
