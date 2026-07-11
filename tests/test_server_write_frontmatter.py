@@ -106,3 +106,44 @@ def test_write_missing_description_warns(tmp_path, monkeypatch):
     body = "# Alice\n\n## Role\nwork.\n"          # no Overview, no description param
     res = server.wiki_write_page("d", "alice", body, source=None, type="person")
     assert "warning" in res and "description" in res["warning"]
+
+
+def test_commit_warning_wins_over_freshness_and_frontmatter_warnings(
+    tmp_path, monkeypatch
+):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda base: {"state": "clean", "warning": "freshness warning"},
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "commit_and_push",
+        lambda *args, **kwargs: {
+            "committed": True,
+            "pushed": False,
+            "warning": "push warning",
+        },
+    )
+
+    res = server.wiki_write_page(
+        "d", "alice", "# Alice\n\n## Role\nwork.\n", type="person"
+    )
+
+    assert res["warning"] == "push warning"
+
+
+def test_freshness_warning_wins_over_frontmatter_warning(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda base: {"state": "clean", "warning": "freshness warning"},
+    )
+
+    res = server.wiki_write_page(
+        "d", "alice", "# Alice\n\n## Role\nwork.\n", type="person"
+    )
+
+    assert res["warning"] == "freshness warning"

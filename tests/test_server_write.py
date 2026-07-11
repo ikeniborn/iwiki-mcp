@@ -240,3 +240,44 @@ def test_write_page_rejects_relative_source_escape(tmp_path, monkeypatch):
     assert "error" in out
     assert "outside project" in out["error"]
     assert not os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))
+
+
+def test_write_page_surfaces_safe_push_failure_metadata(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server.sync,
+        "commit_and_push",
+        lambda *args, **kwargs: {
+            "committed": True,
+            "pushed": False,
+            "sync_attempts": 2,
+            "push_attempts": 3,
+            "failure_class": "push_rejected",
+            "conflict": False,
+            "hint": "run wiki_sync",
+            "warning": "commit saved locally; push failed",
+            "remote": "https://user:secret@example.test/wiki.git",
+            "credential": "secret",
+        },
+    )
+
+    out = server.wiki_write_page(
+        "backend",
+        "auth",
+        "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n",
+    )
+
+    assert out == {
+        "page": "backend/concept/auth.md",
+        "indexed_chunks": out["indexed_chunks"],
+        "bytes": out["bytes"],
+        "over_cap": out["over_cap"],
+        "committed": True,
+        "pushed": False,
+        "sync_attempts": 2,
+        "push_attempts": 3,
+        "failure_class": "push_rejected",
+        "conflict": False,
+        "hint": "run wiki_sync",
+        "warning": "commit saved locally; push failed",
+    }

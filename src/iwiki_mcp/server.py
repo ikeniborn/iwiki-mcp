@@ -376,6 +376,25 @@ def _fresh_warn(fresh: dict) -> dict:
     return {"warning": w} if w else {}
 
 
+def _write_sync_result(
+    commit: dict, freshness_warning: str | None = None,
+    frontmatter_warning: str | None = None,
+) -> dict:
+    result = {
+        "committed": commit.get("committed", False),
+        "pushed": commit.get("pushed", False),
+    }
+    for key in (
+        "sync_attempts", "push_attempts", "failure_class", "conflict", "hint"
+    ):
+        if key in commit:
+            result[key] = commit[key]
+    warning = commit.get("warning") or freshness_warning or frontmatter_warning
+    if warning:
+        result["warning"] = warning
+    return result
+
+
 @_safe
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None,
@@ -489,12 +508,8 @@ def wiki_write_page(
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
         "over_cap": stats["over_cap"],
-        "committed": commit.get("committed", False),
-        "pushed": commit.get("pushed", False),
-        **_fresh_warn(fresh),
+        **_write_sync_result(commit, fresh.get("warning"), fm_warning),
     }
-    if fm_warning:
-        result.setdefault("warning", fm_warning)
     return result
 
 
@@ -591,9 +606,7 @@ def wiki_update_page(
         "embedded": stats["embedded"],
         "bytes": stats["bytes"],
         "over_cap": stats["over_cap"],
-        "committed": commit.get("committed", False),
-        "pushed": commit.get("pushed", False),
-        **_fresh_warn(fresh),
+        **_write_sync_result(commit, fresh.get("warning")),
     }
     return result
 
