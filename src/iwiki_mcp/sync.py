@@ -151,14 +151,25 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                 pull = _run(base, "pull", "--rebase")
                 if pull.returncode != 0:
                     if _has_rebase_state(base):
-                        _run(base, "rebase", "--abort")
-                        return {"pulled": False, "pushed": False,
-                                "error": "pull --rebase conflict (aborted)",
-                                "hint": "resolve in the base repo, or re-run index to "
-                                        "regenerate a conflicted index.jsonl, "
-                                        "then sync again",
-                                "sync_attempts": sync_attempts,
-                                "push_attempts": push_attempts}
+                        abort = _run(base, "rebase", "--abort")
+                        result = {
+                            "pulled": False,
+                            "pushed": False,
+                            "error": "pull --rebase conflict (aborted)",
+                            "failure_class": "rebase_conflict",
+                            "conflict": True,
+                            "hint": "resolve the conflicting commits in the base "
+                                    "repo, then sync again",
+                            "sync_attempts": sync_attempts,
+                            "push_attempts": push_attempts,
+                        }
+                        if abort.returncode != 0:
+                            result["error"] = "pull --rebase conflict; abort failed"
+                            result["hint"] = (
+                                "run git rebase --abort in the base repo, then "
+                                f"resolve the conflict and sync again: {_output(abort)}"
+                            )
+                        return result
                     failure_class = _classify_remote_failure(
                         pull.stderr + pull.stdout)
                     if failure_class in recoverable and attempt < max_attempts - 1:
