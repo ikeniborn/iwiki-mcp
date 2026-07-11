@@ -963,6 +963,7 @@ def wiki_export_okf(domain: str | None = None) -> dict:
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
     cfg = Config.load()
+    base.migrate_store_location(bind.base, valid_domain)
     swept = okf.batch_sweep(cfg, bind.base, valid_domain)
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     art_warn = okf.refresh_artifacts(bind.base, valid_domain)
