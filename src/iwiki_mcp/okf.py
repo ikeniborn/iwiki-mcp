@@ -4,6 +4,7 @@ default). Kept out of the engine because it reaches git and the index."""
 from __future__ import annotations
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -122,6 +123,30 @@ def _page_slugs(dom_path: Path) -> list[str]:
             continue
         out.append(rel.with_suffix("").as_posix())
     return out
+
+
+def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
+    """Rename <domain>/<old_identity>.md to <new_identity>.md and rewrite every
+    intra-domain link old_identity -> new_identity across the domain's pages.
+    No-op when old == new. The rename is authoritative; link rewrite is best-effort."""
+    from .engine.links import rewrite_link_targets
+    if old_identity == new_identity:
+        return
+    dom = Path(base_dir) / domain
+    old_p = dom / f"{old_identity}.md"
+    new_p = dom / f"{new_identity}.md"
+    new_p.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(old_p, new_p)
+    mapping = {old_identity: new_identity}
+    for slug in _page_slugs(dom):
+        p = dom / f"{slug}.md"
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new_text = rewrite_link_targets(text, mapping)
+        if new_text != text:
+            p.write_text(new_text, encoding="utf-8")
 
 
 def _read_log(dom_path: Path) -> list:

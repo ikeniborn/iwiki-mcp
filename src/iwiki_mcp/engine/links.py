@@ -131,3 +131,47 @@ def to_markdown_links(body: str) -> str:
 
     rewritten = _WIKILINK.sub(_rewrite, masked)
     return re.sub(r"\x00(\d+)\x00", _restore, rewritten)
+
+
+def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
+    """Rewrite markdown ([t](slug.md#a)) and legacy ([[slug#H|a]]) link targets
+    whose slug is a key of `mapping` to its mapped slug, leaving code and text
+    untouched. Idempotent when nothing matches."""
+    if not mapping:
+        return body
+    masks: list[str] = []
+
+    def _mask(m: re.Match) -> str:
+        masks.append(m.group(0))
+        return f"\x00{len(masks) - 1}\x00"
+
+    masked = _INLINE.sub(_mask, _FENCE.sub(_mask, body))
+
+    def _md(m: re.Match) -> str:
+        if m.group(1):                      # image
+            return m.group(0)
+        target = m.group(2)
+        path, sep, anchor = target.partition("#")
+        clean = path[2:] if path.startswith("./") else path
+        slug = clean[:-3] if clean.endswith(".md") else clean
+        if slug in mapping:
+            return m.group(0).replace(target, f"{mapping[slug]}.md{sep}{anchor}")
+        return m.group(0)
+
+    def _legacy(m: re.Match) -> str:
+        inner = m.group(1)
+        slug, sep, rest = inner.partition("#")
+        s = slug.strip()
+        base = s[:-3] if s.endswith(".md") else s
+        if base in mapping:
+            return m.group(0).replace(inner, f"{mapping[base]}{sep}{rest}", 1)
+        return m.group(0)
+
+    out = _MD_LINK.sub(_md, masked)
+    out = _LINK.sub(_legacy, out)
+
+    def _restore(m: re.Match) -> str:
+        i = int(m.group(1))
+        return masks[i] if i < len(masks) else m.group(0)
+
+    return re.sub(r"\x00(\d+)\x00", _restore, out)

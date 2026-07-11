@@ -44,7 +44,9 @@ def test_apply_okf_writes_frontmatter(tmp_path, monkeypatch):
     (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "guide", tags=["Flow"])
     assert "error" not in res
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # a bare (untyped) slug is moved under its resolved type dir on apply
+    assert res["page"] == "d/guide/a.md"
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["type"] == "guide"
     assert meta["tags"] == ["flow"]
 
@@ -112,7 +114,8 @@ def test_apply_okf_preserves_existing_tags_when_none(tmp_path, monkeypatch):
     (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "reference", tags=None)
     assert "error" not in res
-    new_meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # bare slug -> moved under the new type dir
+    new_meta, _ = fm.split((tmp_path / "d" / "reference" / "a.md").read_text(encoding="utf-8"))
     assert new_meta["tags"] == ["existing"]
 
 
@@ -126,7 +129,8 @@ def test_apply_okf_preserves_existing_description_and_status(tmp_path, monkeypat
     (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "reference", tags=["x"])
     assert "error" not in res
-    new_meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # bare slug -> moved under the new type dir
+    new_meta, _ = fm.split((tmp_path / "d" / "reference" / "a.md").read_text(encoding="utf-8"))
     assert new_meta.get("description") == "Existing summary text."
     assert new_meta.get("status") == "stable"
 
@@ -142,7 +146,9 @@ def test_apply_okf_sets_resource_from_log(tmp_path, monkeypatch):
     }) + "\n", encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "guide")
     assert "error" not in res
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # bare slug -> moved under the new type dir; the log lookup still resolves
+    # by the PRE-move page name ("a.md"), since that is what ingest recorded.
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["resource"] == "/src/a.py"
 
 
@@ -159,4 +165,8 @@ def test_apply_okf_rollback_on_index_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "index_domain", boom)
     res = server.wiki_apply_okf("d", "a", "guide")
     assert "error" in res
-    assert page_path.read_bytes() == before
+    # bare slug -> moved under the new type dir; the move is authoritative and
+    # is NOT undone by the rollback -- original bytes are restored at the NEW
+    # path, the old flat path is gone.
+    assert not page_path.exists()
+    assert (tmp_path / "d" / "guide" / "a.md").read_bytes() == before

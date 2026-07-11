@@ -939,12 +939,26 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
     base.migrate_store_location(bind.base, valid_domain)
-    path = _page_path(bind.base, valid_domain, slug)
-    if not os.path.isfile(path):
-        return {"error": f"page '{valid_domain}/{slug}' not found",
-                "hint": "list pages with wiki_list_pages"}
     cfg = Config.load()
-    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    current_identity = PurePosixPath(*_slug_parts(slug)).as_posix()
+    current_path = _page_path(bind.base, valid_domain, current_identity)
+    # not-found guard MUST run on the CURRENT path BEFORE move_page: os.replace on a
+    # missing source raises FileNotFoundError -> @_safe generic error, losing the
+    # friendly "page not found" hint.
+    if not os.path.isfile(current_path):
+        return {"error": f"page '{valid_domain}/{current_identity}' not found",
+                "hint": "list pages with wiki_list_pages"}
+    new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
+    if current_identity != new_identity:
+        # move_page's link rewrite is best-effort; if a later step (frontmatter
+        # write, index) fails below, the rollback restores the original bytes at
+        # the NEW path but does not move the file back — acceptable, the page
+        # keeps valid structure at its new identity and the next index run
+        # reconciles it.
+        okf.move_page(bind.base, valid_domain, current_identity, new_identity)
+    identity = new_identity
+    page_file = identity + ".md"
+    path = _page_path(bind.base, valid_domain, identity)
     original = open(path, encoding="utf-8").read()
     existing_meta, body = _fm.split(original)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
@@ -952,7 +966,10 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     apply_status = existing_meta.get("status")
     resolved = (
         existing_meta.get("resource")
-        or okf.latest_source(bind.base, valid_domain, page_file)
+        # log entries are keyed by the page name at ingest time, i.e. the
+        # PRE-move name when this call also moved the page: look up under
+        # current_identity, not the (possibly moved-to) page_file.
+        or okf.latest_source(bind.base, valid_domain, current_identity + ".md")
     )
     fm_block, _ = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
