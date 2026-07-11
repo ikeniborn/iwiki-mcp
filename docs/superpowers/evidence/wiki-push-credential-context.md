@@ -96,5 +96,6 @@ PY
 ## Version decision
 
 The initial evidence follow-up bumped the repository from `0.6.5` to `0.6.6`.
-Subsequent verification fixes advanced it through `0.6.7`; the final metadata
-consistency fix aligns the project, lockfile, and runtime package version at `0.6.8`.
+Subsequent verification fixes advanced it through `0.6.7`; the metadata-consistency
+fix aligned version `0.6.8`, and result finalization aligns the project, lockfile, and
+runtime package version at `0.6.9`.
