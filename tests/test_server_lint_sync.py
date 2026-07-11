@@ -117,10 +117,10 @@ def test_remediation_plan_does_not_mutate_page_or_log(tmp_path, monkeypatch):
 
 
 def test_remediation_plan_returns_stale_update_candidate(tmp_path, monkeypatch):
-    _, domain, _ = _seed_remediation(tmp_path, monkeypatch)
+    _, domain, proj = _seed_remediation(tmp_path, monkeypatch)
     page = domain / "auth.md"
     page.write_text("# Auth\n## Overview\nold\n## Flow\nold body\n", encoding="utf-8")
-    src = tmp_path / "auth.py"
+    src = proj / "auth.py"
     src.write_text("def login():\n    return 'token'\n", encoding="utf-8")
     _write_log(domain, [{
         "op": "ingest",
@@ -200,10 +200,10 @@ def test_remediation_plan_blocks_ignored_source_content(tmp_path, monkeypatch):
 
 def test_remediation_plan_truncates_large_source(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "SOURCE_CONTENT_MAX_BYTES", 12)
-    _, domain, _ = _seed_remediation(tmp_path, monkeypatch)
+    _, domain, proj = _seed_remediation(tmp_path, monkeypatch)
     page = domain / "large.md"
     page.write_text("# Large\n## Overview\nold\n", encoding="utf-8")
-    src = tmp_path / "large.py"
+    src = proj / "large.py"
     src.write_text("abcdefghijklmnop", encoding="utf-8")
     _write_log(domain, [{
         "op": "ingest",
@@ -221,11 +221,11 @@ def test_remediation_plan_truncates_large_source(tmp_path, monkeypatch):
 
 
 def test_remediation_plan_blocks_unreadable_stale_inputs(tmp_path, monkeypatch):
-    _, domain, _ = _seed_remediation(tmp_path, monkeypatch)
+    _, domain, proj = _seed_remediation(tmp_path, monkeypatch)
     page = domain / "auth.md"
     page.write_text("# Auth\n## Overview\nold\n", encoding="utf-8")
     missing_page = domain / "missing.md"
-    missing_source = tmp_path / "missing.py"
+    missing_source = proj / "missing.py"  # in-project but absent -> source_unreadable
     src = tmp_path / "auth.py"
     src.write_text("new source\n", encoding="utf-8")
 
@@ -246,6 +246,57 @@ def test_remediation_plan_blocks_unreadable_stale_inputs(tmp_path, monkeypatch):
     reasons = {candidate["reason"] for candidate in out["blocked_candidates"]}
     assert reasons == {"source_unreadable", "page_unreadable"}
     assert out["update_candidates"] == []
+
+
+def test_remediation_plan_blocks_out_of_project_source_read(tmp_path, monkeypatch):
+    # SECURITY (holistic review finding 2, read-side residual): a `source`
+    # string that never passed through _normalize_source at write time -- e.g.
+    # synced in from the shared git base, a pre-fix legacy log entry, or a
+    # manual base edit -- must not be opened/echoed by wiki_remediation_plan
+    # even when the page is lint-stale.
+    _, domain, proj = _seed_remediation(tmp_path, monkeypatch)
+
+    poisoned_page = domain / "auth.md"
+    poisoned_page.write_text(
+        "# Auth\n## Overview\nold\n## Flow\nold body\n", encoding="utf-8"
+    )
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("TOP_SECRET_OUTSIDE_PROJECT_CONTENT", encoding="utf-8")
+
+    legit_page = domain / "billing.md"
+    legit_page.write_text("# Billing\n## Overview\nold\n", encoding="utf-8")
+    legit_src = proj / "billing.py"
+    legit_src.write_text("def charge():\n    return 'ok'\n", encoding="utf-8")
+
+    _write_log(domain, [
+        {
+            "op": "ingest",
+            "source": str(outside),
+            "page": "auth.md",
+            "src_hash": "oldhash",
+        },
+        {
+            "op": "ingest",
+            "source": str(legit_src),
+            "page": "billing.md",
+            "src_hash": "oldhash",
+        },
+    ])
+
+    out = server.wiki_remediation_plan()
+
+    dumped = json.dumps(out)
+    assert "TOP_SECRET_OUTSIDE_PROJECT_CONTENT" not in dumped
+
+    blocked = [c for c in out["blocked_candidates"] if c["source"] == str(outside)]
+    assert len(blocked) == 1
+    assert blocked[0]["reason"] == "source_outside_project"
+    assert "source_content" not in blocked[0]
+
+    # In-project source: no regression -- still previews normally.
+    updated = [c for c in out["update_candidates"] if c["source"] == str(legit_src)]
+    assert len(updated) == 1
+    assert "def charge" in updated[0]["source_content"]
 
 
 def test_remediation_plan_blocks_missing_page_for_stale_record(tmp_path, monkeypatch):

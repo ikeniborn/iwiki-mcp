@@ -159,6 +159,19 @@ def _normalize_source(project_dir: str, source: str) -> str:
         raise ValueError("source outside project")
 
 
+def _source_within_project(project_dir: str, source: str) -> bool:
+    """Read-path containment guard, mirroring _normalize_source: True iff
+    `source` resolves inside project_dir. Sources reaching wiki_remediation_plan
+    come from the on-disk ingest log/lint report, which may hold a record
+    _normalize_source never validated (synced-in from the shared git base,
+    a pre-fix legacy entry, or a manual edit) -- so re-check before opening it."""
+    try:
+        _normalize_source(project_dir, source)
+        return True
+    except ValueError:
+        return False
+
+
 def _slug_from_page_path(dom_path: Path, page_path: str) -> str:
     rel = Path(page_path).resolve().relative_to(dom_path.resolve())
     if rel.suffix != ".md":
@@ -794,6 +807,15 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
                 "source": source,
                 "reason": "page_unreadable",
                 "error": str(e),
+            })
+            continue
+        if source and not _source_within_project(bind.project_dir, source):
+            blocked_candidates.append({
+                "domain": target,
+                "slug": slug,
+                "page": page,
+                "source": source,
+                "reason": "source_outside_project",
             })
             continue
         try:
