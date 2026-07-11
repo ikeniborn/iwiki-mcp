@@ -68,8 +68,8 @@ footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px so
 <input type="checkbox" id="theme-toggle" hidden>
 <input type="radio" name="chain-tab" id="tab-intent" class="tab-radio" hidden>
 <input type="radio" name="chain-tab" id="tab-spec"   class="tab-radio" hidden>
-<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden checked>
-<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-plan"   class="tab-radio" hidden>
+<input type="radio" name="chain-tab" id="tab-result" class="tab-radio" hidden checked>
 <header>
   <label for="theme-toggle" class="theme-btn" title="Тёмная/светлая тема">🌙 / ☀️</label>
   <h1>okf-unit-b — цепочка IDD→SDD</h1>
@@ -278,7 +278,83 @@ footer{ margin-top:2rem; color:var(--muted); font-size:.85rem; border-top:1px so
 <!-- TAB:plan END -->
 
 <!-- TAB:result START -->
-<section class="tab-pane" id="pane-result"><p class="note">Этап ещё не проверен.</p></section>
+<section class="tab-pane" id="pane-result">
+  <p class="lead">Сверка внедрения — вердикт <span class="verdict-ok">OK</span>.</p>
+  <p class="sub">plan_hash <code>42a4e74b24f9dcf3</code> · diff base <code>5f0589a</code> (merge-base master) · chain intent <span class="badge na">n/a</span> → spec <span class="badge ok">✓</span> → plan <span class="badge ok">✓</span> → result <span class="badge ok">OK</span></p>
+
+  <h2>Резюме внедрения</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Артефакт</th><th>Путь</th></tr></thead>
+    <tbody>
+      <tr><td>spec</td><td><code>2026-07-10-okf-unit-b-design.md</code></td></tr>
+      <tr><td>plan</td><td><code>2026-07-10-okf-unit-b.md</code></td></tr>
+      <tr><td>diff base</td><td><code>5f0589a</code> · 28 файлов, +507/−132 · v0.5.1</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Выполненные изменения</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Файл</th><th>Что делает</th></tr></thead>
+    <tbody>
+      <tr><td><code>engine/store.py</code></td><td>Record.kind/ordinal/v + SCHEMA_VERSION=2</td></tr>
+      <tr><td><code>engine/chunk.py</code></td><td>summary-чанк + чистые section-чанки (без article-префикса)</td></tr>
+      <tr><td><code>engine/related.py</code></td><td>vector-соседи фильтруются на kind=="section"</td></tr>
+      <tr><td><code>indexer.py</code></td><td>reuse-guard v==SCHEMA_VERSION (миграция v1→v2)</td></tr>
+      <tr><td><code>engine/hier.py</code> (new)</td><td>seed / undirected graph-expand / section-rank; sim→float()</td></tr>
+      <tr><td><code>retrieval.py</code> + <code>config.py</code></td><td>единый иерарх. flow 3 режима; seed_top_k/bfs_top_k/seed_threshold</td></tr>
+      <tr><td><code>eval/hierarchical/</code></td><td>детерминир. recall@k харнес</td></tr>
+      <tr><td><code>README.md</code>/<code>docs/README.ru.md</code></td><td>two-level модель + env vars + re-index note</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Результаты</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Шаг</th><th>Статус</th><th>Коммит</th></tr></thead>
+    <tbody>
+      <tr><td>T1 store</td><td><span class="badge ok">DONE</span></td><td><code>631bee9</code></td></tr>
+      <tr><td>T2 chunk (+related fix)</td><td><span class="badge ok">DONE</span></td><td><code>d7274b4</code></td></tr>
+      <tr><td>T3 indexer migrate</td><td><span class="badge ok">DONE</span></td><td><code>01754b0</code></td></tr>
+      <tr><td>T4 hier core</td><td><span class="badge ok">DONE</span></td><td><code>25780b5</code></td></tr>
+      <tr><td>T5 retrieval + config</td><td><span class="badge ok">DONE</span></td><td><code>ebfc7ed</code></td></tr>
+      <tr><td>T6 eval harness</td><td><span class="badge ok">DONE</span></td><td><code>13d7115</code></td></tr>
+      <tr><td>T7 docs/version/wiki</td><td><span class="badge ok">DONE</span></td><td><code>f915f9e</code>+fixes</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><b>Покрытие spec:</b> SC-1..SC-6 ✓ (section-вектор без title/desc; kind round-trip; seed→graph→section с source; live 3 режима; eval recall floor; 343 tests+flake8). <b>Excess:</b> related.py fix (одобрен mid-run), final-fix. <b>Final review (opus):</b> MERGE WITH FIXES → Critical score-строка ИСПРАВЛЕН (hier.sim float-cast, подтверждён live числовым score). 0 open crit. Вердикт <span class="verdict-ok">OK</span>.</div>
+
+  <h2>Влияние на систему</h2>
+  <table class="rpt-table">
+    <thead><tr><th>Область</th><th>Изменение</th><th>Риск / follow-up</th></tr></thead>
+    <tbody>
+      <tr><td>Индекс</td><td>два уровня: summary (page) + чистые section записи; формат v2</td><td>нужен однократный <code>wiki_index</code> на домен (миграция)</td></tr>
+      <tr><td>Поиск</td><td>иерарх. seed→graph→section, source-тег, embeddings+grep fallback</td><td>страница без description не seed-ится в vector (fallback = follow-up)</td></tr>
+      <tr><td>Качество вектора</td><td>section-вектор без article-префикса → нет размытия</td><td>expand_graph cap по BFS-порядку, не relevance (follow-up)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Схема потока</h2>
+  <figure class="rpt-graph">
+    <svg viewBox="0 0 560 90" width="560" role="img" aria-label="иерархический поток поиска">
+      <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+      <filter id="ds2" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="var(--shadow)"/></filter></defs>
+      <line x1="112" y1="45" x2="150" y2="45" stroke="var(--line)" stroke-width="2" marker-end="url(#arr2)"/>
+      <line x1="300" y1="45" x2="338" y2="45" stroke="var(--line)" stroke-width="2" marker-end="url(#arr2)"/>
+      <line x1="470" y1="45" x2="508" y2="45" stroke="var(--line)" stroke-width="2" marker-end="url(#arr2)"/>
+      <g filter="url(#ds2)">
+        <rect x="12"  y="28" width="100" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="150" y="28" width="150" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="338" y="28" width="132" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+        <rect x="508" y="28" width="44" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>
+      </g>
+      <text x="62"  y="49" text-anchor="middle">query</text>
+      <text x="225" y="49" text-anchor="middle">seed (summary)</text>
+      <text x="404" y="49" text-anchor="middle">graph-expand</text>
+      <text x="530" y="49" text-anchor="middle">rank</text>
+    </svg>
+  </figure>
+  <p class="sub">query → seed-статьи (summary-вектора) → graph-expand (wiki-BFS) → section-rank в пуле → секции с <code>source</code>.</p>
+  <footer>Chain closed: intent n/a → spec ✓ → plan ✓ → result OK. Next: PR dev-okf-unit-b → master.</footer>
+</section>
 <!-- TAB:result END -->
 </body>
 </html>
