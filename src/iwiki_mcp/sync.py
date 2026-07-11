@@ -76,8 +76,18 @@ def _output(r: subprocess.CompletedProcess) -> str:
 
 
 def _sanitize_git_output(output: str) -> str:
-    return re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1", output,
+    return re.sub(r"[a-z][a-z0-9+.-]*://[^\s'\"]+", "<remote>", output,
                   flags=re.IGNORECASE)
+
+
+def _exception_output(error: Exception) -> str:
+    for value in (getattr(error, "stderr", None),
+                  getattr(error, "stdout", None)):
+        if value:
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return value
+    return str(error)
 
 
 def _classify_remote_failure(output: str) -> str:
@@ -104,6 +114,9 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
     if not is_git_repo(base):
         return {"pulled": False, "pushed": False, "error": "base is not a git repo",
                 "sync_attempts": 0, "push_attempts": 0}
+    sync_attempts = 0
+    push_attempts = 0
+    pulled = False
     try:
         with base_lock(base, timeout):
             if not _has_remote(base):
@@ -111,7 +124,6 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                         "warning": "no git remote configured; commits stay local",
                         "sync_attempts": 0, "push_attempts": 0}
             max_attempts = min(max(push_retries, 0), 3)
-            push_attempts = 0
             recoverable = {"non_fast_forward", "credential_unavailable",
                            "transport_unavailable"}
             for attempt in range(max_attempts):
@@ -137,8 +149,9 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                             "failure_class": failure_class,
                             "sync_attempts": sync_attempts,
                             "push_attempts": push_attempts}
-                push = _run(base, "push")
+                pulled = True
                 push_attempts += 1
+                push = _run(base, "push")
                 if push.returncode == 0:
                     return {"pulled": True, "pushed": True,
                             "sync_attempts": sync_attempts,
@@ -160,8 +173,13 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                 "warning": "base busy: lock timeout",
                 "sync_attempts": 0, "push_attempts": 0}
     except Exception as e:
-        return {"pulled": False, "pushed": False, "error": str(e),
-                "sync_attempts": 0, "push_attempts": 0}
+        output = _exception_output(e)
+        result = {"pulled": pulled, "pushed": False,
+                  "failure_class": _classify_remote_failure(output),
+                  "sync_attempts": sync_attempts,
+                  "push_attempts": push_attempts}
+        result["warning" if pulled else "error"] = _sanitize_git_output(output)
+        return result
 
 
 def _ahead_behind(base: str) -> tuple[int, int] | None:

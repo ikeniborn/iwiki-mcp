@@ -66,15 +66,25 @@ def test_classify_remote_failure(output, expected):
     assert sync._classify_remote_failure(output) == expected
 
 
-def test_sanitize_git_output_removes_url_userinfo():
+def test_sanitize_git_output_redacts_credential_bearing_remote_url():
     output = "fatal: unable to access 'https://user:secret@host/path': denied"
 
     sanitized = sync._sanitize_git_output(output)
 
     assert "user" not in sanitized
     assert "secret" not in sanitized
-    assert "https://host/path" in sanitized
-    assert "denied" in sanitized
+    assert "host" not in sanitized
+    assert sanitized == "fatal: unable to access '<remote>': denied"
+
+
+def test_sanitize_git_output_redacts_plain_remote_url():
+    output = "fatal: unable to access 'https://host/private/repo.git': unavailable"
+
+    sanitized = sync._sanitize_git_output(output)
+
+    assert "host" not in sanitized
+    assert "/private/repo.git" not in sanitized
+    assert sanitized == "fatal: unable to access '<remote>': unavailable"
 
 
 def test_auto_commit_in_repo(tmp_path):
@@ -208,7 +218,7 @@ def test_sync_retry_exhaustion_reports_sanitized_warning(monkeypatch, tmp_path):
         "pushed": False,
         "warning": (
             "fatal: could not read Username for "
-            "'https://host/wiki': terminal prompts disabled"
+            "'<remote>': terminal prompts disabled"
         ),
         "failure_class": "credential_unavailable",
         "sync_attempts": 3,
@@ -257,6 +267,57 @@ def test_sync_unknown_push_failure_stops_immediately(monkeypatch, tmp_path):
         "pulled": True,
         "pushed": False,
         "warning": failure,
+        "failure_class": "unknown",
+        "sync_attempts": 1,
+        "push_attempts": 1,
+    }
+    assert sleeps == []
+
+
+def test_sync_pull_timeout_preserves_live_attempt_state(monkeypatch, tmp_path):
+    sleeps = _script_sync(monkeypatch, [])
+    timeout = subprocess.TimeoutExpired(
+        ["git", "pull"], 30, stderr="fatal: unable to access 'https://host/repo'"
+    )
+    def raise_timeout(*args, **kwargs):
+        raise timeout
+
+    monkeypatch.setattr(sync, "_run", raise_timeout)
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": False,
+        "pushed": False,
+        "error": "fatal: unable to access '<remote>'",
+        "failure_class": "unknown",
+        "sync_attempts": 1,
+        "push_attempts": 0,
+    }
+    assert sleeps == []
+
+
+def test_sync_push_timeout_preserves_live_attempt_state(monkeypatch, tmp_path):
+    sleeps = _script_sync(monkeypatch, [])
+    timeout = subprocess.TimeoutExpired(
+        ["git", "push"], 30, stderr="fatal: unable to access 'https://host/repo'"
+    )
+    script = iter([_completed(), timeout])
+
+    def scripted_run(*args, **kwargs):
+        result = next(script)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(sync, "_run", scripted_run)
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": True,
+        "pushed": False,
+        "warning": "fatal: unable to access '<remote>'",
         "failure_class": "unknown",
         "sync_attempts": 1,
         "push_attempts": 1,
