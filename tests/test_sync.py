@@ -129,6 +129,14 @@ def test_sanitize_git_output_redacts_simple_host_scp_remote_safely():
     assert sync._sanitize_git_output("key:value") == "key:value"
 
 
+def test_sanitize_git_output_redacts_user_scp_remote_without_path_guard():
+    output = "fatal: repository git@host:repo not found"
+
+    sanitized = sync._sanitize_git_output(output)
+
+    assert sanitized == "fatal: repository <remote> not found"
+
+
 def test_auto_commit_in_repo(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / "x.md").write_text("hi")
