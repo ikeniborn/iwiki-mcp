@@ -114,3 +114,151 @@ def test_sync_pull_failure_preserves_non_conflict_error(tmp_path):
     assert res["pushed"] is False
     assert "error" in res
     assert res["error"] != "pull --rebase conflict (aborted)"
+
+
+def _completed(returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(["git"], returncode, stdout, stderr)
+
+
+def _script_sync(monkeypatch, results):
+    script = iter(results)
+    sleeps = []
+    monkeypatch.setattr(sync, "is_git_repo", lambda base: True)
+    monkeypatch.setattr(sync, "_has_remote", lambda base: True)
+    monkeypatch.setattr(sync, "_has_rebase_state", lambda base: False)
+    monkeypatch.setattr(sync, "_run", lambda *args, **kwargs: next(script))
+    monkeypatch.setattr(sync.time, "sleep", sleeps.append)
+    return sleeps
+
+
+def test_sync_first_attempt_success_reports_attempt_counts(monkeypatch, tmp_path):
+    sleeps = _script_sync(monkeypatch, [_completed(), _completed()])
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": True,
+        "pushed": True,
+        "sync_attempts": 1,
+        "push_attempts": 1,
+    }
+    assert sleeps == []
+
+
+def test_sync_recovers_after_pull_credential_failure(monkeypatch, tmp_path):
+    credential_failure = _completed(
+        1, stderr="fatal: could not read Username: terminal prompts disabled"
+    )
+    sleeps = _script_sync(
+        monkeypatch, [credential_failure, _completed(), _completed()]
+    )
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": True,
+        "pushed": True,
+        "sync_attempts": 2,
+        "push_attempts": 1,
+    }
+    assert sleeps == [0.25]
+
+
+def test_sync_recovers_after_push_credential_failure(monkeypatch, tmp_path):
+    credential_failure = _completed(
+        1, stderr="git@host: Permission denied (publickey)."
+    )
+    sleeps = _script_sync(
+        monkeypatch,
+        [_completed(), credential_failure, _completed(), _completed()],
+    )
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": True,
+        "pushed": True,
+        "sync_attempts": 2,
+        "push_attempts": 2,
+    }
+    assert sleeps == [0.25]
+
+
+def test_sync_retry_exhaustion_reports_sanitized_warning(monkeypatch, tmp_path):
+    credential_failure = _completed(
+        1,
+        stderr=(
+            "fatal: could not read Username for "
+            "'https://user:secret@host/wiki': terminal prompts disabled"
+        ),
+    )
+    sleeps = _script_sync(
+        monkeypatch,
+        [
+            _completed(), credential_failure,
+            _completed(), credential_failure,
+            _completed(), credential_failure,
+        ],
+    )
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": True,
+        "pushed": False,
+        "warning": (
+            "fatal: could not read Username for "
+            "'https://host/wiki': terminal prompts disabled"
+        ),
+        "failure_class": "credential_unavailable",
+        "sync_attempts": 3,
+        "push_attempts": 3,
+    }
+    assert sleeps == [0.25, 0.25]
+
+
+@pytest.mark.parametrize(
+    ("failure", "failure_class"),
+    [
+        (
+            "fatal: remote origin does not appear to be a git repository",
+            "permanent",
+        ),
+        ("unexpected pull failure", "unknown"),
+    ],
+)
+def test_sync_permanent_or_unknown_pull_failure_stops_immediately(
+    monkeypatch, tmp_path, failure, failure_class
+):
+    sleeps = _script_sync(monkeypatch, [_completed(1, stderr=failure)])
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": False,
+        "pushed": False,
+        "error": failure,
+        "failure_class": failure_class,
+        "sync_attempts": 1,
+        "push_attempts": 0,
+    }
+    assert sleeps == []
+
+
+def test_sync_unknown_push_failure_stops_immediately(monkeypatch, tmp_path):
+    failure = "! [rejected] main -> main (hook declined)"
+    sleeps = _script_sync(
+        monkeypatch, [_completed(), _completed(1, stderr=failure)]
+    )
+
+    result = sync.sync(str(tmp_path))
+
+    assert result == {
+        "pulled": True,
+        "pushed": False,
+        "warning": failure,
+        "failure_class": "unknown",
+        "sync_attempts": 1,
+        "push_attempts": 1,
+    }
+    assert sleeps == []

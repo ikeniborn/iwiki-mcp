@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from filelock import Timeout
@@ -101,13 +102,20 @@ def _is_non_ff(r: subprocess.CompletedProcess) -> bool:
 
 def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
     if not is_git_repo(base):
-        return {"pulled": False, "pushed": False, "error": "base is not a git repo"}
+        return {"pulled": False, "pushed": False, "error": "base is not a git repo",
+                "sync_attempts": 0, "push_attempts": 0}
     try:
         with base_lock(base, timeout):
             if not _has_remote(base):
                 return {"pulled": False, "pushed": False,
-                        "warning": "no git remote configured; commits stay local"}
-            for attempt in range(push_retries):
+                        "warning": "no git remote configured; commits stay local",
+                        "sync_attempts": 0, "push_attempts": 0}
+            max_attempts = min(max(push_retries, 0), 3)
+            push_attempts = 0
+            recoverable = {"non_fast_forward", "credential_unavailable",
+                           "transport_unavailable"}
+            for attempt in range(max_attempts):
+                sync_attempts = attempt + 1
                 pull = _run(base, "pull", "--rebase")
                 if pull.returncode != 0:
                     if _has_rebase_state(base):
@@ -116,20 +124,44 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                                 "error": "pull --rebase conflict (aborted)",
                                 "hint": "resolve in the base repo, or re-run index to "
                                         "regenerate a conflicted index.jsonl, "
-                                        "then sync again"}
-                    return {"pulled": False, "pushed": False, "error": _output(pull)}
+                                        "then sync again",
+                                "sync_attempts": sync_attempts,
+                                "push_attempts": push_attempts}
+                    failure_class = _classify_remote_failure(
+                        pull.stderr + pull.stdout)
+                    if failure_class in recoverable and attempt < max_attempts - 1:
+                        time.sleep(0.25)
+                        continue
+                    return {"pulled": False, "pushed": False,
+                            "error": _output(pull),
+                            "failure_class": failure_class,
+                            "sync_attempts": sync_attempts,
+                            "push_attempts": push_attempts}
                 push = _run(base, "push")
+                push_attempts += 1
                 if push.returncode == 0:
-                    return {"pulled": True, "pushed": True}
-                if _is_non_ff(push) and attempt < push_retries - 1:
+                    return {"pulled": True, "pushed": True,
+                            "sync_attempts": sync_attempts,
+                            "push_attempts": push_attempts}
+                failure_class = _classify_remote_failure(push.stderr + push.stdout)
+                if failure_class in recoverable and attempt < max_attempts - 1:
+                    time.sleep(0.25)
                     continue
-                return {"pulled": True, "pushed": False, "warning": _output(push)}
-            # only reachable if push_retries <= 0; loop otherwise always returns inside
-            return {"pulled": True, "pushed": False, "warning": "push retries exhausted"}
+                return {"pulled": True, "pushed": False,
+                        "warning": _output(push),
+                        "failure_class": failure_class,
+                        "sync_attempts": sync_attempts,
+                        "push_attempts": push_attempts}
+            return {"pulled": True, "pushed": False,
+                    "warning": "push retries exhausted",
+                    "sync_attempts": 0, "push_attempts": 0}
     except Timeout:
-        return {"pulled": False, "pushed": False, "warning": "base busy: lock timeout"}
+        return {"pulled": False, "pushed": False,
+                "warning": "base busy: lock timeout",
+                "sync_attempts": 0, "push_attempts": 0}
     except Exception as e:
-        return {"pulled": False, "pushed": False, "error": str(e)}
+        return {"pulled": False, "pushed": False, "error": str(e),
+                "sync_attempts": 0, "push_attempts": 0}
 
 
 def _ahead_behind(base: str) -> tuple[int, int] | None:
