@@ -95,4 +95,6 @@ PY
 
 ## Version decision
 
-This documentation follow-up bumps the repository patch version to `0.6.6`, as required for every repository change.
+The initial evidence follow-up bumped the repository from `0.6.5` to `0.6.6`.
+Subsequent verification fixes advanced it through `0.6.7`; the final metadata
+consistency fix aligns the project, lockfile, and runtime package version at `0.6.8`.

@@ -31,7 +31,7 @@ chain:
 - Modify: `src/iwiki_mcp/sync.py:14-16,67-73`
 - Test: `tests/test_sync.py`
 
-- [ ] **Step 1: Write failing subprocess-policy and classification tests**
+- [x] **Step 1: Write failing subprocess-policy and classification tests**
 
 Add tests that monkeypatch `subprocess.run`, call `_run`, and assert `shell` is absent, `stdin=subprocess.DEVNULL`, and `env["GIT_TERMINAL_PROMPT"] == "0"`. Add parametrized assertions for `_classify_remote_failure` covering non-fast-forward, credential-unavailable (`Permission denied (publickey)` and terminal-prompts-disabled HTTPS), transport-unavailable, permanent remote/ref errors, and unknown text. Include a fake secret in stderr and assert `_sanitize_git_output` removes URL userinfo.
 
@@ -49,7 +49,7 @@ def test_classify_remote_failure(stderr, expected):
     assert sync._classify_remote_failure(proc) == expected
 ```
 
-- [ ] **Step 2: Run tests and confirm RED**
+- [x] **Step 2: Run tests and confirm RED**
 
 ```bash
 uv run pytest -q tests/test_sync.py
@@ -57,11 +57,11 @@ uv run pytest -q tests/test_sync.py
 
 Expected: failures because the policy environment and classifier helpers do not exist.
 
-- [ ] **Step 3: Implement minimal safe boundary and closed classifier**
+- [x] **Step 3: Implement minimal safe boundary and closed classifier**
 
 Update `_run` to copy `os.environ`, force `GIT_TERMINAL_PROMPT=0`, and pass `stdin=subprocess.DEVNULL`. Add `_classify_remote_failure` with only the spec-approved signatures and `_sanitize_git_output` that strips URL userinfo before results are returned. Do not invoke a shell, inspect credential values, or scan sockets.
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 ```bash
 uv run pytest -q tests/test_sync.py
@@ -69,7 +69,7 @@ uv run pytest -q tests/test_sync.py
 
 Expected: all `tests/test_sync.py` tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/iwiki_mcp/sync.py tests/test_sync.py
@@ -82,7 +82,7 @@ git commit -m "fix(sync): make git subprocesses non-interactive"
 - Modify: `src/iwiki_mcp/sync.py:76-106`
 - Test: `tests/test_sync.py`
 
-- [ ] **Step 1: Write failing attempt-state tests**
+- [x] **Step 1: Write failing attempt-state tests**
 
 Use a scripted `_run` fake and monkeypatched `time.sleep`. Cover first-attempt success; pull credential failure then success; push credential failure then success; third-attempt exhaustion; permanent/unknown immediate stop; no sleep after the last attempt. Assert `sync_attempts`, `push_attempts`, `failure_class`, exact sanitized `warning`, and sleep calls `[0.25]` or `[0.25, 0.25]`.
 
@@ -98,7 +98,7 @@ def test_sync_recovers_when_credentials_become_available(monkeypatch, git_base):
     assert sleeps == [0.25]
 ```
 
-- [ ] **Step 2: Run attempt tests and confirm RED**
+- [x] **Step 2: Run attempt tests and confirm RED**
 
 ```bash
 uv run pytest -q tests/test_sync.py -k "attempt or recover or exhaustion or permanent"
@@ -106,11 +106,11 @@ uv run pytest -q tests/test_sync.py -k "attempt or recover or exhaustion or perm
 
 Expected: missing metadata and pull/auth failures do not retry.
 
-- [ ] **Step 3: Implement the three-attempt state machine**
+- [x] **Step 3: Implement the three-attempt state machine**
 
 Refactor `sync` so each loop iteration is one synchronization attempt. Retry only the three approved recoverable classes from pull or push; delay `0.25` seconds only when another attempt remains. Preserve existing lock scope, no-remote behavior, and fail-soft returns. Return `sync_attempts: 0` and `push_attempts: 0` for pre-attempt exits.
 
-- [ ] **Step 4: Run sync tests and confirm GREEN**
+- [x] **Step 4: Run sync tests and confirm GREEN**
 
 ```bash
 uv run pytest -q tests/test_sync.py tests/test_sync_concurrency.py tests/test_ensure_fresh.py
@@ -118,7 +118,7 @@ uv run pytest -q tests/test_sync.py tests/test_sync_concurrency.py tests/test_en
 
 Expected: all selected tests pass and no attempt exceeds the configured maximum.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/iwiki_mcp/sync.py tests/test_sync.py
@@ -131,11 +131,11 @@ git commit -m "fix(sync): retry recoverable remote failures"
 - Modify: `src/iwiki_mcp/sync.py:84-106`
 - Create: `tests/test_sync_parallel.py`
 
-- [ ] **Step 1: Write local-bare-remote integration tests**
+- [x] **Step 1: Write local-bare-remote integration tests**
 
 Create one bare remote and two clones. Prove non-overlapping commits rebase and push automatically. Then edit the same line in both clones, push clone A, call `sync` in clone B, and assert `pushed is False`, `failure_class == "rebase_conflict"`, `conflict is True`, actionable `hint`, no rebase state, unchanged remote head, and clone B's local commit still exists.
 
-- [ ] **Step 2: Run parallel tests and confirm RED**
+- [x] **Step 2: Run parallel tests and confirm RED**
 
 ```bash
 uv run pytest -q tests/test_sync_parallel.py
@@ -143,11 +143,11 @@ uv run pytest -q tests/test_sync_parallel.py
 
 Expected: conflict metadata assertions fail before implementation.
 
-- [ ] **Step 3: Return safe conflict metadata after abort**
+- [x] **Step 3: Return safe conflict metadata after abort**
 
 On detected rebase state, run `rebase --abort`, stop without delay/retry, preserve the original class even if abort emits an error, and return sanitized guidance to resolve the base repo then call `wiki_sync`. Never stage or select conflict content.
 
-- [ ] **Step 4: Run integration tests and confirm GREEN**
+- [x] **Step 4: Run integration tests and confirm GREEN**
 
 ```bash
 uv run pytest -q tests/test_sync_parallel.py tests/test_sync_concurrency.py
@@ -155,7 +155,7 @@ uv run pytest -q tests/test_sync_parallel.py tests/test_sync_concurrency.py
 
 Expected: non-conflicting and conflicting scenarios pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/iwiki_mcp/sync.py tests/test_sync_parallel.py
@@ -168,11 +168,11 @@ git commit -m "fix(sync): preserve commits on rebase conflict"
 - Modify: `src/iwiki_mcp/sync.py:171-190`
 - Test: `tests/test_commit_and_push.py`
 
-- [ ] **Step 1: Write failing propagation and single-commit tests**
+- [x] **Step 1: Write failing propagation and single-commit tests**
 
 Extend current tests so successful, exhausted, conflict, and failed-local-commit paths assert `sync_attempts`, `push_attempts`, `failure_class`, `conflict`, and `hint`. Count `auto_commit` calls and prove three synchronization attempts still call it once.
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 ```bash
 uv run pytest -q tests/test_commit_and_push.py
@@ -180,11 +180,11 @@ uv run pytest -q tests/test_commit_and_push.py
 
 Expected: metadata is currently dropped.
 
-- [ ] **Step 3: Copy an explicit allowlist of safe sync fields**
+- [x] **Step 3: Copy an explicit allowlist of safe sync fields**
 
 Build the result from `committed`, `pushed`, and an allowlist of `sync_attempts`, `push_attempts`, `failure_class`, `conflict`, and `hint`; continue normalizing terminal `error`/`warning` to sanitized `warning`. A failed local commit returns both attempt counts as zero and never calls `sync`.
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 ```bash
 uv run pytest -q tests/test_commit_and_push.py
@@ -192,7 +192,7 @@ uv run pytest -q tests/test_commit_and_push.py
 
 Expected: all tests pass; `auto_commit` count is one.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/iwiki_mcp/sync.py tests/test_commit_and_push.py
@@ -207,11 +207,11 @@ git commit -m "fix(sync): expose safe push recovery metadata"
 - Test: `tests/test_server_update.py`
 - Test: `tests/test_server_write_frontmatter.py`
 
-- [ ] **Step 1: Write failing write/update result-contract tests**
+- [x] **Step 1: Write failing write/update result-contract tests**
 
 Mock `commit_and_push` with a committed-but-unpushed result containing all safe metadata and assert both tools return it. Add warning-priority tests: commit warning wins over freshness and frontmatter warnings; without a commit warning, existing freshness then frontmatter behavior remains unchanged. Inject `https://secret@host` and assert returned warning is already sanitized at the sync boundary.
 
-- [ ] **Step 2: Run focused tests and confirm RED**
+- [x] **Step 2: Run focused tests and confirm RED**
 
 ```bash
 uv run pytest -q tests/test_server_write.py tests/test_server_update.py tests/test_server_write_frontmatter.py
@@ -219,11 +219,11 @@ uv run pytest -q tests/test_server_write.py tests/test_server_update.py tests/te
 
 Expected: commit warning and metadata are absent from tool results.
 
-- [ ] **Step 3: Add one deterministic result helper**
+- [x] **Step 3: Add one deterministic result helper**
 
 Add a small server helper that copies the safe commit metadata allowlist and selects warning priority `commit -> freshness -> frontmatter`. Use it from both write paths without changing mutation, rollback, indexing, or response fields unrelated to synchronization.
 
-- [ ] **Step 4: Run focused tests and confirm GREEN**
+- [x] **Step 4: Run focused tests and confirm GREEN**
 
 ```bash
 uv run pytest -q tests/test_server_write.py tests/test_server_update.py tests/test_server_write_frontmatter.py tests/test_server_fresh.py
@@ -231,7 +231,7 @@ uv run pytest -q tests/test_server_write.py tests/test_server_update.py tests/te
 
 Expected: all selected tests pass with exact warning priority.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/iwiki_mcp/server.py tests/test_server_write.py tests/test_server_update.py tests/test_server_write_frontmatter.py
@@ -245,15 +245,15 @@ git commit -m "fix(server): surface write push failures"
 - Modify: `README.md`
 - Modify: `docs/README.ru.md`
 
-- [ ] **Step 1: Run sanitized probes**
+- [x] **Step 1: Run sanitized probes**
 
 Run shell and MCP-like probes that record only transport category, credential-helper configured boolean, SSH-agent variable present/usable booleans, and failure class. Do not print env values, socket paths, helper output, remote URL, username, or tokens. Reproduce the failing call when available; otherwise mark evidence blocked rather than inventing a cause.
 
-- [ ] **Step 2: Write the evidence record and operational guidance**
+- [x] **Step 2: Write the evidence record and operational guidance**
 
 Document commands in redacted/category-only form, observed results, root-cause verdict (`confirmed`, `disproved`, or `blocked`), the implemented standard-Git retry boundary, and safe options. State explicitly that client config changes, socket scanning, profile loading, brokers, and credential storage are not implemented.
 
-- [ ] **Step 3: Verify no credential material entered the diff**
+- [x] **Step 3: Verify no credential material entered the diff**
 
 ```bash
 git diff --check
@@ -262,7 +262,7 @@ git diff -- docs/superpowers/evidence/wiki-push-credential-context.md README.md 
 
 Expected: only categories/booleans and placeholder hosts; no local paths, URLs, keys, tokens, or socket values.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/evidence/wiki-push-credential-context.md README.md docs/README.ru.md
@@ -276,17 +276,21 @@ git commit -m "docs: document push recovery and credential evidence"
 - Modify through MCP: iwiki domain `iwiki-mcp`, page `mcp-server`, section `Write path`
 - Modify: `docs/TODO.md`
 
-- [ ] **Step 1: Update confirmed wiki behavior through MCP tools**
+- [x] **Step 1: Update confirmed wiki behavior through MCP tools**
 
 Use `wiki_update_page` with source anchors `src/iwiki_mcp/sync.py` and `src/iwiki_mcp/server.py`. Document bounded recovery, conflict abort/preservation, non-interactive Git, warning priority, and safe metadata. Do not claim a credential root cause beyond Task 6 evidence.
 
-- [ ] **Step 2: Lint the bound wiki domain**
+- [x] **Step 2: Lint the bound wiki domain**
 
 Run `wiki_lint(domain="iwiki-mcp")`.
 
 Expected: no new broken references, stale pages, missing sources, or orphans; pre-existing advisory findings are recorded separately.
 
-- [ ] **Step 3: Run full regression and security checks**
+Verification evidence (2026-07-12): `broken`, `stale`, and `missing_source`
+were empty. The existing `architecture.md` orphan, `long_lead` advisories, and
+`vector`/`vector-store` tag drift remained; no new blocking finding appeared.
+
+- [x] **Step 3: Run full regression and security checks**
 
 ```bash
 uv run pytest -q
