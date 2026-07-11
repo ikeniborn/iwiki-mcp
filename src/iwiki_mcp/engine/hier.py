@@ -3,10 +3,11 @@ wiki-graph expansion into a candidate pool, then clean-section ranking inside it
 Ported for parity from obsidian-ai-wiki's page-similarity/query flow."""
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 from .store import Record, dequantize, cosine
 from .links import parse_links
+from .okf_artifacts import RESERVED_OKF
 
 
 def sim(query_vec: list[float], rec: Record) -> float:
@@ -22,14 +23,22 @@ def seed_articles(query_vec: list[float], summary_recs: list[Record],
 
 
 def _adjacency(domain_dir: str) -> dict[str, set[str]]:
-    """Undirected page graph keyed by '<slug>.md'. An edge a->b also adds b->a."""
+    """Undirected page graph keyed by domain-relative '<type>/<slug>.md'. An edge
+    a->b also adds b->a. Walks the nested type-dir tree; a link target is
+    normalized to '<type>/<slug>' by parse_links and matched with a '.md' suffix.
+    Skips the generated OKF artifacts (index.md/log.md): index.md links every
+    page in the domain, so reading it here would turn it into an all-pages hub
+    that pulls the whole domain into every seed's candidate pool."""
     adj: dict[str, set[str]] = {}
-    root = domain_dir
-    for name in os.listdir(root) if os.path.isdir(root) else []:
-        if not name.endswith(".md"):
+    root = Path(domain_dir)
+    if not root.is_dir():
+        return adj
+    for path in root.rglob("*.md"):
+        name = path.relative_to(root).as_posix()
+        if name in RESERVED_OKF:
             continue
         try:
-            content = open(os.path.join(root, name), encoding="utf-8").read()
+            content = path.read_text(encoding="utf-8")
         except OSError:
             continue
         for link in parse_links(content):

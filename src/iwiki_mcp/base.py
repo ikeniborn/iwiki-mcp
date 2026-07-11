@@ -111,11 +111,32 @@ def pages_dir(base: str, domain: str) -> str:
 
 
 def index_path(base: str, domain: str) -> str:
-    return os.path.join(domain_dir(base, domain), ".iwiki", "index.jsonl")
+    return os.path.join(domain_dir(base, domain), "index.jsonl")
 
 
 def log_path(base: str, domain: str) -> str:
-    return os.path.join(domain_dir(base, domain), ".iwiki", "log.jsonl")
+    return os.path.join(domain_dir(base, domain), "log.jsonl")
+
+
+def migrate_store_location(base: str, domain: str) -> None:
+    """Best-effort one-time move of a domain's store/log out of the legacy
+    ``.iwiki/`` subdir to the domain root. Idempotent, never clobbers an existing
+    root file, never raises. Removes the legacy dir only when it is left empty."""
+    dom = domain_dir(base, domain)
+    legacy = os.path.join(dom, ".iwiki")
+    for name in ("index.jsonl", "log.jsonl"):
+        old = os.path.join(legacy, name)
+        new = os.path.join(dom, name)
+        try:
+            if os.path.isfile(old) and not os.path.exists(new):
+                os.replace(old, new)
+        except OSError:
+            pass
+    try:
+        if os.path.isdir(legacy) and not os.listdir(legacy):
+            os.rmdir(legacy)
+    except OSError:
+        pass
 
 
 def domain_exists(base: str, domain: str) -> bool:

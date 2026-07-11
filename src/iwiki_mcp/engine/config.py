@@ -42,6 +42,7 @@ class Config:
     seed_top_k: int = 5
     bfs_top_k: int = 10
     seed_threshold: float = 0.15
+    write_seed_threshold: float = 0.35
     chat_model: str = ""
 
     @staticmethod
@@ -71,5 +72,6 @@ class Config:
             seed_top_k=int(getenv("IWIKI_SEED_TOP_K", "5")),
             bfs_top_k=int(getenv("IWIKI_BFS_TOP_K", "10")),
             seed_threshold=float(getenv("IWIKI_SEED_THRESHOLD", "0.15")),
+            write_seed_threshold=float(getenv("IWIKI_WRITE_SEED_THRESHOLD", "0.35")),
             chat_model=getenv("IWIKI_CHAT_MODEL", "").strip(),
         )

@@ -49,8 +49,8 @@ def test_write_page_allows_non_ignored_source(tmp_path, monkeypatch):
     md = "# Auth\n## Overview\no\n## Flow\nx\n"
     out = server.wiki_write_page("backend", "auth", md, source=src)
 
-    assert out.get("page") == "backend/auth.md"
-    assert os.path.isfile(os.path.join(b, "backend", "auth.md"))
+    assert out.get("page") == "backend/concept/auth.md"
+    assert os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))
 
 
 def test_create_domain_creates_iwikiignore(tmp_path, monkeypatch):
@@ -61,6 +61,6 @@ def test_create_domain_creates_iwikiignore(tmp_path, monkeypatch):
 
 def test_bind_creates_iwikiignore(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
     server.wiki_bind(read=["proj"], write="proj")
     assert os.path.isfile(os.path.join(proj, ".iwikiignore"))

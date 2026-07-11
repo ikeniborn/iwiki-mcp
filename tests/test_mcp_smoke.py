@@ -12,7 +12,7 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 @pytest.mark.asyncio
 async def test_lists_tools_and_status(tmp_path):
     base = tmp_path / "wiki"
-    (base / "backend" / ".iwiki").mkdir(parents=True)
+    (base / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     env = dict(os.environ)

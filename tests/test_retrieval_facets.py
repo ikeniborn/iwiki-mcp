@@ -22,7 +22,7 @@ def _cfg():
 def _seed_two_typed_pages(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts])
     monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts])
-    (tmp_path / "d" / ".iwiki").mkdir(parents=True)
+    (tmp_path / "d").mkdir(parents=True)
     (tmp_path / "d" / "a.md").write_text(
         "---\ntype: api\ntags: [alpha]\ndescription: widget notes a\n---\n"
         "# A\n\n## Overview\ns\n\n## B\nwidget content here\n",

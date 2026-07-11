@@ -3,7 +3,7 @@ from iwiki_mcp import indexer, retrieval, server
 
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / "backend" / "auth.md").write_text(
         "---\ndescription: auth token guide\n---\n"
         "# Auth\n## Overview\no\n## Token\nrefresh_token rotates\n"

@@ -22,7 +22,7 @@ def _committed_files(base_dir):
 
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
@@ -35,51 +35,77 @@ def _seed(tmp_path, monkeypatch):
     return str(b)
 
 
-def test_write_refreshes_okf_artifacts(tmp_path, monkeypatch):
+def test_export_refreshes_okf_artifacts(tmp_path, monkeypatch):
+    # index.md/log.md are export-only: a plain write emits neither; wiki_export_okf
+    # generates both.
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "auth", "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
     dom = os.path.join(b, "backend")
+    assert not os.path.isfile(os.path.join(dom, "index.md"))
+    assert not os.path.isfile(os.path.join(dom, "log.md"))
+    server.wiki_export_okf("backend")
     assert os.path.isfile(os.path.join(dom, "index.md"))
     assert os.path.isfile(os.path.join(dom, "log.md"))
-    assert "[auth](auth.md)" in open(os.path.join(dom, "index.md"), encoding="utf-8").read()
+    index_text = open(os.path.join(dom, "index.md"), encoding="utf-8").read()
+    assert "[concept/auth](concept/auth.md)" in index_text
 
 
 def test_reserved_files_not_indexed(tmp_path, monkeypatch):
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "auth", "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
+    server.wiki_export_okf("backend")       # generate index.md/log.md
     server.wiki_index("backend")            # reindex with index.md/log.md present
     recs = VectorStore(base.index_path(b, "backend")).load()
     assert all(r.file not in ("index.md", "log.md") for r in recs)
 
 
-def test_delete_refreshes_index(tmp_path, monkeypatch):
+def test_delete_does_not_refresh_index(tmp_path, monkeypatch):
+    # index.md is export-only: wiki_delete_page no longer refreshes it, so a
+    # previously exported index.md stays stale (still lists the deleted page)
+    # until wiki_export_okf is called again.
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "auth", "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
     server.wiki_write_page("backend", "db", "# DB\n\n## Overview\ns\n\n## Schema\nx\n")
-    server.wiki_delete_page("backend", "auth")
-    idx = open(os.path.join(b, "backend", "index.md"), encoding="utf-8").read()
-    assert "[db](db.md)" in idx and "auth.md" not in idx
+    server.wiki_export_okf("backend")
+    # both default to type "concept" (no chat model); addressed by full identity.
+    server.wiki_delete_page("backend", "concept/auth")
+    idx_path = os.path.join(b, "backend", "index.md")
+    idx = open(idx_path, encoding="utf-8").read()
+    assert "auth.md" in idx                       # stale until re-export
+    server.wiki_export_okf("backend")
+    idx = open(idx_path, encoding="utf-8").read()
+    assert "[concept/db](concept/db.md)" in idx and "auth.md" not in idx
 
 
-def test_write_rejects_reserved_slug(tmp_path, monkeypatch):
+def test_write_allows_type_dir_index_slug(tmp_path, monkeypatch):
+    # RESERVED_OKF names domain-ROOT files ("index.md"/"log.md"). With type
+    # dirs, a bare "index" slug resolves to "<type>/index.md" (here
+    # "concept/index.md" -- no explicit type, no chat model), a distinct,
+    # non-reserved page. The guard must compare the full identity, not the
+    # slug's basename, or it wrongly rejects this.
     b = _seed(tmp_path, monkeypatch)
     out = server.wiki_write_page("backend", "index", "# I\n\n## Overview\nx\n")
-    assert "error" in out and "reserved" in out["error"]
-    assert not os.path.isfile(os.path.join(b, "backend", "index.md"))
+    assert "error" not in out
+    assert os.path.isfile(os.path.join(b, "backend", "concept", "index.md"))
 
 
-def test_write_rejects_reserved_slug_on_established_domain(tmp_path, monkeypatch):
-    # On any domain with a prior successful write, index.md/log.md already exist
-    # (refresh_artifacts generated them). The reserved guard must still fire —
-    # not the misleading "page exists" error that invites editing via update_page.
+def test_write_reserved_slug_guard_ignores_type_dir_collision(tmp_path, monkeypatch):
+    # On a domain where wiki_export_okf has already run, index.md/log.md exist
+    # at the domain root. A type-dir write of the same tail ("concept/index")
+    # lands at a different path and must not be blocked by, or clobber, the
+    # generated root files. (The reserved guard can only ever fire for the
+    # literal root "index.md"/"log.md" -- unreachable through wiki_write_page,
+    # since every resolved identity is prefixed with a type segment.)
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "auth", "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
+    server.wiki_export_okf("backend")
     idx_path = os.path.join(b, "backend", "index.md")
-    assert os.path.isfile(idx_path)                       # generated by the first write
+    assert os.path.isfile(idx_path)                       # generated by export
     out = server.wiki_write_page("backend", "index", "# I\n\n## Overview\nx\n")
-    assert "error" in out
-    assert "reserved" in out["error"] and "exists" not in out["error"]
-    assert "[auth](auth.md)" in open(idx_path, encoding="utf-8").read()   # not overwritten
+    assert "error" not in out
+    assert os.path.isfile(os.path.join(b, "backend", "concept", "index.md"))
+    idx_text = open(idx_path, encoding="utf-8").read()
+    assert "[concept/auth](concept/auth.md)" in idx_text   # root index.md untouched
 
 
 def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
@@ -90,38 +116,42 @@ def test_reserved_link_sections_not_indexed_but_graphed(tmp_path, monkeypatch):
     # description); `alice.md#Role` is the domain's only section record, so
     # `related()`'s vector-neighbour lookup (section-only) is empty and its graph
     # fallback runs -- proving the edge, not a vector-similarity coincidence.
+    # The link target is the page's REAL identity (concept/target.md, per the
+    # type-dir layout) -- a bare "target.md" would be dangling and the graph
+    # assertion below would pass vacuously without ever resolving a real edge.
     b = _seed(tmp_path, monkeypatch)
     server.wiki_write_page("backend", "target",
                            "# Target\n\n## External links\n- https://example.com/target\n",
                            source=None, type="concept", description="target page")
     page = ("# Alice\n\n## Role\nbilling prose here.\n\n"
-            "## Outgoing links\n- [Target](target.md)\n\n"
+            "## Outgoing links\n- [Target](concept/target.md)\n\n"
             "## External links\n- https://example.com/docs\n")
     server.wiki_write_page("backend", "alice", page, source=None, type="person",
                            description="Alice covers billing.")
     recs = VectorStore(base.index_path(b, "backend")).load()
     # target's reserved section is never indexed as a section (only its summary lands)
-    assert not any(r.file == "target.md" and r.kind == "section" for r in recs)
-    alice_secs = [r for r in recs if r.file == "alice.md" and r.kind == "section"]
+    assert not any(r.file == "concept/target.md" and r.kind == "section" for r in recs)
+    alice_secs = [r for r in recs if r.file == "person/alice.md" and r.kind == "section"]
     headings = {r.heading for r in alice_secs}
     assert headings == {"Role"}                      # link sections not indexed
     # the authored outgoing link still feeds the graph
-    rel = server.wiki_related("backend", "alice.md#Role")
-    assert rel["graph"] == ["target"]
-    assert "target" in str(rel)
+    rel = server.wiki_related("backend", "person/alice.md#Role")
+    assert rel["graph"] == ["concept/target"]
+    assert "concept/target" in str(rel)
 
 
 def test_reserved_files_land_in_the_same_commit(tmp_path, monkeypatch):
-    # Load-bearing: the generated index.md/log.md must be committed alongside the
-    # page in ONE commit. The default _seed base is not a git repo, so this is the
-    # only test that exercises commit_and_push's `git add -- <domain>` staging the
-    # new untracked reserved files. Guards against a regression to `git add -u`.
+    # Load-bearing: index.md/log.md, generated by wiki_export_okf, must be
+    # committed as part of that same export commit. The default _seed base is not
+    # a git repo, so this is the only test that exercises commit_and_push's
+    # `git add -- <domain>` staging the new untracked reserved files. Guards
+    # against a regression to `git add -u`.
     b = _seed(tmp_path, monkeypatch)
     _git_init(b)
-    out = server.wiki_write_page("backend", "auth",
-                                 "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
+    server.wiki_write_page("backend", "auth",
+                           "# Auth\n\n## Overview\ns\n\n## Flow\nx\n")
+    out = server.wiki_export_okf("backend")
     assert out.get("committed") is True
     files = _committed_files(b)
     assert "backend/index.md" in files
     assert "backend/log.md" in files
-    assert "backend/auth.md" in files

@@ -3,7 +3,7 @@ from iwiki_mcp import server
 
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / "backend" / "auth.md").write_text("# Auth\n## Overview\no\n## Flow\nx\n")
     proj = tmp_path / "proj"
     proj.mkdir()

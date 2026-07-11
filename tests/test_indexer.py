@@ -13,7 +13,7 @@ def _cfg(dimensions=2):
 
 def test_index_domain_stores_relative_paths(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / "backend" / "auth.md").write_text(
         "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n")
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts])
@@ -25,7 +25,7 @@ def test_index_domain_stores_relative_paths(tmp_path, monkeypatch):
 
 def test_index_domain_stores_nested_paths_as_posix(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / "backend" / "nested").mkdir()
     (b / "backend" / "nested" / "auth.md").write_text(
         "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
@@ -38,7 +38,7 @@ def test_index_domain_stores_nested_paths_as_posix(tmp_path, monkeypatch):
 
 def test_index_domain_reembeds_stale_dimensions(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / "backend" / "auth.md").write_text(
         "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
     )
@@ -61,7 +61,7 @@ def test_reindex_migrates_old_schema_and_adds_summary(tmp_path, monkeypatch):
     from iwiki_mcp.engine.chunk import chunk_markdown
 
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     content = '---\ndescription: "Sum txt."\n---\n# T\n\n## Sec\nbody\n'
     (b / "backend" / "p.md").write_text(content, encoding="utf-8")
     monkeypatch.setattr(
@@ -95,7 +95,7 @@ def test_reindex_migrates_old_schema_and_adds_summary(tmp_path, monkeypatch):
 
 def test_append_log_writes_record(tmp_path):
     b = tmp_path / "wiki"
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     indexer.append_log(
         str(b), "backend", "ingest", "src/auth.py", "auth.md", src_hash="abc123"
     )

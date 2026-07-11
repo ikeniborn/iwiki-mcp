@@ -7,7 +7,7 @@ def _seed(tmp_path, monkeypatch, with_domain=True):
     b = tmp_path / "wiki"
     b.mkdir()
     if with_domain:
-        (b / "backend" / ".iwiki").mkdir(parents=True)
+        (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
@@ -24,10 +24,10 @@ def test_write_page_indexes_and_logs(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
     out = server.wiki_write_page("backend", "auth", md)
-    assert out["page"] == "backend/auth.md"
+    assert out["page"] == "backend/concept/auth.md"    # no type/chat model -> default "concept"
     assert out["indexed_chunks"] >= 1
-    assert os.path.isfile(os.path.join(b, "backend", "auth.md"))
-    assert os.path.isfile(os.path.join(b, "backend", ".iwiki", "log.jsonl"))
+    assert os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))
+    assert os.path.isfile(os.path.join(b, "backend", "log.jsonl"))
 
 
 def test_write_rejects_deep_heading(tmp_path, monkeypatch):
@@ -53,7 +53,7 @@ def test_create_domain(tmp_path, monkeypatch):
 
 def test_bind_writes_config_for_current_project_domain(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
 
     out = server.wiki_bind(read=["backend", "proj"], write="proj")
 
@@ -78,7 +78,7 @@ def test_bind_rejects_missing_domain_without_writing(tmp_path, monkeypatch):
 
 def test_bind_preserves_existing_read_when_adding_current_project(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
 
     out = server.wiki_bind(read=["proj"], write="proj")
 
@@ -92,7 +92,7 @@ def test_bind_does_not_remove_existing_read_when_current_already_present(
     tmp_path, monkeypatch
 ):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
     config_path = os.path.join(proj, ".iwiki.toml")
     open(config_path, "w").write('read = ["backend", "proj"]\nwrite = "proj"\n')
 
@@ -104,7 +104,7 @@ def test_bind_does_not_remove_existing_read_when_current_already_present(
 
 def test_bind_rejects_new_non_current_read_without_writing(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared", ".iwiki"))
+    os.makedirs(os.path.join(b, "shared"))
     config_path = os.path.join(proj, ".iwiki.toml")
 
     out = server.wiki_bind(read=["shared"], write="proj")
@@ -117,7 +117,7 @@ def test_bind_rejects_new_non_current_read_without_writing(tmp_path, monkeypatch
 
 def test_bind_rejects_non_current_write_without_writing(tmp_path, monkeypatch):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared", ".iwiki"))
+    os.makedirs(os.path.join(b, "shared"))
     config_path = os.path.join(proj, ".iwiki.toml")
 
     out = server.wiki_bind(write="shared")
@@ -132,7 +132,7 @@ def test_bind_rejects_existing_non_current_write_without_current_override(
     tmp_path, monkeypatch
 ):
     b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj", ".iwiki"))
+    os.makedirs(os.path.join(b, "proj"))
     config_path = os.path.join(proj, ".iwiki.toml")
 
     out = server.wiki_bind(read=["proj"])
@@ -162,7 +162,7 @@ def test_write_page_removes_new_file_when_indexing_fails(tmp_path, monkeypatch):
         open(log_path, encoding="utf-8").read() if os.path.exists(log_path) else ""
     )
     assert "error" in out
-    assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+    assert not os.path.exists(os.path.join(b, "backend", "concept", "auth.md"))
     assert "auth.md" not in log_text
 
 
@@ -191,7 +191,7 @@ def test_write_page_does_not_leave_index_record_when_logging_fails(
         else ""
     )
     assert "error" in out
-    assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+    assert not os.path.exists(os.path.join(b, "backend", "concept", "auth.md"))
     assert "auth.md" not in index_text
 
 
@@ -207,7 +207,7 @@ def test_write_normalizes_wikilinks_to_markdown(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     md = "# Auth\n## Overview\nsummary\n## Flow\nsee [[core#Token Store]] here\n"
     server.wiki_write_page("backend", "auth", md)
-    content = open(os.path.join(b, "backend", "auth.md"), encoding="utf-8").read()
+    content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "[Token Store](core.md#token-store)" in content
     assert "[[core#Token Store]]" not in content
 
@@ -220,3 +220,23 @@ def test_normalize_source(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         server._normalize_source(proj, "/etc/passwd")
+
+
+def test_normalize_source_rejects_relative_escape(tmp_path):
+    # SECURITY (holistic review finding 2): a RELATIVE source containing '..'
+    # used to pass through unchanged, escaping the project (and dodging the
+    # anchored .iwikiignore patterns, which resolve relative to project_dir).
+    proj = str(tmp_path / "proj")
+    os.makedirs(proj)
+    import pytest
+    with pytest.raises(ValueError):
+        server._normalize_source(proj, "../../../../etc/hosts")
+
+
+def test_write_page_rejects_relative_source_escape(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    md = "# Auth\n## Overview\no\n## Flow\nx\n"
+    out = server.wiki_write_page("backend", "auth", md, source="../../../../etc/hosts")
+    assert "error" in out
+    assert "outside project" in out["error"]
+    assert not os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))

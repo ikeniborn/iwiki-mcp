@@ -11,7 +11,7 @@ def _seed(tmp_path, monkeypatch, with_domain=True):
     b = tmp_path / "wiki"
     b.mkdir()
     if with_domain:
-        (b / "backend" / ".iwiki").mkdir(parents=True)
+        (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
@@ -27,7 +27,7 @@ def _seed(tmp_path, monkeypatch, with_domain=True):
 def test_latest_source_tolerates_corrupt_line(tmp_path, monkeypatch):
     """latest_source returns valid source even when log has corrupt line before it."""
     b, _ = _seed(tmp_path, monkeypatch)
-    log_path = os.path.join(b, "backend", ".iwiki", "log.jsonl")
+    log_path = os.path.join(b, "backend", "log.jsonl")
     # Write a corrupt line followed by a valid record
     with open(log_path, "w", encoding="utf-8") as f:
         f.write('{"op":"ingest","page":"old.md","source":"old.py"}\n')

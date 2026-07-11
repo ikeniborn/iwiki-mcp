@@ -123,19 +123,53 @@ def _page_path(b: str, domain: str, slug: str) -> str:
     return str(path)
 
 
+def _resolve_identity(slug: str, resolved_type: str) -> str:
+    """Domain-relative identity '<type>/<tail>'. A bare slug is prefixed with the
+    resolved type; a slug that already carries a leading segment must match it.
+    The resolved type must be a safe SINGLE path segment (guards the invariant
+    'first path segment == frontmatter type': normalize_type lowercases but does
+    NOT reject '/' or a leading '.', so validate it here)."""
+    if (not resolved_type or "/" in resolved_type or "\\" in resolved_type
+            or resolved_type.startswith(".")):
+        raise ValueError(
+            f"invalid frontmatter type '{resolved_type}': must be a safe single "
+            "path segment (no '/', '\\', or leading '.')")
+    parts = _slug_parts(slug)
+    if len(parts) == 1:
+        return f"{resolved_type}/{parts[0]}"
+    if parts[0] != resolved_type:
+        raise ValueError(
+            f"slug type-segment '{parts[0]}' does not match frontmatter type "
+            f"'{resolved_type}'")
+    return PurePosixPath(*parts).as_posix()
+
+
 def _normalize_source(project_dir: str, source: str) -> str:
-    """Store the ingest source relative to the project. An already-relative
-    path passes through; an absolute path under the project is relativized; an
-    absolute path outside the project is rejected (the server works only within
-    the bound project)."""
-    p = Path(source)
-    if not p.is_absolute():
-        return source
+    """Store the ingest source relative to the project. A relative path is
+    resolved against the project dir and confirmed to stay inside it (rejects
+    an escape via '..'); an absolute path under the project is relativized; a
+    path (relative or absolute) that resolves outside the project is rejected
+    (the server works only within the bound project)."""
     proj = Path(project_dir).resolve()
+    p = Path(source)
+    resolved = p.resolve() if p.is_absolute() else (proj / p).resolve()
     try:
-        return p.resolve().relative_to(proj).as_posix()
+        return resolved.relative_to(proj).as_posix()
     except ValueError:
         raise ValueError("source outside project")
+
+
+def _source_within_project(project_dir: str, source: str) -> bool:
+    """Read-path containment guard, mirroring _normalize_source: True iff
+    `source` resolves inside project_dir. Sources reaching wiki_remediation_plan
+    come from the on-disk ingest log/lint report, which may hold a record
+    _normalize_source never validated (synced-in from the shared git base,
+    a pre-fix legacy entry, or a manual edit) -- so re-check before opening it."""
+    try:
+        _normalize_source(project_dir, source)
+        return True
+    except ValueError:
+        return False
 
 
 def _slug_from_page_path(dom_path: Path, page_path: str) -> str:
@@ -183,6 +217,7 @@ def wiki_list_domains() -> dict:
     bind = base.resolve_binding()
     out = []
     for d in base.list_domains(bind.base):
+        base.migrate_store_location(bind.base, d)
         out.append(
             {"domain": d, "index_bytes": _index_bytes(base.index_path(bind.base, d))}
         )
@@ -205,7 +240,7 @@ def wiki_list_pages(domain: str) -> dict:
     pages = []
     for path in sorted(dom_path.rglob("*.md")):
         rel_path = path.relative_to(dom_path)
-        if ".iwiki" in rel_path.parts or rel_path.as_posix() in RESERVED_OKF:
+        if rel_path.as_posix() in RESERVED_OKF:
             continue
         rel = rel_path.as_posix()
         pages.append({"slug": rel[:-3], "file": rel})
@@ -238,9 +273,17 @@ def wiki_search(
     threshold: float | None = None,
     type: str | None = None,
     tags: list[str] | None = None,
+    intent: str = "read",
+    heading: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     cfg = Config.load()
+    if intent.strip().lower() == "write":
+        target = bind.write or (domains[0] if domains else None)
+        if not target:
+            return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
+        target = _validate_domain(target)      # path guards are load-bearing
+        return {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
     doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
         return {"results": [], "hint": "no domains in scope"}
@@ -270,6 +313,7 @@ def wiki_related(domain: str, section_id: str) -> dict:
     cfg = Config.load()
     valid_domain = _validate_domain(domain)
     dom_path = _domain_path(bind.base, valid_domain)
+    base.migrate_store_location(bind.base, valid_domain)
     recs = VectorStore(base.index_path(bind.base, valid_domain)).load()
     cwd = os.getcwd()
     try:
@@ -349,6 +393,7 @@ def wiki_write_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    base.migrate_store_location(bind.base, valid_domain)
     markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
@@ -375,28 +420,39 @@ def wiki_write_page(
         except ValueError as exc:
             return {"error": str(exc),
                     "hint": "pass a source path inside the bound project"}
-    path = _page_path(bind.base, valid_domain, slug)
-    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
-    # Reject reserved slugs BEFORE the exists check: refresh_artifacts generates
-    # index.md/log.md on the first write, so on an established domain the exists
-    # check would otherwise mask this with a misleading "page exists" error.
-    if page_file in RESERVED_OKF:
-        return {
-            "error": f"slug '{slug}' is reserved for the generated OKF file "
-                     f"'{page_file}'",
-            "hint": "choose another slug; index/log are generated, not authored",
-        }
-    if os.path.exists(path):
-        return {
-            "error": f"page '{valid_domain}/{slug}' exists",
-            "hint": "editing an existing page is a guarded op; confirm with the user",
-        }
     cfg = Config.load()
     fm_block, fm_warning = okf.build_frontmatter(
-        cfg, bind.base, valid_domain, slug, markdown,
+        cfg, bind.base, valid_domain, _slug_parts(slug)[-1], markdown,
         source=source, explicit_type=type, explicit_tags=tags,
         explicit_description=description, explicit_status=status,
-        timestamp_path=f"{valid_domain}/{page_file}")
+        timestamp_path=f"{valid_domain}/{slug}.md")
+    meta, _ = _fm.split(fm_block)
+    resolved_type = meta.get("type")
+    try:
+        identity = _resolve_identity(slug, resolved_type)
+    except ValueError as exc:
+        return {"error": str(exc),
+                "hint": "pass a bare slug with a matching `type`, or a slug whose "
+                        "first segment equals the frontmatter type"}
+    page_file = identity + ".md"
+    # Reject reserved slugs BEFORE the exists check: index.md/log.md may already
+    # exist from a prior wiki_export_okf run, so on such a domain the exists
+    # check would otherwise mask this with a misleading "page exists" error.
+    # RESERVED_OKF holds domain-ROOT-relative names ("index.md"/"log.md"); compare
+    # the full identity, not its basename -- a type-dir identity like
+    # "concept/index.md" is a distinct, non-reserved page (basename comparison
+    # would wrongly reject it).
+    if page_file in RESERVED_OKF:
+        return {
+            "error": f"slug tail is reserved for the generated OKF file '{page_file}'",
+            "hint": "choose another slug; index/log are generated, not authored",
+        }
+    path = _page_path(bind.base, valid_domain, identity)
+    if os.path.exists(path):
+        return {
+            "error": f"page '{valid_domain}/{identity}' exists",
+            "hint": "editing an existing page is a guarded op; confirm with the user",
+        }
     full_md = fm_block + markdown
     log_source = source or ""
     log_src_hash = indexer.src_hash(source) if source else None
@@ -426,7 +482,6 @@ def wiki_write_page(
             )
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
                                   pathspec=valid_domain)
     result = {
@@ -440,8 +495,6 @@ def wiki_write_page(
     }
     if fm_warning:
         result.setdefault("warning", fm_warning)
-    if art_warn:
-        result.setdefault("warning", art_warn)
     return result
 
 
@@ -461,6 +514,7 @@ def wiki_update_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    base.migrate_store_location(bind.base, valid_domain)
     # See wiki_write_page: ignore gate on the raw source first, then normalize.
     if source:
         spec = ignore.load_project_ignore(bind.project_dir)
@@ -527,7 +581,6 @@ def wiki_update_page(
             _restore_log(log_file, log_before)
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: update {page_rel}",
                                   pathspec=valid_domain)
     result = {
@@ -542,8 +595,6 @@ def wiki_update_page(
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
-    if art_warn:
-        result.setdefault("warning", art_warn)
     return result
 
 
@@ -560,6 +611,7 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    base.migrate_store_location(bind.base, valid_domain)
     path = _page_path(bind.base, valid_domain, slug)
     if not os.path.isfile(path):
         return {
@@ -584,7 +636,6 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
             _rollback_last_log(bind.base, valid_domain, "delete", page_file, "", None)
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: delete {page_rel}",
                                   pathspec=valid_domain)
     result = {
@@ -595,8 +646,6 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
         "pushed": commit.get("pushed", False),
         **_fresh_warn(fresh),
     }
-    if art_warn:
-        result.setdefault("warning", art_warn)
     return result
 
 
@@ -639,7 +688,7 @@ def wiki_create_domain(name: str) -> dict:
     dom_path = _domain_path(bind.base, valid_domain)
     if dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' already exists"}
-    os.makedirs(dom_path / ".iwiki", exist_ok=True)
+    os.makedirs(dom_path, exist_ok=True)
     ignore.ensure_iwikiignore(bind.project_dir)
     commit = sync.commit_and_push(bind.base, f"iwiki: create domain {valid_domain}",
                                   pathspec=valid_domain)
@@ -705,6 +754,7 @@ def wiki_lint(domain: str | None = None) -> dict:
     reports = {}
     for target in targets:
         valid_domain = _validate_domain(target)
+        base.migrate_store_location(bind.base, valid_domain)
         reports[valid_domain] = lint(
             str(_domain_path(bind.base, valid_domain)), project_dir=bind.project_dir
         )
@@ -728,6 +778,7 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
             "hint": f"use the bound write domain '{bind.write}'",
         }
     dom_path = _domain_path(bind.base, target)
+    base.migrate_store_location(bind.base, target)
     report = lint(str(dom_path), project_dir=bind.project_dir)
 
     update_candidates = []
@@ -756,6 +807,15 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
                 "source": source,
                 "reason": "page_unreadable",
                 "error": str(e),
+            })
+            continue
+        if source and not _source_within_project(bind.project_dir, source):
+            blocked_candidates.append({
+                "domain": target,
+                "slug": slug,
+                "page": page,
+                "source": source,
+                "reason": "source_outside_project",
             })
             continue
         try:
@@ -820,7 +880,7 @@ def _unmigrated_pages(dom_path: Path):
     """Yield (slug, page_file, body, has_frontmatter) for each page."""
     for path in sorted(dom_path.rglob("*.md")):
         rel = path.relative_to(dom_path)
-        if ".iwiki" in rel.parts or rel.as_posix() in RESERVED_OKF:
+        if rel.as_posix() in RESERVED_OKF:
             continue
         meta, body = _fm.split(path.read_text(encoding="utf-8"))
         yield rel.with_suffix("").as_posix(), rel.as_posix(), body, bool(meta)
@@ -828,6 +888,13 @@ def _unmigrated_pages(dom_path: Path):
 
 @_safe
 def wiki_migrate_okf(domain: str | None = None) -> dict:
+    """Backfill missing frontmatter (autonomous when IWIKI_CHAT_MODEL is set,
+    else a plan of candidates) and, in both modes, deterministically move every
+    flat page that already carries a frontmatter `type` under `<type>/<slug>.md`
+    (see okf.migrate_layout). Plan mode makes no LLM writes; the deterministic
+    layout move is applied regardless of mode. Note: even in plan mode this
+    layout move is itself a write -- the domain is always reindexed, and
+    committed only when something actually moved."""
     bind = base.resolve_binding()
     target = domain or bind.write
     if not target:
@@ -841,6 +908,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     if not dom_path.is_dir():
         return {"error": f"domain '{target}' not found",
                 "hint": "create it with wiki_create_domain"}
+    base.migrate_store_location(bind.base, target)
     cfg = Config.load()
     if cfg.chat_model:
         migrated, skipped, warnings = [], [], []
@@ -862,19 +930,30 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
             for t in m.get("tags", []):
                 if t not in vocab:
                     vocab.append(t)
+        # runs AFTER the adoption loop: it moves pages by their frontmatter
+        # `type`, and the loop above is what just added `type` to flat pages.
+        layout = okf.migrate_layout(bind.base, target)
         stats = indexer.index_domain(cfg, bind.base, target)
-        art_warn = okf.refresh_artifacts(bind.base, target)
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
                                       pathspec=target)
         result = {"domain": target, "mode": "autonomous", "migrated": migrated,
-                  "skipped": skipped, "warnings": warnings,
+                  "skipped": skipped, "warnings": warnings, "moved": layout["moved"],
+                  "layout_collisions": layout.get("collisions", []),
+                  "layout_skipped_unsafe": layout.get("skipped_unsafe", []),
                   "indexed_chunks": stats["indexed_chunks"],
                   "committed": commit.get("committed", False),
                   "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
-        if art_warn:
-            result.setdefault("warning", art_warn)
         return result
-    # plan mode: no writes
+    # plan mode: no LLM writes (frontmatter adoption is only proposed as
+    # candidates); the deterministic <type>/<slug> layout move + store
+    # relocation ARE applied below.
+    layout = okf.migrate_layout(bind.base, target)
+    indexer.index_domain(cfg, bind.base, target)   # store reflects moved paths
+    if layout["moved"]:
+        commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
+                                      pathspec=target)
+    else:
+        commit = {"committed": False, "pushed": False}
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
     for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
@@ -892,12 +971,17 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
             "recommended_tools": ["wiki_apply_okf"],
         })
     return {"domain": target, "mode": "plan", "candidates": candidates,
+            "moved": layout["moved"],
+            "layout_collisions": layout.get("collisions", []),
+            "layout_skipped_unsafe": layout.get("skipped_unsafe", []),
             "type_vocabulary": list(_fm.OKF_TYPES),
             "authoring_rules": AUTHORING_RULES,
             "next_steps": ["Classify each candidate's type (from type_vocabulary) "
                            "and tags (reuse tag_vocab first), then call "
                            "wiki_apply_okf(domain, slug, type, tags).",
                            "Run wiki_lint to confirm no missing_frontmatter remains."],
+            "committed": commit.get("committed", False),
+            "pushed": commit.get("pushed", False),
             **_fresh_warn(fresh)}
 
 
@@ -913,12 +997,30 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     if not dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
-    path = _page_path(bind.base, valid_domain, slug)
-    if not os.path.isfile(path):
-        return {"error": f"page '{valid_domain}/{slug}' not found",
+    base.migrate_store_location(bind.base, valid_domain)
+    current_identity = PurePosixPath(*_slug_parts(slug)).as_posix()
+    current_path = _page_path(bind.base, valid_domain, current_identity)
+    # not-found guard MUST run on the CURRENT path BEFORE move_page: os.replace on a
+    # missing source raises FileNotFoundError -> @_safe generic error, losing the
+    # friendly "page not found" hint.
+    if not os.path.isfile(current_path):
+        return {"error": f"page '{valid_domain}/{current_identity}' not found",
                 "hint": "list pages with wiki_list_pages"}
-    cfg = Config.load()
-    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
+    if current_identity != new_identity:
+        new_path = _page_path(bind.base, valid_domain, new_identity)
+        if os.path.exists(new_path):
+            return {"error": f"page '{valid_domain}/{new_identity}' exists",
+                    "hint": "delete or rename the colliding page first"}
+        # move_page's link rewrite is best-effort; if a later step (frontmatter
+        # write, index) fails below, the rollback restores the original bytes at
+        # the NEW path but does not move the file back — acceptable, the page
+        # keeps valid structure at its new identity and the next index run
+        # reconciles it.
+        okf.move_page(bind.base, valid_domain, current_identity, new_identity)
+    identity = new_identity
+    page_file = identity + ".md"
+    path = _page_path(bind.base, valid_domain, identity)
     original = open(path, encoding="utf-8").read()
     existing_meta, body = _fm.split(original)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
@@ -926,13 +1028,20 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     apply_status = existing_meta.get("status")
     resolved = (
         existing_meta.get("resource")
+        # move_page re-keys the log to the NEW identity as part of the move
+        # above, so the ingest record (if any) is now found under page_file,
+        # not the pre-move current_identity.
         or okf.latest_source(bind.base, valid_domain, page_file)
     )
+    cfg = Config.load()
     fm_block, _ = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
         source=resolved, explicit_type=type, explicit_tags=apply_tags,
         explicit_description=apply_desc, explicit_status=apply_status,
-        timestamp_path=f"{valid_domain}/{page_file}")
+        # git has no history yet at the NEW (just-moved) path -- look up the
+        # PRE-move identity so an existing page's original timestamp survives
+        # a type change instead of resetting to today.
+        timestamp_path=f"{valid_domain}/{current_identity}.md")
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(fm_block + body)
@@ -942,7 +1051,6 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
             fh.write(original)
         raise
     page_rel = f"{valid_domain}/{page_file}"
-    art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: apply okf {page_rel}",
                                   pathspec=valid_domain)
     meta, _ = _fm.split(fm_block + body)
@@ -950,8 +1058,6 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
               "indexed_chunks": stats["indexed_chunks"],
               "committed": commit.get("committed", False),
               "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
-    if art_warn:
-        result.setdefault("warning", art_warn)
     return result
 
 
@@ -971,6 +1077,7 @@ def wiki_export_okf(domain: str | None = None) -> dict:
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
     cfg = Config.load()
+    base.migrate_store_location(bind.base, valid_domain)
     swept = okf.batch_sweep(cfg, bind.base, valid_domain)
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     art_warn = okf.refresh_artifacts(bind.base, valid_domain)

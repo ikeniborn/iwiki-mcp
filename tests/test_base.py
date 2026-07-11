@@ -1,5 +1,3 @@
-import os
-
 import pytest
 from iwiki_mcp import base
 
@@ -7,7 +5,7 @@ from iwiki_mcp import base
 def _mkbase(tmp_path, *domains):
     b = tmp_path / "wiki"
     for d in domains:
-        (b / d / ".iwiki").mkdir(parents=True)
+        (b / d).mkdir(parents=True)
         (b / d / "page.md").write_text("# P\n## Overview\nx\n")
     b.mkdir(exist_ok=True)
     return str(b)
@@ -139,7 +137,7 @@ def test_write_project_config_removes_multiline_core_assignment(
 
 def test_index_path_uses_jsonl_index():
     assert base.index_path("/wiki", "backend").endswith(
-        os.path.join(".iwiki", "index.jsonl")
+        "index.jsonl"
     )
 
 

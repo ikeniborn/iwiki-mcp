@@ -20,7 +20,7 @@ def _seed_git(tmp_path, monkeypatch):
     _git(b, "config", "user.email", "t@t")
     _git(b, "config", "user.name", "t")
     _git(b, "checkout", "-q", "-b", "main")
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     (b / ".gitkeep").write_text("")
     _git(b, "add", "-A")
     _git(b, "commit", "-q", "-m", "seed")
@@ -64,7 +64,7 @@ def test_write_refuses_on_diverged_with_zero_side_effects(tmp_path, monkeypatch)
     assert "error" in out and "diverged" in out["error"]
     assert "hint" in out
     assert not os.path.isfile(b / "backend" / "auth.md")
-    assert not os.path.isfile(b / "backend" / ".iwiki" / "log.jsonl")
+    assert not os.path.isfile(b / "backend" / "log.jsonl")
 
 
 def test_write_fast_forwards_when_behind_then_writes(tmp_path, monkeypatch):
@@ -74,7 +74,7 @@ def test_write_fast_forwards_when_behind_then_writes(tmp_path, monkeypatch):
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
     out = server.wiki_write_page("backend", "auth", md)
 
-    assert out["page"] == "backend/auth.md"
-    assert os.path.isfile(b / "backend" / "auth.md")
+    assert out["page"] == "backend/concept/auth.md"
+    assert os.path.isfile(b / "backend" / "concept" / "auth.md")
     assert os.path.isfile(b / "neighbor.md")  # ff pulled the neighbor commit in
     assert out["pushed"] is True

@@ -89,7 +89,7 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                         return {"pulled": False, "pushed": False,
                                 "error": "pull --rebase conflict (aborted)",
                                 "hint": "resolve in the base repo, or re-run index to "
-                                        "regenerate a conflicted .iwiki/index.jsonl, "
+                                        "regenerate a conflicted index.jsonl, "
                                         "then sync again"}
                     return {"pulled": False, "pushed": False, "error": _output(pull)}
                 push = _run(base, "push")

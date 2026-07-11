@@ -6,7 +6,7 @@ from iwiki_mcp import base, indexer, server
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     b.mkdir()
-    (b / "backend" / ".iwiki").mkdir(parents=True)
+    (b / "backend").mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
@@ -28,9 +28,10 @@ def _write():
 def test_delete_removes_file_log_and_index_records(tmp_path, monkeypatch):
     b = _seed(tmp_path, monkeypatch)
     _write()
-    out = server.wiki_delete_page("backend", "auth")
-    assert out["deleted"] == "backend/auth.md"
-    assert not os.path.exists(os.path.join(b, "backend", "auth.md"))
+    # no type/chat model -> default "concept"; addressed by full identity.
+    out = server.wiki_delete_page("backend", "concept/auth")
+    assert out["deleted"] == "backend/concept/auth.md"
+    assert not os.path.exists(os.path.join(b, "backend", "concept", "auth.md"))
     log_text = open(base.log_path(b, "backend"), encoding="utf-8").read()
     assert '"op": "delete"' in log_text
     ip = base.index_path(b, "backend")
@@ -41,7 +42,7 @@ def test_delete_removes_file_log_and_index_records(tmp_path, monkeypatch):
 def test_delete_last_page_leaves_empty_index(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     _write()
-    out = server.wiki_delete_page("backend", "auth")
+    out = server.wiki_delete_page("backend", "concept/auth")
     assert out["indexed_chunks"] == 0
 
 
@@ -65,9 +66,9 @@ def test_delete_rolls_back_on_index_failure(tmp_path, monkeypatch):
         "index_domain",
         lambda cfg, base, domain: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    out = server.wiki_delete_page("backend", "auth")
+    out = server.wiki_delete_page("backend", "concept/auth")
     assert "error" in out
-    assert os.path.exists(os.path.join(b, "backend", "auth.md"))
+    assert os.path.exists(os.path.join(b, "backend", "concept", "auth.md"))
     log_text = open(base.log_path(b, "backend"), encoding="utf-8").read()
     assert '"op": "delete"' not in log_text
 

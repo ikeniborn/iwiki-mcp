@@ -3,7 +3,7 @@ from iwiki_mcp.engine.lint import lint
 
 def _wiki(tmp_path, pages):
     d = tmp_path / "d"
-    (d / ".iwiki").mkdir(parents=True)
+    d.mkdir(parents=True)
     for slug, text in pages.items():
         (d / f"{slug}.md").write_text(text, encoding="utf-8")
     return str(d)

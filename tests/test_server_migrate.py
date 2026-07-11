@@ -1,4 +1,5 @@
 import json
+import subprocess
 
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
@@ -14,7 +15,7 @@ def _patch(monkeypatch, tmp_path):
     # Eager: tests write fixture pages into tmp_path/d/ before calling the
     # tool, so the domain dir must exist before resolve_binding() is (lazily)
     # invoked inside the handler.
-    (tmp_path / "d" / ".iwiki").mkdir(parents=True)
+    (tmp_path / "d").mkdir(parents=True)
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
     monkeypatch.setenv("IWIKI_LLM_KEY", "k")
     monkeypatch.setattr(server.base, "resolve_binding", lambda: _bind(tmp_path))
@@ -39,12 +40,72 @@ def test_migrate_plan_mode_lists_candidates(tmp_path, monkeypatch):
     assert (tmp_path / "d" / "a.md").read_text(encoding="utf-8").startswith("# A")  # no write
 
 
+def test_migrate_plan_mode_skips_commit_when_nothing_moved(tmp_path, monkeypatch):
+    # Untyped flat pages give migrate_layout nothing to move; plan mode must not
+    # call commit_and_push in that case (shape parity: committed/pushed still False).
+    _patch(monkeypatch, tmp_path)   # no IWIKI_CHAT_MODEL
+    (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        server.sync, "commit_and_push",
+        lambda *a, **k: calls.append((a, k)) or {"committed": True, "pushed": True}
+    )
+    res = server.wiki_migrate_okf("d")
+    assert res["mode"] == "plan"
+    assert res["moved"] == []
+    assert calls == []                     # commit_and_push never called
+    assert res["committed"] is False and res["pushed"] is False
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _seed_git_base(tmp_path):
+    """``tmp_path`` becomes a real (remoteless) git repo with domain `d`,
+    holding one already-typed flat page so migrate_layout has a move to make."""
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@t")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "d").mkdir(parents=True)
+    meta = {"type": "guide", "title": "A"}
+    body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
+    (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed")
+
+
+def test_migrate_plan_mode_commits_layout_move(tmp_path, monkeypatch):
+    # Real git base (no remote), so the commit path is actually exercised
+    # here rather than short-circuited by a mocked sync.commit_and_push.
+    _seed_git_base(tmp_path)
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
+    monkeypatch.setenv("IWIKI_LLM_KEY", "k")
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: _bind(tmp_path))
+    monkeypatch.setattr(
+        indexer, "embed_texts",
+        lambda cfg, texts: [[0.1, 0.2] for _ in texts]
+    )
+    res = server.wiki_migrate_okf("d")   # no IWIKI_CHAT_MODEL -> plan mode
+    assert res["mode"] == "plan"
+    assert res["moved"] == ["a -> guide/a"]
+    assert res["committed"] is True
+    assert res["pushed"] is False
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tmp_path,
+        capture_output=True, text=True, check=True,
+    )
+    assert status.stdout.strip() == ""
+
+
 def test_apply_okf_writes_frontmatter(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "guide", tags=["Flow"])
     assert "error" not in res
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # a bare (untyped) slug is moved under its resolved type dir on apply
+    assert res["page"] == "d/guide/a.md"
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["type"] == "guide"
     assert meta["tags"] == ["flow"]
 
@@ -63,11 +124,16 @@ def test_migrate_autonomous_mode(tmp_path, monkeypatch):
     res = server.wiki_migrate_okf("d")
     assert res["mode"] == "autonomous"
     assert "a" in res["migrated"]
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # the adoption loop adds type=guide, then migrate_layout (running AFTER the
+    # loop) moves the now-typed page under its type dir in the same pass.
+    assert not (tmp_path / "d" / "a.md").exists()
+    assert res["moved"] == ["a -> guide/a"]
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["type"] == "guide"
     # idempotent
     res2 = server.wiki_migrate_okf("d")
-    assert res2["migrated"] == [] and "a" in res2["skipped"]
+    assert res2["migrated"] == [] and "guide/a" in res2["skipped"]
+    assert res2["moved"] == []
 
 
 def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
@@ -81,7 +147,7 @@ def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
         }
     )
     (tmp_path / "d" / "a.md").write_text("# A\n\n## Overview\ns\n\n## B\nwords\n", encoding="utf-8")
-    log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
+    log_path = tmp_path / "d" / "log.jsonl"
     log_path.write_text(json.dumps({
         "op": "ingest", "source": "/src/a.py", "page": "a.md",
         "date": "2020-01-01", "src_hash": "abc",
@@ -89,7 +155,8 @@ def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
     res = server.wiki_migrate_okf("d")
     assert res["mode"] == "autonomous"
     assert "a" in res["migrated"]
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # migrate_layout runs after the adoption loop, moving the newly-typed page.
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["resource"] == "/src/a.py"
 
 
@@ -112,7 +179,8 @@ def test_apply_okf_preserves_existing_tags_when_none(tmp_path, monkeypatch):
     (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "reference", tags=None)
     assert "error" not in res
-    new_meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # bare slug -> moved under the new type dir
+    new_meta, _ = fm.split((tmp_path / "d" / "reference" / "a.md").read_text(encoding="utf-8"))
     assert new_meta["tags"] == ["existing"]
 
 
@@ -126,7 +194,8 @@ def test_apply_okf_preserves_existing_description_and_status(tmp_path, monkeypat
     (tmp_path / "d" / "a.md").write_text(fm.render(meta) + body, encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "reference", tags=["x"])
     assert "error" not in res
-    new_meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # bare slug -> moved under the new type dir
+    new_meta, _ = fm.split((tmp_path / "d" / "reference" / "a.md").read_text(encoding="utf-8"))
     assert new_meta.get("description") == "Existing summary text."
     assert new_meta.get("status") == "stable"
 
@@ -135,14 +204,17 @@ def test_apply_okf_sets_resource_from_log(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     body = "# A\n\n## Overview\ns\n\n## B\nwords\n"
     (tmp_path / "d" / "a.md").write_text(body, encoding="utf-8")
-    log_path = tmp_path / "d" / ".iwiki" / "log.jsonl"
+    log_path = tmp_path / "d" / "log.jsonl"
     log_path.write_text(json.dumps({
         "op": "ingest", "source": "/src/a.py", "page": "a.md",
         "date": "2020-01-01", "src_hash": "abc",
     }) + "\n", encoding="utf-8")
     res = server.wiki_apply_okf("d", "a", "guide")
     assert "error" not in res
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # bare slug -> moved under the new type dir; move_page re-keys the ingest
+    # log from "a.md" to "guide/a.md", so the post-move lookup under the NEW
+    # identity still resolves the source recorded at ingest time.
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["resource"] == "/src/a.py"
 
 
@@ -159,4 +231,8 @@ def test_apply_okf_rollback_on_index_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(indexer, "index_domain", boom)
     res = server.wiki_apply_okf("d", "a", "guide")
     assert "error" in res
-    assert page_path.read_bytes() == before
+    # bare slug -> moved under the new type dir; the move is authoritative and
+    # is NOT undone by the rollback -- original bytes are restored at the NEW
+    # path, the old flat path is gone.
+    assert not page_path.exists()
+    assert (tmp_path / "d" / "guide" / "a.md").read_bytes() == before
