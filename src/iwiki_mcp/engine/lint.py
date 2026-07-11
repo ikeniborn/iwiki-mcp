@@ -96,7 +96,7 @@ def _latest_ingest_by_page(wiki_dir: str) -> dict[str, dict]:
     without an `op` are treated as ingests (back-compat). Malformed lines, records
     without a page, and records without a source are ignored.
     """
-    log = os.path.join(wiki_dir, ".iwiki", "log.jsonl")
+    log = os.path.join(wiki_dir, "log.jsonl")
     latest: dict[str, dict] = {}
     if not os.path.isfile(log):
         return latest

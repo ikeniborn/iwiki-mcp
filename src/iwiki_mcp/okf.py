@@ -114,18 +114,18 @@ def latest_source(base_dir, domain, page_file):
 
 
 def _page_slugs(dom_path: Path) -> list[str]:
-    """Domain page slugs, excluding the .iwiki dir and the reserved OKF files."""
+    """Domain page slugs, excluding the reserved OKF files."""
     out = []
     for p in sorted(dom_path.rglob("*.md")):
         rel = p.relative_to(dom_path)
-        if ".iwiki" in rel.parts or rel.as_posix() in _oa.RESERVED_OKF:
+        if rel.as_posix() in _oa.RESERVED_OKF:
             continue
         out.append(rel.with_suffix("").as_posix())
     return out
 
 
 def _read_log(dom_path: Path) -> list:
-    path = dom_path / ".iwiki" / "log.jsonl"
+    path = dom_path / "log.jsonl"
     recs: list = []
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
