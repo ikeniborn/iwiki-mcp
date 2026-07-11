@@ -24,13 +24,11 @@ _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 
 
 def _pages(wiki_dir: str) -> list[str]:
-    """All docs/wiki/**/*.md (normalised), excluding the .iwiki index dir and
-    the generated OKF reserved files (index.md / log.md)."""
+    """All docs/wiki/**/*.md (normalised), excluding the generated OKF reserved
+    files (index.md / log.md)."""
     files = glob.glob(os.path.join(wiki_dir, "**", "*.md"), recursive=True)
     out = []
     for f in files:
-        if "/.iwiki/" in f:
-            continue
         if os.path.relpath(f, wiki_dir) in RESERVED_OKF:
             continue
         out.append(os.path.normpath(f))
@@ -88,7 +86,7 @@ def _logged_page_path(page: str, wiki_dir: str) -> str:
 
 
 def _latest_ingest_by_page(wiki_dir: str) -> dict[str, dict]:
-    """Latest ingest record per page from .iwiki/log.jsonl (last-wins).
+    """Latest ingest record per page from <domain>/log.jsonl (last-wins).
 
     An `ingest` record with a non-empty source sets the page's current record;
     a `delete` record clears it. Last-wins so a delete + re-ingest of the same

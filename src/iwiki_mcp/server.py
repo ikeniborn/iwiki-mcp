@@ -349,6 +349,7 @@ def wiki_write_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    base.migrate_store_location(bind.base, valid_domain)
     markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
@@ -458,6 +459,7 @@ def wiki_update_page(
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    base.migrate_store_location(bind.base, valid_domain)
     # See wiki_write_page: ignore gate on the raw source first, then normalize.
     if source:
         spec = ignore.load_project_ignore(bind.project_dir)
@@ -554,6 +556,7 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
             "error": f"domain '{valid_domain}' not found",
             "hint": "create it with wiki_create_domain",
         }
+    base.migrate_store_location(bind.base, valid_domain)
     path = _page_path(bind.base, valid_domain, slug)
     if not os.path.isfile(path):
         return {
@@ -696,6 +699,7 @@ def wiki_lint(domain: str | None = None) -> dict:
     reports = {}
     for target in targets:
         valid_domain = _validate_domain(target)
+        base.migrate_store_location(bind.base, valid_domain)
         reports[valid_domain] = lint(
             str(_domain_path(bind.base, valid_domain)), project_dir=bind.project_dir
         )
@@ -719,6 +723,7 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
             "hint": f"use the bound write domain '{bind.write}'",
         }
     dom_path = _domain_path(bind.base, target)
+    base.migrate_store_location(bind.base, target)
     report = lint(str(dom_path), project_dir=bind.project_dir)
 
     update_candidates = []
@@ -832,6 +837,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     if not dom_path.is_dir():
         return {"error": f"domain '{target}' not found",
                 "hint": "create it with wiki_create_domain"}
+    base.migrate_store_location(bind.base, target)
     cfg = Config.load()
     if cfg.chat_model:
         migrated, skipped, warnings = [], [], []
@@ -901,6 +907,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     if not dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
+    base.migrate_store_location(bind.base, valid_domain)
     path = _page_path(bind.base, valid_domain, slug)
     if not os.path.isfile(path):
         return {"error": f"page '{valid_domain}/{slug}' not found",
