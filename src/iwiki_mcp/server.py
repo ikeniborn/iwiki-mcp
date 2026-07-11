@@ -855,6 +855,11 @@ def _unmigrated_pages(dom_path: Path):
 
 @_safe
 def wiki_migrate_okf(domain: str | None = None) -> dict:
+    """Backfill missing frontmatter (autonomous when IWIKI_CHAT_MODEL is set,
+    else a plan of candidates) and, in both modes, deterministically move every
+    flat page that already carries a frontmatter `type` under `<type>/<slug>.md`
+    (see okf.migrate_layout). Plan mode makes no LLM writes; the deterministic
+    layout move is applied regardless of mode."""
     bind = base.resolve_binding()
     target = domain or bind.write
     if not target:
@@ -890,16 +895,23 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
             for t in m.get("tags", []):
                 if t not in vocab:
                     vocab.append(t)
+        # runs AFTER the adoption loop: it moves pages by their frontmatter
+        # `type`, and the loop above is what just added `type` to flat pages.
+        layout = okf.migrate_layout(bind.base, target)
         stats = indexer.index_domain(cfg, bind.base, target)
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
                                       pathspec=target)
         result = {"domain": target, "mode": "autonomous", "migrated": migrated,
-                  "skipped": skipped, "warnings": warnings,
+                  "skipped": skipped, "warnings": warnings, "moved": layout["moved"],
                   "indexed_chunks": stats["indexed_chunks"],
                   "committed": commit.get("committed", False),
                   "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
         return result
-    # plan mode: no writes
+    # plan mode: no LLM writes (frontmatter adoption is only proposed as
+    # candidates); the deterministic <type>/<slug> layout move + store
+    # relocation ARE applied below.
+    layout = okf.migrate_layout(bind.base, target)
+    indexer.index_domain(cfg, bind.base, target)   # store reflects moved paths
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
     for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
@@ -917,6 +929,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
             "recommended_tools": ["wiki_apply_okf"],
         })
     return {"domain": target, "mode": "plan", "candidates": candidates,
+            "moved": layout["moved"],
             "type_vocabulary": list(_fm.OKF_TYPES),
             "authoring_rules": AUTHORING_RULES,
             "next_steps": ["Classify each candidate's type (from type_vocabulary) "

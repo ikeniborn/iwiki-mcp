@@ -65,11 +65,16 @@ def test_migrate_autonomous_mode(tmp_path, monkeypatch):
     res = server.wiki_migrate_okf("d")
     assert res["mode"] == "autonomous"
     assert "a" in res["migrated"]
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # the adoption loop adds type=guide, then migrate_layout (running AFTER the
+    # loop) moves the now-typed page under its type dir in the same pass.
+    assert not (tmp_path / "d" / "a.md").exists()
+    assert res["moved"] == ["a -> guide/a"]
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["type"] == "guide"
     # idempotent
     res2 = server.wiki_migrate_okf("d")
-    assert res2["migrated"] == [] and "a" in res2["skipped"]
+    assert res2["migrated"] == [] and "guide/a" in res2["skipped"]
+    assert res2["moved"] == []
 
 
 def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
@@ -91,7 +96,8 @@ def test_migrate_autonomous_sets_resource_from_log(tmp_path, monkeypatch):
     res = server.wiki_migrate_okf("d")
     assert res["mode"] == "autonomous"
     assert "a" in res["migrated"]
-    meta, _ = fm.split((tmp_path / "d" / "a.md").read_text(encoding="utf-8"))
+    # migrate_layout runs after the adoption loop, moving the newly-typed page.
+    meta, _ = fm.split((tmp_path / "d" / "guide" / "a.md").read_text(encoding="utf-8"))
     assert meta["resource"] == "/src/a.py"
 
 

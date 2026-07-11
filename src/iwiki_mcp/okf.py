@@ -149,6 +149,28 @@ def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
             p.write_text(new_text, encoding="utf-8")
 
 
+def migrate_layout(base_dir, domain) -> dict:
+    """Deterministic flat->type layout migration. For each page whose identity has
+    no type segment (a bare '<slug>.md' at the domain root) and carries a
+    frontmatter 'type', move it under '<type>/<slug>.md' and rewrite intra-domain
+    links. Also relocates the store/log to the domain root. Idempotent."""
+    _base.migrate_store_location(base_dir, domain)
+    dom = Path(base_dir) / domain
+    moved = []
+    for slug in _page_slugs(dom):
+        if "/" in slug:                     # already under a type dir
+            continue
+        text = (dom / f"{slug}.md").read_text(encoding="utf-8")
+        meta, _ = fm.split(text)
+        ptype = meta.get("type")
+        if not ptype:
+            continue
+        new_identity = f"{fm.normalize_type(ptype)}/{slug}"
+        move_page(base_dir, domain, slug, new_identity)
+        moved.append(f"{slug} -> {new_identity}")
+    return {"moved": moved}
+
+
 def _read_log(dom_path: Path) -> list:
     path = dom_path / "log.jsonl"
     recs: list = []
