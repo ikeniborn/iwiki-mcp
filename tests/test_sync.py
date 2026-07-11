@@ -87,6 +87,21 @@ def test_sanitize_git_output_redacts_plain_remote_url():
     assert sanitized == "fatal: unable to access '<remote>': unavailable"
 
 
+def test_sanitize_git_output_redacts_scp_remote_without_false_positives():
+    output = "fatal: 'git@host:private/repo.git' unavailable"
+
+    sanitized = sync._sanitize_git_output(output)
+
+    assert "host" not in sanitized
+    assert "private/repo.git" not in sanitized
+    assert sanitized == "fatal: '<remote>' unavailable"
+    assert (
+        sync._sanitize_git_output("fatal: operation failed")
+        == "fatal: operation failed"
+    )
+    assert sync._sanitize_git_output(r"C:\repo\page.md") == r"C:\repo\page.md"
+
+
 def test_auto_commit_in_repo(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / "x.md").write_text("hi")

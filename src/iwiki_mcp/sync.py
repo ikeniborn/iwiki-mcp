@@ -76,8 +76,21 @@ def _output(r: subprocess.CompletedProcess) -> str:
 
 
 def _sanitize_git_output(output: str) -> str:
-    return re.sub(r"[a-z][a-z0-9+.-]*://[^\s'\"]+", "<remote>", output,
-                  flags=re.IGNORECASE)
+    output = re.sub(r"[a-z][a-z0-9+.-]*://[^\s'\"]+", "<remote>", output,
+                    flags=re.IGNORECASE)
+    output = re.sub(
+        r"(?P<quote>['\"])(?:[a-z0-9._-]+@)?[a-z0-9.-]{2,}:[^\s'\"]+"
+        r"(?P=quote)",
+        r"\g<quote><remote>\g<quote>",
+        output,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"(?<![a-z0-9._-])[a-z0-9._-]+@[a-z0-9.-]+:[^\s'\"]+",
+        "<remote>",
+        output,
+        flags=re.IGNORECASE,
+    )
 
 
 def _exception_output(error: Exception) -> str:
