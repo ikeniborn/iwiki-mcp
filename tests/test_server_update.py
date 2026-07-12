@@ -140,3 +140,44 @@ def test_update_sets_description_and_status(tmp_path, monkeypatch):
     meta, _ = server._fm.split(content)
     assert meta["description"] == "new desc"
     assert meta["status"] == "deprecated"
+
+
+def test_update_page_surfaces_safe_push_failure_metadata(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    _write(BASE_MD)
+    monkeypatch.setattr(
+        server.sync,
+        "commit_and_push",
+        lambda *args, **kwargs: {
+            "committed": True,
+            "pushed": False,
+            "sync_attempts": 2,
+            "push_attempts": 3,
+            "failure_class": "push_rejected",
+            "conflict": True,
+            "hint": "run wiki_sync",
+            "warning": "commit saved locally; push failed",
+            "remote": "https://user:secret@example.test/wiki.git",
+            "credential": "secret",
+        },
+    )
+
+    out = server.wiki_update_page("backend", "concept/auth", "Flow", "new flow")
+
+    assert out == {
+        "page": "backend/concept/auth.md",
+        "heading": "Flow",
+        "indexed_chunks": out["indexed_chunks"],
+        "reused": out["reused"],
+        "embedded": out["embedded"],
+        "bytes": out["bytes"],
+        "over_cap": out["over_cap"],
+        "committed": True,
+        "pushed": False,
+        "sync_attempts": 2,
+        "push_attempts": 3,
+        "failure_class": "push_rejected",
+        "conflict": True,
+        "hint": "run wiki_sync",
+        "warning": "commit saved locally; push failed",
+    }

@@ -3,7 +3,10 @@ sync (pull --rebase + push). Fail-soft: a non-repo or missing remote degrades
 to a warning, never an exception."""
 from __future__ import annotations
 
+import os
+import re
 import subprocess
+import time
 from pathlib import Path
 
 from filelock import Timeout
@@ -12,8 +15,11 @@ from .lock import base_lock
 
 
 def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(["git", "-C", base, *args], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                          env=env)
 
 
 def is_git_repo(base: str) -> bool:
@@ -65,45 +71,146 @@ def _has_rebase_state(base: str) -> bool:
 
 
 def _output(r: subprocess.CompletedProcess) -> str:
-    return r.stderr.strip() or r.stdout.strip() or "git command failed"
+    output = r.stderr.strip() or r.stdout.strip() or "git command failed"
+    return _sanitize_git_output(output)
+
+
+def _sanitize_git_output(output: str) -> str:
+    output = re.sub(r"[a-z][a-z0-9+.-]*://[^\s'\"]+", "<remote>", output,
+                    flags=re.IGNORECASE)
+    output = re.sub(
+        r"(?P<quote>['\"])(?:[a-z0-9._-]+@)?[a-z0-9.-]{2,}:[^\s'\"]+"
+        r"(?P=quote)",
+        r"\g<quote><remote>\g<quote>",
+        output,
+        flags=re.IGNORECASE,
+    )
+    output = re.sub(
+        r"(?<![a-z0-9._-])[a-z0-9._-]+@[a-z0-9.-]+:[^\s'\"]+",
+        "<remote>",
+        output,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"(?<![a-z0-9._-])[a-z0-9.-]{2,}:"
+        r"(?=[^\s'\"]*(?:/|\.git(?:[\s'\"]|$)))[^\s'\"]+",
+        "<remote>",
+        output,
+        flags=re.IGNORECASE,
+    )
+
+
+def _exception_output(error: Exception) -> str:
+    for value in (getattr(error, "stderr", None),
+                  getattr(error, "stdout", None)):
+        if value:
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return value
+    return str(error)
+
+
+def _classify_remote_failure(output: str) -> str:
+    text = output.lower()
+    if any(signature in text for signature in
+           ("non-fast-forward", "fetch first")):
+        return "non_fast_forward"
+    if ("permission denied (publickey)" in text or
+            ("could not read username" in text and
+             "terminal prompts disabled" in text)):
+        return "credential_unavailable"
+    if "could not resolve host" in text:
+        return "transport_unavailable"
+    if "does not appear to be a git repository" in text:
+        return "permanent"
+    return "unknown"
 
 
 def _is_non_ff(r: subprocess.CompletedProcess) -> bool:
-    text = (r.stderr + r.stdout).lower()
-    return any(s in text for s in ("non-fast-forward", "fetch first", "rejected"))
+    return _classify_remote_failure(r.stderr + r.stdout) == "non_fast_forward"
 
 
 def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
     if not is_git_repo(base):
-        return {"pulled": False, "pushed": False, "error": "base is not a git repo"}
+        return {"pulled": False, "pushed": False, "error": "base is not a git repo",
+                "sync_attempts": 0, "push_attempts": 0}
+    sync_attempts = 0
+    push_attempts = 0
+    pulled = False
     try:
         with base_lock(base, timeout):
             if not _has_remote(base):
                 return {"pulled": False, "pushed": False,
-                        "warning": "no git remote configured; commits stay local"}
-            for attempt in range(push_retries):
+                        "warning": "no git remote configured; commits stay local",
+                        "sync_attempts": 0, "push_attempts": 0}
+            max_attempts = min(max(push_retries, 0), 3)
+            recoverable = {"non_fast_forward", "credential_unavailable",
+                           "transport_unavailable"}
+            for attempt in range(max_attempts):
+                sync_attempts = attempt + 1
                 pull = _run(base, "pull", "--rebase")
                 if pull.returncode != 0:
                     if _has_rebase_state(base):
-                        _run(base, "rebase", "--abort")
-                        return {"pulled": False, "pushed": False,
-                                "error": "pull --rebase conflict (aborted)",
-                                "hint": "resolve in the base repo, or re-run index to "
-                                        "regenerate a conflicted index.jsonl, "
-                                        "then sync again"}
-                    return {"pulled": False, "pushed": False, "error": _output(pull)}
+                        abort = _run(base, "rebase", "--abort")
+                        result = {
+                            "pulled": False,
+                            "pushed": False,
+                            "error": "pull --rebase conflict (aborted)",
+                            "failure_class": "rebase_conflict",
+                            "conflict": True,
+                            "hint": "resolve the conflicting commits in the base "
+                                    "repo, then sync again",
+                            "sync_attempts": sync_attempts,
+                            "push_attempts": push_attempts,
+                        }
+                        if abort.returncode != 0:
+                            result["error"] = "pull --rebase conflict; abort failed"
+                            result["hint"] = (
+                                "run git rebase --abort in the base repo, then "
+                                f"resolve the conflict and sync again: {_output(abort)}"
+                            )
+                        return result
+                    failure_class = _classify_remote_failure(
+                        pull.stderr + pull.stdout)
+                    if failure_class in recoverable and attempt < max_attempts - 1:
+                        time.sleep(0.25)
+                        continue
+                    return {"pulled": False, "pushed": False,
+                            "error": _output(pull),
+                            "failure_class": failure_class,
+                            "sync_attempts": sync_attempts,
+                            "push_attempts": push_attempts}
+                pulled = True
+                push_attempts += 1
                 push = _run(base, "push")
                 if push.returncode == 0:
-                    return {"pulled": True, "pushed": True}
-                if _is_non_ff(push) and attempt < push_retries - 1:
+                    return {"pulled": True, "pushed": True,
+                            "sync_attempts": sync_attempts,
+                            "push_attempts": push_attempts}
+                failure_class = _classify_remote_failure(push.stderr + push.stdout)
+                if failure_class in recoverable and attempt < max_attempts - 1:
+                    time.sleep(0.25)
                     continue
-                return {"pulled": True, "pushed": False, "warning": push.stderr.strip()}
-            # only reachable if push_retries <= 0; loop otherwise always returns inside
-            return {"pulled": True, "pushed": False, "warning": "push retries exhausted"}
+                return {"pulled": True, "pushed": False,
+                        "warning": _output(push),
+                        "failure_class": failure_class,
+                        "sync_attempts": sync_attempts,
+                        "push_attempts": push_attempts}
+            return {"pulled": True, "pushed": False,
+                    "warning": "push retries exhausted",
+                    "sync_attempts": 0, "push_attempts": 0}
     except Timeout:
-        return {"pulled": False, "pushed": False, "warning": "base busy: lock timeout"}
+        return {"pulled": False, "pushed": False,
+                "warning": "base busy: lock timeout",
+                "sync_attempts": 0, "push_attempts": 0}
     except Exception as e:
-        return {"pulled": False, "pushed": False, "error": str(e)}
+        output = _exception_output(e)
+        result = {"pulled": pulled, "pushed": False,
+                  "failure_class": _classify_remote_failure(output),
+                  "sync_attempts": sync_attempts,
+                  "push_attempts": push_attempts}
+        result["warning" if pulled else "error"] = _sanitize_git_output(output)
+        return result
 
 
 def _ahead_behind(base: str) -> tuple[int, int] | None:
@@ -178,13 +285,24 @@ def commit_and_push(base: str, message: str, pathspec: str | None = None) -> dic
     """
     commit = auto_commit(base, message, pathspec)
     if not commit.get("committed"):
-        out = {"committed": False, "pushed": False}
+        out = {"committed": False, "pushed": False,
+               "sync_attempts": 0, "push_attempts": 0}
         if commit.get("warning"):
             out["warning"] = commit["warning"]
         return out
     result = sync(base)
-    out = {"committed": True, "pushed": bool(result.get("pushed"))}
+    out = {
+        "committed": True,
+        "pushed": bool(result.get("pushed")),
+        "sync_attempts": result.get("sync_attempts", 0),
+        "push_attempts": result.get("push_attempts", 0),
+    }
+    for key in ("failure_class", "conflict", "hint"):
+        if key in result:
+            out[key] = result[key]
+    if "hint" in out:
+        out["hint"] = _sanitize_git_output(str(out["hint"]))
     warn = result.get("warning") or result.get("error")
     if warn:
-        out["warning"] = warn
+        out["warning"] = _sanitize_git_output(str(warn))
     return out
