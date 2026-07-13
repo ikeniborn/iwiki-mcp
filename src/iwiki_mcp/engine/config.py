@@ -57,11 +57,22 @@ class Config:
             )
         if base_url.endswith("/"):
             base_url = base_url[:-1]
+        model_var = "IWIKI_EMBED_MODEL"
+        embed_model = getenv(model_var, "text-embedding-3-small").strip()
+        if not embed_model:
+            raise ConfigError(f"{model_var} must not be blank.")
+        dimensions_var = "IWIKI_EMBED_DIMENSIONS"
+        try:
+            dimensions = int(getenv(dimensions_var, "1536"))
+        except ValueError as exc:
+            raise ConfigError(f"{dimensions_var} must be a positive integer.") from exc
+        if dimensions <= 0:
+            raise ConfigError(f"{dimensions_var} must be a positive integer.")
         return Config(
             base_url=base_url,
             api_key=api_key,
-            embed_model=getenv("IWIKI_EMBED_MODEL", "text-embedding-3-small"),
-            dimensions=int(getenv("IWIKI_EMBED_DIMENSIONS", "1536")),
+            embed_model=embed_model,
+            dimensions=dimensions,
             chunk_size=int(getenv("IWIKI_CHUNK_SIZE", "512")),
             chunk_overlap=int(getenv("IWIKI_CHUNK_OVERLAP", "64")),
             summary_max=int(getenv("IWIKI_SUMMARY_MAX_CHARS", "400")),
