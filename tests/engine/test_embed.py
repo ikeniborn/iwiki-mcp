@@ -5,14 +5,14 @@ from iwiki_mcp.engine.embed import embed_texts, probe_embedding_endpoint, EmbedE
 from iwiki_mcp.engine.config import Config
 
 
-def _cfg(dimensions=0):
-    return Config(base_url="http://x", api_key="k", embed_model="m", dimensions=dimensions,
+def _cfg(dimensions=0, api_key="k"):
+    return Config(base_url="http://x", api_key=api_key, embed_model="m", dimensions=dimensions,
                   chunk_size=512, chunk_overlap=64, summary_max=400, top_k=8,
                   score_threshold=0.2, graph_depth=2, ignore=None)
 
 
-def _probe_cfg():
-    return _cfg(dimensions=2)
+def _probe_cfg(api_key="k"):
+    return _cfg(dimensions=2, api_key=api_key)
 
 
 class _Resp:
@@ -24,6 +24,17 @@ class _Resp:
 
     def json(self):
         return {"data": self._data}
+
+
+class _PayloadResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
 
 
 def test_retries_transient_then_succeeds(monkeypatch):
@@ -131,10 +142,13 @@ def test_probe_reports_http_status_and_reason_without_response_body(monkeypatch)
     monkeypatch.setattr(embed_mod.httpx, "post", fake_post)
 
     with pytest.raises(EmbedError) as exc_info:
-        probe_embedding_endpoint(_probe_cfg())
+        probe_embedding_endpoint(_probe_cfg(api_key="test-secret-key"))
     message = str(exc_info.value)
     assert "401" in message
     assert "Unauthorized" in message
+    assert "test-secret-key" not in message
+    assert "Bearer test-secret-key" not in message
+    assert "Authorization" not in message
     assert "response-body-secret" not in message
     assert calls["n"] == 1
 
@@ -162,17 +176,25 @@ def test_probe_rejects_malformed_json_without_leaking_details(monkeypatch):
     assert calls["n"] == 1
 
 
-@pytest.mark.parametrize("data", [[], [{"embedding": [0.1, 0.2]}] * 2])
-def test_probe_requires_exactly_one_data_row(monkeypatch, data):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        [],
+        {"data": []},
+        {"data": [{"embedding": [0.1, 0.2]}] * 2},
+    ],
+)
+def test_probe_requires_exactly_one_embedding_result(monkeypatch, payload):
     calls = {"n": 0}
 
     def fake_post(*args, **kwargs):
         calls["n"] += 1
-        return _Resp(data)
+        return _PayloadResp(payload)
 
     monkeypatch.setattr(embed_mod.httpx, "post", fake_post)
 
-    with pytest.raises(EmbedError, match="exactly one data row"):
+    with pytest.raises(EmbedError, match="exactly one"):
         probe_embedding_endpoint(_probe_cfg())
     assert calls["n"] == 1
 
