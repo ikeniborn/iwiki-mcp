@@ -10,6 +10,7 @@ import functools
 import json
 import os
 import re
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from mcp.server.fastmcp import FastMCP
@@ -17,7 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from . import base, ignore, indexer, okf, retrieval, sync
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
-from .engine.embed import EmbedError
+from .engine.embed import EmbedError, probe_embedding_endpoint
 from .engine.links import to_markdown_links
 from .engine.okf_artifacts import RESERVED_OKF
 from .engine.section import SectionError, replace_section
@@ -1149,6 +1150,23 @@ def authoring_rules() -> str:
     return AUTHORING_RULES
 
 
+def _print_startup_failure(reason: str) -> None:
+    base_url = os.environ.get("IWIKI_LLM_BASE_URL", "").strip().rstrip("/")
+    endpoint = f"{base_url}/embeddings" if base_url else "<not set>"
+    model = os.environ.get(
+        "IWIKI_EMBED_MODEL", "text-embedding-3-small"
+    ).strip() or "<not set>"
+    print("iwiki-mcp: startup failed", file=sys.stderr)
+    print(f"Embeddings endpoint: {endpoint}", file=sys.stderr)
+    print(f"Model: {model}", file=sys.stderr)
+    print(f"Reason: {reason}", file=sys.stderr)
+    print(
+        "Hint: verify IWIKI_LLM_BASE_URL, IWIKI_LLM_KEY, "
+        "IWIKI_EMBED_MODEL, and IWIKI_EMBED_DIMENSIONS",
+        file=sys.stderr,
+    )
+
+
 def main() -> None:
     import argparse
 
@@ -1157,6 +1175,12 @@ def main() -> None:
     args = p.parse_args()
     if args.project:
         os.environ["IWIKI_PROJECT_DIR"] = os.path.abspath(args.project)
+    try:
+        cfg = Config.load()
+        probe_embedding_endpoint(cfg)
+    except (ConfigError, EmbedError) as exc:
+        _print_startup_failure(str(exc))
+        raise SystemExit(1) from None
     mcp.run()
 
 
