@@ -143,6 +143,35 @@ def test_startup_failure_redacts_key_from_all_diagnostic_values(monkeypatch, cap
     assert "Reason: controlled <redacted> failure" in captured.err
 
 
+def test_startup_failure_redacts_normalized_loaded_key(monkeypatch, capsys):
+    key = "loaded-key"
+    cfg = replace(
+        _cfg(),
+        base_url="https://loaded-key@example.test/v1",
+        api_key=key,
+        embed_model="model-loaded-key",
+    )
+    monkeypatch.setenv("IWIKI_LLM_KEY", f"  {key}  ")
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.Config, "load", lambda: cfg)
+
+    def fail_probe(actual):
+        raise EmbedError("controlled loaded-key failure")
+
+    monkeypatch.setattr(server, "probe_embedding_endpoint", fail_probe)
+    monkeypatch.setattr(server.mcp, "run", lambda: pytest.fail("mcp.run called"))
+
+    with pytest.raises(SystemExit):
+        server.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert key not in captured.err
+    assert "Embeddings endpoint: https://<redacted>@example.test/v1/embeddings" in captured.err
+    assert "Model: model-<redacted>" in captured.err
+    assert "Reason: controlled <redacted> failure" in captured.err
+
+
 def test_main_blocks_mcp_and_reports_config_failure(monkeypatch, capsys):
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "https://example.test/v1/")
     monkeypatch.setenv("IWIKI_EMBED_MODEL", "")

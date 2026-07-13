@@ -1150,8 +1150,7 @@ def authoring_rules() -> str:
     return AUTHORING_RULES
 
 
-def _redact_startup_value(value: str) -> str:
-    api_key = os.environ.get("IWIKI_LLM_KEY", "")
+def _redact_startup_value(value: str, api_key: str) -> str:
     return value.replace(api_key, "<redacted>") if api_key else value
 
 
@@ -1160,6 +1159,7 @@ def _print_startup_failure(reason: str, cfg: Config | None = None) -> None:
     if cfg is not None:
         endpoint = f"{cfg.base_url}/embeddings"
         model = cfg.embed_model or "<not set>"
+        api_key = cfg.api_key
     else:
         if base_url.endswith("/"):
             base_url = base_url[:-1]
@@ -1167,10 +1167,11 @@ def _print_startup_failure(reason: str, cfg: Config | None = None) -> None:
         model = os.environ.get(
             "IWIKI_EMBED_MODEL", "text-embedding-3-small"
         ).strip() or "<not set>"
+        api_key = os.environ.get("IWIKI_LLM_KEY", "").strip()
     print("iwiki-mcp: startup failed", file=sys.stderr)
-    print(f"Embeddings endpoint: {_redact_startup_value(endpoint)}", file=sys.stderr)
-    print(f"Model: {_redact_startup_value(model)}", file=sys.stderr)
-    print(f"Reason: {_redact_startup_value(reason)}", file=sys.stderr)
+    print(f"Embeddings endpoint: {_redact_startup_value(endpoint, api_key)}", file=sys.stderr)
+    print(f"Model: {_redact_startup_value(model, api_key)}", file=sys.stderr)
+    print(f"Reason: {_redact_startup_value(reason, api_key)}", file=sys.stderr)
     print(
         "Hint: verify IWIKI_LLM_BASE_URL, IWIKI_LLM_KEY, "
         "IWIKI_EMBED_MODEL, and IWIKI_EMBED_DIMENSIONS",
