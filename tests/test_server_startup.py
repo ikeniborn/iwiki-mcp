@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from iwiki_mcp import server
@@ -41,6 +43,7 @@ def test_main_loads_config_probes_and_runs_mcp_in_order(monkeypatch):
 def test_main_applies_project_before_loading_config(monkeypatch, tmp_path):
     project = tmp_path / "project"
     calls = []
+    monkeypatch.setenv("IWIKI_PROJECT_DIR", "original-project")
     monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp", "--project", str(project)])
 
     def load():
@@ -86,6 +89,58 @@ def test_main_blocks_mcp_and_reports_probe_failure(monkeypatch, capsys):
     assert "IWIKI_EMBED_DIMENSIONS" in captured.err
     assert "test-secret" not in captured.err
     assert "Authorization" not in captured.err
+
+
+def test_probe_failure_reports_exact_endpoint_used_by_loaded_config(monkeypatch, capsys):
+    cfg = replace(_cfg(), base_url="https://example.test/v1//")
+    endpoints = []
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "https://different.test/v1")
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.Config, "load", lambda: cfg)
+
+    def fail_probe(actual):
+        endpoints.append(f"{actual.base_url}/embeddings")
+        raise EmbedError("controlled probe failure")
+
+    monkeypatch.setattr(server, "probe_embedding_endpoint", fail_probe)
+    monkeypatch.setattr(server.mcp, "run", lambda: pytest.fail("mcp.run called"))
+
+    with pytest.raises(SystemExit):
+        server.main()
+
+    captured = capsys.readouterr()
+    assert endpoints == ["https://example.test/v1///embeddings"]
+    assert "Embeddings endpoint: https://example.test/v1///embeddings" in captured.err
+    assert "https://different.test" not in captured.err
+
+
+def test_startup_failure_redacts_key_from_all_diagnostic_values(monkeypatch, capsys):
+    key = "same-secret"
+    cfg = replace(
+        _cfg(),
+        base_url="https://same-secret@example.test/v1?token=same-secret",
+        api_key=key,
+        embed_model="model-same-secret",
+    )
+    monkeypatch.setenv("IWIKI_LLM_KEY", key)
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.Config, "load", lambda: cfg)
+
+    def fail_probe(actual):
+        raise EmbedError("controlled same-secret failure")
+
+    monkeypatch.setattr(server, "probe_embedding_endpoint", fail_probe)
+    monkeypatch.setattr(server.mcp, "run", lambda: pytest.fail("mcp.run called"))
+
+    with pytest.raises(SystemExit):
+        server.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert key not in captured.err
+    assert "Embeddings endpoint: https://<redacted>@example.test/" in captured.err
+    assert "Model: model-<redacted>" in captured.err
+    assert "Reason: controlled <redacted> failure" in captured.err
 
 
 def test_main_blocks_mcp_and_reports_config_failure(monkeypatch, capsys):
