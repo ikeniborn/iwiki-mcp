@@ -126,6 +126,26 @@ def test_probe_wraps_transport_failures_without_retry(monkeypatch, failure, matc
     assert calls["n"] == 1
 
 
+def test_probe_wraps_invalid_url_without_leaking_details(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(*args, **kwargs):
+        calls["n"] += 1
+        raise httpx.InvalidURL(
+            "bad test-secret-key Authorization response-body-secret"
+        )
+
+    monkeypatch.setattr(embed_mod.httpx, "post", fake_post)
+
+    with pytest.raises(EmbedError, match="embedding probe URL is invalid") as exc_info:
+        probe_embedding_endpoint(_probe_cfg(api_key="test-secret-key"))
+    message = str(exc_info.value)
+    assert "test-secret-key" not in message
+    assert "Authorization" not in message
+    assert "response-body-secret" not in message
+    assert calls["n"] == 1
+
+
 def test_probe_reports_http_status_and_reason_without_response_body(monkeypatch):
     calls = {"n": 0}
     request = httpx.Request("POST", "http://x/embeddings")

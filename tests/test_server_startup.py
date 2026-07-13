@@ -91,6 +91,36 @@ def test_main_blocks_mcp_and_reports_probe_failure(monkeypatch, capsys):
     assert "Authorization" not in captured.err
 
 
+def test_main_reports_malformed_embedding_url_without_traceback(monkeypatch, capsys):
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://example.test:abc/v1")
+    monkeypatch.setenv("IWIKI_LLM_KEY", "test-secret-key")
+    monkeypatch.setenv("IWIKI_EMBED_MODEL", "test-model")
+    monkeypatch.setenv("IWIKI_EMBED_DIMENSIONS", "2")
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.mcp, "run", lambda: pytest.fail("mcp.run called"))
+
+    with pytest.raises(SystemExit) as exc:
+        server.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert captured.out == ""
+    assert "iwiki-mcp: startup failed" in captured.err
+    assert (
+        "Embeddings endpoint: http://example.test:abc/v1/embeddings"
+        in captured.err
+    )
+    assert "Model: test-model" in captured.err
+    assert "Reason: embedding probe URL is invalid" in captured.err
+    assert "Hint:" in captured.err
+    assert "IWIKI_LLM_BASE_URL" in captured.err
+    assert "IWIKI_LLM_KEY" in captured.err
+    assert "IWIKI_EMBED_MODEL" in captured.err
+    assert "IWIKI_EMBED_DIMENSIONS" in captured.err
+    assert "Traceback" not in captured.err
+    assert "test-secret-key" not in captured.err
+
+
 def test_probe_failure_reports_exact_endpoint_used_by_loaded_config(monkeypatch, capsys):
     cfg = replace(_cfg(), base_url="https://example.test/v1//")
     endpoints = []

@@ -42,6 +42,8 @@ def probe_embedding_endpoint(cfg: Config) -> None:
             timeout=10.0,
         )
         response.raise_for_status()
+    except httpx.InvalidURL as exc:
+        raise EmbedError("embedding probe URL is invalid") from exc
     except httpx.TimeoutException as exc:
         raise EmbedError("embedding endpoint probe timed out") from exc
     except httpx.HTTPStatusError as exc:
