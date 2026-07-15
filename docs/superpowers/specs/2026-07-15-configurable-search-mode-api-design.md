@@ -1,7 +1,22 @@
+---
+review:
+  spec_hash: 53fbe5371583ac8f
+  last_run: 2026-07-15
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+  findings: []
+chain:
+  intent: docs/superpowers/intents/2026-07-15-configurable-search-mode-api-intent.md
+  spec: null
+---
+
 # Configurable Semantic Search and Reranking — Design
 
 **Date:** 2026-07-15
-**Status:** draft
+**Status:** approved
 **Topic:** `configurable-search-mode-api`
 **Intent:** `docs/superpowers/intents/2026-07-15-configurable-search-mode-api-intent.md`
 
