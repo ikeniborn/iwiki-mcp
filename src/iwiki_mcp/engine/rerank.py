@@ -51,15 +51,16 @@ def rerank_candidates(cfg: Config, query: str,
         if (not isinstance(index, int) or isinstance(index, bool)
                 or not 0 <= index < len(candidates)):
             continue
+        if index in scores:
+            duplicates.add(index)
+            continue
         if (not isinstance(score, numbers.Real) or isinstance(score, bool)
                 or not math.isfinite(float(score))):
             continue
-        if index in scores or index in duplicates:
-            scores.pop(index, None)
-            duplicates.add(index)
-            continue
         scores[index] = float(score)
 
+    for index in duplicates:
+        scores.pop(index, None)
     if not scores:
         return preliminary, dict(_WARNING)
 
