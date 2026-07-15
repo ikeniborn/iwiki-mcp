@@ -80,12 +80,12 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
             seeds, key=lambda seed: (seed[2], seed[0], seed[1])):
         row = rows.get(file)
         if row is None:
-            rows[file] = {"file": file, "source": "seed", "origins": [origin],
+            rows[file] = {"file": file, "source": "seed", "seed_origins": [origin],
                           "distance": 0, "seed_rank": seed_rank,
                           "discovery": discovery}
             discovery += 1
         else:
-            row["origins"] = sorted(set(row["origins"]) | {origin})
+            row["seed_origins"] = sorted(set(row["seed_origins"]) | {origin})
             row["seed_rank"] = min(row["seed_rank"], seed_rank)
 
     seed_count = len(rows)
@@ -101,7 +101,7 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
                     rows[neighbor] = {
                         "file": neighbor,
                         "source": "graph",
-                        "origins": list(parent["origins"]),
+                        "seed_origins": list(parent["seed_origins"]),
                         "distance": distance,
                         "seed_rank": parent["seed_rank"],
                         "discovery": discovery,
@@ -109,7 +109,8 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
                     discovery += 1
                     next_frontier.append(neighbor)
                 elif row["distance"] == distance:
-                    row["origins"] = sorted(set(row["origins"]) | set(parent["origins"]))
+                    row["seed_origins"] = sorted(
+                        set(row["seed_origins"]) | set(parent["seed_origins"]))
                     row["seed_rank"] = min(row["seed_rank"], parent["seed_rank"])
         frontier = next_frontier
 

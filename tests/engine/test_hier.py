@@ -36,11 +36,11 @@ def test_rank_graph_pages_tracks_seed_and_graph_metadata(tmp_path):
     )
 
     assert ranked == [
-        {"file": "a.md", "source": "seed", "origins": ["semantic"],
+        {"file": "a.md", "source": "seed", "seed_origins": ["semantic"],
          "distance": 0, "seed_rank": 1, "discovery": 0},
-        {"file": "b.md", "source": "seed", "origins": ["lexical"],
+        {"file": "b.md", "source": "seed", "seed_origins": ["lexical"],
          "distance": 0, "seed_rank": 1, "discovery": 1},
-        {"file": "c.md", "source": "graph", "origins": ["lexical"],
+        {"file": "c.md", "source": "graph", "seed_origins": ["lexical"],
          "distance": 1, "seed_rank": 1, "discovery": 2},
     ]
 
@@ -59,7 +59,7 @@ def test_rank_graph_pages_sorts_by_rank_then_file(tmp_path):
     assert [row["file"] for row in ranked] == ["a.md", "b.md", "c.md", "d.md"]
 
 
-def test_rank_graph_pages_merges_origins_at_same_distance(tmp_path):
+def test_rank_graph_pages_merges_seed_origins_at_same_distance(tmp_path):
     (tmp_path / "a.md").write_text("[C](c.md)\n", encoding="utf-8")
     (tmp_path / "b.md").write_text("[C](c.md)\n", encoding="utf-8")
     (tmp_path / "c.md").write_text("no links\n", encoding="utf-8")
@@ -70,7 +70,7 @@ def test_rank_graph_pages_merges_origins_at_same_distance(tmp_path):
     )
 
     c_row = next(row for row in ranked if row["file"] == "c.md")
-    assert c_row["origins"] == ["lexical", "semantic"]
+    assert c_row["seed_origins"] == ["lexical", "semantic"]
 
 
 def test_rank_sections_pool_filter_and_seed_tiebreak():
