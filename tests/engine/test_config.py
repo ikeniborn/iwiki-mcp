@@ -2,6 +2,12 @@ import pytest
 from iwiki_mcp.engine.config import Config, ConfigError
 
 
+@pytest.fixture(autouse=True)
+def clear_search_env(monkeypatch):
+    monkeypatch.delenv("IWIKI_SEARCH_MODE", raising=False)
+    monkeypatch.delenv("IWIKI_RERANK_MODEL", raising=False)
+
+
 @pytest.fixture
 def embedding_env(monkeypatch):
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "https://example.test/v1")
@@ -62,8 +68,11 @@ def test_search_mode_defaults_to_hybrid(monkeypatch, embedding_env):
 def test_search_mode_rejects_invalid_values(monkeypatch, embedding_env, value):
     monkeypatch.setenv("IWIKI_SEARCH_MODE", value)
 
-    with pytest.raises(ConfigError, match="hybrid, lexical, semantic"):
+    with pytest.raises(ConfigError) as exc_info:
         Config.load()
+    assert str(exc_info.value) == (
+        "IWIKI_SEARCH_MODE must be one of: hybrid, lexical, semantic."
+    )
 
 
 def test_rerank_model_defaults_to_empty_string(monkeypatch, embedding_env):
