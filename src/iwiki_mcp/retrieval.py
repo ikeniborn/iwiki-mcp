@@ -232,9 +232,18 @@ def search_read(cfg: Config, base: str, domains: list[str], query: str,
 
 
 def hydrate_candidates(cfg: Config, base: str, candidates: list[dict]) -> list[dict]:
-    pages: dict[tuple[str, str], dict[tuple[str, int], str] | None] = {}
+    indexes: dict[str, dict[tuple[str, str, int], str]] = {}
+    pages: dict[tuple[str, str], dict[tuple[str, int], tuple[str, str]] | None] = {}
     hydrated = []
     for candidate in candidates:
+        domain = candidate["domain"]
+        if domain not in indexes:
+            migrate_store_location(base, domain)
+            indexes[domain] = {
+                (rec.file, rec.heading, rec.chunk): rec.hash
+                for rec in VectorStore(index_path(base, domain)).load()
+                if rec.kind == "section"
+            }
         page_key = candidate["domain"], candidate["file"]
         if page_key not in pages:
             path = os.path.join(domain_dir(base, candidate["domain"]), candidate["file"])
@@ -249,14 +258,18 @@ def hydrate_candidates(cfg: Config, base: str, candidates: list[dict]) -> list[d
                     cfg.summary_max,
                 )
                 pages[page_key] = {
-                    (chunk.heading, chunk.chunk): chunk.text
+                    (chunk.heading, chunk.chunk): (chunk.text, chunk.hash)
                     for chunk in chunks if chunk.kind == "section"
                 }
         chunks_by_key = pages[page_key]
         chunk_key = candidate["heading"], candidate["chunk"]
         if chunks_by_key is None or chunk_key not in chunks_by_key:
             continue
-        hydrated.append({**candidate, "text": chunks_by_key[chunk_key]})
+        text, current_hash = chunks_by_key[chunk_key]
+        indexed_hash = indexes[domain].get((candidate["file"], *chunk_key))
+        if indexed_hash != current_hash:
+            continue
+        hydrated.append({**candidate, "text": text})
     return hydrated
 
 

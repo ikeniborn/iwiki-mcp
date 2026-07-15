@@ -167,7 +167,7 @@ def test_vector_search_is_semantic_compatibility_alias(tmp_path, monkeypatch):
     json.dumps(hits)
 
 
-def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path):
+def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypatch):
     base = tmp_path / "wiki"
     page = base / "d" / "page.md"
     page.parent.mkdir(parents=True)
@@ -176,6 +176,10 @@ def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path):
         "## Long\none two three four five six\n\n## Other\nno leakage\n",
         encoding="utf-8",
     )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=0)
+    monkeypatch.setattr(indexer, "embed_texts",
+                        lambda cfg, texts: [[1.0, 0.0] for _ in texts])
+    indexer.index_domain(cfg, str(base), "d")
     candidates = [
         {"domain": "d", "file": "page.md", "heading": "Long", "chunk": 1,
          "score": 0.2, "hit": "semantic", "source": "global"},
@@ -183,9 +187,7 @@ def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path):
          "score": 0.1, "hit": "semantic", "source": "seed"},
     ]
 
-    hydrated = retrieval.hydrate_candidates(
-        replace(_cfg(), chunk_size=3, chunk_overlap=0), str(base), candidates
-    )
+    hydrated = retrieval.hydrate_candidates(cfg, str(base), candidates)
 
     assert [(hit["heading"], hit["chunk"]) for hit in hydrated] == [
         ("Long", 1), ("Long", 0)
@@ -195,14 +197,35 @@ def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path):
     assert "Other" not in hydrated[0]["text"]
 
 
-def test_hydrate_candidates_omits_stale_heading_and_missing_page(tmp_path):
+def test_hydrate_candidates_omits_stale_heading_and_missing_page(tmp_path, monkeypatch):
     base = tmp_path / "wiki"
     page = base / "d" / "page.md"
     page.parent.mkdir(parents=True)
     page.write_text("# Page\n\n## Current\ntext\n", encoding="utf-8")
+    monkeypatch.setattr(indexer, "embed_texts",
+                        lambda cfg, texts: [[1.0, 0.0] for _ in texts])
+    indexer.index_domain(_cfg(), str(base), "d")
     candidates = [
         {"domain": "d", "file": "page.md", "heading": "Stale", "chunk": 0},
         {"domain": "d", "file": "missing.md", "heading": "Current", "chunk": 0},
     ]
 
     assert retrieval.hydrate_candidates(_cfg(), str(base), candidates) == []
+
+
+def test_hydrate_candidates_omits_changed_indexed_chunk(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+    candidates = retrieval.search_read(
+        _cfg(), base, ["d"], "alpha", 10, 0.5, mode="semantic"
+    )
+    old = next(hit for hit in candidates
+               if hit["file"] == "seed.md" and hit["heading"] == "Match")
+    page = tmp_path / "wiki" / "d" / "seed.md"
+    page.write_text(
+        "---\ndescription: alpha seed\n---\n# Seed\n\n"
+        "## Match\ncompletely unrelated replacement\n\n[Graph](graph.md)\n",
+        encoding="utf-8",
+    )
+
+    assert retrieval.hydrate_candidates(_cfg(), base, [old]) == []
