@@ -118,6 +118,11 @@ def test_rerank_calls_litellm_once_and_reorders_candidates(monkeypatch):
         {"index": 0, "relevance_score": 0.8},
         {"index": 0, "relevance_score": True},
     ]},
+    {"results": [
+        {"index": 0, "relevance_score": True},
+        {"index": 0, "relevance_score": 0.8},
+    ]},
+    {"results": [{"index": 0, "relevance_score": 10 ** 10000}]},
 ])
 def test_invalid_provider_payload_falls_back_to_preliminary_order(monkeypatch, payload):
     from iwiki_mcp.engine.rerank import rerank_candidates

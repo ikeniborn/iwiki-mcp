@@ -42,6 +42,7 @@ def rerank_candidates(cfg: Config, query: str,
         return preliminary, dict(_WARNING)
 
     scores = {}
+    seen = set()
     duplicates = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -51,13 +52,19 @@ def rerank_candidates(cfg: Config, query: str,
         if (not isinstance(index, int) or isinstance(index, bool)
                 or not 0 <= index < len(candidates)):
             continue
-        if index in scores:
+        if index in seen:
             duplicates.add(index)
             continue
-        if (not isinstance(score, numbers.Real) or isinstance(score, bool)
-                or not math.isfinite(float(score))):
+        seen.add(index)
+        if not isinstance(score, numbers.Real) or isinstance(score, bool):
             continue
-        scores[index] = float(score)
+        try:
+            numeric_score = float(score)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(numeric_score):
+            continue
+        scores[index] = numeric_score
 
     for index in duplicates:
         scores.pop(index, None)
