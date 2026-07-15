@@ -97,6 +97,20 @@ def test_semantic_includes_global_section_outside_seed_graph(tmp_path, monkeypat
     assert global_hit["source"] == "global"
 
 
+def test_semantic_seed_receives_graph_page_signal_and_keeps_seed_source(
+        tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["d"], "alpha", 10, 0.5, mode="semantic"
+    )
+
+    seed = next(hit for hit in hits if hit["file"] == "seed.md")
+    assert seed["score"] == pytest.approx(2 / 61 + 1 / 62)
+    assert seed["source"] == "seed"
+
+
 def test_lexical_seed_expands_graph_without_embedding(tmp_path, monkeypatch):
     base = _seed(tmp_path, monkeypatch)
     monkeypatch.setattr(

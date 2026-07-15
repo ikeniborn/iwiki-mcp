@@ -148,12 +148,12 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                 _internal_hit(domain, rec, "seed", rank_key, ["lexical"])
             )
     for page_rank, page in enumerate(graph_pages):
-        if page["source"] != "graph":
-            continue
         for rec in sections_by_file.get(page["file"], []):
             rank_key = (page_rank, rec.ordinal, rec.chunk, rec.file)
             signals["graph_page"].append(
-                _internal_hit(domain, rec, "graph", rank_key, page["seed_origins"])
+                _internal_hit(
+                    domain, rec, page["source"], rank_key, page["seed_origins"]
+                )
             )
     for rec, score in semantic_chunks:
         signals["semantic_chunk"].append(
