@@ -13,6 +13,29 @@ from mcp import ClientSession, StdioServerParameters  # noqa: E402
 from mcp.client.stdio import stdio_client  # noqa: E402
 
 
+EXPECTED_TOOLS = {
+    "wiki_status", "wiki_list_domains", "wiki_list_pages", "wiki_read_page",
+    "wiki_search", "wiki_related", "wiki_write_page", "wiki_update_page",
+    "wiki_delete_page", "wiki_index", "wiki_create_domain", "wiki_bind",
+    "wiki_lint", "wiki_remediation_plan", "wiki_migrate_okf", "wiki_apply_okf",
+    "wiki_export_okf", "wiki_sync",
+}
+
+
+def _enum_values(schema):
+    if isinstance(schema, dict):
+        values = set(schema.get("enum", []))
+        for value in schema.values():
+            values.update(_enum_values(value))
+        return values
+    if isinstance(schema, list):
+        values = set()
+        for value in schema:
+            values.update(_enum_values(value))
+        return values
+    return set()
+
+
 @contextmanager
 def embedding_server():
     requests = []
@@ -88,8 +111,14 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 r, w, read_timeout_seconds=timedelta(seconds=10)
             ) as session:
                 await session.initialize()
-                tools = {t.name for t in (await session.list_tools()).tools}
-                assert {"wiki_status", "wiki_search", "wiki_write_page"} <= tools
+                listed = (await session.list_tools()).tools
+                tools = {tool.name: tool for tool in listed}
+                assert set(tools) == EXPECTED_TOOLS
+                search_schema = tools["wiki_search"].inputSchema
+                assert "mode" not in search_schema.get("required", [])
+                assert _enum_values(search_schema["properties"]["mode"]) == {
+                    "hybrid", "lexical", "semantic",
+                }
                 res = await session.call_tool("wiki_status", {})
                 assert not res.isError
                 assert res.content
