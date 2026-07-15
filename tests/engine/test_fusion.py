@@ -47,7 +47,7 @@ def test_fuse_ranked_respects_limit():
 def test_fuse_ranked_ignores_duplicate_identity_within_signal():
     hit = _hit("a", "A")
 
-    fused = fuse_ranked({"one": [hit, hit]}, limit=2)
+    fused = fuse_ranked({"one": [hit, dict(hit)]}, limit=2)
 
     assert len(fused) == 1
     assert fused[0]["score"] == 1 / 61
