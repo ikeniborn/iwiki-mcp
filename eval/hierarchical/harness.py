@@ -1,46 +1,57 @@
-"""Deterministic, network-free eval for the hierarchical retrieval flow.
-Builds in-memory summary/section records from a fixture vault, runs
-seed->graph->section, and reports article/section recall + MRR."""
+"""Deterministic, network-free eval for the hierarchical retrieval flow."""
 from __future__ import annotations
 
-import os
-import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from iwiki_mcp.engine import chunk as _chunk
 from iwiki_mcp.engine import hier, store
 
 
 def _records(vault, embed_fn):
-    summ, secs = [], []
-    for file, md in vault.items():
-        for c in _chunk.chunk_markdown(file, md, 512, 64):
-            rec = store.make_record(c, embed_fn(c.text))
-            (summ if c.kind == "summary" else secs).append(rec)
-    return summ, secs
+    summaries, sections = [], []
+    for file, markdown in vault.items():
+        for chunk in _chunk.chunk_markdown(file, markdown, 512, 64):
+            record = store.make_record(chunk, embed_fn(chunk.text))
+            (summaries if chunk.kind == "summary" else sections).append(record)
+    return summaries, sections
 
 
-def run_eval(vault, queries, embed_fn) -> dict:
-    summ, secs = _records(vault, embed_fn)
-    with tempfile.TemporaryDirectory() as d:
-        for file, md in vault.items():
-            with open(os.path.join(d, file), "w", encoding="utf-8") as fh:
-                fh.write(md)
-        art_hit = sec_hit = 0
-        rr = 0.0
-        for q in queries:
-            qv = q["vec"]
-            seeds = hier.seed_articles(qv, summ, 5, 0.0)
-            pool = hier.expand_graph([f for f, _ in seeds], d, 1, 10)
-            ranked = hier.rank_sections(qv, secs, pool, 8)
-            if any(f in pool for f in q["articles"]):
-                art_hit += 1
-            headings = [h["heading"] for h in ranked]
-            if any(s in headings for s in q["sections"]):
-                sec_hit += 1
-            for i, h in enumerate(ranked, 1):
-                if h["heading"] in q["sections"]:
-                    rr += 1.0 / i
-                    break
-        n = len(queries) or 1
-        return {"article_recall": art_hit / n, "section_recall": sec_hit / n,
-                "mrr": rr / n}
+def _metrics(rankings, queries):
+    hits = 0
+    reciprocal_rank = 0.0
+    for ranking, query in zip(rankings, queries):
+        relevant = set(query["relevant"])
+        if any(identity in relevant for identity in ranking):
+            hits += 1
+        for rank, identity in enumerate(ranking, 1):
+            if identity in relevant:
+                reciprocal_rank += 1.0 / rank
+                break
+    count = len(queries) or 1
+    return {"recall_at_k": hits / count, "mrr_at_k": reciprocal_rank / count}
+
+
+@contextmanager
+def _vault_dir(vault):
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        for file, markdown in vault.items():
+            path = root / file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(markdown, encoding="utf-8")
+        yield root
+
+
+def run_baseline_eval(vault, queries, embed_fn, top_k=8) -> dict:
+    summaries, sections = _records(vault, embed_fn)
+    rankings = []
+    with _vault_dir(vault) as directory:
+        for query in queries:
+            query_vector = embed_fn(query["query"])
+            seeds = hier.seed_articles(query_vector, summaries, 5, 0.0)
+            pool = hier.expand_graph([file for file, _ in seeds], str(directory), 1, 10)
+            ranked = hier.rank_sections(query_vector, sections, pool, top_k)
+            rankings.append([(hit["file"], hit["heading"]) for hit in ranked])
+    return _metrics(rankings, queries)
