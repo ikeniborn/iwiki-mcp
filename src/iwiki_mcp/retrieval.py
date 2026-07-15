@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import numpy as np
 
@@ -19,6 +20,24 @@ _VALID_MODES = {"hybrid", "semantic", "lexical"}
 
 def _candidate_limit(top_k: int) -> int:
     return max(top_k, CANDIDATE_LIMIT)
+
+
+def _domain_file_path(base: str, domain: str, file: str) -> Path | None:
+    if not isinstance(file, str) or not file or "\\" in file:
+        return None
+    parts = file.split("/")
+    posix_path = PurePosixPath(file)
+    windows_path = PureWindowsPath(file)
+    if (posix_path.is_absolute() or windows_path.is_absolute()
+            or windows_path.drive or any(part in ("", ".", "..") for part in parts)):
+        return None
+    root = Path(domain_dir(base, domain)).resolve()
+    try:
+        path = root.joinpath(*parts).resolve()
+        path.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
 
 
 def _facet_ok(rtype, rtags, want_type, want_tags) -> bool:
@@ -62,7 +81,8 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
     records = VectorStore(index_path(base, domain)).load()
     records = [
         rec for rec in records
-        if _facet_ok(rec.type, rec.tags, type, tags)
+        if _domain_file_path(base, domain, rec.file) is not None
+        and _facet_ok(rec.type, rec.tags, type, tags)
         and (query_vec is None or rec.dim == len(query_vec))
     ]
     summaries = [rec for rec in records if rec.kind == "summary"]
@@ -246,7 +266,10 @@ def hydrate_candidates(cfg: Config, base: str, candidates: list[dict]) -> list[d
             }
         page_key = candidate["domain"], candidate["file"]
         if page_key not in pages:
-            path = os.path.join(domain_dir(base, candidate["domain"]), candidate["file"])
+            path = _domain_file_path(base, domain, candidate["file"])
+            if path is None:
+                pages[page_key] = None
+                continue
             try:
                 with open(path, encoding="utf-8") as fh:
                     markdown = fh.read()

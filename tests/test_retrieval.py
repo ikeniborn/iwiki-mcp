@@ -1,9 +1,13 @@
+import builtins
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from iwiki_mcp import indexer, retrieval
+from iwiki_mcp import base as wiki_base, indexer, retrieval
+from iwiki_mcp.engine import store
+from iwiki_mcp.engine.chunk import chunk_markdown
 from iwiki_mcp.engine.config import Config
 
 
@@ -169,7 +173,7 @@ def test_vector_search_is_semantic_compatibility_alias(tmp_path, monkeypatch):
 
 def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypatch):
     base = tmp_path / "wiki"
-    page = base / "d" / "page.md"
+    page = base / "d" / "nested" / "page.md"
     page.parent.mkdir(parents=True)
     page.write_text(
         "---\ndescription: secret frontmatter\n---\n# Page\n\n"
@@ -181,9 +185,9 @@ def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypat
                         lambda cfg, texts: [[1.0, 0.0] for _ in texts])
     indexer.index_domain(cfg, str(base), "d")
     candidates = [
-        {"domain": "d", "file": "page.md", "heading": "Long", "chunk": 1,
+        {"domain": "d", "file": "nested/page.md", "heading": "Long", "chunk": 1,
          "score": 0.2, "hit": "semantic", "source": "global"},
-        {"domain": "d", "file": "page.md", "heading": "Long", "chunk": 0,
+        {"domain": "d", "file": "nested/page.md", "heading": "Long", "chunk": 0,
          "score": 0.1, "hit": "semantic", "source": "seed"},
     ]
 
@@ -229,3 +233,77 @@ def test_hydrate_candidates_omits_changed_indexed_chunk(tmp_path, monkeypatch):
     )
 
     assert retrieval.hydrate_candidates(_cfg(), base, [old]) == []
+
+
+def _poisoned_section(base, file, content):
+    chunk = next(chunk for chunk in chunk_markdown(
+        file, content, _cfg().chunk_size, _cfg().chunk_overlap, _cfg().summary_max
+    ) if chunk.kind == "section")
+    rec = store.make_record(chunk, [1.0, 0.0])
+    store.save_index(wiki_base.index_path(str(base), "d"), [rec])
+    return rec
+
+
+def _assert_secret_not_read(monkeypatch, secret, callback):
+    real_open = builtins.open
+    reads = []
+
+    def guarded_open(file, *args, **kwargs):
+        if Path(file).resolve() == secret.resolve():
+            reads.append(str(file))
+            raise AssertionError("secret read")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    assert callback() == []
+    assert reads == []
+
+
+def test_retrieval_and_hydration_reject_traversal_file(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    (base / "d").mkdir(parents=True)
+    secret = base / "secret.md"
+    content = "# Secret\n\n## Secret\nprivate alpha\n"
+    secret.write_text(content, encoding="utf-8")
+    rec = _poisoned_section(base, "../secret.md", content)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    assert retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "alpha", 10, -1.0, mode="semantic"
+    ) == []
+    candidate = {
+        "domain": "d", "file": rec.file, "heading": rec.heading,
+        "chunk": rec.chunk, "score": 1.0, "hit": "semantic", "source": "global",
+    }
+    _assert_secret_not_read(
+        monkeypatch, secret,
+        lambda: retrieval.hydrate_candidates(_cfg(), str(base), [candidate]),
+    )
+
+
+def test_retrieval_and_hydration_reject_symlink_escape(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    secret = tmp_path / "secret.md"
+    content = "# Secret\n\n## Secret\nprivate alpha\n"
+    secret.write_text(content, encoding="utf-8")
+    link = domain / "linked.md"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        pytest.skip("symlinks are not supported")
+    rec = _poisoned_section(base, "linked.md", content)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    assert retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "alpha", 10, -1.0, mode="semantic"
+    ) == []
+    candidate = {
+        "domain": "d", "file": rec.file, "heading": rec.heading,
+        "chunk": rec.chunk, "score": 1.0, "hit": "semantic", "source": "global",
+    }
+    _assert_secret_not_read(
+        monkeypatch, secret,
+        lambda: retrieval.hydrate_candidates(_cfg(), str(base), [candidate]),
+    )
