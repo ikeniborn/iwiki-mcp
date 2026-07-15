@@ -15,8 +15,8 @@ def _terms(query: str) -> list[str]:
     return [t.lower() for t in re.findall(r"\w+", query) if len(t) > 2]
 
 
-def grep_sections(domain_dir: str, query: str, top_k: int) -> list[dict]:
-    if top_k <= 0:
+def grep_sections(domain_dir: str, query: str, top_k: int | None) -> list[dict]:
+    if top_k is not None and top_k <= 0:
         return []
     terms = _terms(query)
     if not terms:
@@ -42,4 +42,4 @@ def grep_sections(domain_dir: str, query: str, top_k: int) -> list[dict]:
                 out.append({"file": rel, "heading": heading, "chunk": 0,
                             "score": score, "hit": "lexical"})
     out.sort(key=lambda h: (-h["score"], h["file"], h["heading"]))
-    return out[:top_k]
+    return out if top_k is None else out[:top_k]
