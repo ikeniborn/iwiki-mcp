@@ -9,10 +9,9 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
   index source areas during ordinary project startup. If the project is not bound
   or the write domain is missing, report that setup is required and ask the user
   before changing `.iwiki.toml` or creating a domain.
-- **After changing functionality:** for new knowledge/pages, use `wiki_write_page`. For
-  an existing page, first call `wiki_read_page`, then confirm the guarded
-  replacement/edit with the user because `wiki_write_page` refuses overwrite in v1.
-  Do not imply the tool can update existing pages directly.
+- **After changing functionality:** use `wiki_write_page` for a new page,
+  `wiki_update_page` for one existing `##` section, and `wiki_delete_page` only
+  when the documented source was removed. Run `wiki_lint` after the write.
 - **Periodically / at end of session:** call `wiki_sync` to pull/push the base.
-- Editing an existing page is guarded -- `wiki_write_page` refuses to overwrite; confirm
-  with the user and proceed deliberately.
+- Editing an existing page is section-scoped through `wiki_update_page`;
+  `wiki_write_page` still refuses to overwrite a page.
