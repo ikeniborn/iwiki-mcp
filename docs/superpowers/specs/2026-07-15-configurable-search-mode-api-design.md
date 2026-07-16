@@ -1,7 +1,7 @@
 ---
 review:
-  spec_hash: 53fbe5371583ac8f
-  last_run: 2026-07-15
+  spec_hash: acadde912de598ab
+  last_run: 2026-07-16
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -268,8 +268,9 @@ result or a precise external blocker without weakening local acceptance.
 
 ### R13 — Documentation consistency
 
-Update `README.md`, `docs/README.ru.md`, agent templates, the MCP authoring
-resource, and the bound `iwiki-mcp` retrieval/tool-surface pages. Besides the
+Update `README.md`, `docs/README.ru.md`, the standalone server report, agent
+templates, the MCP authoring resource, and the complete bound `iwiki-mcp`
+retrieval/tool-surface pages. Besides the
 new mode/config/reranker behavior, fix audited contradictions within this
 scope: pure lexical hits use `source="lexical"`; descriptions seed pages rather
 than prefixing section vectors; graph-reachable pages need no description to
@@ -286,11 +287,12 @@ broken/stale findings introduced by the update.
 
 ### R14 — Release level
 
-Bump `pyproject.toml` from `0.6.10` to `0.7.0`. The minor bump communicates the
-intentional breaking rename from `vector` to `semantic` while the package is
-pre-1.0.
+Bump `pyproject.toml` from `0.6.10` to `0.7.1`. The new `0.7` minor line
+communicates the intentional breaking rename from `vector` to `semantic` while
+the patch component records the documentation-consistency remediation completed
+before branch integration.
 
-Acceptance: package metadata, CLI import, and documentation report `0.7.0`.
+Acceptance: package metadata, CLI import, and documentation report `0.7.1`.
 
 ## 8. Risks and mitigations
 
@@ -318,6 +320,7 @@ Acceptance: package metadata, CLI import, and documentation report `0.7.0`.
 - `src/iwiki_mcp/server.py` — public mode resolution and response metadata.
 - `eval/hierarchical/`, `tests/` — baseline, quality, unit, integration, and MCP
   schema coverage.
-- `README.md`, `docs/README.ru.md`, `templates/`, `src/iwiki_mcp/resources.py`,
-  and the `iwiki-mcp` domain — user-facing documentation.
+- `README.md`, `docs/README.ru.md`, `docs/reports/iwiki-mcp-server-report.html`,
+  `templates/`, `src/iwiki_mcp/resources.py`, and the `iwiki-mcp` domain —
+  user-facing documentation.
 - `pyproject.toml` — release version.

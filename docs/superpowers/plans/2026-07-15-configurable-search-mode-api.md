@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 1a492520fbc58626
+  plan_hash: 17b9504e19dd16c2
   last_run: 2026-07-16
   phases:
     structure: { status: passed }
@@ -11,7 +11,7 @@ review:
   findings: []
 result_check:
   verdict: OK
-  plan_hash: 1a492520fbc58626
+  plan_hash: 17b9504e19dd16c2
   last_run: 2026-07-16
   reviewed: true
   docs_checked: true
@@ -48,9 +48,9 @@ chain:
 - `tests/test_retrieval.py`, `tests/test_retrieval_facets.py`, `tests/test_server_search.py`, `tests/test_server_search_facets.py`, `tests/test_server_search_write_intent.py`: read-pipeline and write-isolation integration coverage.
 - `eval/hierarchical/fixtures.py`, `eval/hierarchical/harness.py`, `tests/eval/test_hierarchical_eval.py`, `docs/superpowers/evidence/configurable-search-mode-api-eval.md`: fixed offline quality gate and recorded evidence.
 - `tests/test_mcp_smoke.py`: complete 18-tool registration and optional enum schema contract.
-- `README.md`, `docs/README.ru.md`, `templates/AGENTS.md.snippet`, `templates/CLAUDE.md.snippet`, `src/iwiki_mcp/resources.py`, `tests/test_resources.py`: synchronized public documentation.
-- `pyproject.toml`, `src/iwiki_mcp/__init__.py`, `uv.lock`: `0.7.0` release metadata.
-- iwiki pages `retrieval` and `mcp-server`: implemented read-search and public tool behavior.
+- `README.md`, `docs/README.ru.md`, `docs/reports/iwiki-mcp-server-report.html`, `templates/AGENTS.md.snippet`, `templates/CLAUDE.md.snippet`, `src/iwiki_mcp/resources.py`, `tests/test_resources.py`: synchronized public documentation and regression coverage.
+- `pyproject.toml`, `src/iwiki_mcp/__init__.py`, `uv.lock`: `0.7.1` release metadata.
+- iwiki pages `retrieval`, `mcp-server`, and `installation`: complete implemented read-search, public tool, and environment behavior.
 
 ## Requirement Traceability
 
@@ -1716,11 +1716,12 @@ git commit -m "test: verify fused search quality"
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/README.ru.md`
+- Modify: `docs/reports/iwiki-mcp-server-report.html`
 - Modify: `templates/AGENTS.md.snippet`
 - Modify: `templates/CLAUDE.md.snippet`
 - Modify: `src/iwiki_mcp/resources.py`
 - Modify: `tests/test_resources.py`
-- Update iwiki: `iwiki-mcp/retrieval` section `Hybrid search`
+- Update iwiki: all search-contract sections of `iwiki-mcp/retrieval`
 - Update iwiki: `iwiki-mcp/mcp-server` section `Tool surface`
 
 - [ ] **Step 1: Write documentation contract tests**
@@ -1745,6 +1746,11 @@ def test_agent_snippets_use_supported_existing_page_update_path():
         assert "Do not imply the tool can update existing pages directly" not in text
 ```
 
+Add regressions that read both READMEs and the standalone server report. They
+must reject the old description-as-section-prefix claim, require separate
+summary-vector wording, reject `Hybrid / vector / lexical`, and assert that the
+report's tool table contains the exact 18-tool surface.
+
 - [ ] **Step 2: Verify RED**
 
 ```bash
@@ -1762,6 +1768,8 @@ In both READMEs, document:
 - optional `IWIKI_RERANK_MODEL`, reused URL/key, one 60-second batch, sanitized fail-soft metadata;
 - independent semantic page, lexical page, graph, global semantic chunk, and lexical section signals fused before final top-k;
 - exact result `hit` and `source` values;
+- `description` is a separate page-summary vector and is never prefixed to section vectors;
+- graph-reachable pages do not require their own description to enter through graph expansion;
 - complete 18-tool surface including `wiki_remediation_plan`;
 - `wiki_update_page` as the supported existing-section edit path;
 - reserved root `index.md`/`log.md` behavior under type directories;
@@ -1785,15 +1793,23 @@ Add a compact search section to `AUTHORING_RULES` with the canonical modes, envi
 
 ```bash
 uv run pytest -q tests/test_resources.py
-rg -n 'mode.?=.?("|`)?vector|Modes:.*vector|Режимы:.*vector' README.md docs/README.ru.md templates src/iwiki_mcp/resources.py
-rg -n 'wiki_remediation_plan|wiki_update_page|IWIKI_SEARCH_MODE|IWIKI_RERANK_MODEL' README.md docs/README.ru.md templates src/iwiki_mcp/resources.py
+rg -n 'mode.?=.?("|`)?vector|Modes:.*vector|Режимы:.*vector|Hybrid / vector / lexical' README.md docs/README.ru.md docs/reports/iwiki-mcp-server-report.html templates src/iwiki_mcp/resources.py
+rg -n 'wiki_remediation_plan|wiki_update_page|IWIKI_SEARCH_MODE|IWIKI_RERANK_MODEL' README.md docs/README.ru.md docs/reports/iwiki-mcp-server-report.html templates src/iwiki_mcp/resources.py
 ```
 
 Expected: first search exits 1 with no public vector-mode claim; second finds each required term in the appropriate English/Russian/template/resource surfaces.
 
 - [ ] **Step 6: Update the bound iwiki pages through MCP**
 
-Read `retrieval` and `mcp-server`, then replace only the named sections through `wiki_update_page`. `retrieval/Hybrid search` must describe canonical modes, five independent signals, RRF, exact `hit`/`source`, hydration, and fail-soft reranking. `mcp-server/Tool surface` must list all 18 tools and the optional `wiki_search.mode` enum/default precedence. Use the changed source paths `src/iwiki_mcp/retrieval.py` and `src/iwiki_mcp/server.py` respectively.
+Read the complete `retrieval` and `mcp-server` pages before updating them through
+`wiki_update_page`. `retrieval/Hybrid search`, `Vector search`, `Lexical search`,
+and `Result shape` must agree on canonical modes, five independent signals, RRF,
+exact `hit`/`source`, hydration, internal-only vector terminology, and fail-soft
+reranking. `mcp-server/Tool surface` must list all 18 tools and the optional
+`wiki_search.mode` enum/default precedence. Refresh `installation/Required
+environment` whenever a README edit changes its source hash. Use the changed
+source paths `src/iwiki_mcp/retrieval.py`, `src/iwiki_mcp/server.py`, and
+`README.md` respectively.
 
 Run `wiki_lint(domain="iwiki-mcp")`.
 
@@ -1802,7 +1818,7 @@ Expected: no broken or stale findings introduced. The pre-existing `architecture
 - [ ] **Step 7: Commit documentation**
 
 ```bash
-git add README.md docs/README.ru.md templates/AGENTS.md.snippet templates/CLAUDE.md.snippet src/iwiki_mcp/resources.py tests/test_resources.py
+git add README.md docs/README.ru.md docs/reports/iwiki-mcp-server-report.html templates/AGENTS.md.snippet templates/CLAUDE.md.snippet src/iwiki_mcp/resources.py tests/test_resources.py
 git commit -m "docs: document semantic search and reranking"
 ```
 
@@ -1816,16 +1832,16 @@ git commit -m "docs: document semantic search and reranking"
 
 - [ ] **Step 1: Set the intentional minor release**
 
-Change package metadata from `0.6.10` to `0.7.0`:
+Change package metadata from `0.6.10` to `0.7.1`:
 
 ```toml
-version = "0.7.0"
+version = "0.7.1"
 ```
 
 Set the package constant to the same value:
 
 ```python
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 ```
 
 Refresh only lock metadata:
@@ -1848,7 +1864,7 @@ Expected: all focused tests pass.
 uv run pytest -q
 uv run flake8 src tests eval
 uv run iwiki-mcp --help
-uv run python -c 'import iwiki_mcp; assert iwiki_mcp.__version__ == "0.7.0"'
+uv run python -c 'import iwiki_mcp; assert iwiki_mcp.__version__ == "0.7.1"'
 ```
 
 Expected: full pytest and flake8 exit 0; help exits 0 without a model request; version assertion exits 0.
@@ -1875,7 +1891,7 @@ Expected: no whitespace errors, no unrelated implementation paths, no broken/sta
 
 ```bash
 git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock
-git commit -m "chore: release version 0.7.0"
+git commit -m "chore: release version 0.7.1"
 ```
 
 - [ ] **Step 7: Run chain reconciliation before handoff**

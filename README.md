@@ -252,7 +252,7 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 |---|---|
 | `type` | Required. **Open** vocabulary: prefer `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default), but any value is accepted (e.g. `person`); off-list values get only an advisory `unknown_type`. Also the page's directory: `wiki_write_page` places the file at `<type>/<slug>.md` under the domain root — a bare `slug` is prefixed with the resolved `type`, and a `slug` that already carries a leading segment must match it. |
 | `title` | Derived from the page's `# Title` H1. |
-| `description` | The authored article summary — the single source of the summary, embedded as each section's context prefix. Stored in full (never truncated). Falls back to a `## Overview` section only transitionally (migration). |
+| `description` | The authored article summary — the single source of the summary, stored as a separate summary vector for page seeding. It is never prefixed to section vectors and is stored in full (never truncated). Falls back to a `## Overview` section only transitionally (migration). |
 | `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. The stored path is project-relative — an absolute path under the project is relativized, and any path (absolute or relative, e.g. `../../etc/hosts`) that resolves outside the project is rejected. |
 | `tags` | Lowercase kebab-case labels, at most 5 per page. |
 | `status` | Optional iwiki extension: `stub` (default), `developing`, `stable`, `deprecated`. |
