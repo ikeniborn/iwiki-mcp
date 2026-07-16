@@ -135,7 +135,7 @@ text{ pointer-events:none; }
 <main class="report">
 
 <h1>iwiki-mcp — How the Server Works</h1>
-<p class="lead">A stdio MCP server that fronts a shared, git-synced wiki <em>base</em> split into <em>domains</em>. Coding agents author Markdown pages; the server validates structure, persists, embeds, indexes, and runs hybrid (vector + lexical) search across the domains a project is bound to.</p>
+<p class="lead">A stdio MCP server that fronts a shared, git-synced wiki <em>base</em> split into <em>domains</em>. Coding agents author Markdown pages; the server validates structure, persists, embeds, indexes, and runs hybrid, lexical, or semantic search across the domains a project is bound to.</p>
 <p class="sub">sources: <code>src/iwiki_mcp/**</code> · <code>docs/wiki/*.md</code> · generated 2026-07-01 · branch <code>master</code></p>
 
 <div class="note"><b>Not a daemon.</b> The server lives for the client session that spawned it. <code>iwiki-mcp = iwiki_mcp.server:main</code> parses an optional <code>--project DIR</code>, then <code>mcp.run()</code> speaks MCP over stdio via a <code>FastMCP("iwiki")</code> instance.</div>
@@ -158,10 +158,10 @@ text{ pointer-events:none; }
     <div class="comp"><b>MCP Client</b><br><span class="sub">Claude Code / Codex — the authoring agent</span></div>
 
     <div class="boundary" data-label="iwiki-mcp server · top layer">
-      <div class="comp"><b>server.py</b><br><span class="sub">12 <code>wiki_*</code> tools · <code>@_safe</code> wrap · path guards</span></div>
+      <div class="comp"><b>server.py</b><br><span class="sub">18 <code>wiki_*</code> tools · <code>@_safe</code> wrap · path guards</span></div>
       <div class="comp"><b>base.py</b><br><span class="sub">binding · domain/page path resolution</span></div>
       <div class="comp"><b>indexer.py</b><br><span class="sub">ingest · incremental re-index · ingest log</span></div>
-      <div class="comp"><b>retrieval.py</b><br><span class="sub">hybrid vector + lexical query</span></div>
+      <div class="comp"><b>retrieval.py</b><br><span class="sub">five signals · RRF · exact hydration</span></div>
       <div class="comp"><b>sync.py</b><br><span class="sub">auto-commit · pull --rebase · push</span></div>
       <div class="comp"><b>ignore.py / lock.py</b><br><span class="sub"><code>.iwikiignore</code> gate · base file-lock</span></div>
       <div class="comp"><b>resources.py</b><br><span class="sub"><code>iwiki://authoring-rules</code></span></div>
@@ -244,7 +244,7 @@ text{ pointer-events:none; }
 <svg viewBox="0 0 980 315" role="img" aria-label="Query-path interaction sequence across four actors">
   <g class="node"><rect class="card" x="55"  y="24" width="150" height="40" rx="10"/><text class="t-title" x="130" y="42" text-anchor="middle">MCP Client</text><text class="t-sub" x="130" y="57" text-anchor="middle">agent / IDE</text></g>
   <g class="node"><rect class="card" x="295" y="24" width="150" height="40" rx="10"/><text class="t-title" x="370" y="42" text-anchor="middle">iwiki-mcp</text><text class="t-sub" x="370" y="57" text-anchor="middle">retrieval.py</text></g>
-  <g class="node"><rect class="card" x="535" y="24" width="150" height="40" rx="10"/><text class="t-title" x="610" y="42" text-anchor="middle">engine/</text><text class="t-sub" x="610" y="57" text-anchor="middle">search·grep</text></g>
+  <g class="node"><rect class="card" x="535" y="24" width="150" height="40" rx="10"/><text class="t-title" x="610" y="42" text-anchor="middle">engine/</text><text class="t-sub" x="610" y="57" text-anchor="middle">hier·fusion·rerank</text></g>
   <g class="node"><rect class="card" x="775" y="24" width="150" height="40" rx="10"/><text class="t-title" x="850" y="42" text-anchor="middle">Embeddings</text><text class="t-sub" x="850" y="57" text-anchor="middle">query ×1</text></g>
 
   <line class="lifeline" x1="130" y1="64" x2="130" y2="295"/>
@@ -255,22 +255,22 @@ text{ pointer-events:none; }
   <text class="lbl" x="250" y="94"  text-anchor="middle">wiki_search(query, scope, mode)</text>
   <path class="seq-call" marker-end="url(#arrA)" d="M130,100 H368"/>
 
-  <text class="lbl" x="490" y="129" text-anchor="middle">resolve_scope → domains · hybrid_search</text>
+  <text class="lbl" x="490" y="129" text-anchor="middle">resolve_scope → prepare candidates</text>
   <path class="seq-call" marker-end="url(#arrA)" d="M370,135 H608"/>
 
-  <text class="lbl" x="730" y="164" text-anchor="middle">POST /embeddings (vector / hybrid mode)</text>
+  <text class="lbl" x="730" y="164" text-anchor="middle">POST /embeddings (semantic / hybrid)</text>
   <path class="seq-call" marker-end="url(#arrA)" d="M610,170 H848"/>
 
   <text class="lbl" x="730" y="199" text-anchor="middle">query vector</text>
   <path class="seq-ret" marker-end="url(#arr)" d="M850,205 H612"/>
 
-  <text class="lbl" x="490" y="234" text-anchor="middle">cosine + grep → merge · dedupe · rank</text>
+  <text class="lbl" x="490" y="234" text-anchor="middle">five signals → RRF → optional rerank</text>
   <path class="seq-ret" marker-end="url(#arr)" d="M610,240 H372"/>
 
-  <text class="lbl" x="250" y="269" text-anchor="middle">{ results: [ {domain,file,heading,score,hit} ] }</text>
+  <text class="lbl" x="250" y="269" text-anchor="middle">{ results: [ {domain,file,heading,score,hit,source} ] }</text>
   <path class="seq-ret" marker-end="url(#arr)" d="M370,275 H132"/>
 </svg>
-<figcaption>Query path. <code>mode=lexical</code> skips the embeddings call entirely; <code>vector</code>/<code>hybrid</code> embed the query exactly once and reuse it across every in-scope domain.</figcaption>
+<figcaption>Query path. <code>mode=lexical</code> skips the embeddings call entirely; <code>semantic</code>/<code>hybrid</code> embed the query exactly once and reuse it across every in-scope domain.</figcaption>
 </figure>
 
 <!-- ============================================================= -->
@@ -311,18 +311,18 @@ text{ pointer-events:none; }
 <figcaption>Blocking validation (<code>deep_heading</code>, <code>pre_h2_text</code>) and the <code>.iwikiignore</code> source gate reject before any write. Only changed chunks (hash + dim mismatch) are re-embedded.</figcaption>
 </figure>
 
-<h3>3b. Query path — scope → vector ∥ lexical → merge → rank</h3>
+<h3>3b. Query path — scope → independent signals → RRF → optional rerank</h3>
 <figure class="diagram">
 <svg viewBox="0 0 1060 320" role="img" aria-label="Query-path data flow: scope resolution, parallel vector and lexical search, merge and rank">
   <!-- nodes -->
   <g class="node"><rect class="card" x="20"  y="130" width="140" height="60" rx="12"/><rect class="bar-accent" x="28"  y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="90"  y="156" text-anchor="middle">wiki_search</text><text class="t-sub" x="90"  y="174" text-anchor="middle">query · mode</text></g>
   <g class="node"><rect class="card" x="195" y="130" width="140" height="60" rx="12"/><rect class="bar-ok" x="203" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="265" y="156" text-anchor="middle">resolve_scope</text><text class="t-sub" x="265" y="174" text-anchor="middle">read[] / all</text></g>
 
-  <g class="node"><rect class="card" x="380" y="48"  width="180" height="60" rx="12"/><rect class="bar-accent" x="388" y="60" width="5" height="36" rx="2.5"/><text class="t-title" x="470" y="74" text-anchor="middle">vector_search</text><text class="t-sub" x="470" y="92" text-anchor="middle">embed query · cosine (numpy)</text></g>
-  <g class="node"><rect class="card" x="380" y="212" width="180" height="60" rx="12"/><rect class="bar-ok" x="388" y="224" width="5" height="36" rx="2.5"/><text class="t-title" x="470" y="238" text-anchor="middle">lexical_search</text><text class="t-sub" x="470" y="256" text-anchor="middle">grep · term-frequency</text></g>
+  <g class="node"><rect class="card" x="380" y="48"  width="180" height="60" rx="12"/><rect class="bar-accent" x="388" y="60" width="5" height="36" rx="2.5"/><text class="t-title" x="470" y="74" text-anchor="middle">semantic signals</text><text class="t-sub" x="470" y="92" text-anchor="middle">page · graph · global chunks</text></g>
+  <g class="node"><rect class="card" x="380" y="212" width="180" height="60" rx="12"/><rect class="bar-ok" x="388" y="224" width="5" height="36" rx="2.5"/><text class="t-title" x="470" y="238" text-anchor="middle">lexical signals</text><text class="t-sub" x="470" y="256" text-anchor="middle">page · section · graph</text></g>
 
-  <g class="node"><rect class="card" x="615" y="130" width="150" height="60" rx="12"/><rect class="bar-ok" x="623" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="690" y="156" text-anchor="middle">hybrid merge</text><text class="t-sub" x="690" y="174" text-anchor="middle">dedupe key</text></g>
-  <g class="node"><rect class="card" x="800" y="130" width="115" height="60" rx="12"/><rect class="bar-ok" x="808" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="857" y="156" text-anchor="middle">rank</text><text class="t-sub" x="857" y="174" text-anchor="middle">vector/both first</text></g>
+  <g class="node"><rect class="card" x="615" y="130" width="150" height="60" rx="12"/><rect class="bar-ok" x="623" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="690" y="156" text-anchor="middle">RRF</text><text class="t-sub" x="690" y="174" text-anchor="middle">dedupe · k=60</text></g>
+  <g class="node"><rect class="card" x="800" y="130" width="115" height="60" rx="12"/><rect class="bar-ok" x="808" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="857" y="156" text-anchor="middle">rerank</text><text class="t-sub" x="857" y="174" text-anchor="middle">optional · fail-soft</text></g>
   <g class="node"><rect class="card" x="935" y="130" width="105" height="60" rx="12"/><rect class="bar-ok" x="943" y="142" width="5" height="36" rx="2.5"/><text class="t-title" x="987" y="156" text-anchor="middle">top_k</text><text class="t-sub" x="987" y="174" text-anchor="middle">results</text></g>
 
   <!-- edges -->
@@ -335,15 +335,15 @@ text{ pointer-events:none; }
   <path class="flow" marker-end="url(#arrA)" d="M915,160 H935"/>
 
   <!-- branch labels -->
-  <rect class="lbl-bg" x="300" y="100" width="112" height="18"/><text class="lbl" x="356" y="113" text-anchor="middle">vector / hybrid</text>
+  <rect class="lbl-bg" x="300" y="100" width="112" height="18"/><text class="lbl" x="356" y="113" text-anchor="middle">semantic / hybrid</text>
   <rect class="lbl-bg" x="300" y="204" width="118" height="18"/><text class="lbl" x="359" y="217" text-anchor="middle">lexical / hybrid</text>
 </svg>
-<figcaption>Merge dedupes by <code>(domain, file, heading)</code> — a section hit by both paths collapses to one, marked <code>both</code>. Because vector and lexical scores live on different scales, vector/both are ranked first (by cosine), then lexical (by term frequency).</figcaption>
+<figcaption>Five ranked lists are fused by <code>(domain, file, heading, chunk)</code> with Reciprocal Rank Fusion. A candidate present in semantic and lexical signals is marked <code>both</code>; an optional reranker sees exact current chunks and fails soft to preliminary order.</figcaption>
 </figure>
 
 <!-- ============================================================= -->
 <h2>4. Tool surface</h2>
-<p>Twelve <code>wiki_*</code> tools plus one MCP resource (<code>iwiki://authoring-rules</code>). <span class="badge det">det</span> = deterministic / no network · <span class="badge llm">embed</span> = calls the embeddings API · <span class="badge git">git</span> = mutates the base repo.</p>
+<p>Eighteen <code>wiki_*</code> tools plus one MCP resource (<code>iwiki://authoring-rules</code>). <span class="badge det">det</span> = deterministic / no network · <span class="badge llm">embed</span> = calls the embeddings API · <span class="badge git">git</span> = mutates the base repo.</p>
 
 <table class="rpt-table">
   <thead><tr><th>Tool</th><th>Kind</th><th>What it does</th></tr></thead>
@@ -355,10 +355,16 @@ text{ pointer-events:none; }
     <tr><td><code>wiki_list_pages</code></td><td><span class="badge det">det</span></td><td>List a domain's pages (slug + file), skipping <code>.iwiki</code>.</td></tr>
     <tr><td><code>wiki_read_page</code></td><td><span class="badge det">det</span></td><td>Return a page's raw Markdown.</td></tr>
     <tr><td><code>wiki_write_page</code></td><td><span class="badge llm">embed</span> <span class="badge git">git</span></td><td>Validate → write → append log → re-index → auto-commit (transactional; refuses overwrite).</td></tr>
+    <tr><td><code>wiki_update_page</code></td><td><span class="badge llm">embed</span> <span class="badge git">git</span></td><td>Replace one existing <code>##</code> section, re-index, commit, and push.</td></tr>
+    <tr><td><code>wiki_delete_page</code></td><td><span class="badge git">git</span></td><td>Delete one page transactionally and remove its indexed records.</td></tr>
     <tr><td><code>wiki_index</code></td><td><span class="badge llm">embed</span></td><td>Incrementally re-index a domain (write target by default); re-embeds only changed chunks.</td></tr>
-    <tr><td><code>wiki_search</code></td><td><span class="badge llm">embed</span></td><td>Hybrid / vector / lexical retrieval across in-scope domains.</td></tr>
+    <tr><td><code>wiki_search</code></td><td><span class="badge llm">embed</span></td><td>Read modes are hybrid / lexical / semantic, with optional fail-soft reranking.</td></tr>
     <tr><td><code>wiki_related</code></td><td><span class="badge det">det</span></td><td>Neighbours of a section by vector cosine, falling back to a <code>[[refs]]</code> graph walk.</td></tr>
     <tr><td><code>wiki_lint</code></td><td><span class="badge det">det</span></td><td>Health report: broken refs, orphans, stale pages, section-formation findings.</td></tr>
+    <tr><td><code>wiki_remediation_plan</code></td><td><span class="badge det">det</span></td><td>Group lint findings into read-only update/delete remediation actions.</td></tr>
+    <tr><td><code>wiki_migrate_okf</code></td><td><span class="badge llm">embed</span> <span class="badge git">git</span></td><td>Backfill OKF metadata and normalize page layout.</td></tr>
+    <tr><td><code>wiki_apply_okf</code></td><td><span class="badge llm">embed</span> <span class="badge git">git</span></td><td>Apply reviewed OKF metadata and layout decisions.</td></tr>
+    <tr><td><code>wiki_export_okf</code></td><td><span class="badge git">git</span></td><td>Run deterministic OKF conformance and regenerate root artifacts.</td></tr>
     <tr><td><code>wiki_sync</code></td><td><span class="badge git">git</span></td><td><code>pull --rebase</code> + <code>push</code> under the base lock; retries a non-fast-forward push.</td></tr>
   </tbody>
 </table>

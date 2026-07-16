@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Итог: configurable-search-mode-api</title>
+<style>
+:root{--bg:#f6f7fb;--surface:#fff;--fg:#2b2b3a;--muted:#6b6b80;--accent:#5c6bc0;--accent-2:#3949ab;--border:#d6d8e6;--line:#9aa0b4;--zebra:#eef0f8;--ok:#43a047;--ok-2:#2e7d32;--warn:#fb8c00;--warn-2:#ef6c00;--danger:#e53935;--danger-2:#c62828;--shadow:rgba(40,40,80,.18)}
+body:has(#theme-toggle:checked){--bg:#181825;--surface:#262637;--fg:#cdd6f4;--muted:#a6adc8;--accent:#89b4fa;--accent-2:#5e95f0;--border:#3a3b52;--line:#6c7086;--zebra:#21222f;--ok:#a6e3a1;--ok-2:#74c46e;--warn:#f9e2af;--warn-2:#f5c95b;--danger:#f38ba8;--danger-2:#e8638a;--shadow:rgba(0,0,0,.45)}
+*{box-sizing:border-box}body{margin:0 auto;padding:1.5rem 2rem 4rem;max-width:1180px;font:16px/1.55 system-ui,sans-serif;background:radial-gradient(1200px 500px at 100% -10%,color-mix(in srgb,var(--accent) 10%,transparent),transparent),var(--bg);color:var(--fg);transition:background .3s,color .3s}.theme-btn{position:sticky;top:.5rem;float:right;cursor:pointer;user-select:none;padding:.3rem .65rem;border:1px solid var(--border);border-radius:7px;background:var(--surface);z-index:2}h1,h2,h3{color:var(--accent-2)}h2{margin-top:2rem;border-bottom:1px solid var(--border);padding-bottom:.3rem}code{font-family:ui-monospace,SFMono-Regular,monospace}.lead{font-size:1.1rem}.sub{color:var(--muted);font-size:.92rem}.note{border-left:4px solid var(--accent);padding:.65rem 1rem;margin:1rem 0;background:color-mix(in srgb,var(--accent) 8%,var(--surface));border-radius:0 8px 8px 0;box-shadow:0 1px 8px var(--shadow)}.ok{border-left-color:var(--ok)}.warn{border-left-color:var(--warn)}.badge{display:inline-block;font-size:.76rem;padding:.08rem .55rem;border-radius:999px;border:1px solid var(--border)}.badge.good{color:var(--ok-2);border-color:var(--ok)}.badge.warn{color:var(--warn-2);border-color:var(--warn)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.75rem;margin:1rem 0}.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.8rem 1rem;box-shadow:0 2px 10px var(--shadow)}.card b{color:var(--accent-2)}.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin:1rem 0}.flow .node{flex:1 1 145px;background:var(--surface);border:1px solid var(--border);border-radius:9px;padding:.7rem;text-align:center}.flow .arrow{flex:0 0 2rem;height:2px;background:var(--line);position:relative;align-self:center}.flow .arrow:after{content:"";position:absolute;right:-5px;top:-4px;border:5px solid transparent;border-left-color:var(--line)}.table-wrap{overflow:auto;margin:1rem 0}.rpt-table{border-collapse:separate;border-spacing:0;width:100%;background:var(--surface);font-size:.88rem;border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:0 2px 12px var(--shadow)}.rpt-table th,.rpt-table td{border-bottom:1px solid var(--border);padding:.48rem .65rem;text-align:left;vertical-align:top}.rpt-table tbody tr:last-child td{border-bottom:none}.rpt-table thead th{background:var(--accent);color:var(--bg)}.rpt-table tbody tr:nth-child(even){background:var(--zebra)}.rpt-table tbody tr:hover{background:color-mix(in srgb,var(--accent) 14%,var(--surface))}details{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.7rem 1rem;margin:.7rem 0;box-shadow:0 1px 8px var(--shadow)}details summary{cursor:pointer;font-weight:600;color:var(--accent)}.metric{font-size:1.45rem;color:var(--ok-2);font-weight:700}.small{font-size:.84rem}.fallback{color:var(--muted);font-style:italic}@media(max-width:650px){body{padding:1rem}.flow .arrow{display:none}.flow{gap:.5rem}}
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Переключить тёмную или светлую тему">🌙 / ☀️</label>
+<header>
+<h1>Configurable Search Mode API — итоговый отчёт</h1>
+<p class="lead">Публичный поиск переведён на режимы <code>hybrid</code>, <code>lexical</code>, <code>semantic</code>; расширенный пул объединяется через RRF и опционально переранжируется через LiteLLM с безопасным fallback.</p>
+<p class="sub">Ветка <code>dev-configurable-search-mode-api</code> · версия <code>0.7.1</code> · 2026-07-16 · <code>plan_hash: 17b9504e19dd16c2</code></p>
+<div class="note ok"><b>Финальный verdict:</b> <span class="badge good">OK</span> — 11/11 задач и R1–R14 сверены; локальная verification полностью зелёная.</div>
+</header>
+<main>
+<section id="summary">
+<h2>Обзор результата</h2>
+<div class="grid">
+<div class="card"><b>Тесты</b><div class="metric">505</div><span class="sub">passed</span></div>
+<div class="card"><b>Качество до</b><div><code>recall@3 0.8333</code><br><code>MRR@3 0.75</code></div></div>
+<div class="card"><b>Качество после</b><div><code>recall@3 1.0</code><br><code>MRR@3 1.0</code></div></div>
+<div class="card"><b>Изменения</b><div class="metric">32</div><span class="sub">файла в implementation diff</span></div>
+</div>
+<h3>Цепочка результатов</h3>
+<figure class="flow"><div class="node"><b>intent</b><br>единая терминология и quality gate</div><div class="arrow"></div><div class="node"><b>spec</b><br>R1–R14</div><div class="arrow"></div><div class="node"><b>plan</b><br>11 задач + review remediation</div><div class="arrow"></div><div class="node"><b>result</b><br>версия 0.7.1, verdict OK</div></figure>
+</section>
+
+<section id="intent">
+<h2>Intent</h2>
+<p><b>Источник:</b> <code>docs/superpowers/intents/2026-07-15-configurable-search-mode-api-intent.md</code>, <code>intent_hash: 8da5f9ad64cca29d</code>.</p>
+<h3>Покрытие желаемых результатов</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Желаемый результат</th><th>Отражение в diff</th><th>Статус</th></tr></thead><tbody>
+<tr><td>Три canonical modes, без публичного <code>vector</code>.</td><td><code>server.py</code>, schema smoke, README.</td><td><span class="badge good">DONE</span></td></tr>
+<tr><td>Default из <code>IWIKI_SEARCH_MODE</code>, explicit mode сильнее.</td><td><code>config.py</code>, server/config tests.</td><td><span class="badge good">DONE</span></td></tr>
+<tr><td>Semantic/lexical page seeds, graph и chunk pool объединены.</td><td><code>hier.py</code>, <code>fusion.py</code>, <code>retrieval.py</code>.</td><td><span class="badge good">DONE</span></td></tr>
+<tr><td>Опциональный authenticated LiteLLM reranker с fallback.</td><td><code>rerank.py</code>, server integration, failure tests.</td><td><span class="badge good">DONE</span></td></tr>
+<tr><td>Полный MCP tool/schema smoke.</td><td><code>tests/test_mcp_smoke.py</code>: ровно 18 tools.</td><td><span class="badge good">DONE</span></td></tr>
+<tr><td>EN/RU/templates/resource/iwiki используют один contract.</td><td>Repository docs и три iwiki sections обновлены.</td><td><span class="badge good">DONE</span></td></tr>
+</tbody></table></div>
+<h3>Матрица ограничений</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Класс</th><th>Решение</th><th>Свидетельство</th></tr></thead><tbody>
+<tr><td>Публичный API</td><td>Только <code>hybrid</code>, <code>lexical</code>, <code>semantic</code>; <code>vector</code> отклоняется.</td><td>Schema smoke и server tests.</td></tr>
+<tr><td>Приоритет режима</td><td>Явный аргумент → <code>IWIKI_SEARCH_MODE</code> → <code>hybrid</code>.</td><td><code>tests/engine/test_config.py</code>, <code>tests/test_server_search.py</code>.</td></tr>
+<tr><td>Reranker</td><td>Только при непустом <code>IWIKI_RERANK_MODEL</code>; один batch, timeout 60 секунд, fail-soft.</td><td><code>tests/engine/test_rerank.py</code>.</td></tr>
+<tr><td>Граница scope</td><td><code>intent="write"</code> не использует read mode, RRF или reranking.</td><td><code>tests/test_server_search_write_intent.py</code>.</td></tr>
+<tr><td>Не входит</td><td>Answer generation, query expansion, deployment mutation, stale-source bug.</td><td>В diff отсутствуют соответствующие изменения.</td></tr>
+</tbody></table></div>
+<h3>Карта автономии</h3>
+<div class="grid"><div class="card"><b>Полная</b><br>tests, internal names, surgical docs</div><div class="card"><b>Guarded</b><br>ceiling 32 и RRF 60 приняты по eval</div><div class="card"><b>Proposal-first</b><br>новые modes/dependencies не добавлялись</div><div class="card"><b>Human-only</b><br>credentials и deployment не менялись</div></div>
+<h3>Карта контекста</h3>
+<figure class="flow"><div class="node">MCP client</div><div class="arrow"></div><div class="node"><code>server.py</code><br>mode contract</div><div class="arrow"></div><div class="node"><code>retrieval.py</code><br>signals + RRF</div><div class="arrow"></div><div class="node"><code>rerank.py</code><br>LiteLLM boundary</div></figure>
+</section>
+
+<section id="spec">
+<h2>Spec</h2>
+<p><b>Источник:</b> <code>docs/superpowers/specs/2026-07-15-configurable-search-mode-api-design.md</code>, <code>spec_hash: acadde912de598ab</code>.</p>
+<h3>Карта покрытия требований</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Требования</th><th>Результат</th><th>Основная проверка</th></tr></thead><tbody>
+<tr><td>R1</td><td>Canonical modes и <code>semantic</code> hit contract.</td><td>Server/schema tests.</td></tr>
+<tr><td>R2</td><td>Explicit → env → hybrid precedence.</td><td>Config/server tests.</td></tr>
+<tr><td>R3</td><td>Непустой rerank model включает provider boundary.</td><td>Config и disabled-call tests.</td></tr>
+<tr><td>R4</td><td><code>hit</code>, <code>source</code>, sanitized rerank metadata.</td><td>Retrieval/server serialization tests.</td></tr>
+<tr><td>R5</td><td>Пять независимых ranking signals и mode selection.</td><td>Retrieval/facet tests.</td></tr>
+<tr><td>R6</td><td>Deterministic Reciprocal Rank Fusion.</td><td>Fusion/hier tests.</td></tr>
+<tr><td>R7</td><td>Exact current-chunk hydration с hash/path safety.</td><td>Hydration/stale/path tests.</td></tr>
+<tr><td>R8</td><td>Write-intent isolation.</td><td>Write-target tests.</td></tr>
+<tr><td>R9</td><td>Authenticated LiteLLM request contract.</td><td>Exact HTTP tests.</td></tr>
+<tr><td>R10</td><td>60-second timeout и stable fail-soft order.</td><td>Failure-class tests.</td></tr>
+<tr><td>R11</td><td>Fixed offline quality evaluation.</td><td>Evidence: 1.0 recall/MRR.</td></tr>
+<tr><td>R12</td><td>18-tool MCP schema и repository verification.</td><td>Smoke + 505 tests.</td></tr>
+<tr><td>R13</td><td>Repository и iwiki documentation consistency.</td><td><code>wiki_lint</code>: broken/stale 0.</td></tr>
+<tr><td>R14</td><td>Minor release с review-remediation patch.</td><td>Runtime version <code>0.7.1</code>.</td></tr>
+</tbody></table></div>
+<h3>Граф компонентов</h3>
+<div class="grid"><div class="card"><b><code>engine/config.py</code></b><br>env contract</div><div class="card"><b><code>engine/hier.py</code></b><br>graph ranking metadata</div><div class="card"><b><code>engine/fusion.py</code></b><br>framework-free RRF</div><div class="card"><b><code>engine/rerank.py</code></b><br>provider boundary</div><div class="card"><b><code>retrieval.py</code></b><br>candidate orchestration</div><div class="card"><b><code>server.py</code></b><br>public MCP surface</div></div>
+<h3>Поток данных</h3>
+<figure class="flow"><div class="node">Page semantic<br>Page lexical</div><div class="arrow"></div><div class="node">Graph + global chunks + lexical sections</div><div class="arrow"></div><div class="node">RRF<br><code>k=60</code></div><div class="arrow"></div><div class="node">Hydration<br>ceiling 32</div><div class="arrow"></div><div class="node">Optional rerank<br>final top-k</div></figure>
+<h3>Карта рисков и мер</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Риск</th><th>Мера</th><th>Статус</th></tr></thead><tbody>
+<tr><td>Overfit малого corpus</td><td>Детерминированный corpus, recall guardrail, MRR gate.</td><td><span class="badge good">пройдено</span></td></tr>
+<tr><td>Provider failure</td><td>Sanitized warning и preliminary order.</td><td><span class="badge good">покрыто</span></td></tr>
+<tr><td>Stale Markdown</td><td>Hash и containment checks перед hydration.</td><td><span class="badge good">покрыто</span></td></tr>
+<tr><td>Breaking rename</td><td>Minor version, exact enum, README на двух языках.</td><td><span class="badge good">выполнено</span></td></tr>
+</tbody></table></div>
+</section>
+
+<section id="plan">
+<h2>Plan</h2>
+<p><b>Источник:</b> <code>docs/superpowers/plans/2026-07-15-configurable-search-mode-api.md</code>, <code>plan_hash: 17b9504e19dd16c2</code>.</p>
+<h3>Граф шагов</h3>
+<figure class="flow"><div class="node">T1 baseline</div><div class="arrow"></div><div class="node">T2–T4 primitives</div><div class="arrow"></div><div class="node">T5–T7 pipeline</div><div class="arrow"></div><div class="node">T8–T9 schema + eval</div><div class="arrow"></div><div class="node">T10–T11 docs + release</div></figure>
+<details><summary>Полная сверка каждого plan step</summary>
+<div class="table-wrap"><table class="rpt-table small"><thead><tr><th>Шаг</th><th>Статус</th><th>Matched diff/evidence</th></tr></thead><tbody>
+<tr><td>T1.1 Расширить corpus/query contract</td><td><span class="badge good">DONE</span></td><td><code>eval/hierarchical/fixtures.py</code></td></tr>
+<tr><td>T1.2 Добавить evaluator старого algorithm</td><td><span class="badge good">DONE</span></td><td><code>eval/hierarchical/harness.py</code></td></tr>
+<tr><td>T1.3 Baseline characterization test</td><td><span class="badge good">DONE</span></td><td><code>tests/eval/test_hierarchical_eval.py</code></td></tr>
+<tr><td>T1.4 Запустить baseline и записать evidence</td><td><span class="badge good">DONE</span></td><td><code>configurable-search-mode-api-eval.md</code>: 0.8333/0.75</td></tr>
+<tr><td>T1.5 Commit frozen baseline</td><td><span class="badge good">DONE</span></td><td><code>ac0ae66</code></td></tr>
+<tr><td>T2.1 Failing configuration tests</td><td><span class="badge good">DONE</span></td><td><code>tests/engine/test_config.py</code></td></tr>
+<tr><td>T2.2 Проверить RED</td><td><span class="badge good">DONE</span></td><td>TDD evidence задачи</td></tr>
+<tr><td>T2.3 Validated parsing</td><td><span class="badge good">DONE</span></td><td><code>engine/config.py</code></td></tr>
+<tr><td>T2.4 GREEN и commit</td><td><span class="badge good">DONE</span></td><td><code>d98f864</code>, <code>61fa929</code></td></tr>
+<tr><td>T3.1 Failing RRF tests</td><td><span class="badge good">DONE</span></td><td><code>tests/engine/test_fusion.py</code></td></tr>
+<tr><td>T3.2 Проверить RED</td><td><span class="badge good">DONE</span></td><td>TDD evidence задачи</td></tr>
+<tr><td>T3.3 Framework-free fusion</td><td><span class="badge good">DONE</span></td><td><code>engine/fusion.py</code></td></tr>
+<tr><td>T3.4 GREEN и commit</td><td><span class="badge good">DONE</span></td><td><code>015a947</code>, <code>c47dfcc</code></td></tr>
+<tr><td>T4.1 Failing graph-ranking tests</td><td><span class="badge good">DONE</span></td><td><code>tests/engine/test_hier.py</code></td></tr>
+<tr><td>T4.2 Проверить RED</td><td><span class="badge good">DONE</span></td><td>TDD evidence задачи</td></tr>
+<tr><td>T4.3 Ranked multi-origin expansion</td><td><span class="badge good">DONE</span></td><td><code>engine/hier.py</code></td></tr>
+<tr><td>T4.4 GREEN и commit</td><td><span class="badge good">DONE</span></td><td><code>078d08c</code>, <code>044f6bf</code></td></tr>
+<tr><td>T5.1 Failing signal-selection tests</td><td><span class="badge good">DONE</span></td><td><code>tests/test_retrieval.py</code></td></tr>
+<tr><td>T5.2 Facet и candidate-ceiling tests</td><td><span class="badge good">DONE</span></td><td><code>tests/test_retrieval_facets.py</code></td></tr>
+<tr><td>T5.3 Проверить RED</td><td><span class="badge good">DONE</span></td><td>TDD evidence задачи</td></tr>
+<tr><td>T5.4 Signal collection и fusion</td><td><span class="badge good">DONE</span></td><td><code>retrieval.py</code>, <code>grep.py</code></td></tr>
+<tr><td>T5.5 Exact candidate hydration</td><td><span class="badge good">DONE</span></td><td><code>retrieval.py</code>, stale/path tests</td></tr>
+<tr><td>T5.6 Compatibility wrappers и GREEN</td><td><span class="badge good">DONE</span></td><td>Focused retrieval suite</td></tr>
+<tr><td>T5.7 Commit preliminary pipeline</td><td><span class="badge good">DONE</span></td><td><code>434f697</code> и review fixes</td></tr>
+<tr><td>T6.1 Successful request/mapping tests</td><td><span class="badge good">DONE</span></td><td><code>tests/engine/test_rerank.py</code></td></tr>
+<tr><td>T6.2 Fail-soft validation tests</td><td><span class="badge good">DONE</span></td><td>Timeout, transport, HTTP, malformed, duplicate, overflow</td></tr>
+<tr><td>T6.3 Проверить RED</td><td><span class="badge good">DONE</span></td><td>TDD evidence задачи</td></tr>
+<tr><td>T6.4 One-batch fail-soft reranking</td><td><span class="badge good">DONE</span></td><td><code>engine/rerank.py</code></td></tr>
+<tr><td>T6.5 GREEN и commit</td><td><span class="badge good">DONE</span></td><td><code>a97f200</code>, <code>03ad03c</code>, <code>b076d81</code></td></tr>
+<tr><td>T7.1 Public mode/precedence tests</td><td><span class="badge good">DONE</span></td><td><code>tests/test_server_search.py</code></td></tr>
+<tr><td>T7.2 Reranker response-shape tests</td><td><span class="badge good">DONE</span></td><td><code>tests/test_server_search.py</code></td></tr>
+<tr><td>T7.3 Write intent isolation proof</td><td><span class="badge good">DONE</span></td><td><code>tests/test_server_search_write_intent.py</code></td></tr>
+<tr><td>T7.4 Проверить RED</td><td><span class="badge good">DONE</span></td><td>10 expected failures до implementation</td></tr>
+<tr><td>T7.5 Optional enum и read-only reranking</td><td><span class="badge good">DONE</span></td><td><code>server.py</code></td></tr>
+<tr><td>T7.6 GREEN и embedding-error visibility</td><td><span class="badge good">DONE</span></td><td>44 focused tests</td></tr>
+<tr><td>T7.7 Commit server integration</td><td><span class="badge good">DONE</span></td><td><code>8d406b1</code></td></tr>
+<tr><td>T8.1 Complete registration/schema assertions</td><td><span class="badge good">DONE</span></td><td><code>tests/test_mcp_smoke.py</code></td></tr>
+<tr><td>T8.2 Smoke ловит old schema</td><td><span class="badge good">DONE</span></td><td>Exact 18 + enum assertion</td></tr>
+<tr><td>T8.3 Commit smoke contract</td><td><span class="badge good">DONE</span></td><td><code>a42c924</code></td></tr>
+<tr><td>T9.1 Preliminary/fake-reranker eval paths</td><td><span class="badge good">DONE</span></td><td><code>harness.py</code></td></tr>
+<tr><td>T9.2 Acceptance assertions</td><td><span class="badge good">DONE</span></td><td><code>test_hierarchical_eval.py</code></td></tr>
+<tr><td>T9.3 Запустить gate</td><td><span class="badge good">DONE</span></td><td>baseline, preliminary, fake metrics</td></tr>
+<tr><td>T9.4 Дополнить evidence</td><td><span class="badge good">DONE</span></td><td><code>configurable-search-mode-api-eval.md</code></td></tr>
+<tr><td>T9.5 Commit evaluation evidence</td><td><span class="badge good">DONE</span></td><td><code>646eeba</code></td></tr>
+<tr><td>T10.1 Documentation contract tests</td><td><span class="badge good">DONE</span></td><td><code>tests/test_resources.py</code></td></tr>
+<tr><td>T10.2 Проверить RED</td><td><span class="badge good">DONE</span></td><td>2 expected failures</td></tr>
+<tr><td>T10.3 EN/RU public docs</td><td><span class="badge good">DONE</span></td><td><code>README.md</code>, <code>docs/README.ru.md</code></td></tr>
+<tr><td>T10.4 Templates и MCP resource</td><td><span class="badge good">DONE</span></td><td><code>templates/*</code>, <code>resources.py</code></td></tr>
+<tr><td>T10.5 Repository terminology verification</td><td><span class="badge good">DONE</span></td><td>Resource tests, grep, flake8</td></tr>
+<tr><td>T10.6 Bound iwiki update</td><td><span class="badge good">DONE</span></td><td><code>retrieval</code>, <code>mcp-server</code>, <code>installation</code></td></tr>
+<tr><td>T10.7 Commit documentation</td><td><span class="badge good">DONE</span></td><td><code>bb15973</code></td></tr>
+<tr><td>T11.1 Set minor release</td><td><span class="badge good">DONE</span></td><td><code>pyproject.toml</code>, <code>__init__.py</code>, <code>uv.lock</code></td></tr>
+<tr><td>T11.2 Focused verification</td><td><span class="badge good">DONE</span></td><td>95 passed</td></tr>
+<tr><td>T11.3 Mandatory repository verification</td><td><span class="badge good">DONE</span></td><td>505 passed; flake8/CLI/version exit 0</td></tr>
+<tr><td>T11.4 Read-only live checks</td><td><span class="badge good">DONE</span></td><td>Hybrid/lexical observed; semantic precise stale-process blocker recorded</td></tr>
+<tr><td>T11.5 Final diff/docs health</td><td><span class="badge good">DONE</span></td><td>38 branch files; wiki broken/stale/missing 0</td></tr>
+<tr><td>T11.6 Commit release metadata</td><td><span class="badge good">DONE</span></td><td><code>ef08613</code></td></tr>
+<tr><td>T11.7 Chain reconciliation</td><td><span class="badge good">DONE</span></td><td><code>result_check: OK</code>, этот отчёт</td></tr>
+</tbody></table></div></details>
+<h3>Карта влияния на артефакты</h3>
+<div class="grid"><div class="card"><b>Runtime</b><br>config, fusion, hier, rerank, retrieval, server</div><div class="card"><b>Verification</b><br>engine, retrieval, server, MCP smoke tests</div><div class="card"><b>Evidence</b><br>offline corpus, harness, metrics file</div><div class="card"><b>Docs/release</b><br>README, standalone report, templates, resources, wiki, 0.7.1</div></div>
+<h3>Карта проверок</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Gate</th><th>Команда/проверка</th><th>Наблюдение</th></tr></thead><tbody>
+<tr><td>Focused</td><td><code>uv run pytest -q …</code></td><td>95 passed</td></tr>
+<tr><td>Full</td><td><code>uv run pytest -q</code></td><td>505 passed</td></tr>
+<tr><td>Style</td><td><code>uv run flake8 src tests eval</code></td><td>exit 0</td></tr>
+<tr><td>CLI/release</td><td><code>uv run iwiki-mcp --help</code> + version assert</td><td>exit 0; 0.7.1</td></tr>
+</tbody></table></div>
+<h3>Поток человеческих контрольных точек</h3>
+<p class="fallback">Proposal-first и human-only зоны не затронуты; отдельная пауза не требовалась. Guarded tuning принят только после зафиксированного offline eval.</p>
+</section>
+
+<section id="result">
+<h2>Result и сверка diff</h2>
+<h3>Граф сверки diff</h3>
+<figure class="flow"><div class="node">R1–R14</div><div class="arrow"></div><div class="node">11 plan tasks + remediation</div><div class="arrow"></div><div class="node">25 commits</div><div class="arrow"></div><div class="node">38 branch files</div><div class="arrow"></div><div class="node">0 gaps<br>0 excess</div></figure>
+<h3>Карта свидетельств результатов</h3>
+<div class="grid"><div class="card"><b>API</b><br>optional enum из трёх modes</div><div class="card"><b>Ranking</b><br>RRF и graph/global/lexical signals</div><div class="card"><b>Resilience</b><br>fail-soft rerank и stale/path guards</div><div class="card"><b>Quality</b><br>recall/MRR достигли 1.0</div></div>
+<h3>Карта лишнего и пропусков</h3>
+<div class="note ok"><b>Пропуски:</b> нет. <b>Лишнее:</b> нет. Project-relative stale-source явно оставлен отдельным follow-up; deployment и credentials не менялись.</div>
+<h3>Карта изменений</h3>
+<details open><summary>Полный inventory: runtime, eval и release</summary>
+<div class="table-wrap"><table class="rpt-table small"><thead><tr><th>Файл</th><th>Конкретное изменение и причина</th><th>Результат и evidence</th></tr></thead><tbody>
+<tr><td><code>src/iwiki_mcp/engine/config.py</code></td><td>Добавлены нормализованные <code>search_mode</code> и <code>rerank_model</code>.</td><td>Env precedence подтверждён config tests.</td></tr>
+<tr><td><code>src/iwiki_mcp/engine/fusion.py</code></td><td>Добавлен чистый deterministic RRF.</td><td>Duplicates, ties и ceiling покрыты unit tests.</td></tr>
+<tr><td><code>src/iwiki_mcp/engine/grep.py</code></td><td>Lexical scan больше не обрезается до внутреннего объединения.</td><td>Page aggregation получает полный ranked signal.</td></tr>
+<tr><td><code>src/iwiki_mcp/engine/hier.py</code></td><td>Добавлены distance, discovery order и multi-origin seed metadata.</td><td>Graph order детерминирован, tests зелёные.</td></tr>
+<tr><td><code>src/iwiki_mcp/engine/rerank.py</code></td><td>Добавлен authenticated LiteLLM batch и строгая response validation.</td><td>Fail-soft для всех классов ошибок.</td></tr>
+<tr><td><code>src/iwiki_mcp/retrieval.py</code></td><td>Собраны пять signals, RRF, exact hash-safe/path-safe hydration.</td><td>Facet isolation и stale/symlink guards подтверждены.</td></tr>
+<tr><td><code>src/iwiki_mcp/server.py</code></td><td>Добавлены canonical modes, precedence, rerank orchestration и metadata.</td><td>Read contract новый; write path изолирован.</td></tr>
+<tr><td><code>eval/hierarchical/fixtures.py</code></td><td>Corpus расширен различимыми retrieval cases.</td><td>Шесть запросов вместо простого baseline.</td></tr>
+<tr><td><code>eval/hierarchical/harness.py</code></td><td>Добавлены preliminary и fake-reranker pipelines/metrics.</td><td>Offline quality gate воспроизводим.</td></tr>
+<tr><td><code>docs/superpowers/evidence/configurable-search-mode-api-eval.md</code></td><td>Записаны corpus, baseline, параметры и итоговые metrics.</td><td><code>0.8333/0.75 → 1.0/1.0</code>.</td></tr>
+<tr><td><code>pyproject.toml</code></td><td>Новая minor-линия фиксирует breaking rename; patch отмечает remediation.</td><td><code>0.7.1</code>.</td></tr>
+<tr><td><code>src/iwiki_mcp/__init__.py</code></td><td>Runtime version синхронизирована.</td><td>Import assertion выводит <code>0.7.1</code>.</td></tr>
+<tr><td><code>uv.lock</code></td><td>Lock metadata синхронизирована с release.</td><td><code>uv lock</code> завершён успешно.</td></tr>
+</tbody></table></div></details>
+<details><summary>Полный inventory: документация</summary>
+<div class="table-wrap"><table class="rpt-table small"><thead><tr><th>Файл/артефакт</th><th>Конкретное изменение и причина</th><th>Результат и evidence</th></tr></thead><tbody>
+<tr><td><code>README.md</code></td><td>Modes, env, RRF, reranker и полный список 18 tools.</td><td>English public contract соответствует schema.</td></tr>
+<tr><td><code>docs/README.ru.md</code></td><td>Русская документация синхронизирована с English contract.</td><td>Те же 18 tools и settings.</td></tr>
+<tr><td><code>docs/reports/iwiki-mcp-server-report.html</code></td><td>Старая vector/lexical схема заменена на five-signal RRF pipeline и полный tool surface.</td><td>Regression test подтверждает canonical modes и ровно 18 строк tools.</td></tr>
+<tr><td><code>src/iwiki_mcp/resources.py</code></td><td>Authoring resource описывает search и maintenance tools.</td><td>Resource tests подтверждают термины.</td></tr>
+<tr><td><code>templates/AGENTS.md.snippet</code></td><td>Исправлен путь update/delete существующих страниц.</td><td>Больше нет ложного запрета direct update.</td></tr>
+<tr><td><code>templates/CLAUDE.md.snippet</code></td><td>Та же актуализация agent workflow.</td><td>Оба snippets проверены тестом.</td></tr>
+<tr><td>iwiki <code>retrieval</code></td><td>Описаны modes, signals, RRF, hydration и rerank.</td><td>Страница обновлена и переиндексирована.</td></tr>
+<tr><td>iwiki <code>mcp-server</code></td><td>Описаны 18 tools, enum/precedence и write isolation.</td><td>Страница обновлена и переиндексирована.</td></tr>
+<tr><td>iwiki <code>installation</code></td><td>Добавлены search/rerank environment settings.</td><td>Устранён stale finding от README source.</td></tr>
+<tr><td><code>docs/TODO.md</code></td><td>Chain row закрыт как <code>done</code>.</td><td><code>Result: OK</code>, дата закрытия 2026-07-16.</td></tr>
+<tr><td><code>docs/superpowers/intents/2026-07-15-configurable-search-mode-api-intent.md</code></td><td>Зафиксированы outcomes, constraints, autonomy и stop rules.</td><td><code>intent_hash: 8da5f9ad64cca29d</code>.</td></tr>
+<tr><td><code>docs/superpowers/specs/2026-07-15-configurable-search-mode-api-design.md</code></td><td>R13 расширен до полного repository/iwiki contract; R14 синхронизирован с remediation release.</td><td><code>spec_hash: acadde912de598ab</code>.</td></tr>
+<tr><td><code>docs/superpowers/plans/2026-07-15-configurable-search-mode-api.md</code></td><td>Task 10 покрывает исправленные R13 gaps; добавлен финальный <code>result_check</code>.</td><td><code>plan_hash: 17b9504e19dd16c2</code>, docs checked.</td></tr>
+<tr><td><code>docs/superpowers/reports/configurable-search-mode-api-results.html</code></td><td>Создан единый offline chain report.</td><td>Self-contained, две темы, без внешних ресурсов.</td></tr>
+</tbody></table></div></details>
+<details><summary>Полный inventory: tests</summary>
+<div class="table-wrap"><table class="rpt-table small"><thead><tr><th>Файл</th><th>Покрытие</th><th>Результат</th></tr></thead><tbody>
+<tr><td><code>tests/engine/test_config.py</code></td><td>Mode/reranker env parsing и isolation.</td><td>Pass.</td></tr>
+<tr><td><code>tests/engine/test_fusion.py</code></td><td>RRF lists, duplicates, deterministic ties.</td><td>Pass.</td></tr>
+<tr><td><code>tests/engine/test_hier.py</code></td><td>Graph rank, origins, distance.</td><td>Pass.</td></tr>
+<tr><td><code>tests/engine/test_rerank.py</code></td><td>URL/auth/payload/timeout, malformed/duplicate/overflow responses.</td><td>Pass.</td></tr>
+<tr><td><code>tests/eval/test_hierarchical_eval.py</code></td><td>Baseline guardrail и measurable improvement.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_grep.py</code></td><td>Untruncated lexical internal scan.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_mcp_smoke.py</code></td><td>Ровно 18 tools и optional canonical enum.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_resources.py</code></td><td>Authoring terms, template update path, summary-vector wording, canonical report modes и exact 18-tool table.</td><td>RED 2 failures → GREEN 7 passed.</td></tr>
+<tr><td><code>tests/test_retrieval.py</code></td><td>Signals, fusion, hydration, hit/source contract.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_retrieval_facets.py</code></td><td>Facet filtering во всех candidate paths.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_robustness_fixes.py</code></td><td>Совместимость robustness cases с новым pipeline.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_server_search.py</code></td><td>Modes, precedence, reranking metadata и fallback.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_server_search_facets.py</code></td><td>Server facet forwarding после API change.</td><td>Pass.</td></tr>
+<tr><td><code>tests/test_server_search_write_intent.py</code></td><td>Write-intent isolation от mode/reranker.</td><td>Pass.</td></tr>
+</tbody></table></div></details>
+</section>
+
+<section id="review">
+<h2>Code review</h2>
+<h3>Карта замечаний code review</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Найдено при review</th><th>Исправление</th><th>Evidence</th></tr></thead><tbody>
+<tr><td>Seed pages могли выпадать из graph signal.</td><td>Seed rows включены в graph ranking.</td><td><code>453a0b8</code>.</td></tr>
+<tr><td>Hydration могла принять изменённый chunk.</td><td>Сравнивается indexed hash с текущим hash.</td><td><code>6524e9b</code>.</td></tr>
+<tr><td>Candidate path допускал traversal/symlink escape.</td><td>Добавлены containment checks.</td><td><code>ff09231</code>.</td></tr>
+<tr><td>Duplicate rerank indices зависели от порядка.</td><td>Добавлен order-independent <code>seen</code> и overflow validation.</td><td><code>03ad03c</code>, <code>b076d81</code>.</td></tr>
+<tr><td>R13 оставлял README, standalone report и соседние iwiki sections семантически устаревшими.</td><td>Исправлены EN/RU summary semantics, five-signal report, 18-tool table и полная retrieval page.</td><td>Documentation regressions: RED 2 → GREEN 7; <code>wiki_lint</code> stale 0.</td></tr>
+<tr><td>Branch diff содержал unrelated <code>.iwiki.toml</code> domain <code>okf</code>.</td><td>Binding возвращён к состоянию <code>master</code>; файл исчез из итогового branch diff.</td><td><code>git diff master -- .iwiki.toml</code> пуст.</td></tr>
+<tr><td>Result report сверял узкий implementation range и ошибочно заявлял 32 файла.</td><td>Сверка выполнена по полному <code>master..HEAD</code> с chain artifacts и remediation docs.</td><td>38 файлов, 0 unexplained excess.</td></tr>
+</tbody></table></div>
+<div class="note ok">Финальная ручная сверка требований, diff и свежей verification не выявила открытых Critical/Important/Minor findings.</div>
+</section>
+
+<section id="verification">
+<h2>Verification</h2>
+<h3>Карта проверок результата</h3>
+<div class="table-wrap"><table class="rpt-table"><thead><tr><th>Проверка</th><th>Наблюдённый вывод</th><th>Вердикт</th></tr></thead><tbody>
+<tr><td>Focused suite</td><td><code>95 passed in 1.44s</code></td><td><span class="badge good">OK</span></td></tr>
+<tr><td>Full suite</td><td><code>505 passed in 3.85s</code></td><td><span class="badge good">OK</span></td></tr>
+<tr><td>Flake8 + diff check</td><td>exit 0, вывода ошибок нет</td><td><span class="badge good">OK</span></td></tr>
+<tr><td>CLI smoke</td><td><code>iwiki-mcp --help</code>, exit 0</td><td><span class="badge good">OK</span></td></tr>
+<tr><td>Runtime version</td><td><code>0.7.1</code></td><td><span class="badge good">OK</span></td></tr>
+<tr><td>Live connector</td><td>Текущий долгоживущий MCP-процесс ещё публикует старую schema: <code>semantic</code> отклонён.</td><td><span class="badge warn">нужен restart</span></td></tr>
+</tbody></table></div>
+<p class="note warn">Live connector blocker внешний и точный: процесс запущен до обновления checkout. Новый subprocess schema и direct runtime contracts проверены локально; после перезапуска MCP client загрузит новую schema. Deployment не мутировался.</p>
+</section>
+
+<section id="documentation">
+<h2>Документационные свидетельства</h2>
+<h3>Карта документационных свидетельств</h3>
+<div class="grid"><div class="card"><b>Repository</b><br>README EN/RU, standalone report, templates и MCP resource согласованы.</div><div class="card"><b>iwiki</b><br>Все search-contract sections <code>retrieval</code>, а также <code>mcp-server</code> и <code>installation</code> обновлены.</div><div class="card"><b>Lint</b><br>broken 0, stale 0, missing_source 0.</div><div class="card"><b>Известный фон</b><br>1 прежний orphan, 54 advisory, 1 tag drift.</div></div>
+</section>
+
+<section id="decisions">
+<h2>Распространение решений</h2>
+<h3>Карта распространения решений</h3>
+<figure class="flow"><div class="node">Canonical terminology</div><div class="arrow"></div><div class="node">Python Literal + env</div><div class="arrow"></div><div class="node">MCP schema</div><div class="arrow"></div><div class="node">EN/RU docs + templates + iwiki</div></figure>
+<p>Review выявил, что R13 был уже spec-решением, но plan сузил его. Решение распространено обратно в spec file boundaries/R14, Task 10 file map/tests/wiki sections, repository report, обе README и полную iwiki retrieval page. Patch-версия изменена на <code>0.7.1</code> по repository versioning policy.</p>
+<p>Неизменённые границы сохранены осознанно: write-target остаётся vector-based внутренним механизмом; answer generation и deployment находятся вне сервера; stale-source resolution не смешан с search release.</p>
+<h3>Карта процесса</h3>
+<figure class="flow"><div class="node">TDD RED</div><div class="arrow"></div><div class="node">Минимальная реализация</div><div class="arrow"></div><div class="node">Spec review</div><div class="arrow"></div><div class="node">Quality review + fixes</div><div class="arrow"></div><div class="node">Full verification + docs</div></figure>
+</section>
+
+<section id="verdict">
+<h2>Финальный verdict</h2>
+<div class="note ok"><span class="metric">OK</span><br>Intent достигнут, spec R1–R14 покрыта, plan 11/11 выполнен, implementation diff объяснён, tests/lint/CLI/version подтверждены, repository и iwiki docs синхронизированы. Для внешнего connector остаётся только перезапуск MCP client, не изменение кода.</div>
+</section>
+</main>
+</body>
+</html>

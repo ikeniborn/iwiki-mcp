@@ -54,15 +54,18 @@ def test_wiki_search_whitespace_type_becomes_no_filter(monkeypatch):
     """wiki_search forwards whitespace-only type as None (no filter)."""
     captured = {}
 
-    def fake_hybrid(cfg, base, doms, query, top_k, threshold, mode, type=None, tags=None):
+    def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
+                        type=None, tags=None):
         captured.update(type=type, tags=tags)
         return []
 
     class FakeConfig:
         top_k = 10
         score_threshold = 0.5
+        search_mode = "hybrid"
+        rerank_model = ""
 
-    monkeypatch.setattr(server.retrieval, "hybrid_search", fake_hybrid)
+    monkeypatch.setattr(server.retrieval, "prepare_read_candidates", fake_candidates)
     monkeypatch.setattr(
         server.base, "resolve_binding",
         lambda: server.base.Binding(

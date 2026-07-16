@@ -32,3 +32,21 @@ def test_search_write_intent_returns_single_target(tmp_path, monkeypatch):
     assert miss["target"]["exists"] is False
     # read intent unchanged
     assert "results" in server.wiki_search("retrieval")
+
+
+def test_search_write_intent_ignores_search_mode_and_reranker(tmp_path, monkeypatch):
+    _bind(tmp_path, monkeypatch, "d")
+    monkeypatch.setenv("IWIKI_SEARCH_MODE", "lexical")
+    monkeypatch.setenv("IWIKI_RERANK_MODEL", "model")
+    monkeypatch.setattr(
+        server.rerank, "rerank_candidates",
+        lambda *args: (_ for _ in ()).throw(AssertionError("reranker called")),
+    )
+    server.wiki_write_page(
+        "d", "retrieval", "# Retrieval\n\n## Purpose\nBody.\n",
+        type="architecture", description="purpose of retrieval",
+    )
+    result = server.wiki_search(
+        "purpose of retrieval", intent="write", mode="semantic", heading="Purpose"
+    )
+    assert result["target"]["exists"] is True

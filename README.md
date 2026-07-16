@@ -189,6 +189,8 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 |---|---|---|
 | `IWIKI_TOP_K` | `8` | Default maximum results for search and related-section lookup. |
 | `IWIKI_SCORE_THRESHOLD` | `0.2` | Default minimum vector similarity for a returned section hit. |
+| `IWIKI_SEARCH_MODE` | `hybrid` | Omitted `wiki_search.mode` default. Values are `hybrid`, `lexical`, or `semantic`; whitespace/case are normalized and an explicit mode wins. |
+| `IWIKI_RERANK_MODEL` | empty | Optional LiteLLM-compatible reranker model. Reuses `IWIKI_LLM_BASE_URL` / `IWIKI_LLM_KEY`, sends one candidate batch with a 60-second timeout, and fails soft with sanitized metadata. |
 | `IWIKI_GRAPH_DEPTH` | `2` | Wiki-link hop depth for the retrieval graph-expansion and related-section lookup. |
 | `IWIKI_SEED_TOP_K` | `5` | How many articles the summary-vector pass seeds before graph expansion. |
 | `IWIKI_BFS_TOP_K` | `10` | Cap on graph-expanded (non-seed) articles added to the candidate pool. |
@@ -214,7 +216,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Tool | What it does |
 |---|---|
-| `wiki_search` | **Two-level hierarchical search.** A per-page `summary` vector (from the frontmatter `description`) seeds candidate articles, the wiki-link graph expands the candidate pool, and clean `section` vectors (heading + body, no article prefix) are ranked inside it; each hit carries its `source` (`seed`/`graph`). Modes: `hybrid` (default), `vector`, `lexical`. `scope` selects domains: `project` (default, the bound `read` set) or `all`; an explicit `domains` list overrides `scope`. Accepts `k` and threshold overrides. **Existing domains need a one-time re-index (`wiki_index` per domain, or `wiki_export_okf`) to build the two-level index.** A page with no `description` produces no summary vector, so it is not reachable by `vector`-mode seeding (it remains findable via `lexical`/`hybrid` grep); a lexical seed fallback is a planned follow-up. Pass `intent="write"` for the precise write-target mode: it seeds with the higher `IWIKI_WRITE_SEED_THRESHOLD`, keeps only an exact (case-insensitive) heading match when `heading` is given, and returns a single `target` for a write tool to decide create-vs-update — `{domain, file, heading, score, exists: true}` on a hit, or just `{domain, exists: false}` on a miss; `scope`/`mode`/`k`/`threshold`/`type`/`tags` are ignored in this mode, and the target domain is the bound `write` domain (or the first entry of an explicit `domains` list when there is no write binding). A page needs a frontmatter `description` (it seeds the summary vector) to be locatable this way at all. |
+| `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. |
 | `wiki_read_page` | Read one Markdown page by domain and slug. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain. |
@@ -227,11 +229,18 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_bind` | Write or update `.iwiki.toml` for the current project after validating domains. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
 | `wiki_lint` | Report domain health: broken links, orphans, stale pages, `missing_source` (pages whose ingest source no longer exists on disk — deletion candidates), and section gaps. |
+| `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |
+| `wiki_migrate_okf` | Backfill OKF frontmatter and normalize type-directory layout, autonomously with a chat model or as a review plan without one. |
+| `wiki_apply_okf` | Apply reviewed OKF metadata and layout decisions. |
+| `wiki_export_okf` | Run the deterministic in-place OKF conformance sweep and regenerate root `index.md` / `log.md`. |
 | `wiki_sync` | Run `git pull --rebase` and `git push` in the base. |
 
 `wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None)` — it replaces only the named `##` section and leaves the rest of the page intact. For a full-page rewrite, read the current page first with `wiki_read_page`, confirm the intended replacement with the user, and then handle the edit deliberately outside the v1 overwrite path.
 
 `wiki_lint` reports `missing_source` pages whose ingest source has disappeared. Remove such a stale page explicitly with `wiki_delete_page` after confirming with the user; `wiki_sync` then propagates the deletion to the remote like any other commit.
+
+Project-relative stale-source resolution remains a separate audited follow-up; this
+release does not silently change that behavior.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
 
@@ -243,7 +252,7 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 |---|---|
 | `type` | Required. **Open** vocabulary: prefer `architecture`, `api`, `guide`, `reference`, `runbook`, `concept` (default), but any value is accepted (e.g. `person`); off-list values get only an advisory `unknown_type`. Also the page's directory: `wiki_write_page` places the file at `<type>/<slug>.md` under the domain root — a bare `slug` is prefixed with the resolved `type`, and a `slug` that already carries a leading segment must match it. |
 | `title` | Derived from the page's `# Title` H1. |
-| `description` | The authored article summary — the single source of the summary, embedded as each section's context prefix. Stored in full (never truncated). Falls back to a `## Overview` section only transitionally (migration). |
+| `description` | The authored article summary — the single source of the summary, stored as a separate summary vector for page seeding. It is never prefixed to section vectors and is stored in full (never truncated). Falls back to a `## Overview` section only transitionally (migration). |
 | `resource` | The `source` passed to the write tool, if any; `wiki_apply_okf` and `wiki_migrate_okf` fall back to the page's last logged ingest source when none is given. The stored path is project-relative — an absolute path under the project is relativized, and any path (absolute or relative, e.g. `../../etc/hosts`) that resolves outside the project is rejected. |
 | `tags` | Lowercase kebab-case labels, at most 5 per page. |
 | `status` | Optional iwiki extension: `stub` (default), `developing`, `stable`, `deprecated`. |

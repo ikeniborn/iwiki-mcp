@@ -72,6 +72,57 @@ def expand_graph(seed_files: list[str], domain_dir: str, depth: int,
     return pool
 
 
+def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
+                     depth: int, cap: int) -> list[dict]:
+    rows: dict[str, dict] = {}
+    discovery = 0
+    for file, origin, seed_rank in sorted(
+            seeds, key=lambda seed: (seed[2], seed[0], seed[1])):
+        row = rows.get(file)
+        if row is None:
+            rows[file] = {"file": file, "source": "seed", "seed_origins": [origin],
+                          "distance": 0, "seed_rank": seed_rank,
+                          "discovery": discovery}
+            discovery += 1
+        else:
+            row["seed_origins"] = sorted(set(row["seed_origins"]) | {origin})
+            row["seed_rank"] = min(row["seed_rank"], seed_rank)
+
+    seed_count = len(rows)
+    adjacency = _adjacency(domain_dir)
+    frontier = list(rows)
+    for distance in range(1, max(0, depth) + 1):
+        next_frontier: list[str] = []
+        for file in frontier:
+            parent = rows[file]
+            for neighbor in sorted(adjacency.get(file, ())):
+                row = rows.get(neighbor)
+                if row is None:
+                    rows[neighbor] = {
+                        "file": neighbor,
+                        "source": "graph",
+                        "seed_origins": list(parent["seed_origins"]),
+                        "distance": distance,
+                        "seed_rank": parent["seed_rank"],
+                        "discovery": discovery,
+                    }
+                    discovery += 1
+                    next_frontier.append(neighbor)
+                elif row["distance"] == distance:
+                    row["seed_origins"] = sorted(
+                        set(row["seed_origins"]) | set(parent["seed_origins"]))
+                    row["seed_rank"] = min(row["seed_rank"], parent["seed_rank"])
+        frontier = next_frontier
+
+    ranked = sorted(rows.values(), key=lambda row: (
+        0 if row["source"] == "seed" else 1,
+        row["distance"], row["seed_rank"], row["file"], row["discovery"],
+    ))
+    if cap > 0:
+        return ranked[:seed_count + cap]
+    return ranked
+
+
 def rank_sections(query_vec: list[float], section_recs: list[Record],
                   pool_files: dict[str, str], top_k: int) -> list[dict]:
     hits: list[dict] = []

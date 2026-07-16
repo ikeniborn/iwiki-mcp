@@ -45,3 +45,14 @@ def test_grep_orders_ties_by_file_then_heading(tmp_path):
         ("a.md", "Zulu"),
         ("b.md", "Alpha"),
     ]
+
+
+def test_grep_none_returns_all_positive_sections(tmp_path):
+    (tmp_path / "a.md").write_text(
+        "# A\n## One\nneedle\n## Two\nneedle needle\n## Three\nneedle\n",
+        encoding="utf-8",
+    )
+
+    hits = grep_sections(str(tmp_path), "needle", top_k=None)
+
+    assert len(hits) == 3

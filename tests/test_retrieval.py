@@ -1,142 +1,309 @@
+import builtins
 import json
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from iwiki_mcp import retrieval, indexer
+from iwiki_mcp import base as wiki_base, indexer, retrieval
+from iwiki_mcp.engine import store
+from iwiki_mcp.engine.chunk import chunk_markdown
 from iwiki_mcp.engine.config import Config
 
 
 def _cfg():
     return Config(base_url="http://x/v1", api_key="k", embed_model="m",
                   dimensions=2, chunk_size=512, chunk_overlap=64, summary_max=400,
-                  top_k=8, score_threshold=0.0, graph_depth=2, ignore=None)
+                  top_k=8, score_threshold=0.0, graph_depth=2, ignore=None,
+                  seed_top_k=1, bfs_top_k=10, seed_threshold=0.5)
 
 
 def _seed(tmp_path, monkeypatch):
-    b = tmp_path / "wiki"
-    for d, body in (("a", "alpha refresh_token here"), ("b", "beta gamma")):
-        (b / d).mkdir(parents=True)
-        (b / d / "p.md").write_text(
-            f"---\ndescription: {d} page summary\n---\n# P\n## Overview\no\n## S\n{body}\n")
-    monkeypatch.setattr(indexer, "embed_texts",
-                        lambda cfg, texts: [[1.0, 0.0] for _ in texts])
-    indexer.index_domain(_cfg(), str(b), "a")
-    indexer.index_domain(_cfg(), str(b), "b")
-    return str(b)
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "seed.md").write_text(
+        "---\ndescription: alpha seed\n---\n# Seed\n\n"
+        "## Match\nrefresh_token alpha\n\n[Graph](graph.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "graph.md").write_text(
+        "---\ndescription: beta graph\n---\n# Graph\n\n## Graph\nbeta details\n",
+        encoding="utf-8",
+    )
+    (domain / "global.md").write_text(
+        "---\ndescription: beta global\n---\n# Global\n\n## Global\nalpha details\n",
+        encoding="utf-8",
+    )
+
+    def fake_index_embed(cfg, texts):
+        return [[1.0, 0.0] if "alpha" in text.lower() else [0.0, 1.0]
+                for text in texts]
+
+    monkeypatch.setattr(indexer, "embed_texts", fake_index_embed)
+    indexer.index_domain(_cfg(), str(base), "d")
+    return str(base)
 
 
-def test_vector_search_merges_domains(tmp_path, monkeypatch):
-    b = _seed(tmp_path, monkeypatch)
-    monkeypatch.setattr(retrieval, "embed_texts",
-                        lambda cfg, texts: [[1.0, 0.0]])
-    hits = retrieval.vector_search(_cfg(), b, ["a", "b"], "q", top_k=10, threshold=0.0)
-    assert {h["domain"] for h in hits} == {"a", "b"}
-    assert all(h["hit"] == "vector" for h in hits)
+@pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+def test_semantic_modes_embed_query_once(tmp_path, monkeypatch, mode):
+    base = _seed(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_query_embed(cfg, texts):
+        calls.append(texts)
+        return [[1.0, 0.0]]
+
+    monkeypatch.setattr(retrieval, "embed_texts", fake_query_embed)
+
+    retrieval.search_read(_cfg(), base, ["d"], "alpha", 5, 0.0, mode=mode)
+
+    assert calls == [["alpha"]]
 
 
-def test_vector_search_empty_domains_does_not_embed(monkeypatch):
+def test_lexical_mode_never_embeds_and_returns_only_lexical_hits(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
     monkeypatch.setattr(
         retrieval, "embed_texts",
         lambda cfg, texts: (_ for _ in ()).throw(AssertionError("embedded query")),
     )
 
-    assert retrieval.vector_search(
-        _cfg(), "base", [], "q", top_k=10, threshold=0.0
+    hits = retrieval.search_read(
+        _cfg(), base, ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    assert hits
+    assert all(hit["hit"] == "lexical" for hit in hits)
+
+
+def test_hybrid_duplicate_hit_is_both(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    hits = retrieval.search_read(
+        _cfg(), base, ["d"], "refresh_token alpha", 10, 0.0, mode="hybrid"
+    )
+
+    duplicate = next(hit for hit in hits
+                     if hit["file"] == "seed.md" and hit["heading"] == "Match")
+    assert duplicate["hit"] == "both"
+
+
+def test_semantic_includes_global_section_outside_seed_graph(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    hits = retrieval.search_read(
+        _cfg(), base, ["d"], "alpha", 10, 0.5, mode="semantic"
+    )
+
+    global_hit = next(hit for hit in hits if hit["file"] == "global.md")
+    assert global_hit["source"] == "global"
+
+
+def test_semantic_seed_receives_graph_page_signal_and_keeps_seed_source(
+        tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["d"], "alpha", 10, 0.5, mode="semantic"
+    )
+
+    seed = next(hit for hit in hits if hit["file"] == "seed.md")
+    assert seed["score"] == pytest.approx(2 / 61 + 1 / 62)
+    assert seed["source"] == "seed"
+
+
+def test_lexical_seed_expands_graph_without_embedding(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        retrieval, "embed_texts",
+        lambda cfg, texts: (_ for _ in ()).throw(AssertionError("embedded query")),
+    )
+
+    hits = retrieval.search_read(
+        _cfg(), base, ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    graph_hit = next(hit for hit in hits if hit["file"] == "graph.md")
+    assert graph_hit["source"] == "graph"
+    assert graph_hit["hit"] == "lexical"
+
+
+def test_candidate_limit_has_floor_but_never_reduces_top_k(monkeypatch):
+    monkeypatch.setattr(retrieval, "CANDIDATE_LIMIT", 2)
+
+    assert retrieval._candidate_limit(5) == 5
+    assert retrieval._candidate_limit(1) == 2
+
+
+def test_invalid_mode_lists_allowed_values():
+    with pytest.raises(
+        ValueError,
+        match="invalid search mode: bogus; allowed values: hybrid, lexical, semantic",
+    ):
+        retrieval.search_read(_cfg(), "base", ["d"], "q", 10, 0.0, mode="bogus")
+
+
+def test_empty_request_does_not_embed(monkeypatch):
+    monkeypatch.setattr(
+        retrieval, "embed_texts",
+        lambda cfg, texts: (_ for _ in ()).throw(AssertionError("embedded query")),
+    )
+
+    assert retrieval.prepare_read_candidates(
+        _cfg(), "base", [], "q", 10, 0.0, mode="semantic"
+    ) == []
+    assert retrieval.prepare_read_candidates(
+        _cfg(), "base", ["d"], "q", 0, 0.0, mode="semantic"
     ) == []
 
 
-def test_hybrid_adds_lexical(tmp_path, monkeypatch):
-    b = _seed(tmp_path, monkeypatch)
-    monkeypatch.setattr(retrieval, "embed_texts",
-                        lambda cfg, texts: [[0.0, 1.0]])   # orthogonal -> no vector hits
-    hits = retrieval.hybrid_search(_cfg(), b, ["a", "b"], "refresh_token",
-                                   top_k=10, threshold=0.99, mode="hybrid")
-    assert any(h["hit"] == "lexical" and h["domain"] == "a" for h in hits)
-    # a pure-grep hit ran no graph expansion; it must not be mislabeled "graph"
-    assert all(h["source"] == "lexical" for h in hits if h["hit"] == "lexical")
+def test_vector_search_is_semantic_compatibility_alias(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+
+    hits = retrieval.vector_search(_cfg(), base, ["d"], "alpha", 10, 0.0)
+
+    assert hits
+    assert all(hit["hit"] == "semantic" for hit in hits)
+    json.dumps(hits)
 
 
-def test_hybrid_preserves_best_vector_duplicate(monkeypatch):
-    monkeypatch.setattr(
-        retrieval, "vector_search",
-        lambda cfg, base, domains, query, top_k, threshold, type=None, tags=None: [
-            {"domain": "a", "file": "p.md", "heading": "S", "chunk": 1,
-             "score": 0.9, "hit": "vector"},
-            {"domain": "a", "file": "p.md", "heading": "S", "chunk": 2,
-             "score": 0.4, "hit": "vector"},
-        ],
+def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    page = base / "d" / "nested" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ndescription: secret frontmatter\n---\n# Page\n\n"
+        "## Long\none two three four five six\n\n## Other\nno leakage\n",
+        encoding="utf-8",
     )
-    monkeypatch.setattr(
-        retrieval, "lexical_search",
-        lambda base, domains, query, top_k, type=None, tags=None: [],
-    )
-
-    hits = retrieval.hybrid_search(
-        _cfg(), "base", ["a"], "q", top_k=10, threshold=0.0, mode="hybrid"
-    )
-
-    assert hits[0]["score"] == 0.9
-    assert hits[0]["chunk"] == 1
-
-
-def test_hybrid_rejects_invalid_mode():
-    with pytest.raises(ValueError, match="invalid search mode: bogus"):
-        retrieval.hybrid_search(
-            _cfg(), "base", ["a"], "q", top_k=10, threshold=0.0, mode="bogus"
-        )
-
-
-def test_hierarchical_vector_returns_pool_sections_with_source(tmp_path, monkeypatch):
-    b = tmp_path / "wiki"
-    (b / "d").mkdir(parents=True)
-    (b / "d" / "a.md").write_text(
-        "---\ndescription: alpha topic overview\n---\n"
-        "# A\n\n## Alpha\nalpha topic details\n\n[B](b.md)\n"
-    )
-    (b / "d" / "b.md").write_text(
-        "---\ndescription: unrelated other page\n---\n"
-        "# B\n\n## Beta\nbeta topic details\n"
-    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=0)
     monkeypatch.setattr(indexer, "embed_texts",
                         lambda cfg, texts: [[1.0, 0.0] for _ in texts])
-    indexer.index_domain(_cfg(), str(b), "d")
+    indexer.index_domain(cfg, str(base), "d")
+    candidates = [
+        {"domain": "d", "file": "nested/page.md", "heading": "Long", "chunk": 1,
+         "score": 0.2, "hit": "semantic", "source": "global"},
+        {"domain": "d", "file": "nested/page.md", "heading": "Long", "chunk": 0,
+         "score": 0.1, "hit": "semantic", "source": "seed"},
+    ]
+
+    hydrated = retrieval.hydrate_candidates(cfg, str(base), candidates)
+
+    assert [(hit["heading"], hit["chunk"]) for hit in hydrated] == [
+        ("Long", 1), ("Long", 0)
+    ]
+    assert hydrated[0]["text"] == "## Long\nfour five six"
+    assert "frontmatter" not in hydrated[0]["text"]
+    assert "Other" not in hydrated[0]["text"]
+
+
+def test_hydrate_candidates_omits_stale_heading_and_missing_page(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    page = base / "d" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# Page\n\n## Current\ntext\n", encoding="utf-8")
+    monkeypatch.setattr(indexer, "embed_texts",
+                        lambda cfg, texts: [[1.0, 0.0] for _ in texts])
+    indexer.index_domain(_cfg(), str(base), "d")
+    candidates = [
+        {"domain": "d", "file": "page.md", "heading": "Stale", "chunk": 0},
+        {"domain": "d", "file": "missing.md", "heading": "Current", "chunk": 0},
+    ]
+
+    assert retrieval.hydrate_candidates(_cfg(), str(base), candidates) == []
+
+
+def test_hydrate_candidates_omits_changed_indexed_chunk(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
+    candidates = retrieval.search_read(
+        _cfg(), base, ["d"], "alpha", 10, 0.5, mode="semantic"
+    )
+    old = next(hit for hit in candidates
+               if hit["file"] == "seed.md" and hit["heading"] == "Match")
+    page = tmp_path / "wiki" / "d" / "seed.md"
+    page.write_text(
+        "---\ndescription: alpha seed\n---\n# Seed\n\n"
+        "## Match\ncompletely unrelated replacement\n\n[Graph](graph.md)\n",
+        encoding="utf-8",
+    )
+
+    assert retrieval.hydrate_candidates(_cfg(), base, [old]) == []
+
+
+def _poisoned_section(base, file, content):
+    chunk = next(chunk for chunk in chunk_markdown(
+        file, content, _cfg().chunk_size, _cfg().chunk_overlap, _cfg().summary_max
+    ) if chunk.kind == "section")
+    rec = store.make_record(chunk, [1.0, 0.0])
+    store.save_index(wiki_base.index_path(str(base), "d"), [rec])
+    return rec
+
+
+def _assert_secret_not_read(monkeypatch, secret, callback):
+    real_open = builtins.open
+    reads = []
+
+    def guarded_open(file, *args, **kwargs):
+        if Path(file).resolve() == secret.resolve():
+            reads.append(str(file))
+            raise AssertionError("secret read")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    assert callback() == []
+    assert reads == []
+
+
+def test_retrieval_and_hydration_reject_traversal_file(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    (base / "d").mkdir(parents=True)
+    secret = base / "secret.md"
+    content = "# Secret\n\n## Secret\nprivate alpha\n"
+    secret.write_text(content, encoding="utf-8")
+    rec = _poisoned_section(base, "../secret.md", content)
     monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
 
-    hits = retrieval.hybrid_search(_cfg(), str(b), ["d"], "alpha topic",
-                                   top_k=5, threshold=0.0, mode="vector")
-    files = {h["file"] for h in hits}
-    assert "a.md" in files                      # seed article's section
-    assert all("source" in h for h in hits)      # source tag present
-
-
-def test_vector_hybrid_score_is_a_json_serializable_float(tmp_path, monkeypatch):
-    """Regression: query vectors are cast through numpy (np.float32), which
-    must not leak into hit['score'] — FastMCP's JSON encoder stringifies
-    numpy scalars instead of emitting a number."""
-    b = tmp_path / "wiki"
-    (b / "d").mkdir(parents=True)
-    (b / "d" / "a.md").write_text(
-        "---\ndescription: alpha topic overview\n---\n"
-        "# A\n\n## Alpha\nalpha topic details\n\n[B](b.md)\n"
-    )
-    (b / "d" / "b.md").write_text(
-        "---\ndescription: beta unrelated overview\n---\n"
-        "# B\n\n## Beta\nbeta topic details\n"
+    assert retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "alpha", 10, -1.0, mode="semantic"
+    ) == []
+    candidate = {
+        "domain": "d", "file": rec.file, "heading": rec.heading,
+        "chunk": rec.chunk, "score": 1.0, "hit": "semantic", "source": "global",
+    }
+    _assert_secret_not_read(
+        monkeypatch, secret,
+        lambda: retrieval.hydrate_candidates(_cfg(), str(base), [candidate]),
     )
 
-    def _fake_embed(cfg, texts):
-        # Distinct embeddings per page, so seed (a, cos=1.0) and graph
-        # (b, cos=0.0, pulled in only via the a->b link) are genuinely
-        # different, not the identical-vector fixtures used elsewhere.
-        return [([1.0, 0.0] if "alpha" in t.lower() else [0.0, 1.0]) for t in texts]
 
-    monkeypatch.setattr(indexer, "embed_texts", _fake_embed)
-    indexer.index_domain(_cfg(), str(b), "d")
+def test_retrieval_and_hydration_reject_symlink_escape(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    secret = tmp_path / "secret.md"
+    content = "# Secret\n\n## Secret\nprivate alpha\n"
+    secret.write_text(content, encoding="utf-8")
+    link = domain / "linked.md"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        pytest.skip("symlinks are not supported")
+    rec = _poisoned_section(base, "linked.md", content)
     monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
 
-    hits = retrieval.hybrid_search(_cfg(), str(b), ["d"], "alpha topic",
-                                   top_k=5, threshold=0.0, mode="vector")
-
-    assert {h["source"] for h in hits} == {"seed", "graph"}  # real seed vs graph
-    assert all(isinstance(h["score"], float) for h in hits)
-    json.dumps(hits)  # must not raise / must not silently stringify numbers
+    assert retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "alpha", 10, -1.0, mode="semantic"
+    ) == []
+    candidate = {
+        "domain": "d", "file": rec.file, "heading": rec.heading,
+        "chunk": rec.chunk, "score": 1.0, "hit": "semantic", "source": "global",
+    }
+    _assert_secret_not_read(
+        monkeypatch, secret,
+        lambda: retrieval.hydrate_candidates(_cfg(), str(base), [candidate]),
+    )

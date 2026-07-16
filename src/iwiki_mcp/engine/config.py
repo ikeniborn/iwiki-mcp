@@ -44,6 +44,8 @@ class Config:
     seed_threshold: float = 0.15
     write_seed_threshold: float = 0.35
     chat_model: str = ""
+    search_mode: str = "hybrid"
+    rerank_model: str = ""
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -68,6 +70,11 @@ class Config:
             raise ConfigError(f"{dimensions_var} must be a positive integer.") from exc
         if dimensions <= 0:
             raise ConfigError(f"{dimensions_var} must be a positive integer.")
+        search_mode = getenv("IWIKI_SEARCH_MODE", "hybrid").strip().lower()
+        valid_modes = ("hybrid", "lexical", "semantic")
+        if search_mode not in valid_modes:
+            allowed = ", ".join(valid_modes)
+            raise ConfigError(f"IWIKI_SEARCH_MODE must be one of: {allowed}.")
         return Config(
             base_url=base_url,
             api_key=api_key,
@@ -85,4 +92,6 @@ class Config:
             seed_threshold=float(getenv("IWIKI_SEED_THRESHOLD", "0.15")),
             write_seed_threshold=float(getenv("IWIKI_WRITE_SEED_THRESHOLD", "0.35")),
             chat_model=getenv("IWIKI_CHAT_MODEL", "").strip(),
+            search_mode=search_mode,
+            rerank_model=getenv("IWIKI_RERANK_MODEL", "").strip(),
         )

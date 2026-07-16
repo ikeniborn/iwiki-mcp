@@ -20,6 +20,17 @@ AUTHORING_RULES: str = """\
   same domain in v1).
 - Write accurate English prose grounded in the real source; do not invent.
 
+## Search and maintenance tools
+
+- Read search exposes exactly `hybrid`, `lexical`, and `semantic`. The omitted mode
+  comes from `IWIKI_SEARCH_MODE` (default `hybrid`); an explicit `wiki_search.mode`
+  wins. `vector` is an internal embedding term, not a public mode.
+- `IWIKI_RERANK_MODEL` optionally reranks the fused candidate pool through the shared
+  LiteLLM URL and key. Provider failures are fail-soft and return sanitized metadata.
+- Use `wiki_write_page` for a new page, `wiki_update_page` for one existing `##`
+  section, and `wiki_delete_page` only when a source was removed. Run `wiki_lint`
+  after changes; use `wiki_remediation_plan` to inspect grouped repair actions.
+
 ## OKF frontmatter
 
 - Every page carries a YAML frontmatter block above the `# Title` H1. The write

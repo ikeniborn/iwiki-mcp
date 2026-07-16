@@ -12,10 +12,12 @@ import os
 import re
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
 from . import base, ignore, indexer, okf, retrieval, sync
+from .engine import rerank
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
@@ -268,7 +270,7 @@ def wiki_read_page(domain: str, slug: str) -> dict:
 def wiki_search(
     query: str,
     scope: str = "project",
-    mode: str = "hybrid",
+    mode: Literal["hybrid", "lexical", "semantic"] | None = None,
     domains: list[str] | None = None,
     k: int | None = None,
     threshold: float | None = None,
@@ -285,24 +287,49 @@ def wiki_search(
             return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
         target = _validate_domain(target)      # path guards are load-bearing
         return {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
+    resolved_mode = cfg.search_mode if mode is None else mode.strip().lower()
+    allowed_modes = ("hybrid", "lexical", "semantic")
+    if resolved_mode not in allowed_modes:
+        return {"error": "invalid search mode; allowed values: hybrid, lexical, semantic"}
     doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
         return {"results": [], "hint": "no domains in scope"}
     q_type = (type.strip().lower() or None) if type else None
     q_tags = _fm.normalize_tags(tags) if tags else None
     q_tags = q_tags or None
-    results = retrieval.hybrid_search(
-        cfg,
-        bind.base,
-        doms,
-        query,
-        top_k=cfg.top_k if k is None else k,
-        threshold=cfg.score_threshold if threshold is None else threshold,
-        mode=mode,
-        type=q_type,
-        tags=q_tags,
-    )
-    return {"results": results}
+    requested_top_k = cfg.top_k if k is None else k
+    try:
+        candidates = retrieval.prepare_read_candidates(
+            cfg,
+            bind.base,
+            doms,
+            query,
+            top_k=requested_top_k,
+            threshold=cfg.score_threshold if threshold is None else threshold,
+            mode=resolved_mode,
+            type=q_type,
+            tags=q_tags,
+        )
+    except EmbedError as exc:
+        return {"error": str(exc)}
+    results = candidates[:requested_top_k]
+    response = {"results": results}
+    if cfg.rerank_model:
+        hydrated = retrieval.hydrate_candidates(cfg, bind.base, candidates)
+        ranked, metadata = rerank.rerank_candidates(cfg, query, hydrated)
+        if metadata["applied"]:
+            hydrated_keys = {
+                (item["domain"], item["file"], item["heading"], item["chunk"])
+                for item in hydrated
+            }
+            stale = [
+                item for item in candidates
+                if (item["domain"], item["file"], item["heading"], item["chunk"])
+                not in hydrated_keys
+            ]
+            results = (ranked + stale)[:requested_top_k]
+        response = {"results": results, "rerank": metadata}
+    return response
 
 
 @_safe
