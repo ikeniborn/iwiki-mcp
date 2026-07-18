@@ -298,6 +298,7 @@ def wiki_search(
     q_tags = _fm.normalize_tags(tags) if tags else None
     q_tags = q_tags or None
     requested_top_k = cfg.top_k if k is None else k
+    page_cache = {}
     try:
         candidates = retrieval.prepare_read_candidates(
             cfg,
@@ -309,13 +310,16 @@ def wiki_search(
             mode=resolved_mode,
             type=q_type,
             tags=q_tags,
+            page_cache=page_cache,
         )
     except EmbedError as exc:
         return {"error": str(exc)}
     results = candidates[:requested_top_k]
     response = {"results": results}
     if cfg.rerank_model:
-        hydrated = retrieval.hydrate_candidates(cfg, bind.base, candidates)
+        hydrated = retrieval.hydrate_candidates(
+            cfg, bind.base, candidates, page_cache=page_cache
+        )
         ranked, metadata = rerank.rerank_candidates(
             cfg, query, hydrated, top_n=requested_top_k
         )

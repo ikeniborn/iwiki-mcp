@@ -471,6 +471,99 @@ def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypat
     assert "Other" not in hydrated[0]["text"]
 
 
+def test_hydration_reuses_prepared_materialization(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    read_calls = 0
+    chunk_calls = 0
+    final_opens = 0
+    real_read = retrieval._read_domain_file
+    real_chunk = retrieval.chunk_markdown
+    real_open = retrieval.os.open
+
+    def tracked_read(*args, **kwargs):
+        nonlocal read_calls
+        read_calls += 1
+        return real_read(*args, **kwargs)
+
+    def tracked_chunk(*args, **kwargs):
+        nonlocal chunk_calls
+        chunk_calls += 1
+        return real_chunk(*args, **kwargs)
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal final_opens
+        if path == "long.md":
+            final_opens += 1
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(retrieval, "_read_domain_file", tracked_read)
+    monkeypatch.setattr(retrieval, "chunk_markdown", tracked_chunk)
+    monkeypatch.setattr(retrieval.os, "open", tracked_open)
+
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0, mode="lexical", page_cache=cache
+    )
+    hydrated = retrieval.hydrate_candidates(
+        cfg, base, candidates, page_cache=cache
+    )
+
+    target = next(
+        hit for hit in hydrated
+        if hit["file"] == "long.md" and hit["heading"] == "Details"
+        and hit["chunk"] == 1
+    )
+    assert target["text"] == "## Details\nneedle five six"
+    assert read_calls == 1
+    assert chunk_calls == 1
+    assert final_opens == 2
+
+
+def test_hydration_omits_cached_page_changed_after_preparation(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0, mode="lexical", page_cache=cache
+    )
+    target = [
+        hit for hit in candidates
+        if hit["file"] == "long.md" and hit["heading"] == "Details"
+    ]
+    (Path(base) / "d" / "long.md").write_text(
+        "# Long\n\n## Details\nreplacement content with a different size\n",
+        encoding="utf-8",
+    )
+
+    assert retrieval.hydrate_candidates(
+        cfg, base, target, page_cache=cache
+    ) == []
+
+
+def test_hydration_omits_ambiguous_indexed_identity(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0, mode="lexical", page_cache=cache
+    )
+    target = next(
+        hit for hit in candidates
+        if hit["file"] == "long.md" and hit["heading"] == "Details"
+        and hit["chunk"] == 1
+    )
+    path = wiki_base.index_path(base, "d")
+    records = store.load_index(path)
+    duplicate = next(
+        record for record in records
+        if record.kind == "section" and record.file == target["file"]
+        and record.heading == target["heading"] and record.chunk == target["chunk"]
+    )
+    store.save_index(path, [*records, duplicate])
+
+    assert retrieval.hydrate_candidates(
+        cfg, base, [target], page_cache=cache
+    ) == []
+
+
 def test_hydrate_candidates_omits_stale_heading_and_missing_page(tmp_path, monkeypatch):
     base = tmp_path / "wiki"
     page = base / "d" / "page.md"

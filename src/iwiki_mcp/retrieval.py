@@ -36,7 +36,7 @@ def _candidate_limit(top_k: int) -> int:
     return max(top_k, CANDIDATE_LIMIT)
 
 
-def _domain_file_path(base: str, domain: str, file: str) -> Path | None:
+def _domain_file_parts(file: str) -> list[str] | None:
     if not isinstance(file, str) or not file or "\\" in file:
         return None
     parts = file.split("/")
@@ -44,6 +44,13 @@ def _domain_file_path(base: str, domain: str, file: str) -> Path | None:
     windows_path = PureWindowsPath(file)
     if (posix_path.is_absolute() or windows_path.is_absolute()
             or windows_path.drive or any(part in ("", ".", "..") for part in parts)):
+        return None
+    return parts
+
+
+def _domain_file_path(base: str, domain: str, file: str) -> Path | None:
+    parts = _domain_file_parts(file)
+    if parts is None:
         return None
     root = Path(domain_dir(base, domain)).resolve()
     try:
@@ -70,8 +77,10 @@ def _file_stamp(fd: int) -> FileStamp | None:
     return result.st_dev, result.st_ino, result.st_size, result.st_mtime_ns
 
 
-def _read_domain_file(base: str, domain: str,
-                      file: str) -> tuple[FileStamp, str] | None:
+def _open_domain_file(base: str, domain: str, file: str) -> int | None:
+    parts = _domain_file_parts(file)
+    if parts is None:
+        return None
     try:
         directory_flags = (
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
@@ -95,13 +104,38 @@ def _read_domain_file(base: str, domain: str,
         fds.append(final_fd)
         if not stat.S_ISREG(os.fstat(final_fd).st_mode):
             return None
-        before = _file_stamp(final_fd)
+        fds.pop()
+        return final_fd
+    except (OSError, NotImplementedError):
+        return None
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def _stamp_domain_file(base: str, domain: str, file: str) -> FileStamp | None:
+    fd = _open_domain_file(base, domain, file)
+    if fd is None:
+        return None
+    try:
+        return _file_stamp(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_domain_file(base: str, domain: str,
+                      file: str) -> tuple[FileStamp, str] | None:
+    fd = _open_domain_file(base, domain, file)
+    if fd is None:
+        return None
+    try:
+        before = _file_stamp(fd)
         if before is None:
             return None
         payload = bytearray()
-        while block := os.read(final_fd, 1024 * 1024):
+        while block := os.read(fd, 1024 * 1024):
             payload.extend(block)
-        after = _file_stamp(final_fd)
+        after = _file_stamp(fd)
         if after is None or after != before:
             return None
         try:
@@ -112,8 +146,7 @@ def _read_domain_file(base: str, domain: str,
     except (OSError, NotImplementedError):
         return None
     finally:
-        for fd in reversed(fds):
-            os.close(fd)
+        os.close(fd)
 
 
 def _materialize_page(cfg: Config, base: str, domain: str, file: str,
@@ -366,48 +399,46 @@ def search_read(cfg: Config, base: str, domains: list[str], query: str,
     )[:top_k]
 
 
-def hydrate_candidates(cfg: Config, base: str, candidates: list[dict]) -> list[dict]:
-    indexes: dict[str, dict[tuple[str, str, int], str]] = {}
-    pages: dict[tuple[str, str], dict[tuple[str, int], tuple[str, str]] | None] = {}
+def hydrate_candidates(cfg: Config, base: str, candidates: list[dict],
+                       page_cache: PageCache | None = None) -> list[dict]:
+    if page_cache is None:
+        page_cache = {}
+    indexes: dict[str, dict[tuple[str, str, int], str | None]] = {}
+    validated_pages: dict[tuple[str, str], _MaterializedPage | None] = {}
     hydrated = []
     for candidate in candidates:
         domain = candidate["domain"]
         if domain not in indexes:
             migrate_store_location(base, domain)
-            indexes[domain] = {
-                (rec.file, rec.heading, rec.chunk): rec.hash
-                for rec in VectorStore(index_path(base, domain)).load()
+            unique = _unique_sections(
+                rec for rec in VectorStore(index_path(base, domain)).load()
                 if rec.kind == "section"
+            )
+            indexes[domain] = {
+                identity: rec.hash if rec is not None else None
+                for identity, rec in unique.items()
             }
         page_key = candidate["domain"], candidate["file"]
-        if page_key not in pages:
-            path = _domain_file_path(base, domain, candidate["file"])
-            if path is None:
-                pages[page_key] = None
-                continue
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    markdown = fh.read()
-            except OSError:
-                pages[page_key] = None
-            else:
-                chunks = chunk_markdown(
-                    candidate["file"], markdown, cfg.chunk_size, cfg.chunk_overlap,
-                    cfg.summary_max,
-                )
-                pages[page_key] = {
-                    (chunk.heading, chunk.chunk): (chunk.text, chunk.hash)
-                    for chunk in chunks if chunk.kind == "section"
-                }
-        chunks_by_key = pages[page_key]
+        if page_key not in validated_pages:
+            page = _materialize_page(
+                cfg, base, domain, candidate["file"], page_cache
+            )
+            current_stamp = (
+                _stamp_domain_file(base, domain, candidate["file"])
+                if page is not None else None
+            )
+            validated_pages[page_key] = (
+                page if page is not None and current_stamp == page.stamp else None
+            )
+        page = validated_pages[page_key]
         chunk_key = candidate["heading"], candidate["chunk"]
-        if chunks_by_key is None or chunk_key not in chunks_by_key:
+        if page is None or chunk_key not in page.chunks:
             continue
-        text, current_hash = chunks_by_key[chunk_key]
+        chunk = page.chunks[chunk_key]
         indexed_hash = indexes[domain].get((candidate["file"], *chunk_key))
-        if indexed_hash != current_hash:
+        if indexed_hash != chunk.hash:
             continue
-        hydrated.append({**candidate, "text": text})
+        hydrated.append({**candidate, "text": chunk.text})
     return hydrated
 
 

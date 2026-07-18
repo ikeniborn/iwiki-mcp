@@ -5,7 +5,7 @@ def test_wiki_search_passes_facets(monkeypatch):
     captured = {}
 
     def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
-                        type=None, tags=None):
+                        type=None, tags=None, page_cache=None):
         captured.update(type=type, tags=tags)
         return []
 
@@ -33,7 +33,7 @@ def test_wiki_search_normalizes_facets(monkeypatch):
     captured = {}
 
     def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
-                        type=None, tags=None):
+                        type=None, tags=None, page_cache=None):
         captured.update(type=type, tags=tags)
         return []
 
