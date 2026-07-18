@@ -190,7 +190,7 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 | `IWIKI_TOP_K` | `8` | Максимум результатов по умолчанию для поиска и поиска связанных секций. |
 | `IWIKI_SCORE_THRESHOLD` | `0.2` | Минимальное векторное сходство по умолчанию для возвращаемой секции. |
 | `IWIKI_SEARCH_MODE` | `hybrid` | Режим для опущенного `wiki_search.mode`: `hybrid`, `lexical` или `semantic`. Регистр и пробелы нормализуются; явный режим имеет приоритет. |
-| `IWIKI_RERANK_MODEL` | пусто | Опциональная LiteLLM-совместимая reranker-модель. Использует `IWIKI_LLM_BASE_URL` / `IWIKI_LLM_KEY`, отправляет один batch с timeout 60 секунд и при сбое возвращает только очищенные метаданные. |
+| `IWIKI_RERANK_MODEL` | пусто | Опциональная LiteLLM-совместимая reranker-модель. Использует `IWIKI_LLM_BASE_URL` / `IWIKI_LLM_KEY`, оценивает полный batch с timeout 60 секунд, ограничивает только число строк в ответе provider финальным числом результатов и при сбое возвращает только очищенные метаданные. |
 | `IWIKI_GRAPH_DEPTH` | `2` | Глубина переходов по wiki-ссылкам для graph-расширения поиска и поиска связанных секций. |
 | `IWIKI_SEED_TOP_K` | `5` | Сколько статей отбирает проход по summary-векторам до graph-расширения. |
 | `IWIKI_BFS_TOP_K` | `10` | Ограничение на graph-расширенные (не-seed) статьи, добавляемые в пул кандидатов. |
@@ -216,7 +216,7 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 
 | Инструмент | Что делает |
 |---|---|
-| `wiki_search` | Режимы чтения — только `hybrid`, `lexical` и `semantic`; явный режим переопределяет `IWIKI_SEARCH_MODE` (по умолчанию `hybrid`), а публичный `vector` отклоняется. Summary-семантика страниц, lexical-совпадения страниц, graph-страницы, глобальные semantic-чанки и lexical-секции ранжируются независимо и объединяются RRF до финального top-k. Результаты содержат `hit` (`semantic`/`lexical`/`both`) и `source` (`seed`/`graph`/`global`/`lexical`). При заданном `IWIKI_RERANK_MODEL` точные актуальные чанки полного пула отправляются одним аутентифицированным LiteLLM batch с timeout 60 секунд; сбой сохраняет предварительный порядок и возвращает только очищенные метаданные `rerank`. `scope`, `domains`, `k`, `threshold`, `type` и `tags` ограничивают read-поиск. `intent="write"` остаётся изолированным summary-vector поиском write-target и игнорирует read-режим/reranking. |
+| `wiki_search` | Режимы чтения — только `hybrid`, `lexical` и `semantic`; явный режим переопределяет `IWIKI_SEARCH_MODE` (по умолчанию `hybrid`), а публичный `vector` отклоняется. Summary-семантика страниц, lexical-совпадения страниц, graph-страницы, глобальные semantic-чанки и lexical-секции ранжируются независимо и объединяются RRF до финального top-k. Результаты содержат `hit` (`semantic`/`lexical`/`both`) и `source` (`seed`/`graph`/`global`/`lexical`). При заданном `IWIKI_RERANK_MODEL` точные актуальные чанки полного пула отправляются одним аутентифицированным LiteLLM batch с timeout 60 секунд, а provider `top_n` ограничивается запрошенным финальным `k`; сбой сохраняет предварительный порядок и возвращает только очищенные метаданные `rerank`. `scope`, `domains`, `k`, `threshold`, `type` и `tags` ограничивают read-поиск. `intent="write"` остаётся изолированным summary-vector поиском write-target и игнорирует read-режим/reranking. |
 | `wiki_read_page` | Прочитать одну Markdown-страницу по домену и slug. |
 | `wiki_list_pages` | Перечислить slug-и и файлы страниц в домене. |
 | `wiki_related` | Вернуть связанные секции для id секции в пределах одного домена. |

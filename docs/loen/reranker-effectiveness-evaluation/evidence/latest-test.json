@@ -1,0 +1,71 @@
+{
+  "topic": "reranker-effectiveness-evaluation",
+  "pass": 2,
+  "timestamp": "2026-07-18T12:50:17+03:00",
+  "preflight": {
+    "approved_contract": true,
+    "plan_hash": "8caffc3f7f43d791",
+    "endpoint_reachable": true,
+    "model": "lemonade-reranker-bge-reranker-v2-m3",
+    "credentials_persisted": false
+  },
+  "experiment": {
+    "model_calls": 32,
+    "candidate_count": 32,
+    "baseline_ndcg_at_8": 0.648482,
+    "best_ndcg_at_8": 0.670004,
+    "intent_recall_at_8": 1.0,
+    "best_seed_variant": "natural-plain-p16",
+    "decomposed_plain_ndcg_at_8": 0.544568,
+    "decomposed_plain_latency_seconds": 3.833,
+    "top_n_8_median_seconds": 1.332,
+    "top_n_32_median_seconds": 1.4081
+  },
+  "checks": {
+    "focused_pytest": {
+      "command": "uv run pytest -q tests/eval tests/engine/test_rerank.py tests/test_server_search.py tests/test_package.py",
+      "exit_code": 0,
+      "passed": 46,
+      "failed": 0,
+      "seconds": 0.52
+    },
+    "full_pytest": {
+      "command": "uv run pytest -q",
+      "exit_code": 0,
+      "passed": 510,
+      "failed": 0,
+      "seconds": 4.06
+    },
+    "flake8": {
+      "command": "uv run flake8 src tests eval",
+      "exit_code": 0,
+      "findings": 0
+    },
+    "cli_help": {
+      "command": "uv run iwiki-mcp --help",
+      "exit_code": 0
+    },
+    "wiki_lint": {
+      "broken": 0,
+      "stale": 0,
+      "missing_source": 0,
+      "pre_existing_advisories_remain": true
+    }
+  },
+  "decision": {
+    "outcome": "complete",
+    "auto_fix_applied": true,
+    "product_fixes": 1,
+    "recommendation": [
+      "retain the current reranker model",
+      "retain the 32-candidate safety ceiling",
+      "use one natural-language query and plain document text",
+      "set provider top_n to final k while sending the full candidate batch",
+      "preserve all unscored candidates in preliminary order"
+    ]
+  },
+  "primary_sources": [
+    "https://huggingface.co/BAAI/bge-reranker-v2-m3",
+    "https://docs.vllm.ai/en/latest/models/pooling_models/scoring/"
+  ]
+}

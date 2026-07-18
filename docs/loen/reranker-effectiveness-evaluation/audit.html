@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoEn Audit: reranker-effectiveness-evaluation</title>
+</head>
+<body>
+  <main>
+    <h1>LoEn Audit: reranker-effectiveness-evaluation</h1>
+    <section>
+      <h2>Current Status</h2>
+      <p><strong>Status:</strong> complete</p>
+      <p><strong>Mode:</strong> governance / auto-fix</p>
+      <p><strong>Stage:</strong> result</p>
+      <p><strong>Pass:</strong> 2 of at most 5</p>
+      <p><strong>Final verdict:</strong> Keep the current model and candidate
+      ceiling; apply the bounded provider response limit.</p>
+    </section>
+    <section>
+      <h2>Experiment</h2>
+      <p>Thirty-two direct model calls evaluated pool size, query form,
+      document representation, query decomposition, and provider top_n.</p>
+      <p>Baseline nDCG@8: 0.648482. Best seed-case nDCG@8: 0.670004.
+      Intent recall@8: 1.0. Query decomposition reduced nDCG@8 to 0.544568
+      and took 3.8330 seconds.</p>
+    </section>
+    <section>
+      <h2>Accepted Fix</h2>
+      <p>The server submits the complete hydrated candidate batch once and sets
+      provider top_n to requested final k. Scored rows lead; every remaining
+      candidate retains preliminary order. Public metadata stays sanitized.</p>
+    </section>
+    <section>
+      <h2>Verification</h2>
+      <p>Focused: 46 passed. Full: 510 passed. Flake8 and CLI help passed.
+      Wiki lint has no broken, stale, or missing-source pages attributable to
+      this change.</p>
+    </section>
+    <section>
+      <h2>Scope</h2>
+      <p>No model, deployment, secret, external service, index schema, merge,
+      release, or protected branch was changed.</p>
+    </section>
+    <section>
+      <h2>Evidence</h2>
+      <p>See evidence/live-matrix.json, evidence/latest-test.json, and companion
+      logs.</p>
+    </section>
+  </main>
+</body>
+</html>

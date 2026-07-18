@@ -1,0 +1,200 @@
+topic: reranker-effectiveness-evaluation
+mode: governance
+status: complete
+objective: "Measure reranker quality and efficiency, select a Pareto-efficient request strategy, and apply only bounded verified fixes."
+current_stage: result
+stage: result
+created: "2026-07-18"
+updated: "2026-07-18"
+mutable_scope:
+  - docs/loen/reranker-effectiveness-evaluation/**
+  - eval/reranker/**
+  - tests/eval/**
+  - tests/engine/test_rerank.py
+  - tests/test_server_search.py
+  - src/iwiki_mcp/engine/rerank.py
+  - src/iwiki_mcp/__init__.py
+  - src/iwiki_mcp/engine/config.py
+  - src/iwiki_mcp/server.py
+  - src/iwiki_mcp/retrieval.py
+  - README.md
+  - docs/README.ru.md
+  - pyproject.toml
+  - uv.lock
+protected_scope:
+  - secrets/**
+  - .env*
+  - external service and deployment configuration
+  - index schema and stored wiki content
+  - write-intent and unrelated retrieval behavior
+  - merge, release, push, and protected branches
+quality_gates:
+  - command: uv run pytest -q tests/eval tests/engine/test_rerank.py tests/test_server_search.py
+    evidence: evidence/latest-test.json
+  - command: uv run pytest -q
+    evidence: evidence/latest-full-test.log
+  - command: uv run flake8 src tests eval
+    evidence: evidence/latest-lint.log
+verifier:
+  type: evaluation-and-test
+  command: uv run pytest -q tests/eval tests/engine/test_rerank.py tests/test_server_search.py
+budget:
+  max_iterations: 5
+  max_model_calls: 200
+  max_product_fixes: 1
+stop_conditions:
+  - quality and efficiency evidence supports a Pareto-efficient recommendation
+  - no tested variant dominates current behavior
+  - verifier passes after an accepted bounded fix
+  - budget exhausted
+  - protected scope required
+  - live reranker unavailable after bounded retries
+  - insufficient untruncated input or relevance judgments
+handoff_conditions:
+  - model or deployment replacement indicated
+  - public API, index schema, embeddings, or write-intent change required
+  - live infrastructure or secret modification required
+  - owner must choose a quality-latency tradeoff
+  - verifier regression remains after repair budget
+rollback_policy: "Reverse only current-pass changes, rerun the baseline verifier, preserve evidence, and never use destructive Git reset."
+run:
+  mode: governance
+  subtype: auto-fix
+  plan_approved: true
+  plan_hash: "8caffc3f7f43d791"
+  state: complete
+  max_passes: 5
+  current_pass: 2
+  approval_source: "user"
+  approved_at: "2026-07-18T12:07:24+03:00"
+governance:
+  automation_type: manual
+  schedule: "manual trigger only"
+  owner: "repository owner"
+  first_runs_require_human_review: 1
+  reviewed_runs: 1
+  auto_fix: true
+  auto_merge: false
+  report_only_on_no_findings: true
+  alert_on:
+    - protected_scope_attempt
+    - verifier_failure
+    - budget_exhausted
+    - metric_regression
+    - latency_regression
+    - live_reranker_unavailable
+    - insufficient_judgments
+release_policy:
+  target_branch: ""
+  merge_strategy: ""
+  verifier_required: true
+  evidence_required: true
+  scope_limit: ""
+  recovery_policy: ""
+context_capsule:
+  required_fields:
+    - Topic
+    - Objective
+    - Loop mode
+    - Current stage
+    - Mutable scope
+    - Protected scope
+    - Quality gates
+    - Relevant files
+    - Last evidence summary
+    - Specific question or task for the agent
+profiles:
+  planner: loen-planner
+  worker: loen-worker
+  verifier: loen-verifier
+  reviewer: loen-reviewer
+  researcher: loen-researcher
+execution:
+  isolation: wasm
+  executor: wasmtime
+  network: allowlist
+  mounts:
+    - path: .
+      mode: read-only
+    - path: /tmp/loen
+      mode: write
+agents:
+  planner:
+    tools: [read, search]
+    sandbox: read-only
+  worker:
+    tools: [read, search, edit, shell]
+    sandbox: workspace-write
+  verifier:
+    tools: [read, search, shell]
+    sandbox: read-only
+    must_not_edit: true
+  reviewer:
+    tools: [read, search, shell]
+    sandbox: read-only
+    must_not_edit: true
+  researcher:
+    tools: [read, search, shell]
+    sandbox: read-only
+    experiment_scope_required: true
+stages:
+  goal:
+    roles: [planner, worker]
+  context:
+    roles: [planner, worker, researcher]
+  plan:
+    roles: [planner]
+  act:
+    roles: [worker]
+  check:
+    roles: [verifier]
+  reflect:
+    roles: [planner, verifier, reviewer]
+  result:
+    roles: [planner, verifier, reviewer]
+tools:
+  allowed:
+    - read
+    - search
+    - apply_patch
+    - shell
+  denied:
+    - secrets
+    - destructive_git
+    - external_write
+permissions:
+  filesystem:
+    mutable_scope:
+      - docs/loen/reranker-effectiveness-evaluation/**
+      - eval/reranker/**
+      - tests/eval/**
+      - tests/engine/test_rerank.py
+      - tests/test_server_search.py
+      - src/iwiki_mcp/engine/rerank.py
+      - src/iwiki_mcp/__init__.py
+      - src/iwiki_mcp/engine/config.py
+      - src/iwiki_mcp/server.py
+      - src/iwiki_mcp/retrieval.py
+      - README.md
+      - docs/README.ru.md
+      - pyproject.toml
+      - uv.lock
+    protected_scope:
+      - secrets/**
+      - .env*
+  network:
+    mode: allowlist
+    allowlist:
+      - 127.0.0.1:4000
+      - 127.0.0.1:13306
+      - homelab.ikeniborn.ru:443
+  shell:
+    allow:
+      - uv run pytest -q tests/eval tests/engine/test_rerank.py tests/test_server_search.py
+      - uv run pytest -q
+      - uv run flake8 src tests eval
+      - uv run iwiki-mcp --help
+    deny_patterns:
+      - rm -rf
+      - git reset --hard
+      - curl *|sh

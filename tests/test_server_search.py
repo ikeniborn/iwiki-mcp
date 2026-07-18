@@ -149,17 +149,25 @@ def test_disabled_reranker_keeps_existing_top_level_shape(tmp_path, monkeypatch)
 def test_configured_reranker_adds_metadata(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     monkeypatch.setenv("IWIKI_RERANK_MODEL", "model")
-    monkeypatch.setattr(
-        server.rerank, "rerank_candidates",
-        lambda cfg, query, candidates: (
+
+    captured = {}
+
+    def rerank(cfg, query, candidates, top_n):
+        captured["top_n"] = top_n
+        return (
             [{k: v for k, v in item.items() if k != "text"}
              for item in reversed(candidates)],
             {"applied": True},
-        ),
+        )
+
+    monkeypatch.setattr(
+        server.rerank, "rerank_candidates",
+        rerank,
     )
-    out = server.wiki_search("token", threshold=0.0)
+    out = server.wiki_search("token", k=3, threshold=0.0)
     assert out["rerank"] == {"applied": True}
     assert all("text" not in item for item in out["results"])
+    assert captured["top_n"] == 3
 
 
 def test_reranker_can_promote_candidate_below_preliminary_top_k(tmp_path, monkeypatch):
@@ -179,7 +187,7 @@ def test_reranker_can_promote_candidate_below_preliminary_top_k(tmp_path, monkey
     )
     monkeypatch.setattr(
         server.rerank, "rerank_candidates",
-        lambda cfg, query, items: (
+        lambda cfg, query, items, top_n: (
             [{key: value for key, value in item.items() if key != "text"}
              for item in reversed(items)],
             {"applied": True},
@@ -203,7 +211,7 @@ def test_reranker_failure_preserves_complete_preliminary_order(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         server.rerank, "rerank_candidates",
-        lambda cfg, query, candidates: (
+        lambda cfg, query, candidates, top_n: (
             [{key: value for key, value in item.items() if key != "text"}
              for item in candidates],
             {"applied": False, "warning": "reranker unavailable"},
@@ -212,6 +220,48 @@ def test_reranker_failure_preserves_complete_preliminary_order(tmp_path, monkeyp
     out = server.wiki_search("token")
     assert out["results"] == preliminary
     assert out["rerank"] == {"applied": False, "warning": "reranker unavailable"}
+
+
+def test_partial_rerank_preserves_all_unscored_preliminary_order(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("IWIKI_RERANK_MODEL", "model")
+    preliminary = [
+        {"domain": "backend", "file": "stale-a.md", "heading": "H", "chunk": 0,
+         "score": 0.3, "hit": "semantic", "source": "global"},
+        {"domain": "backend", "file": "scored-b.md", "heading": "H", "chunk": 0,
+         "score": 0.2, "hit": "semantic", "source": "global"},
+        {"domain": "backend", "file": "unscored-c.md", "heading": "H", "chunk": 0,
+         "score": 0.1, "hit": "semantic", "source": "global"},
+    ]
+    monkeypatch.setattr(
+        server.retrieval, "prepare_read_candidates",
+        lambda *args, **kwargs: preliminary,
+    )
+    monkeypatch.setattr(
+        server.retrieval, "hydrate_candidates",
+        lambda cfg, base, items: [
+            {**item, "text": item["file"]} for item in items[1:]
+        ],
+    )
+    monkeypatch.setattr(
+        server.rerank, "rerank_candidates",
+        lambda cfg, query, candidates, top_n: (
+            [
+                {key: value for key, value in candidates[0].items() if key != "text"},
+                {key: value for key, value in candidates[1].items() if key != "text"},
+            ],
+            {"applied": True, "_scored_count": 1},
+        ),
+    )
+
+    out = server.wiki_search("token", k=3)
+
+    assert [item["file"] for item in out["results"]] == [
+        "scored-b.md", "stale-a.md", "unscored-c.md"
+    ]
+    assert out["rerank"] == {"applied": True}
 
 
 def test_configured_reranker_with_no_hydrated_candidates_fails_soft(

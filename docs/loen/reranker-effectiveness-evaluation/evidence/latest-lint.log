@@ -1,0 +1,11 @@
+uv run flake8 src tests eval
+exit 0
+
+uv run iwiki-mcp --help
+exit 0
+
+wiki_lint iwiki-mcp
+broken: 0
+stale: 0
+missing_source: 0
+pre-existing orphan, long-lead advisories, and tag drift remain
