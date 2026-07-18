@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: cc26f34646992682
+  plan_hash: c2aa5787b5ce174f
   last_run: 2026-07-18
   phases:
     structure: { status: passed }
@@ -8,7 +8,47 @@ review:
     dependencies: { status: passed }
     verifiability: { status: passed }
     consistency: { status: passed }
-  findings: []
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: CRITICAL
+      section: "Task 4: Reuse materialized pages during hydration and reranking"
+      section_hash: a22cb8cf7a2b70cb
+      fragment: "page = _materialize_page(cfg, base, domain, candidate[\"file\"], page_cache)"
+      text: "Hydration trusts a cached page without checking whether the source file changed after candidate preparation, weakening the existing stale-chunk guard."
+      fix: "Store a file fingerprint during materialization, reject a page changed during its read, revalidate the fingerprint once before cached hydration, and add a mutation-between-stages test."
+      verdict: fixed
+      verdict_at: 2026-07-18
+    - id: F-002
+      phase: verifiability
+      severity: CRITICAL
+      section: "Task 6: Run complete verification and close implementation evidence"
+      section_hash: 97db3b3900082da2
+      fragment: "$check-chain result docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md"
+      text: "The plan commits all implementation work before result reconciliation, so check-chain result would inspect an empty git diff and could not reconcile the implementation."
+      fix: "Invoke check-chain result with --since=master so it reviews the complete committed branch diff."
+      verdict: fixed
+      verdict_at: 2026-07-18
+    - id: F-003
+      phase: verifiability
+      severity: WARNING
+      section: "Task 4: Reuse materialized pages during hydration and reranking"
+      section_hash: a22cb8cf7a2b70cb
+      fragment: "Update existing hydrate_candidates monkeypatch functions"
+      text: "The plan names required test-double edits but does not provide the exact three replacements, contrary to the writing-plans no-placeholder contract."
+      fix: "List each affected test and provide its complete replacement lambda signature with page_cache or kwargs."
+      verdict: fixed
+      verdict_at: 2026-07-18
+    - id: F-004
+      phase: dependencies
+      severity: CRITICAL
+      section: "Task 6: Run complete verification and close implementation evidence"
+      section_hash: 97db3b3900082da2
+      fragment: "git commit -m \"docs(plan): record lexical chunk scoring execution\""
+      text: "Execution checkbox updates change the plan body after its validated plan_hash, but the plan goes directly to result reconciliation with stale plan-stage validation."
+      fix: "After committing checkbox evidence, rerun check-chain plan on this file, commit the refreshed frontmatter/TODO state, then run check-chain result with --since=master."
+      verdict: fixed
+      verdict_at: 2026-07-18
 chain:
   intent: docs/superpowers/intents/2026-07-18-lexical-retrieval-chunk-scoring-intent.md
   spec: docs/superpowers/specs/2026-07-18-lexical-retrieval-chunk-scoring-design.md
@@ -60,6 +100,8 @@ existing JSONL `VectorStore`, existing RRF fusion, iwiki MCP documentation tools
   unchanged page-seed behavior, compatibility wrapper.
 - Modify `tests/test_server_search.py`: shared preparation/hydration materialization and
   updated test doubles.
+- Modify `tests/test_server_search_facets.py` and `tests/test_robustness_fixes.py`:
+  preparation test doubles accept the new internal cache keyword.
 - Update iwiki pages `indexing` and `retrieval` through MCP tools after behavior ships.
 - Verify existing version `0.7.3` in `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and
   `uv.lock`; do not bump again within this topic.
@@ -71,7 +113,8 @@ existing JSONL `VectorStore`, existing RRF fusion, iwiki MCP documentation tools
 | R1–R3 repeated headings and reuse metadata | Task 1 |
 | R5 pure scorers | Task 2 |
 | R4, R6–R7 exact materialization and unchanged seeds/fusion | Task 3 |
-| R8–R9 shared hydration cache and compatibility path | Task 4 |
+| R8 shared hydration cache and freshness validation | Task 4 |
+| R9 lexical compatibility path | Task 3 |
 | R10 migration evidence | Tasks 1 and 5 |
 | R11 documentation | Task 5 |
 | Full acceptance and health metrics | Task 6 |
@@ -458,7 +501,7 @@ def _long_lexical_page(tmp_path, monkeypatch):
     domain = base / "d"
     domain.mkdir(parents=True)
     (domain / "long.md").write_text(
-        "---\ndescription: long page\n---\n# Long\n\n"
+        "---\ndescription: long page\ntags: [wanted]\n---\n# Long\n\n"
         "## Details\none two three needle five six\n",
         encoding="utf-8",
     )
@@ -499,7 +542,7 @@ def test_direct_lexical_signal_omits_changed_chunk_hash(tmp_path, monkeypatch):
         cfg, base, "d", "replacement", None, "lexical", 32, 0.0, None, None, {}
     )
 
-    assert "lexical_section" not in signals
+    assert signals["lexical_section"] == []
 
 
 def test_direct_lexical_signal_omits_ambiguous_old_index_identity(
@@ -508,13 +551,62 @@ def test_direct_lexical_signal_omits_ambiguous_old_index_identity(
     path = wiki_base.index_path(base, "d")
     recs = store.load_index(path)
     section = next(rec for rec in recs if rec.kind == "section" and rec.chunk == 0)
-    store.save_index(path, recs + [section])
+    duplicate = replace(section, tags=["other"])
+    store.save_index(path, recs + [duplicate])
 
     signals = retrieval._domain_signals(
-        cfg, base, "d", "one", None, "lexical", 32, 0.0, None, None, {}
+        cfg, base, "d", "one", None, "lexical", 32, 0.0,
+        None, ["wanted"], {},
     )
 
-    assert "lexical_section" not in signals
+    assert signals["lexical_section"] == []
+
+
+def test_direct_lexical_signal_selects_later_repeated_heading_occurrence(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "repeated.md").write_text(
+        "---\ndescription: repeated\n---\n# Repeated\n\n"
+        "## Setup\nfirst meaning\n\n"
+        "## Setup\nsecond meaning contains needle\n",
+        encoding="utf-8",
+    )
+    cfg = _cfg()
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+
+    signals = retrieval._domain_signals(
+        cfg, str(base), "d", "needle", None, "lexical", 32, 0.0, None, None, {}
+    )
+
+    direct = signals["lexical_section"]
+    assert [(hit["heading"], hit["chunk"]) for hit in direct] == [("Setup", 1)]
+
+
+def test_materialization_omits_page_changed_during_read(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "page.md").write_text("## Details\nneedle\n", encoding="utf-8")
+    stamps = iter([
+        (1, 2, 10, 100),
+        (1, 2, 20, 200),
+    ])
+    monkeypatch.setattr(
+        retrieval, "_file_stamp", lambda path: next(stamps), raising=False
+    )
+    cache = {}
+
+    page = retrieval._materialize_page(
+        _cfg(), str(base), "d", "page.md", cache
+    )
+
+    assert page is None
+    assert cache[("d", "page.md")] is None
 ```
 
 - [ ] **Step 3: Add a failing unchanged-page-seed overlap test**
@@ -559,11 +651,12 @@ source occurrences.
 Run:
 
 ```bash
-uv run pytest -q tests/test_retrieval.py::test_direct_lexical_signal_uses_exact_late_chunk tests/test_retrieval.py::test_direct_lexical_signal_omits_changed_chunk_hash tests/test_retrieval.py::test_direct_lexical_signal_omits_ambiguous_old_index_identity tests/test_retrieval.py::test_lexical_page_seed_uses_whole_section_score_not_overlap_count
+uv run pytest -q tests/test_retrieval.py::test_direct_lexical_signal_uses_exact_late_chunk tests/test_retrieval.py::test_direct_lexical_signal_omits_changed_chunk_hash tests/test_retrieval.py::test_direct_lexical_signal_omits_ambiguous_old_index_identity tests/test_retrieval.py::test_direct_lexical_signal_selects_later_repeated_heading_occurrence tests/test_retrieval.py::test_materialization_omits_page_changed_during_read tests/test_retrieval.py::test_lexical_page_seed_uses_whole_section_score_not_overlap_count
 ```
 
-Expected: `_domain_signals` rejects the extra cache argument, and current direct lexical
-mapping still selects only `chunk=0`.
+Expected: `_domain_signals` rejects the extra cache argument, `_materialize_page` is
+absent, and current direct lexical mapping still selects only `chunk=0`, including for
+the later repeated `Setup`.
 
 - [ ] **Step 5: Add request-local materialization primitives**
 
@@ -576,16 +669,30 @@ from .engine.chunk import Chunk, chunk_markdown
 from .engine.grep import score_chunks, score_sections
 ```
 
-Replace the existing `chunk_markdown` and `grep_sections` imports. Add:
+Keep the existing `from pathlib import Path`. Replace the existing `chunk_markdown` and
+`grep_sections` imports, then add:
 
 ```python
+FileStamp = tuple[int, int, int, int]
+
+
 @dataclass
 class _MaterializedPage:
+    path: Path
+    stamp: FileStamp
     markdown: str
     chunks: dict[tuple[str, int], Chunk]
 
 
 PageCache = dict[tuple[str, str], _MaterializedPage | None]
+
+
+def _file_stamp(path: Path) -> FileStamp | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 def _materialize_page(cfg: Config, base: str, domain: str, file: str,
@@ -597,16 +704,26 @@ def _materialize_page(cfg: Config, base: str, domain: str, file: str,
     if path is None:
         cache[key] = None
         return None
+    before = _file_stamp(path)
+    if before is None:
+        cache[key] = None
+        return None
     try:
         with open(path, encoding="utf-8") as fh:
             markdown = fh.read()
     except OSError:
         cache[key] = None
         return None
+    after = _file_stamp(path)
+    if after is None or before != after:
+        cache[key] = None
+        return None
     chunks = chunk_markdown(
         file, markdown, cfg.chunk_size, cfg.chunk_overlap, cfg.summary_max
     )
     page = _MaterializedPage(
+        path=path,
+        stamp=after,
         markdown=markdown,
         chunks={
             (chunk.heading, chunk.chunk): chunk
@@ -625,31 +742,21 @@ def _unique_sections(records) -> dict[tuple[str, str, int], object | None]:
     return indexed
 ```
 
-- [ ] **Step 6: Separate semantic dimension filtering from lexical eligibility**
+- [ ] **Step 6: Replace whole-section-to-chunk-zero mapping**
 
-In `_domain_signals`, first filter only by safe path and facets:
+At the start of `_domain_signals`, retain the unfiltered records for global collision
+detection while leaving the existing eligibility filter unchanged:
 
 ```python
+    loaded_records = VectorStore(index_path(base, domain)).load()
     records = [
-        rec for rec in records
+        rec for rec in loaded_records
         if _domain_file_path(base, domain, rec.file) is not None
         and _facet_ok(rec.type, rec.tags, type, tags)
+        and (query_vec is None or rec.dim == len(query_vec))
     ]
-    summaries = [rec for rec in records if rec.kind == "summary"]
-    sections = [rec for rec in records if rec.kind == "section"]
-    semantic_summaries = [
-        rec for rec in summaries if query_vec is not None and rec.dim == len(query_vec)
-    ]
-    semantic_sections = [
-        rec for rec in sections if query_vec is not None and rec.dim == len(query_vec)
-    ]
+    loaded_sections = [rec for rec in loaded_records if rec.kind == "section"]
 ```
-
-Use `semantic_summaries` for summary cosine scoring and `semantic_sections` for global
-semantic chunk scoring. Continue using all safe facet-eligible `sections` for lexical
-and page/graph signals.
-
-- [ ] **Step 7: Replace whole-section-to-chunk-zero mapping**
 
 Change the `_domain_signals` signature to:
 
@@ -667,7 +774,10 @@ Replace its lexical block with:
     lexical_seeds: list[tuple[str, int]] = []
     lexical_map = {}
     if mode in ("lexical", "hybrid"):
-        indexed = _unique_sections(sections)
+        indexed = _unique_sections(loaded_sections)
+        eligible_identities = {
+            (rec.file, rec.heading, rec.chunk) for rec in sections
+        }
         headings_by_file: dict[str, set[str]] = {}
         for rec in sections:
             headings_by_file.setdefault(rec.file, set()).add(rec.heading)
@@ -685,7 +795,8 @@ Replace its lexical block with:
             for chunk in page.chunks.values():
                 key = file, chunk.heading, chunk.chunk
                 rec = indexed.get(key)
-                if rec is not None and rec.hash == chunk.hash:
+                if (key in eligible_identities and rec is not None
+                        and rec.hash == chunk.hash):
                     verified_chunks.append(chunk)
                     lexical_map[key] = rec
 
@@ -707,7 +818,7 @@ Build `lexical_section` with the full identity:
         )
 ```
 
-- [ ] **Step 8: Thread an optional cache through candidate preparation**
+- [ ] **Step 7: Thread an optional cache through candidate preparation**
 
 Extend `prepare_read_candidates`:
 
@@ -728,7 +839,7 @@ Immediately before `query_vec = None`, insert:
 Pass `page_cache` as the last argument to every `_domain_signals` call. Leave
 `search_read` callers working through the default `None` cache.
 
-- [ ] **Step 9: Run focused retrieval tests and verify GREEN**
+- [ ] **Step 8: Run focused retrieval tests and verify GREEN**
 
 Run:
 
@@ -739,7 +850,7 @@ uv run pytest -q tests/test_retrieval.py tests/test_grep.py tests/engine/test_fu
 Expected: exact late-window, stale hash, old collision, unchanged page seed, existing
 fusion, path safety, and lexical no-embedding tests all pass.
 
-- [ ] **Step 10: Update and test the internal lexical compatibility wrapper**
+- [ ] **Step 9: Update and test the internal lexical compatibility wrapper**
 
 Add this test to `tests/test_retrieval.py`:
 
@@ -778,7 +889,7 @@ uv run pytest -q tests/test_retrieval.py::test_lexical_search_compatibility_wrap
 
 Expected: PASS with `chunk == 1`.
 
-- [ ] **Step 11: Commit Task 3**
+- [ ] **Step 10: Commit Task 3**
 
 ```bash
 git add src/iwiki_mcp/retrieval.py tests/test_retrieval.py
@@ -791,10 +902,12 @@ git commit -m "fix(retrieval): map lexical hits to verified chunks"
 
 - Modify: `tests/test_retrieval.py`
 - Modify: `tests/test_server_search.py`
+- Modify: `tests/test_server_search_facets.py`
+- Modify: `tests/test_robustness_fixes.py`
 - Modify: `src/iwiki_mcp/retrieval.py`
 - Modify: `src/iwiki_mcp/server.py`
 
-- [ ] **Step 1: Add a failing hydration-cache test**
+- [ ] **Step 1: Add failing hydration-cache tests**
 
 Append to `tests/test_retrieval.py`:
 
@@ -805,8 +918,10 @@ def test_hydration_reuses_prepared_page_materialization(tmp_path, monkeypatch):
     chunk_calls = []
     page_reads = []
     real_chunk_markdown = retrieval.chunk_markdown
+    real_file_stamp = retrieval._file_stamp
     real_open = builtins.open
     page_path = (Path(base) / "d" / "long.md").resolve()
+    stamp_calls = []
 
     def counted(*args, **kwargs):
         chunk_calls.append(args[0])
@@ -817,7 +932,12 @@ def test_hydration_reuses_prepared_page_materialization(tmp_path, monkeypatch):
             page_reads.append(str(file))
         return real_open(file, *args, **kwargs)
 
+    def counted_stamp(path):
+        stamp_calls.append(path)
+        return real_file_stamp(path)
+
     monkeypatch.setattr(retrieval, "chunk_markdown", counted)
+    monkeypatch.setattr(retrieval, "_file_stamp", counted_stamp)
     monkeypatch.setattr(builtins, "open", counted_open)
     candidates = retrieval.prepare_read_candidates(
         cfg, base, ["d"], "needle", 10, 0.0,
@@ -831,6 +951,62 @@ def test_hydration_reuses_prepared_page_materialization(tmp_path, monkeypatch):
     assert matched["text"] == "## Details\nneedle five six"
     assert len(page_reads) == 1
     assert chunk_calls == ["long.md"]
+    assert stamp_calls == [page_path, page_path, page_path]
+
+
+def test_hydration_omits_cached_page_changed_after_preparation(
+        tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0,
+        mode="lexical", page_cache=cache,
+    )
+    page_path = Path(base) / "d" / "long.md"
+    page_path.write_text(
+        "---\ndescription: changed\n---\n# Long\n\n"
+        "## Details\nreplacement content with a different length\n",
+        encoding="utf-8",
+    )
+
+    hydrated = retrieval.hydrate_candidates(
+        cfg, base, candidates, page_cache=cache
+    )
+
+    assert not any(
+        hit["file"] == "long.md" and hit["heading"] == "Details"
+        for hit in hydrated
+    )
+
+
+def test_hydration_omits_ambiguous_index_identity(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0,
+        mode="lexical", page_cache=cache,
+    )
+    target = next(
+        hit for hit in candidates
+        if hit["file"] == "long.md"
+        and hit["heading"] == "Details"
+        and hit["chunk"] == 1
+    )
+    path = wiki_base.index_path(base, "d")
+    recs = store.load_index(path)
+    duplicate = next(
+        rec for rec in recs
+        if rec.file == "long.md"
+        and rec.heading == "Details"
+        and rec.chunk == 1
+    )
+    store.save_index(path, recs + [duplicate])
+
+    hydrated = retrieval.hydrate_candidates(
+        cfg, base, [target], page_cache=cache
+    )
+
+    assert hydrated == []
 ```
 
 - [ ] **Step 2: Run the hydration-cache test and verify RED**
@@ -838,10 +1014,12 @@ def test_hydration_reuses_prepared_page_materialization(tmp_path, monkeypatch):
 Run:
 
 ```bash
-uv run pytest -q tests/test_retrieval.py::test_hydration_reuses_prepared_page_materialization
+uv run pytest -q tests/test_retrieval.py::test_hydration_reuses_prepared_page_materialization tests/test_retrieval.py::test_hydration_omits_cached_page_changed_after_preparation tests/test_retrieval.py::test_hydration_omits_ambiguous_index_identity
 ```
 
-Expected: `hydrate_candidates` rejects `page_cache`.
+Expected: all three tests fail because `hydrate_candidates` rejects `page_cache`. After
+its signature is extended, the mutation and collision assertions remain the safety
+gates that prevent blind cached-text reuse and last-record-wins identity hydration.
 
 - [ ] **Step 3: Make hydration use the shared materializer**
 
@@ -854,9 +1032,13 @@ def hydrate_candidates(cfg: Config, base: str, candidates: list[dict],
         page_cache = {}
 ```
 
-Build collision-safe per-domain index hashes:
+Change the `indexes` annotation and build collision-safe per-domain index hashes:
 
 ```python
+    indexes: dict[
+        str, dict[tuple[str, str, int], str | None]
+    ] = {}
+
             identities = _unique_sections([
                 rec for rec in VectorStore(index_path(base, domain)).load()
                 if rec.kind == "section"
@@ -867,12 +1049,26 @@ Build collision-safe per-domain index hashes:
             }
 ```
 
+Before the candidate loop, add a per-hydration validation map:
+
+```python
+    validated_pages: dict[
+        tuple[str, str], _MaterializedPage | None
+    ] = {}
+```
+
 Replace hydration's separate page read/re-chunk block with:
 
 ```python
-        page = _materialize_page(
-            cfg, base, domain, candidate["file"], page_cache
-        )
+        page_key = domain, candidate["file"]
+        if page_key not in validated_pages:
+            page = _materialize_page(
+                cfg, base, domain, candidate["file"], page_cache
+            )
+            if page is not None and _file_stamp(page.path) != page.stamp:
+                page = None
+            validated_pages[page_key] = page
+        page = validated_pages[page_key]
         chunk_key = candidate["heading"], candidate["chunk"]
         if page is None or chunk_key not in page.chunks:
             continue
@@ -885,7 +1081,9 @@ Replace hydration's separate page read/re-chunk block with:
         hydrated.append({**candidate, "text": chunk.text})
 ```
 
-Remove the old local `pages` map; `page_cache` replaces it.
+Remove the old local `pages` map; `page_cache` replaces it. The validation map ensures
+one fingerprint recheck per page during hydration while every candidate for that page
+uses the same decision.
 
 - [ ] **Step 4: Run hydration and path-safety tests**
 
@@ -936,8 +1134,45 @@ def test_search_threads_one_page_cache_to_prepare_and_hydrate(
     assert seen["prepare"] == {}
 ```
 
-Update existing `hydrate_candidates` monkeypatch functions in this file to accept
-`page_cache=None` or `**kwargs`.
+Make these exact replacements in the existing tests:
+
+```python
+# test_reranker_can_promote_candidate_below_preliminary_top_k
+lambda cfg, base, items, page_cache=None: [
+    {**item, "text": item["file"]} for item in items
+]
+
+# test_partial_rerank_preserves_all_unscored_preliminary_order
+lambda cfg, base, items, page_cache=None: [
+    {**item, "text": item["file"]} for item in items[1:]
+]
+
+# test_configured_reranker_with_no_hydrated_candidates_fails_soft
+lambda *args, **kwargs: []
+```
+
+Also add `page_cache=None` after `tags=None` in all three explicit
+`prepare_read_candidates` test doubles:
+
+```python
+# tests/test_robustness_fixes.py::test_wiki_search_whitespace_type_becomes_no_filter
+def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
+                    type=None, tags=None, page_cache=None):
+    captured.update(type=type, tags=tags)
+    return []
+
+# tests/test_server_search_facets.py::test_wiki_search_passes_facets
+def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
+                    type=None, tags=None, page_cache=None):
+    captured.update(type=type, tags=tags)
+    return []
+
+# tests/test_server_search_facets.py::test_wiki_search_normalizes_facets
+def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
+                    type=None, tags=None, page_cache=None):
+    captured.update(type=type, tags=tags)
+    return []
+```
 
 - [ ] **Step 6: Run the server cache test and verify RED**
 
@@ -984,7 +1219,7 @@ Expected: all tests pass; reranker ordering and fail-soft metadata remain unchan
 - [ ] **Step 9: Commit Task 4**
 
 ```bash
-git add src/iwiki_mcp/retrieval.py src/iwiki_mcp/server.py tests/test_retrieval.py tests/test_server_search.py
+git add src/iwiki_mcp/retrieval.py src/iwiki_mcp/server.py tests/test_retrieval.py tests/test_server_search.py tests/test_server_search_facets.py tests/test_robustness_fixes.py
 git commit -m "perf(search): reuse lexical page materialization"
 ```
 
@@ -996,6 +1231,8 @@ git commit -m "perf(search): reuse lexical page materialization"
 - Update iwiki page: domain `iwiki-mcp`, slug `retrieval`, heading `Lexical search`
 - No repository Markdown source is changed by this task; iwiki MCP writes auto-index and
   auto-commit the external wiki base.
+- Reindex through iwiki MCP after the upgraded server process is installed and
+  restarted; record per-domain migration results.
 
 - [ ] **Step 1: Update indexing documentation through iwiki MCP**
 
@@ -1011,8 +1248,8 @@ Call `wiki_update_page` with:
 `chunk_markdown` produces a two-level set of chunks per page. One `summary` chunk
 (`kind="summary"`, `heading=""`, `ordinal=-1`) carries the full whitespace-collapsed
 frontmatter `description` as its embed text. Every non-reserved H2 section produces
-clean `section` chunks whose embed text is only `## {heading}\n{body window}`. `##
-Overview`, `## Outgoing links`, and `## External links` remain excluded.
+clean `section` chunks whose embed text is only `## {heading}\n{body window}`.
+`## Overview`, `## Outgoing links`, and `## External links` remain excluded.
 
 Section bodies use word windows configured by `chunk_size` and `chunk_overlap`.
 Chunk numbering is zero-based and continuous across every exact repeated heading in
@@ -1054,7 +1291,10 @@ A direct chunk hit requires one unique indexed `(file, heading, chunk)` identity
 equal current/index hash. Unsafe paths, unreadable pages, missing or stale chunks, and
 ambiguous pre-migration identities are omitted without falling back to `chunk=0`.
 Candidate preparation and optional reranker hydration share the same request-local
-materialization, while hydration independently retains the hash equality gate.
+materialization. Materialization rejects a file changed during its read; hydration
+revalidates the cached file fingerprint once per page and retains the indexed-hash
+equality gate. A page changed after preparation is omitted without a second content
+read.
 
 Positive whole-H2 page totals still select lexical page seeds; those seeds still expand
 graph pages and contribute separate `lexical_page`, `graph_page`, and
@@ -1076,7 +1316,7 @@ Expected:
 - pre-existing advisory long-lead/orphan/tag-drift entries are permitted to remain
   unchanged because this task did not introduce them
 
-- [ ] **Step 4: Record the operational migration evidence**
+- [ ] **Step 4: Verify the migration implementation**
 
 Run the existing focused migration test:
 
@@ -1086,6 +1326,29 @@ uv run pytest -q tests/test_indexer.py::test_reindex_migrates_repeated_heading_i
 
 Expected: PASS, proving the ordinary index path performs the migration without changing
 `SCHEMA_VERSION`.
+
+- [ ] **Step 5: HUMAN CHECKPOINT — restart the upgraded MCP server**
+
+Do not run the operational reindex through an MCP process that imported the pre-change
+chunker. Install or otherwise activate this branch's `0.7.3` server, restart the MCP
+process, and obtain explicit confirmation that the restarted connector is active.
+
+Expected: user confirms the upgraded MCP process is active. If restart/deployment is
+outside the current session, stop with a rollout handoff; do not claim migration
+complete.
+
+- [ ] **Step 6: Reindex every currently bound domain through iwiki MCP**
+
+Call `wiki_status`, form the distinct union of its current `read` domains and non-null
+`write` domain, then call `wiki_index(domain=<domain>)` exactly once for each. Use the
+runtime binding list rather than copying the planning-time list, because bindings may
+change before deployment.
+
+Expected for every domain: no `error`, returned `domain` matches the requested domain,
+and `indexed_chunks`, `reused`, and `embedded` are recorded in result evidence. Run
+`wiki_lint(domain="iwiki-mcp")` again; `broken` and `stale` remain empty. Reindexing may
+make external wiki-base commits, as already authorized; do not call `wiki_sync` unless
+the user separately requests remote publication.
 
 ### Task 6: Run complete verification and close implementation evidence
 
@@ -1161,20 +1424,37 @@ git commit -m "docs(plan): record lexical chunk scoring execution"
 
 Expected: clean working tree after the commit. Do not create an empty commit.
 
-- [ ] **Step 8: Run chain result reconciliation**
+Before staging, mark Step 7 complete in this plan so every implementation checkbox is
+recorded in the commit.
 
-Invoke:
+## Post-plan chain gates
+
+Run these only after every task checkbox above is complete and committed. They are
+chain validation and result-recording actions, not implementation tasks.
+
+1. Revalidate the fully checked plan:
 
 ```text
-$check-chain result docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md
+$check-chain plan docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md
 ```
 
-Expected: `Result: OK`, TODO row closed, no missing plan step, no unfixed code-review
-finding, verification evidence recorded, and final result report generated.
+Expected: plan verdict `OK`, refreshed `review.plan_hash`, and TODO `Plan: ✓`. Commit the
+frontmatter and TODO update:
 
-- [ ] **Step 9: Commit chain result artifacts**
+```bash
+git add docs/TODO.md docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md
+git commit -m "docs(plan): validate lexical chunk scoring execution"
+```
 
-Stage the result-updated plan, TODO row, and generated final report:
+2. Reconcile the complete committed branch diff:
+
+```text
+$check-chain result docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md --since=master
+```
+
+Expected: `Result: OK`, TODO row closed, no missing plan step, no unfixed review
+finding, verification evidence recorded, and final result report generated. Stage and
+commit the result artifacts:
 
 ```bash
 git add docs/TODO.md docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md docs/superpowers/reports/lexical-retrieval-chunk-scoring-results.html

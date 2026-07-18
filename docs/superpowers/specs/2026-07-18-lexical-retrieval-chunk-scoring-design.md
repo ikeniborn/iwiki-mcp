@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 4142665a7355e95c
+  spec_hash: d2d6aba81d7bb1dc
   last_run: 2026-07-18
   phases:
     structure: { status: passed }
@@ -17,7 +17,7 @@ chain:
 **Date:** 2026-07-18
 **Topic:** `lexical-retrieval-chunk-scoring`
 **Branch:** `dev-lexical-retrieval-chunk-scoring`
-**Status:** approved design, pending written-spec review
+**Status:** approved design, pending implementation
 
 ## Context
 
@@ -87,11 +87,14 @@ different repeated-heading occurrence.
 ### R4 — request-local page materialization
 
 Retrieval MUST use a request-local cache keyed by `(domain, file)`. A materialized page
-contains the current Markdown and the canonical section chunks from `chunk_markdown`.
+contains the resolved safe path, a file fingerprint, the current Markdown, and the
+canonical section chunks from `chunk_markdown`.
 
 The cache MUST:
 
 - use `_domain_file_path` before reading;
+- capture `(st_dev, st_ino, st_size, st_mtime_ns)` before and after the read and reject
+  a page whose fingerprint changes during materialization;
 - represent unreadable or unsafe pages as unavailable;
 - live for one `wiki_search` call only;
 - be shared by candidate preparation and optional hydration;
@@ -116,8 +119,10 @@ Whole-H2 hits MUST NOT create direct section candidates and MUST NOT map to `chu
 
 ### R6 — exact verified direct lexical hits
 
-For every eligible domain, retrieval MUST build indexed section identities from records
-that pass path, facet, and dimension-independent lexical eligibility checks.
+For every eligible domain, retrieval MUST detect identity collisions across all loaded
+section records before applying the existing path, facet, and mode-dependent dimension
+filters. Eligibility and uniqueness are separate gates: filtering out one side of a
+collision MUST NOT make the remaining record appear unique.
 
 A current chunk becomes a direct lexical candidate only when:
 
@@ -154,10 +159,12 @@ orders repeated-heading windows.
 
 `server.wiki_search` MUST create the request-local materialization cache and pass it to
 candidate preparation and hydration. `hydrate_candidates` MUST reuse cached current
-chunks when available and retain its indexed-hash equality check.
+chunks when available, revalidate the cached file fingerprint once per page before use,
+and retain its indexed-hash equality check.
 
 The cache is an optimization, not a trust boundary: hydration still omits candidates
-whose current chunk is absent or whose current hash differs from the indexed hash.
+whose file fingerprint changed after preparation, whose current chunk is absent, or
+whose current hash differs from the indexed hash.
 
 ### R9 — lexical compatibility path
 
@@ -170,8 +177,10 @@ Lexical mode MUST make zero embedding requests.
 
 ### R10 — migration
 
-No index schema bump is performed. Rollout MUST run the existing `wiki_index(domain)`
-once for every bound domain after upgrade.
+No index schema bump is performed. After the upgraded MCP process is installed and
+restarted, rollout MUST run the existing `wiki_index(domain)` once for every domain
+bound at that time. A pre-upgrade long-lived MCP process MUST NOT perform this migration
+because it still holds the old chunker code.
 
 During that reindex:
 
@@ -212,7 +221,8 @@ compatibility tests require it.
 
 ### `retrieval.py`
 
-Own safe page materialization, index collision detection, hash verification, lexical
+Own safe page materialization with stable file fingerprints, one-time cached-page
+revalidation during hydration, index collision detection, hash verification, lexical
 page aggregation, and conversion of verified matches into existing internal hits. It
 continues to own signal assembly and public candidate projection.
 
@@ -225,23 +235,26 @@ change MCP schemas.
 
 1. `wiki_search` resolves mode, domains, facets, top-k, and threshold, then creates an
    empty request-local materialization cache.
-2. `_domain_signals` loads safe eligible records and builds section lists and indexed
-   identity state, marking duplicate identities ambiguous.
+2. `_domain_signals` builds collision state across all loaded section records, then
+   applies the existing safety, facet, and dimension filters for eligibility.
 3. Semantic signals run as today.
-4. In lexical/hybrid mode, each eligible page is safely materialized once.
+4. In lexical/hybrid mode, each eligible page is safely materialized once with a stable
+   before/after file fingerprint.
 5. Whole-H2 scoring over the cached Markdown produces only per-file page-seed totals.
 6. Chunk scoring runs only over canonical current chunks with a unique matching indexed
    identity and equal hash.
 7. Verified records create `lexical_section` hits; page totals create lexical seeds;
    graph expansion and RRF run unchanged.
-8. If reranking is configured, hydration reuses the same page cache and rechecks the
-   indexed hash before passing exact text to the reranker.
+8. If reranking is configured, hydration reuses the same page cache, revalidates each
+   cached page fingerprint once, and rechecks the indexed hash before passing exact text
+   to the reranker.
 9. Final top-k handling and public result projection remain unchanged.
 
 ## Error handling
 
 - Invalid or escaping indexed paths are filtered before materialization.
 - Read failures mark a page unavailable for the current request.
+- A file changed during materialization or between preparation and hydration is omitted.
 - Empty or too-short query terms produce no lexical signals.
 - Duplicate old index identities produce no direct lexical hit until reindex.
 - Missing current identities and hash mismatches produce no direct lexical hit.
@@ -257,8 +270,9 @@ The release uses project version `0.7.3`. No JSONL record fields or schema versi
 change. Public search fields remain exactly `domain`, `file`, `heading`, `chunk`,
 `score`, `hit`, and `source`.
 
-Operators MUST run `wiki_index` for every bound domain. Because indexing is incremental,
-stable identities and hashes reuse their embeddings.
+Operators MUST restart onto the upgraded server before running `wiki_index` for every
+currently bound domain. Because indexing is incremental, stable identities and hashes
+reuse their embeddings.
 
 The meaning of `chunk` changes only for later occurrences of an exact repeated heading:
 it continues numbering from earlier occurrences. Unique-heading pages remain
@@ -290,7 +304,8 @@ compatible.
 - Short-section score and ordering remain unchanged.
 - A matching later repeated-H2 occurrence returns its unique chunk.
 - Whole-H2 page-seed totals remain unchanged and do not double-count overlap.
-- Old-index collisions, missing records, and hash mismatches produce no direct hit.
+- Old-index collisions remain ambiguous even when facets or dimensions filter one
+  duplicate; collisions, missing records, and hash mismatches produce no direct hit.
 - Lexical mode performs no embedding request.
 - Public fields, `hit`, `source`, RRF behavior, and candidate ceiling remain unchanged.
 
@@ -299,6 +314,9 @@ compatible.
 - Hydration sends the exact verified matched chunk text to the reranker.
 - Candidate preparation and hydration share one request-local materialization.
 - An eligible page is read and chunked at most once per request.
+- A page changed after preparation is omitted from cached hydration without a second
+  content read.
+- Hydration omits an indexed identity duplicated after candidate preparation.
 - Unsafe paths and stale chunks remain omitted.
 
 ### Verification commands
@@ -316,8 +334,9 @@ uv run iwiki-mcp --help
   are skipped; rollout documentation requires one normal domain reindex.
 - **Overlap inflates page seed scores.** Page seeds retain whole-H2 scoring; only direct
   section signals score chunks.
-- **Request cache serves stale cross-request text.** Cache lifetime is one call and has
-  no global state.
+- **Request cache serves text changed after preparation.** Materialization requires a
+  stable before/after fingerprint; hydration revalidates that fingerprint once per page
+  before using cached text. Cache lifetime remains one call with no global state.
 - **Identical repeated bodies reuse the wrong source position.** Index reuse refreshes
   `ordinal`; unique chunk numbering distinguishes occurrences after reindex.
 - **Chunk scorer drifts from indexing.** Retrieval consumes `chunk_markdown` output
