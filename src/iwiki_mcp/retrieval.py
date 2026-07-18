@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import stat
 
 import numpy as np
 
@@ -60,12 +62,56 @@ def _facet_ok(rtype, rtags, want_type, want_tags) -> bool:
     return True
 
 
-def _file_stamp(path: Path) -> FileStamp | None:
+def _file_stamp(fd: int) -> FileStamp | None:
     try:
-        stat = path.stat()
+        result = os.fstat(fd)
     except OSError:
         return None
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+    return result.st_dev, result.st_ino, result.st_size, result.st_mtime_ns
+
+
+def _read_domain_file(base: str, domain: str,
+                      file: str) -> tuple[FileStamp, str] | None:
+    try:
+        directory_flags = (
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
+        )
+        file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    except AttributeError:
+        return None
+    fds: list[int] = []
+    try:
+        current_fd = os.open(domain_dir(base, domain), directory_flags)
+        fds.append(current_fd)
+        parts = file.split("/")
+        for part in parts[:-1]:
+            current_fd = os.open(
+                part, directory_flags, dir_fd=current_fd
+            )
+            fds.append(current_fd)
+        final_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
+        fds.append(final_fd)
+        if not stat.S_ISREG(os.fstat(final_fd).st_mode):
+            return None
+        before = _file_stamp(final_fd)
+        if before is None:
+            return None
+        payload = bytearray()
+        while block := os.read(final_fd, 1024 * 1024):
+            payload.extend(block)
+        after = _file_stamp(final_fd)
+        if after is None or after != before:
+            return None
+        try:
+            markdown = bytes(payload).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return after, markdown
+    except OSError:
+        return None
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
 
 
 def _materialize_page(cfg: Config, base: str, domain: str, file: str,
@@ -77,19 +123,11 @@ def _materialize_page(cfg: Config, base: str, domain: str, file: str,
     if path is None:
         cache[key] = None
         return None
-    before = _file_stamp(path)
-    if before is None:
+    read = _read_domain_file(base, domain, file)
+    if read is None:
         cache[key] = None
         return None
-    try:
-        markdown = path.read_text(encoding="utf-8")
-    except OSError:
-        cache[key] = None
-        return None
-    after = _file_stamp(path)
-    if after is None or after != before:
-        cache[key] = None
-        return None
+    stamp, markdown = read
     chunks = {
         (chunk.heading, chunk.chunk): chunk
         for chunk in chunk_markdown(
@@ -97,7 +135,7 @@ def _materialize_page(cfg: Config, base: str, domain: str, file: str,
         )
         if chunk.kind == "section"
     }
-    page = _MaterializedPage(path, after, markdown, chunks)
+    page = _MaterializedPage(path, stamp, markdown, chunks)
     cache[key] = page
     return page
 

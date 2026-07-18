@@ -144,6 +144,77 @@ def test_materialize_page_rejects_change_during_read(tmp_path, monkeypatch):
     assert cache[("d", "long.md")] is None
 
 
+def test_materialize_page_rejects_file_symlink_swap_after_validation(
+        tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    page_path = Path(base) / "d" / "long.md"
+    secret = tmp_path / "secret.md"
+    secret.write_text(
+        "# Secret\n\n## Details\nexternal secret needle\n", encoding="utf-8"
+    )
+    original_domain_file_path = retrieval._domain_file_path
+    swapped = False
+
+    def swap_after_validation(base, domain, file):
+        nonlocal swapped
+        validated = original_domain_file_path(base, domain, file)
+        if validated is not None and not swapped:
+            swapped = True
+            page_path.unlink()
+            try:
+                page_path.symlink_to(secret)
+            except OSError:
+                pytest.skip("symlinks are not supported")
+        return validated
+
+    monkeypatch.setattr(retrieval, "_domain_file_path", swap_after_validation)
+    cache = {}
+
+    page = retrieval._materialize_page(cfg, base, "d", "long.md", cache)
+
+    assert page is None
+    assert cache[("d", "long.md")] is None
+
+
+def test_materialize_page_rejects_parent_symlink_swap_after_validation(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    nested = base / "d" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "page.md").write_text(
+        "# Page\n\n## Details\nsafe text\n", encoding="utf-8"
+    )
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "page.md").write_text(
+        "# Secret\n\n## Details\nexternal secret\n", encoding="utf-8"
+    )
+    original_domain_file_path = retrieval._domain_file_path
+    swapped = False
+
+    def swap_after_validation(base, domain, file):
+        nonlocal swapped
+        validated = original_domain_file_path(base, domain, file)
+        if validated is not None and not swapped:
+            swapped = True
+            nested.rename(nested.with_name("nested-original"))
+            try:
+                nested.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("symlinks are not supported")
+        return validated
+
+    monkeypatch.setattr(retrieval, "_domain_file_path", swap_after_validation)
+    cache = {}
+
+    page = retrieval._materialize_page(
+        _cfg(), str(base), "d", "nested/page.md", cache
+    )
+
+    assert page is None
+    assert cache[("d", "nested/page.md")] is None
+
+
 def test_lexical_page_seed_uses_source_term_frequency_not_overlap(
         tmp_path, monkeypatch):
     base = tmp_path / "wiki"
