@@ -1,4 +1,5 @@
-from iwiki_mcp.engine.grep import grep_sections
+from iwiki_mcp.engine.chunk import chunk_markdown
+from iwiki_mcp.engine.grep import grep_sections, score_chunks, score_sections
 
 
 def test_grep_finds_exact_symbol(tmp_path):
@@ -56,3 +57,55 @@ def test_grep_none_returns_all_positive_sections(tmp_path):
     hits = grep_sections(str(tmp_path), "needle", top_k=None)
 
     assert len(hits) == 3
+
+
+def test_score_sections_preserves_whole_h2_term_frequency():
+    markdown = "## One\nneedle\n## Two\nneedle needle\n"
+
+    hits = score_sections("page.md", markdown, "needle")
+
+    assert [(hit["heading"], hit["score"]) for hit in hits] == [
+        ("Two", 2),
+        ("One", 1),
+    ]
+
+
+def test_score_chunks_returns_exact_late_window_only():
+    chunks = chunk_markdown(
+        "page.md",
+        "## Long\none two three needle five six\n",
+        size=3,
+        overlap=0,
+    )
+
+    hits = score_chunks(chunks, "needle", top_k=None)
+
+    assert [(hit["heading"], hit["chunk"], hit["score"]) for hit in hits] == [
+        ("Long", 1, 1),
+    ]
+
+
+def test_score_chunks_orders_ties_by_file_heading_and_chunk():
+    chunks = (
+        chunk_markdown(
+            "b.md",
+            "## Same\nneedle needle\n",
+            size=1,
+            overlap=0,
+        )
+        + chunk_markdown(
+            "a.md",
+            "## Zulu\nneedle\n## Alpha\nneedle\n",
+            size=1,
+            overlap=0,
+        )
+    )
+
+    hits = score_chunks(chunks, "needle", top_k=None)
+
+    assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in hits] == [
+        ("a.md", "Alpha", 0),
+        ("a.md", "Zulu", 0),
+        ("b.md", "Same", 0),
+        ("b.md", "Same", 1),
+    ]
