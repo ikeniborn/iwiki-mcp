@@ -1,21 +1,33 @@
 """Broad multi-signal retrieval followed by deterministic rank fusion."""
 from __future__ import annotations
 
-import os
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import numpy as np
 
 from .base import domain_dir, index_path, migrate_store_location
 from .engine import fusion, hier
-from .engine.chunk import chunk_markdown
+from .engine.chunk import Chunk, chunk_markdown
 from .engine.config import Config
 from .engine.embed import embed_texts
-from .engine.grep import grep_sections
+from .engine.grep import score_chunks, score_sections
 from .engine.store import VectorStore
 
 CANDIDATE_LIMIT = 32
 _VALID_MODES = {"hybrid", "semantic", "lexical"}
+FileStamp = tuple[int, int, int, int]
+
+
+@dataclass
+class _MaterializedPage:
+    path: Path
+    stamp: FileStamp
+    markdown: str
+    chunks: dict[tuple[str, int], Chunk]
+
+
+PageCache = dict[tuple[str, str], _MaterializedPage | None]
 
 
 def _candidate_limit(top_k: int) -> int:
@@ -48,14 +60,57 @@ def _facet_ok(rtype, rtags, want_type, want_tags) -> bool:
     return True
 
 
-def _hit_facets(base, domain, file):
-    from .engine import frontmatter as fm
-    path = os.path.join(domain_dir(base, domain), file)
+def _file_stamp(path: Path) -> FileStamp | None:
     try:
-        meta, _ = fm.split(open(path, encoding="utf-8").read())
+        stat = path.stat()
     except OSError:
-        return None, []
-    return meta.get("type"), fm.normalize_tags(meta.get("tags", []) or [])
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _materialize_page(cfg: Config, base: str, domain: str, file: str,
+                      cache: PageCache) -> _MaterializedPage | None:
+    key = domain, file
+    if key in cache:
+        return cache[key]
+    path = _domain_file_path(base, domain, file)
+    if path is None:
+        cache[key] = None
+        return None
+    before = _file_stamp(path)
+    if before is None:
+        cache[key] = None
+        return None
+    try:
+        markdown = path.read_text(encoding="utf-8")
+    except OSError:
+        cache[key] = None
+        return None
+    after = _file_stamp(path)
+    if after is None or after != before:
+        cache[key] = None
+        return None
+    chunks = {
+        (chunk.heading, chunk.chunk): chunk
+        for chunk in chunk_markdown(
+            file, markdown, cfg.chunk_size, cfg.chunk_overlap, cfg.summary_max
+        )
+        if chunk.kind == "section"
+    }
+    page = _MaterializedPage(path, after, markdown, chunks)
+    cache[key] = page
+    return page
+
+
+def _unique_sections(records) -> dict[tuple[str, str, int], object | None]:
+    unique: dict[tuple[str, str, int], object | None] = {}
+    for rec in records:
+        key = rec.file, rec.heading, rec.chunk
+        if key in unique:
+            unique[key] = None
+        else:
+            unique[key] = rec
+    return unique
 
 
 def _internal_hit(domain, rec, source, rank_key, seed_origins=None) -> dict:
@@ -76,11 +131,13 @@ def _internal_hit(domain, rec, source, rank_key, seed_origins=None) -> dict:
 def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                     query_vec: list[float] | None, mode: str, limit: int,
                     threshold: float, type: str | None,
-                    tags: list | None) -> dict[str, list[dict]]:
+                    tags: list | None, page_cache: PageCache
+                    ) -> dict[str, list[dict]]:
     migrate_store_location(base, domain)
-    records = VectorStore(index_path(base, domain)).load()
+    loaded_records = VectorStore(index_path(base, domain)).load()
+    loaded_sections = [rec for rec in loaded_records if rec.kind == "section"]
     records = [
-        rec for rec in records
+        rec for rec in loaded_records
         if _domain_file_path(base, domain, rec.file) is not None
         and _facet_ok(rec.type, rec.tags, type, tags)
         and (query_vec is None or rec.dim == len(query_vec))
@@ -118,20 +175,34 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
     lexical_hits: list[dict] = []
     lexical_seeds: list[tuple[str, int]] = []
     if mode in ("lexical", "hybrid"):
-        eligible_files = set(sections_by_file)
-        lexical_map = {
-            (rec.file, rec.heading): rec
-            for rec in sections
-            if rec.chunk == 0
+        indexed = _unique_sections(loaded_sections)
+        eligible_identities = {
+            (rec.file, rec.heading, rec.chunk) for rec in sections
         }
-        lexical_hits = [
-            hit for hit in grep_sections(domain_dir(base, domain), query, None)
-            if hit["file"] in eligible_files
-            and (hit["file"], hit["heading"]) in lexical_map
-        ]
+        headings_by_file: dict[str, set[str]] = {}
+        for rec in sections:
+            headings_by_file.setdefault(rec.file, set()).add(rec.heading)
+        verified_chunks: list[Chunk] = []
+        lexical_map = {}
         page_scores: dict[str, int] = {}
-        for hit in lexical_hits:
-            page_scores[hit["file"]] = page_scores.get(hit["file"], 0) + hit["score"]
+        for file in sorted(sections_by_file):
+            page = _materialize_page(cfg, base, domain, file, page_cache)
+            if page is None:
+                continue
+            eligible_headings = headings_by_file[file]
+            for hit in score_sections(file, page.markdown, query):
+                if hit["heading"] in eligible_headings:
+                    page_scores[file] = page_scores.get(file, 0) + hit["score"]
+            for (heading, chunk_index), chunk in page.chunks.items():
+                identity = file, heading, chunk_index
+                if identity not in eligible_identities:
+                    continue
+                rec = indexed.get(identity)
+                if rec is None or rec.hash != chunk.hash:
+                    continue
+                verified_chunks.append(chunk)
+                lexical_map[identity] = rec
+        lexical_hits = score_chunks(verified_chunks, query, None)
         ranked_pages = sorted(page_scores.items(), key=lambda item: (-item[1], item[0]))
         lexical_seeds = ranked_pages[:cfg.seed_top_k]
     else:
@@ -183,7 +254,7 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
             )
         )
     for rank, hit in enumerate(lexical_hits):
-        rec = lexical_map[(hit["file"], hit["heading"])]
+        rec = lexical_map[(hit["file"], hit["heading"], hit["chunk"])]
         signals["lexical_section"].append(
             _internal_hit(
                 domain, rec, "lexical", (rank, rec.file, rec.ordinal, rec.chunk),
@@ -196,13 +267,16 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
 def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: str,
                             top_k: int, threshold: float, mode: str = "hybrid",
                             type: str | None = None,
-                            tags: list | None = None) -> list[dict]:
+                            tags: list | None = None,
+                            page_cache: PageCache | None = None) -> list[dict]:
     if mode not in _VALID_MODES:
         allowed = ", ".join(sorted(_VALID_MODES))
         raise ValueError(f"invalid search mode: {mode}; allowed values: {allowed}")
     if top_k <= 0 or not domains:
         return []
 
+    if page_cache is None:
+        page_cache = {}
     query_vec = None
     if mode in ("semantic", "hybrid"):
         query_vec = list(np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32))
@@ -210,7 +284,8 @@ def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: s
     signals: dict[str, list[dict]] = {}
     for domain in domains:
         domain_signals = _domain_signals(
-            cfg, base, domain, query, query_vec, mode, limit, threshold, type, tags
+            cfg, base, domain, query, query_vec, mode, limit, threshold, type, tags,
+            page_cache,
         )
         for name, hits in domain_signals.items():
             signals.setdefault(name, []).extend(hits)
@@ -332,22 +407,12 @@ def locate_target(cfg: Config, base: str, domain: str, query: str,
             "score": best["score"], "exists": True}
 
 
-def lexical_search(base: str, domains: list[str], query: str, top_k: int,
-                   type: str | None = None, tags: list | None = None) -> list[dict]:
-    if top_k <= 0:
-        return []
-    hits = []
-    for domain in domains:
-        for hit in grep_sections(domain_dir(base, domain), query, None):
-            if type is not None or tags:
-                record_type, record_tags = _hit_facets(base, domain, hit["file"])
-                if not _facet_ok(record_type, record_tags, type, tags):
-                    continue
-            hits.append({"domain": domain, **hit, "source": "lexical"})
-    hits.sort(key=lambda hit: (
-        -hit["score"], hit["domain"], hit["file"], hit["heading"]
-    ))
-    return hits[:top_k]
+def lexical_search(cfg: Config, base: str, domains: list[str], query: str,
+                   top_k: int, type: str | None = None,
+                   tags: list | None = None) -> list[dict]:
+    return search_read(
+        cfg, base, domains, query, top_k, cfg.score_threshold, "lexical", type, tags
+    )
 
 
 def hybrid_search(cfg: Config, base: str, domains: list[str], query: str,

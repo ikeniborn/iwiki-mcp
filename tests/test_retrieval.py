@@ -45,6 +45,133 @@ def _seed(tmp_path, monkeypatch):
     return str(base)
 
 
+def _long_lexical_page(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "long.md").write_text(
+        "---\ndescription: long page\ntags: [wanted]\n---\n"
+        "# Long\n\n## Details\none two three needle five six\n",
+        encoding="utf-8",
+    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=0)
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+    return cfg, str(base)
+
+
+def test_lexical_signal_targets_exact_current_chunk(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+
+    signals = retrieval._domain_signals(
+        cfg, base, "d", "needle", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    direct = signals["lexical_section"]
+    assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in direct] == [
+        ("long.md", "Details", 1)
+    ]
+
+
+def test_lexical_signal_omits_stale_indexed_chunk(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    (Path(base) / "d" / "long.md").write_text(
+        "---\ndescription: long page\n---\n"
+        "# Long\n\n## Details\nreplacement two three needle five six\n",
+        encoding="utf-8",
+    )
+
+    signals = retrieval._domain_signals(
+        cfg, base, "d", "replacement", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    assert signals.get("lexical_section", []) == []
+
+
+def test_lexical_collision_uses_all_loaded_sections(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    path = wiki_base.index_path(base, "d")
+    records = store.load_index(path)
+    section = next(
+        record for record in records
+        if record.kind == "section" and record.heading == "Details" and record.chunk == 0
+    )
+    store.save_index(path, [*records, replace(section, tags=["other"])])
+
+    signals = retrieval._domain_signals(
+        cfg, base, "d", "one", None, "lexical", 10, 0.0, None, ["wanted"], {}
+    )
+
+    assert signals.get("lexical_section", []) == []
+
+
+def test_lexical_signal_distinguishes_repeated_heading_chunks(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "repeated.md").write_text(
+        "---\ndescription: repeated page\n---\n# Repeated\n\n"
+        "## Setup\nfirst\n\n## Setup\nneedle later\n",
+        encoding="utf-8",
+    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=0)
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+
+    signals = retrieval._domain_signals(
+        cfg, str(base), "d", "needle", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    direct = signals["lexical_section"]
+    assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in direct] == [
+        ("repeated.md", "Setup", 1)
+    ]
+
+
+def test_materialize_page_rejects_change_during_read(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    stamps = iter(((1, 2, 10, 100), (1, 2, 20, 200)))
+    monkeypatch.setattr(retrieval, "_file_stamp", lambda path: next(stamps))
+
+    page = retrieval._materialize_page(cfg, base, "d", "long.md", cache)
+
+    assert page is None
+    assert cache[("d", "long.md")] is None
+
+
+def test_lexical_page_seed_uses_source_term_frequency_not_overlap(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "overlap.md").write_text(
+        "---\ndescription: overlap page\n---\n# Overlap\n\n"
+        "## Details\none two needle four five\n",
+        encoding="utf-8",
+    )
+    (domain / "twice.md").write_text(
+        "---\ndescription: twice page\n---\n# Twice\n\n"
+        "## Details\nneedle x needle\n",
+        encoding="utf-8",
+    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=2, seed_top_k=1)
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+
+    signals = retrieval._domain_signals(
+        cfg, str(base), "d", "needle", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    assert {hit["file"] for hit in signals["lexical_page"]} == {"twice.md"}
+
+
 @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
 def test_semantic_modes_embed_query_once(tmp_path, monkeypatch, mode):
     base = _seed(tmp_path, monkeypatch)
@@ -169,6 +296,21 @@ def test_vector_search_is_semantic_compatibility_alias(tmp_path, monkeypatch):
     assert hits
     assert all(hit["hit"] == "semantic" for hit in hits)
     json.dumps(hits)
+
+
+def test_lexical_search_delegates_to_canonical_flow(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+
+    hits = retrieval.lexical_search(
+        cfg, base, ["d"], "needle", 10, type=None, tags=None
+    )
+
+    assert any(
+        hit["file"] == "long.md"
+        and hit["heading"] == "Details"
+        and hit["chunk"] == 1
+        for hit in hits
+    )
 
 
 def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypatch):
