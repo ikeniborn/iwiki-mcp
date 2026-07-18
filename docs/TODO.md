@@ -17,4 +17,4 @@
 | wiki-push-recovery | done | ✓ | ✓ | ✓ | OK | 2026-07-11 | 2026-07-12 | check-chain result: OK — 7/7 tasks DONE, R1–R8 covered, 413 tests, flake8/CLI/lock/diff clean, wiki current; credential context blocked by approved safety stop; plan_hash d0fe18073cb8717a |
 | embedding-startup-check | done | ✓ | ✓ | ✓ | OK | 2026-07-13 | 2026-07-13 | check-chain result: OK — 6/6 tasks DONE, R1–R8 covered, 446 tests pass, flake8/CLI/version/diff clean, final review READY, wiki current |
 | configurable-search-mode-api | done | ✓ | ✓ | ✓ | OK | 2026-07-15 | 2026-07-16 | check-chain result re-audit: OK — R13 docs/wiki gaps fixed with RED→GREEN regressions, unrelated binding removed, 11/11 tasks and R1–R14 covered, 505 tests pass, v0.7.1, wiki current; live connector restart required to expose new schema. |
-| lexical-retrieval-chunk-scoring | in-progress | ✓ | ✓ | – | – | 2026-07-18 |  | spec OK — canonical re-chunk, verified direct hits, preserved page seeds, unique repeated-H2 chunks |
+| lexical-retrieval-chunk-scoring | in-progress | ✓ | ✓ | ✓ | – | 2026-07-18 |  | plan OK — 6 TDD tasks cover R1–R11, migration, iwiki docs, verification, and result reconciliation |
