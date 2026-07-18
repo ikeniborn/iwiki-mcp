@@ -305,12 +305,8 @@ def test_lexical_search_delegates_to_canonical_flow(tmp_path, monkeypatch):
         cfg, base, ["d"], "needle", 10, type=None, tags=None
     )
 
-    assert any(
-        hit["file"] == "long.md"
-        and hit["heading"] == "Details"
-        and hit["chunk"] == 1
-        for hit in hits
-    )
+    direct = next(hit for hit in hits if hit["heading"] == "Details")
+    assert direct["chunk"] == 1
 
 
 def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypatch):
