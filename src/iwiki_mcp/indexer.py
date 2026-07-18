@@ -51,6 +51,7 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
                 and prev.v == SCHEMA_VERSION):
             prev.type = c.type          # refresh facets without re-embedding
             prev.tags = list(c.tags)
+            prev.ordinal = c.ordinal
             fresh.append(prev)
             reused += 1
         else:
