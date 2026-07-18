@@ -226,11 +226,12 @@ def test_read_domain_file_rejects_fifo_without_blocking_or_leaking_fd(tmp_path):
     os.mkfifo(domain / "pipe.md")
     context = multiprocessing.get_context("fork")
     results = context.Queue()
+    fd_directory = Path("/proc/self/fd")
 
     def read_fifo():
-        before = len(os.listdir("/proc/self/fd"))
+        before = len(os.listdir(fd_directory)) if fd_directory.is_dir() else None
         result = retrieval._read_domain_file(str(base), "d", "pipe.md")
-        after = len(os.listdir("/proc/self/fd"))
+        after = len(os.listdir(fd_directory)) if fd_directory.is_dir() else None
         results.put((result, before, after))
 
     process = context.Process(target=read_fifo)
@@ -249,7 +250,8 @@ def test_read_domain_file_rejects_fifo_without_blocking_or_leaking_fd(tmp_path):
     assert not blocked
     result, before, after = outcome
     assert result is None
-    assert after == before
+    if before is not None:
+        assert after == before
 
 
 def test_read_domain_file_fails_closed_when_dir_fd_is_unsupported(
