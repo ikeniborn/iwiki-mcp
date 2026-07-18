@@ -1,5 +1,7 @@
 import builtins
 import json
+import multiprocessing
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -213,6 +215,63 @@ def test_materialize_page_rejects_parent_symlink_swap_after_validation(
 
     assert page is None
     assert cache[("d", "nested/page.md")] is None
+
+
+def test_read_domain_file_rejects_fifo_without_blocking_or_leaking_fd(tmp_path):
+    if not hasattr(os, "mkfifo") or "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("FIFO fork test requires POSIX")
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    os.mkfifo(domain / "pipe.md")
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+
+    def read_fifo():
+        before = len(os.listdir("/proc/self/fd"))
+        result = retrieval._read_domain_file(str(base), "d", "pipe.md")
+        after = len(os.listdir("/proc/self/fd"))
+        results.put((result, before, after))
+
+    process = context.Process(target=read_fifo)
+    process.start()
+    process.join(1)
+    blocked = process.is_alive()
+    outcome = None
+    if blocked:
+        process.terminate()
+        process.join()
+    else:
+        outcome = results.get(timeout=1)
+    results.close()
+    results.join_thread()
+
+    assert not blocked
+    result, before, after = outcome
+    assert result is None
+    assert after == before
+
+
+def test_read_domain_file_fails_closed_when_dir_fd_is_unsupported(
+        tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    del cfg
+    real_open = retrieval.os.open
+    opened = []
+
+    def unsupported_dir_fd(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            raise NotImplementedError("dir_fd unavailable")
+        fd = real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(retrieval.os, "open", unsupported_dir_fd)
+
+    assert retrieval._read_domain_file(base, "d", "long.md") is None
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
 
 
 def test_lexical_page_seed_uses_source_term_frequency_not_overlap(

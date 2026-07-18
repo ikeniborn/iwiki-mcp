@@ -76,7 +76,9 @@ def _read_domain_file(base: str, domain: str,
         directory_flags = (
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
         )
-        file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        file_flags = (
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        )
     except AttributeError:
         return None
     fds: list[int] = []
@@ -107,7 +109,7 @@ def _read_domain_file(base: str, domain: str,
         except UnicodeDecodeError:
             return None
         return after, markdown
-    except OSError:
+    except (OSError, NotImplementedError):
         return None
     finally:
         for fd in reversed(fds):
