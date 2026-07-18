@@ -190,7 +190,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `IWIKI_TOP_K` | `8` | Default maximum results for search and related-section lookup. |
 | `IWIKI_SCORE_THRESHOLD` | `0.2` | Default minimum vector similarity for a returned section hit. |
 | `IWIKI_SEARCH_MODE` | `hybrid` | Omitted `wiki_search.mode` default. Values are `hybrid`, `lexical`, or `semantic`; whitespace/case are normalized and an explicit mode wins. |
-| `IWIKI_RERANK_MODEL` | empty | Optional LiteLLM-compatible reranker model. Reuses `IWIKI_LLM_BASE_URL` / `IWIKI_LLM_KEY`, sends one candidate batch with a 60-second timeout, and fails soft with sanitized metadata. |
+| `IWIKI_RERANK_MODEL` | empty | Optional LiteLLM-compatible reranker model. Reuses `IWIKI_LLM_BASE_URL` / `IWIKI_LLM_KEY`, scores one full candidate batch with a 60-second timeout, limits only the provider response rows to the final result count, and fails soft with sanitized metadata. |
 | `IWIKI_GRAPH_DEPTH` | `2` | Wiki-link hop depth for the retrieval graph-expansion and related-section lookup. |
 | `IWIKI_SEED_TOP_K` | `5` | How many articles the summary-vector pass seeds before graph expansion. |
 | `IWIKI_BFS_TOP_K` | `10` | Cap on graph-expanded (non-seed) articles added to the candidate pool. |
@@ -216,7 +216,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Tool | What it does |
 |---|---|
-| `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. |
+| `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch, while provider `top_n` is limited to requested final `k`; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. |
 | `wiki_read_page` | Read one Markdown page by domain and slug. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain. |

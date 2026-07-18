@@ -13,13 +13,17 @@ _WARNING = {"applied": False, "warning": "reranker unavailable"}
 
 
 def rerank_candidates(cfg: Config, query: str,
-                      candidates: list[dict]) -> tuple[list[dict], dict]:
+                      candidates: list[dict],
+                      top_n: int | None = None) -> tuple[list[dict], dict]:
     preliminary = [
         {key: value for key, value in candidate.items() if key != "text"}
         for candidate in candidates
     ]
     if not candidates:
         return preliminary, dict(_WARNING)
+    result_count = len(candidates) if top_n is None else min(
+        max(1, top_n), len(candidates)
+    )
 
     try:
         response = httpx.post(
@@ -28,7 +32,7 @@ def rerank_candidates(cfg: Config, query: str,
                 "model": cfg.rerank_model,
                 "query": query,
                 "documents": [candidate["text"] for candidate in candidates],
-                "top_n": len(candidates),
+                "top_n": result_count,
             },
             headers={"Authorization": f"Bearer {cfg.api_key}"},
             timeout=_TIMEOUT,
@@ -79,4 +83,7 @@ def rerank_candidates(cfg: Config, query: str,
         if index in scores:
             candidate["score"] = scores[index]
         ranked.append(candidate)
-    return ranked, {"applied": True}
+    metadata = {"applied": True}
+    if top_n is not None:
+        metadata["_scored_count"] = len(scores)
+    return ranked, metadata

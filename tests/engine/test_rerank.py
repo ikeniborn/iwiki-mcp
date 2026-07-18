@@ -103,6 +103,28 @@ def test_rerank_calls_litellm_once_and_reorders_candidates(monkeypatch):
     assert metadata == {"applied": True}
 
 
+def test_rerank_requests_only_the_final_result_count(monkeypatch):
+    from iwiki_mcp.engine.rerank import rerank_candidates
+
+    captured = {}
+
+    def post(*args, **kwargs):
+        captured.update(kwargs["json"])
+        return _Response({
+            "results": [{"index": 1, "relevance_score": 0.9}]
+        })
+
+    monkeypatch.setattr(httpx, "post", post)
+
+    ranked, metadata = rerank_candidates(
+        _cfg(), "question", _candidates(), top_n=1
+    )
+
+    assert captured["top_n"] == 1
+    assert [item["file"] for item in ranked] == ["b.md", "a.md"]
+    assert metadata == {"applied": True, "_scored_count": 1}
+
+
 @pytest.mark.parametrize("payload", [
     {},
     {"results": "invalid"},

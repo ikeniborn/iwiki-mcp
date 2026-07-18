@@ -1,0 +1,76 @@
+{
+  "timestamp": "2026-07-18T12:41:49+03:00",
+  "endpoint": "https://homelab.ikeniborn.ru/llm/v1/rerank",
+  "model": "lemonade-reranker-bge-reranker-v2-m3",
+  "credentials_persisted": false,
+  "candidate_count": 32,
+  "model_calls": 32,
+  "judgments": {
+    "intent_count": 3,
+    "relevant_candidates": 15,
+    "intents": [
+      "AI runtime cleanup and rollback",
+      "runtime and gateway failures",
+      "Prometheus reboot verification"
+    ]
+  },
+  "baseline": {
+    "name": "supplied preliminary order",
+    "ndcg_at_8": 0.648482,
+    "intent_recall_at_8": 1.0
+  },
+  "screen": [
+    {"name": "raw-plain-p8", "ndcg_at_8": 0.656023, "intent_recall_at_8": 1.0, "latency_seconds": 0.4561, "request_bytes": 13687},
+    {"name": "raw-plain-p16", "ndcg_at_8": 0.665485, "intent_recall_at_8": 1.0, "latency_seconds": 0.6862, "request_bytes": 21825},
+    {"name": "raw-plain-p24", "ndcg_at_8": 0.580940, "intent_recall_at_8": 1.0, "latency_seconds": 1.0211, "request_bytes": 32528},
+    {"name": "raw-plain-p32", "ndcg_at_8": 0.577617, "intent_recall_at_8": 1.0, "latency_seconds": 1.3319, "request_bytes": 43601},
+    {"name": "raw-context-p8", "ndcg_at_8": 0.646003, "intent_recall_at_8": 1.0, "latency_seconds": 0.5081, "request_bytes": 14250},
+    {"name": "raw-context-p16", "ndcg_at_8": 0.655465, "intent_recall_at_8": 1.0, "latency_seconds": 0.7343, "request_bytes": 22907},
+    {"name": "raw-context-p24", "ndcg_at_8": 0.564585, "intent_recall_at_8": 1.0, "latency_seconds": 1.0829, "request_bytes": 34208},
+    {"name": "raw-context-p32", "ndcg_at_8": 0.564585, "intent_recall_at_8": 1.0, "latency_seconds": 1.4007, "request_bytes": 45944},
+    {"name": "natural-plain-p8", "ndcg_at_8": 0.656023, "intent_recall_at_8": 1.0, "latency_seconds": 0.5020, "request_bytes": 13765},
+    {"name": "natural-plain-p16", "ndcg_at_8": 0.670004, "intent_recall_at_8": 1.0, "latency_seconds": 0.7216, "request_bytes": 21903},
+    {"name": "natural-plain-p24", "ndcg_at_8": 0.619888, "intent_recall_at_8": 1.0, "latency_seconds": 1.0656, "request_bytes": 32606},
+    {"name": "natural-plain-p32", "ndcg_at_8": 0.619888, "intent_recall_at_8": 1.0, "latency_seconds": 1.3810, "request_bytes": 43679},
+    {"name": "natural-context-p8", "ndcg_at_8": 0.656023, "intent_recall_at_8": 1.0, "latency_seconds": 0.5160, "request_bytes": 14328},
+    {"name": "natural-context-p16", "ndcg_at_8": 0.665485, "intent_recall_at_8": 1.0, "latency_seconds": 0.7513, "request_bytes": 22985},
+    {"name": "natural-context-p24", "ndcg_at_8": 0.615137, "intent_recall_at_8": 1.0, "latency_seconds": 1.1403, "request_bytes": 34286},
+    {"name": "natural-context-p32", "ndcg_at_8": 0.615137, "intent_recall_at_8": 1.0, "latency_seconds": 1.4605, "request_bytes": 46022}
+  ],
+  "decomposed_query": {
+    "plain": {
+      "ndcg_at_8": 0.544568,
+      "intent_recall_at_8": 1.0,
+      "total_latency_seconds": 3.8330,
+      "request_bytes": 130649
+    },
+    "context": {
+      "ndcg_at_8": 0.515880,
+      "intent_recall_at_8": 1.0,
+      "total_latency_seconds": 4.0768,
+      "request_bytes": 137678
+    }
+  },
+  "top_n_comparison_same_32_documents_five_runs": {
+    "top_n_8": {
+      "median_seconds": 1.3320,
+      "max_seconds": 1.3782,
+      "request_bytes": 43600,
+      "result_count": 8
+    },
+    "top_n_32": {
+      "median_seconds": 1.4081,
+      "max_seconds": 1.4271,
+      "request_bytes": 43601,
+      "result_count": 32
+    }
+  },
+  "conclusions": [
+    "natural-plain-p16 had the highest seed-case nDCG@8 at 0.670004",
+    "raw-plain-p16 improved nDCG@8 over raw-plain-p32 and reduced one-shot latency by 48.5 percent",
+    "a global pool reduction is not accepted because later candidates contain judged-relevant secondary intents",
+    "file and heading prefixes did not improve this seed case",
+    "three-query decomposition plus RRF increased cost and reduced nDCG in this seed case",
+    "limiting top_n to final k reduced returned rows without reducing the 32-document scoring batch"
+  ]
+}

@@ -316,18 +316,22 @@ def wiki_search(
     response = {"results": results}
     if cfg.rerank_model:
         hydrated = retrieval.hydrate_candidates(cfg, bind.base, candidates)
-        ranked, metadata = rerank.rerank_candidates(cfg, query, hydrated)
+        ranked, metadata = rerank.rerank_candidates(
+            cfg, query, hydrated, top_n=requested_top_k
+        )
         if metadata["applied"]:
-            hydrated_keys = {
+            scored_count = metadata.pop("_scored_count", len(ranked))
+            scored = ranked[:scored_count]
+            scored_keys = {
                 (item["domain"], item["file"], item["heading"], item["chunk"])
-                for item in hydrated
+                for item in scored
             }
-            stale = [
+            unscored = [
                 item for item in candidates
                 if (item["domain"], item["file"], item["heading"], item["chunk"])
-                not in hydrated_keys
+                not in scored_keys
             ]
-            results = (ranked + stale)[:requested_top_k]
+            results = (scored + unscored)[:requested_top_k]
         response = {"results": results, "rerank": metadata}
     return response
 
