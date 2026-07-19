@@ -288,9 +288,19 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
         (file, "lexical", rank)
         for rank, (file, _) in enumerate(lexical_seeds)
     ]
-    graph_pages = hier.rank_graph_pages(
-        graph_seeds, domain_dir(base, domain), cfg.graph_depth, cfg.bfs_top_k
-    ) if graph_seeds else []
+    if graph_seeds:
+        graph_markdown = {
+            file: page.markdown
+            for (cached_domain, file), page in page_cache.items()
+            if cached_domain == domain and page is not None
+            and _stamp_domain_file(base, domain, file) == page.stamp
+        }
+        graph_pages = hier.rank_graph_pages(
+            graph_seeds, domain_dir(base, domain), cfg.graph_depth, cfg.bfs_top_k,
+            markdown_by_file=graph_markdown,
+        )
+    else:
+        graph_pages = []
 
     signals: dict[str, list[dict]] = {
         "semantic_page": [],

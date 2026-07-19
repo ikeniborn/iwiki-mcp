@@ -335,6 +335,103 @@ def test_lexical_mode_never_embeds_and_returns_only_lexical_hits(tmp_path, monke
     assert all(hit["hit"] == "lexical" for hit in hits)
 
 
+def test_lexical_graph_reuses_materialized_page_markdown(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    target = Path(base) / "d" / "seed.md"
+    reads = []
+    real_read_domain_file = retrieval._read_domain_file
+    real_path_read_text = Path.read_text
+
+    def tracked_read_domain_file(base, domain, file):
+        if domain == "d" and file == "seed.md":
+            reads.append("materialize")
+        return real_read_domain_file(base, domain, file)
+
+    def tracked_path_read_text(path, *args, **kwargs):
+        if path == target:
+            reads.append("graph")
+        return real_path_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(retrieval, "_read_domain_file", tracked_read_domain_file)
+    monkeypatch.setattr(Path, "read_text", tracked_path_read_text)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    graph = next(hit for hit in hits if hit["file"] == "graph.md")
+    assert graph["source"] == "graph"
+    assert graph["hit"] == "lexical"
+    assert reads == ["materialize"]
+
+
+def test_lexical_graph_falls_back_when_materialized_page_changes(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    seed = domain / "seed.md"
+    seed.write_text(
+        "# Seed\n\n## Match\nrefresh_token\n\n[Old](old.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "old.md").write_text(
+        "# Old\n\n## Details\nold details\n", encoding="utf-8"
+    )
+    (domain / "new-target.md").write_text(
+        "# New\n\n## Details\nnew details\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(_cfg(), str(base), "d")
+    real_score_sections = retrieval.score_sections
+    mutated = False
+
+    def mutate_after_materialization(file, markdown, query):
+        nonlocal mutated
+        if file == "seed.md" and not mutated:
+            mutated = True
+            seed.write_text(
+                "# Seed\n\n## Match\nrefresh_token\n\n[New](new-target.md)\n",
+                encoding="utf-8",
+            )
+        return real_score_sections(file, markdown, query)
+
+    monkeypatch.setattr(retrieval, "score_sections", mutate_after_materialization)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    graph_files = {
+        hit["file"] for hit in hits if hit["source"] == "graph"
+    }
+    assert "new-target.md" in graph_files
+    assert "old.md" not in graph_files
+
+
+def test_lexical_no_seed_skips_graph_freshness_checks(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    stamp_calls = []
+    real_stamp_domain_file = retrieval._stamp_domain_file
+
+    def tracked_stamp_domain_file(*args, **kwargs):
+        stamp_calls.append(args)
+        return real_stamp_domain_file(*args, **kwargs)
+
+    monkeypatch.setattr(
+        retrieval, "_stamp_domain_file", tracked_stamp_domain_file
+    )
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["d"], "absent_token_xyz", 10, 0.0, mode="lexical"
+    )
+
+    assert hits == []
+    assert stamp_calls == []
+
+
 def test_hybrid_duplicate_hit_is_both(tmp_path, monkeypatch):
     base = _seed(tmp_path, monkeypatch)
     monkeypatch.setattr(retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]])
@@ -516,7 +613,7 @@ def test_hydration_reuses_prepared_materialization(tmp_path, monkeypatch):
     assert target["text"] == "## Details\nneedle five six"
     assert read_calls == 1
     assert chunk_calls == 1
-    assert final_opens == 2
+    assert final_opens == 3
 
 
 def test_hydration_omits_cached_page_changed_after_preparation(tmp_path, monkeypatch):
