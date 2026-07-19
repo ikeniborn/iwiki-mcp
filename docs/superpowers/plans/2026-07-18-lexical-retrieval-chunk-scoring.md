@@ -1352,10 +1352,11 @@ the user separately requests remote publication.
 
 Execution evidence (2026-07-19; `indexed_chunks` / `reused` / `embedded`):
 `iwiki-mcp` 65/65/0; `personal-ai-wiki` 149/149/0; `obsidian-ai-wiki` 62/62/0;
-`icodex` 97/97/0; `iclaude` 25/0/25; `okf` 62/62/0. The `iclaude` migration had
-two failed attempts returning 502, followed by exactly one successful migration after
-the user's explicit retry. No `wiki_sync` was run. The `iwiki-mcp` lint scope was
-clean (`broken: []`, `stale: []`).
+`icodex` 97/97/0; `iclaude` 25/0/25; `okf` 62/62/0. The initial `iclaude` call
+failed with 502; the first separately user-authorized retry also failed with 502; the
+second separately user-authorized retry succeeded with 25/0/25. Thus exactly one
+successful migration occurred across three invocations. No `wiki_sync` was run. The
+`iwiki-mcp` lint scope was clean (`broken: []`, `stale: []`).
 
 ### Task 6: Run complete verification and close implementation evidence
 
@@ -1413,12 +1414,18 @@ drift exists.
 
 ```bash
 git status --short
-git diff --check
+git diff --check master...HEAD
 git diff --stat master...HEAD
 ```
 
 Expected: only planned implementation, tests, chain artifacts, TODO/version files, and
-approved documentation evidence are present; `git diff --check` is silent.
+approved documentation evidence are present; the branch diff from `master` is clean
+under `git diff --check master...HEAD`.
+
+Execution evidence (2026-07-19): focused acceptance tests passed 78 tests; the full
+suite passed 532 tests; flake8 exited 0 with no output; CLI help exited 0; version
+`0.7.3` appeared in all three version-bearing files; `git diff --check master...HEAD`
+was clean; the changed-file scope matched the plan.
 
 - [x] **Step 7: Commit any remaining planned repository changes**
 
