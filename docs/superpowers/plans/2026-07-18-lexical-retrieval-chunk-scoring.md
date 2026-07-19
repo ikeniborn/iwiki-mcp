@@ -128,7 +128,7 @@ existing JSONL `VectorStore`, existing RRF fusion, iwiki MCP documentation tools
 - Modify: `src/iwiki_mcp/engine/chunk.py`
 - Modify: `src/iwiki_mcp/indexer.py`
 
-- [ ] **Step 1: Add failing repeated-heading chunk tests**
+- [x] **Step 1: Add failing repeated-heading chunk tests**
 
 Append these tests to `tests/engine/test_chunk.py`:
 
@@ -166,7 +166,7 @@ def test_identical_repeated_sections_remain_distinct_chunks():
     assert chunks[0].hash == chunks[1].hash
 ```
 
-- [ ] **Step 2: Run the chunk tests and verify RED**
+- [x] **Step 2: Run the chunk tests and verify RED**
 
 Run:
 
@@ -177,7 +177,7 @@ uv run pytest -q tests/engine/test_chunk.py::test_repeated_headings_continue_chu
 Expected: both tests fail because the second `Setup` occurrence currently restarts at
 `chunk=0`.
 
-- [ ] **Step 3: Implement per-heading continuous numbering**
+- [x] **Step 3: Implement per-heading continuous numbering**
 
 In `src/iwiki_mcp/engine/chunk.py`, update the `Chunk.chunk` comment and replace the
 section loop with:
@@ -203,7 +203,7 @@ Change the dataclass comment to:
     chunk: int           # window index within the same heading across the page
 ```
 
-- [ ] **Step 4: Run all chunk tests and verify GREEN**
+- [x] **Step 4: Run all chunk tests and verify GREEN**
 
 Run:
 
@@ -213,7 +213,7 @@ uv run pytest -q tests/engine/test_chunk.py tests/test_chunk_frontmatter.py
 
 Expected: all tests pass; unique-heading tests retain `0..N` numbering.
 
-- [ ] **Step 5: Add failing incremental reindex tests**
+- [x] **Step 5: Add failing incremental reindex tests**
 
 Append to `tests/test_indexer.py`:
 
@@ -288,7 +288,7 @@ def test_reused_record_refreshes_current_ordinal(tmp_path, monkeypatch):
     assert stable.ordinal == 1
 ```
 
-- [ ] **Step 6: Run the indexer tests and verify RED**
+- [x] **Step 6: Run the indexer tests and verify RED**
 
 Run:
 
@@ -299,7 +299,7 @@ uv run pytest -q tests/test_indexer.py::test_reindex_migrates_repeated_heading_i
 Expected: the migration test passes using the Task 1 chunk numbering, while
 `test_reused_record_refreshes_current_ordinal` fails with `99`.
 
-- [ ] **Step 7: Refresh ordinal on record reuse**
+- [x] **Step 7: Refresh ordinal on record reuse**
 
 In `src/iwiki_mcp/indexer.py`, extend the reuse branch:
 
@@ -310,7 +310,7 @@ In `src/iwiki_mcp/indexer.py`, extend the reuse branch:
             fresh.append(prev)
 ```
 
-- [ ] **Step 8: Run focused indexing tests and verify GREEN**
+- [x] **Step 8: Run focused indexing tests and verify GREEN**
 
 Run:
 
@@ -320,7 +320,7 @@ uv run pytest -q tests/engine/test_chunk.py tests/test_chunk_frontmatter.py test
 
 Expected: all focused chunk and indexer tests pass.
 
-- [ ] **Step 9: Commit Task 1**
+- [x] **Step 9: Commit Task 1**
 
 ```bash
 git add src/iwiki_mcp/engine/chunk.py src/iwiki_mcp/indexer.py tests/engine/test_chunk.py tests/test_indexer.py
@@ -334,7 +334,7 @@ git commit -m "fix(indexing): make repeated heading chunks unique"
 - Modify: `tests/test_grep.py`
 - Modify: `src/iwiki_mcp/engine/grep.py`
 
-- [ ] **Step 1: Add failing pure scorer tests**
+- [x] **Step 1: Add failing pure scorer tests**
 
 Update the import and append tests in `tests/test_grep.py`:
 
@@ -384,7 +384,7 @@ def test_score_chunks_orders_ties_by_file_heading_and_chunk():
     ]
 ```
 
-- [ ] **Step 2: Run new grep tests and verify RED**
+- [x] **Step 2: Run new grep tests and verify RED**
 
 Run:
 
@@ -394,7 +394,7 @@ uv run pytest -q tests/test_grep.py::test_score_sections_preserves_whole_h2_term
 
 Expected: collection fails because `score_sections` and `score_chunks` do not exist.
 
-- [ ] **Step 3: Implement the pure scorers**
+- [x] **Step 3: Implement the pure scorers**
 
 In `src/iwiki_mcp/engine/grep.py`, add:
 
@@ -467,7 +467,7 @@ Refactor `grep_sections` so its file loop calls:
 Remove its duplicated inline H2 scoring and return `_ordered(out, top_k)`. Keep reserved
 OKF filtering and fail-soft file reads unchanged.
 
-- [ ] **Step 4: Run all grep tests and verify GREEN**
+- [x] **Step 4: Run all grep tests and verify GREEN**
 
 Run:
 
@@ -477,7 +477,7 @@ uv run pytest -q tests/test_grep.py
 
 Expected: all existing filesystem-adapter tests and new pure-scorer tests pass.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```bash
 git add src/iwiki_mcp/engine/grep.py tests/test_grep.py
@@ -491,7 +491,7 @@ git commit -m "refactor(grep): add canonical chunk scoring"
 - Modify: `tests/test_retrieval.py`
 - Modify: `src/iwiki_mcp/retrieval.py`
 
-- [ ] **Step 1: Add a small long-page fixture helper**
+- [x] **Step 1: Add a small long-page fixture helper**
 
 Add to `tests/test_retrieval.py`:
 
@@ -513,7 +513,7 @@ def _long_lexical_page(tmp_path, monkeypatch):
     return cfg, str(base)
 ```
 
-- [ ] **Step 2: Add failing exact-direct-hit and stale/collision tests**
+- [x] **Step 2: Add failing exact-direct-hit and stale/collision tests**
 
 Append to `tests/test_retrieval.py`:
 
@@ -609,7 +609,7 @@ def test_materialization_omits_page_changed_during_read(tmp_path, monkeypatch):
     assert cache[("d", "page.md")] is None
 ```
 
-- [ ] **Step 3: Add a failing unchanged-page-seed overlap test**
+- [x] **Step 3: Add a failing unchanged-page-seed overlap test**
 
 Append:
 
@@ -646,7 +646,7 @@ def test_lexical_page_seed_uses_whole_section_score_not_overlap_count(
 This proves overlap does not inflate `overlap.md` above the page containing two actual
 source occurrences.
 
-- [ ] **Step 4: Run new retrieval tests and verify RED**
+- [x] **Step 4: Run new retrieval tests and verify RED**
 
 Run:
 
@@ -658,7 +658,7 @@ Expected: `_domain_signals` rejects the extra cache argument, `_materialize_page
 absent, and current direct lexical mapping still selects only `chunk=0`, including for
 the later repeated `Setup`.
 
-- [ ] **Step 5: Add request-local materialization primitives**
+- [x] **Step 5: Add request-local materialization primitives**
 
 At the top of `src/iwiki_mcp/retrieval.py`, import:
 
@@ -742,7 +742,7 @@ def _unique_sections(records) -> dict[tuple[str, str, int], object | None]:
     return indexed
 ```
 
-- [ ] **Step 6: Replace whole-section-to-chunk-zero mapping**
+- [x] **Step 6: Replace whole-section-to-chunk-zero mapping**
 
 At the start of `_domain_signals`, retain the unfiltered records for global collision
 detection while leaving the existing eligibility filter unchanged:
@@ -818,7 +818,7 @@ Build `lexical_section` with the full identity:
         )
 ```
 
-- [ ] **Step 7: Thread an optional cache through candidate preparation**
+- [x] **Step 7: Thread an optional cache through candidate preparation**
 
 Extend `prepare_read_candidates`:
 
@@ -839,7 +839,7 @@ Immediately before `query_vec = None`, insert:
 Pass `page_cache` as the last argument to every `_domain_signals` call. Leave
 `search_read` callers working through the default `None` cache.
 
-- [ ] **Step 8: Run focused retrieval tests and verify GREEN**
+- [x] **Step 8: Run focused retrieval tests and verify GREEN**
 
 Run:
 
@@ -850,7 +850,7 @@ uv run pytest -q tests/test_retrieval.py tests/test_grep.py tests/engine/test_fu
 Expected: exact late-window, stale hash, old collision, unchanged page seed, existing
 fusion, path safety, and lexical no-embedding tests all pass.
 
-- [ ] **Step 9: Update and test the internal lexical compatibility wrapper**
+- [x] **Step 9: Update and test the internal lexical compatibility wrapper**
 
 Add this test to `tests/test_retrieval.py`:
 
@@ -889,7 +889,7 @@ uv run pytest -q tests/test_retrieval.py::test_lexical_search_compatibility_wrap
 
 Expected: PASS with `chunk == 1`.
 
-- [ ] **Step 10: Commit Task 3**
+- [x] **Step 10: Commit Task 3**
 
 ```bash
 git add src/iwiki_mcp/retrieval.py tests/test_retrieval.py
@@ -907,7 +907,7 @@ git commit -m "fix(retrieval): map lexical hits to verified chunks"
 - Modify: `src/iwiki_mcp/retrieval.py`
 - Modify: `src/iwiki_mcp/server.py`
 
-- [ ] **Step 1: Add failing hydration-cache tests**
+- [x] **Step 1: Add failing hydration-cache tests**
 
 Append to `tests/test_retrieval.py`:
 
@@ -1009,7 +1009,7 @@ def test_hydration_omits_ambiguous_index_identity(tmp_path, monkeypatch):
     assert hydrated == []
 ```
 
-- [ ] **Step 2: Run the hydration-cache test and verify RED**
+- [x] **Step 2: Run the hydration-cache test and verify RED**
 
 Run:
 
@@ -1021,7 +1021,7 @@ Expected: all three tests fail because `hydrate_candidates` rejects `page_cache`
 its signature is extended, the mutation and collision assertions remain the safety
 gates that prevent blind cached-text reuse and last-record-wins identity hydration.
 
-- [ ] **Step 3: Make hydration use the shared materializer**
+- [x] **Step 3: Make hydration use the shared materializer**
 
 Extend `hydrate_candidates`:
 
@@ -1085,7 +1085,7 @@ Remove the old local `pages` map; `page_cache` replaces it. The validation map e
 one fingerprint recheck per page during hydration while every candidate for that page
 uses the same decision.
 
-- [ ] **Step 4: Run hydration and path-safety tests**
+- [x] **Step 4: Run hydration and path-safety tests**
 
 Run:
 
@@ -1096,7 +1096,7 @@ uv run pytest -q tests/test_retrieval.py
 Expected: all retrieval and hydration tests pass, including traversal and symlink
 guards.
 
-- [ ] **Step 5: Add a failing server cache-threading test**
+- [x] **Step 5: Add a failing server cache-threading test**
 
 Append to `tests/test_server_search.py`:
 
@@ -1174,7 +1174,7 @@ def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
     return []
 ```
 
-- [ ] **Step 6: Run the server cache test and verify RED**
+- [x] **Step 6: Run the server cache test and verify RED**
 
 Run:
 
@@ -1184,7 +1184,7 @@ uv run pytest -q tests/test_server_search.py::test_search_threads_one_page_cache
 
 Expected: preparation and hydration currently receive no shared cache.
 
-- [ ] **Step 7: Thread one cache through `wiki_search`**
+- [x] **Step 7: Thread one cache through `wiki_search`**
 
 In `src/iwiki_mcp/server.py`, before candidate preparation:
 
@@ -1206,7 +1206,7 @@ Pass the same object to hydration:
         )
 ```
 
-- [ ] **Step 8: Run server and retrieval suites**
+- [x] **Step 8: Run server and retrieval suites**
 
 Run:
 
@@ -1216,7 +1216,7 @@ uv run pytest -q tests/test_retrieval.py tests/test_server_search.py tests/test_
 
 Expected: all tests pass; reranker ordering and fail-soft metadata remain unchanged.
 
-- [ ] **Step 9: Commit Task 4**
+- [x] **Step 9: Commit Task 4**
 
 ```bash
 git add src/iwiki_mcp/retrieval.py src/iwiki_mcp/server.py tests/test_retrieval.py tests/test_server_search.py tests/test_server_search_facets.py tests/test_robustness_fixes.py
@@ -1234,7 +1234,7 @@ git commit -m "perf(search): reuse lexical page materialization"
 - Reindex through iwiki MCP after the upgraded server process is installed and
   restarted; record per-domain migration results.
 
-- [ ] **Step 1: Update indexing documentation through iwiki MCP**
+- [x] **Step 1: Update indexing documentation through iwiki MCP**
 
 Call `wiki_update_page` with:
 
@@ -1267,7 +1267,7 @@ is saved.
 
 Expected tool result: page updated and reindexed without an error.
 
-- [ ] **Step 2: Update retrieval documentation through iwiki MCP**
+- [x] **Step 2: Update retrieval documentation through iwiki MCP**
 
 Call `wiki_update_page` with:
 
@@ -1304,7 +1304,7 @@ graph pages and contribute separate `lexical_page`, `graph_page`, and
 
 Expected tool result: page updated and reindexed without an error.
 
-- [ ] **Step 3: Validate iwiki health**
+- [x] **Step 3: Validate iwiki health**
 
 Call `wiki_lint(domain="iwiki-mcp")`.
 
@@ -1316,7 +1316,7 @@ Expected:
 - pre-existing advisory long-lead/orphan/tag-drift entries are permitted to remain
   unchanged because this task did not introduce them
 
-- [ ] **Step 4: Verify the migration implementation**
+- [x] **Step 4: Verify the migration implementation**
 
 Run the existing focused migration test:
 
@@ -1327,7 +1327,7 @@ uv run pytest -q tests/test_indexer.py::test_reindex_migrates_repeated_heading_i
 Expected: PASS, proving the ordinary index path performs the migration without changing
 `SCHEMA_VERSION`.
 
-- [ ] **Step 5: HUMAN CHECKPOINT — restart the upgraded MCP server**
+- [x] **Step 5: HUMAN CHECKPOINT — restart the upgraded MCP server**
 
 Do not run the operational reindex through an MCP process that imported the pre-change
 chunker. Install or otherwise activate this branch's `0.7.3` server, restart the MCP
@@ -1337,7 +1337,7 @@ Expected: user confirms the upgraded MCP process is active. If restart/deploymen
 outside the current session, stop with a rollout handoff; do not claim migration
 complete.
 
-- [ ] **Step 6: Reindex every currently bound domain through iwiki MCP**
+- [x] **Step 6: Reindex every currently bound domain through iwiki MCP**
 
 Call `wiki_status`, form the distinct union of its current `read` domains and non-null
 `write` domain, then call `wiki_index(domain=<domain>)` exactly once for each. Use the
@@ -1350,6 +1350,13 @@ and `indexed_chunks`, `reused`, and `embedded` are recorded in result evidence. 
 make external wiki-base commits, as already authorized; do not call `wiki_sync` unless
 the user separately requests remote publication.
 
+Execution evidence (2026-07-19; `indexed_chunks` / `reused` / `embedded`):
+`iwiki-mcp` 65/65/0; `personal-ai-wiki` 149/149/0; `obsidian-ai-wiki` 62/62/0;
+`icodex` 97/97/0; `iclaude` 25/0/25; `okf` 62/62/0. The `iclaude` migration had
+two failed attempts returning 502, followed by exactly one successful migration after
+the user's explicit retry. No `wiki_sync` was run. The `iwiki-mcp` lint scope was
+clean (`broken: []`, `stale: []`).
+
 ### Task 6: Run complete verification and close implementation evidence
 
 **Files:**
@@ -1360,7 +1367,7 @@ the user separately requests remote publication.
 - Update during execution tracking:
   `docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md`
 
-- [ ] **Step 1: Run focused acceptance tests**
+- [x] **Step 1: Run focused acceptance tests**
 
 ```bash
 uv run pytest -q tests/engine/test_chunk.py tests/test_grep.py tests/test_indexer.py tests/test_retrieval.py tests/test_server_search.py
@@ -1369,7 +1376,7 @@ uv run pytest -q tests/engine/test_chunk.py tests/test_grep.py tests/test_indexe
 Expected: all focused tests pass, including exact late-window, repeated-heading,
 no-deduplication, cache, migration, and reranker hydration cases.
 
-- [ ] **Step 2: Run the complete test suite**
+- [x] **Step 2: Run the complete test suite**
 
 ```bash
 uv run pytest -q
@@ -1377,7 +1384,7 @@ uv run pytest -q
 
 Expected: all tests pass with zero failures.
 
-- [ ] **Step 3: Run lint**
+- [x] **Step 3: Run lint**
 
 ```bash
 uv run flake8 src tests
@@ -1385,7 +1392,7 @@ uv run flake8 src tests
 
 Expected: exit status 0 and no output.
 
-- [ ] **Step 4: Run CLI smoke**
+- [x] **Step 4: Run CLI smoke**
 
 ```bash
 uv run iwiki-mcp --help
@@ -1393,7 +1400,7 @@ uv run iwiki-mcp --help
 
 Expected: exit status 0 and help output without traceback.
 
-- [ ] **Step 5: Verify version consistency**
+- [x] **Step 5: Verify version consistency**
 
 ```bash
 rg -n 'version = "0.7.3"|__version__ = "0.7.3"' pyproject.toml src/iwiki_mcp/__init__.py uv.lock
@@ -1402,7 +1409,7 @@ rg -n 'version = "0.7.3"|__version__ = "0.7.3"' pyproject.toml src/iwiki_mcp/__i
 Expected: `0.7.3` appears in all three version-bearing files and no task-local version
 drift exists.
 
-- [ ] **Step 6: Verify diff scope and whitespace**
+- [x] **Step 6: Verify diff scope and whitespace**
 
 ```bash
 git status --short
@@ -1413,7 +1420,7 @@ git diff --stat master...HEAD
 Expected: only planned implementation, tests, chain artifacts, TODO/version files, and
 approved documentation evidence are present; `git diff --check` is silent.
 
-- [ ] **Step 7: Commit any remaining planned repository changes**
+- [x] **Step 7: Commit any remaining planned repository changes**
 
 If Task 6 changed only checkbox tracking in this plan, stage only that file:
 
