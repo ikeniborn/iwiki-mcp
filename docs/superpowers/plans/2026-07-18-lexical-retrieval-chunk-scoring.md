@@ -1,7 +1,7 @@
 ---
 review:
-  plan_hash: c2aa5787b5ce174f
-  last_run: 2026-07-18
+  plan_hash: 86ba7a0db3721e59
+  last_run: 2026-07-19
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -13,42 +13,42 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: Reuse materialized pages during hydration and reranking"
-      section_hash: a22cb8cf7a2b70cb
+      section_hash: 0ce00e02ec1b2013
       fragment: "page = _materialize_page(cfg, base, domain, candidate[\"file\"], page_cache)"
       text: "Hydration trusts a cached page without checking whether the source file changed after candidate preparation, weakening the existing stale-chunk guard."
       fix: "Store a file fingerprint during materialization, reject a page changed during its read, revalidate the fingerprint once before cached hydration, and add a mutation-between-stages test."
       verdict: fixed
-      verdict_at: 2026-07-18
+      verdict_at: 2026-07-19
     - id: F-002
       phase: verifiability
       severity: CRITICAL
       section: "Task 6: Run complete verification and close implementation evidence"
-      section_hash: 97db3b3900082da2
+      section_hash: 64994aeb740a2d21
       fragment: "$check-chain result docs/superpowers/plans/2026-07-18-lexical-retrieval-chunk-scoring.md"
       text: "The plan commits all implementation work before result reconciliation, so check-chain result would inspect an empty git diff and could not reconcile the implementation."
       fix: "Invoke check-chain result with --since=master so it reviews the complete committed branch diff."
       verdict: fixed
-      verdict_at: 2026-07-18
+      verdict_at: 2026-07-19
     - id: F-003
       phase: verifiability
       severity: WARNING
       section: "Task 4: Reuse materialized pages during hydration and reranking"
-      section_hash: a22cb8cf7a2b70cb
+      section_hash: 0ce00e02ec1b2013
       fragment: "Update existing hydrate_candidates monkeypatch functions"
       text: "The plan names required test-double edits but does not provide the exact three replacements, contrary to the writing-plans no-placeholder contract."
       fix: "List each affected test and provide its complete replacement lambda signature with page_cache or kwargs."
       verdict: fixed
-      verdict_at: 2026-07-18
+      verdict_at: 2026-07-19
     - id: F-004
       phase: dependencies
       severity: CRITICAL
       section: "Task 6: Run complete verification and close implementation evidence"
-      section_hash: 97db3b3900082da2
+      section_hash: 64994aeb740a2d21
       fragment: "git commit -m \"docs(plan): record lexical chunk scoring execution\""
       text: "Execution checkbox updates change the plan body after its validated plan_hash, but the plan goes directly to result reconciliation with stale plan-stage validation."
       fix: "After committing checkbox evidence, rerun check-chain plan on this file, commit the refreshed frontmatter/TODO state, then run check-chain result with --since=master."
       verdict: fixed
-      verdict_at: 2026-07-18
+      verdict_at: 2026-07-19
 chain:
   intent: docs/superpowers/intents/2026-07-18-lexical-retrieval-chunk-scoring-intent.md
   spec: docs/superpowers/specs/2026-07-18-lexical-retrieval-chunk-scoring-design.md
