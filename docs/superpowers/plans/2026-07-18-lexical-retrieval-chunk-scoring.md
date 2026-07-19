@@ -49,6 +49,12 @@ review:
       fix: "After committing checkbox evidence, rerun check-chain plan on this file, commit the refreshed frontmatter/TODO state, then run check-chain result with --since=master."
       verdict: fixed
       verdict_at: 2026-07-19
+result_check:
+  verdict: OK
+  plan_hash: 39e06215c6673c72
+  last_run: 2026-07-20
+  reviewed: true
+  docs_checked: true
 chain:
   intent: docs/superpowers/intents/2026-07-18-lexical-retrieval-chunk-scoring-intent.md
   spec: docs/superpowers/specs/2026-07-18-lexical-retrieval-chunk-scoring-design.md
