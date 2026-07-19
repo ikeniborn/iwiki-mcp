@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 86ba7a0db3721e59
+  plan_hash: 39e06215c6673c72
   last_run: 2026-07-19
   phases:
     structure: { status: passed }
@@ -89,11 +89,15 @@ existing JSONL `VectorStore`, existing RRF fusion, iwiki MCP documentation tools
 - Modify `src/iwiki_mcp/indexer.py`: refresh reused-record `ordinal`.
 - Modify `src/iwiki_mcp/engine/grep.py`: pure whole-section and chunk scorers plus the
   existing filesystem adapter.
+- Modify `src/iwiki_mcp/engine/hier.py`: let graph adjacency consume already
+  materialized Markdown without changing graph traversal or ranking.
 - Modify `src/iwiki_mcp/retrieval.py`: request-local materialization, collision-safe
   indexed identities, exact lexical mapping, shared hydration cache, compatibility
   wrapper.
 - Modify `src/iwiki_mcp/server.py`: create and thread one request-local page cache.
 - Modify `tests/engine/test_chunk.py`: repeated-heading numbering and preservation.
+- Modify `tests/engine/test_hier_adjacency.py`: partial cached-Markdown reuse and disk
+  fallback.
 - Modify `tests/test_indexer.py`: incremental migration and positional metadata reuse.
 - Modify `tests/test_grep.py`: pure scorer behavior and deterministic ordering.
 - Modify `tests/test_retrieval.py`: exact late-window matches, stale/collision safety,
@@ -112,12 +116,12 @@ existing JSONL `VectorStore`, existing RRF fusion, iwiki MCP documentation tools
 |---|---|
 | R1–R3 repeated headings and reuse metadata | Task 1 |
 | R5 pure scorers | Task 2 |
-| R4, R6–R7 exact materialization and unchanged seeds/fusion | Task 3 |
-| R8 shared hydration cache and freshness validation | Task 4 |
+| R4, R6–R7 exact materialization and unchanged seeds/fusion | Tasks 3 and 7 |
+| R8 shared hydration cache and freshness validation | Tasks 4 and 7 |
 | R9 lexical compatibility path | Task 3 |
 | R10 migration evidence | Tasks 1 and 5 |
 | R11 documentation | Task 5 |
-| Full acceptance and health metrics | Task 6 |
+| Full acceptance and health metrics | Tasks 6 and 7 |
 
 ### Task 1: Make repeated-heading chunk identities collision-free
 
@@ -1440,6 +1444,124 @@ Expected: clean working tree after the commit. Do not create an empty commit.
 
 Before staging, mark Step 7 complete in this plan so every implementation checkbox is
 recorded in the commit.
+
+### Task 7: Reuse materialized Markdown during graph expansion
+
+**Files:**
+
+- Modify: `src/iwiki_mcp/engine/hier.py`
+- Modify: `src/iwiki_mcp/retrieval.py`
+- Modify: `tests/engine/test_hier_adjacency.py`
+- Modify: `tests/test_retrieval.py`
+
+This final-review correction closes the remaining health-metric gap: lexical/hybrid
+preparation materialized an eligible page, then graph adjacency read the same page
+again through `Path.read_text`.
+
+- [x] **Step 1: Add a failing whole-request read-count regression**
+
+Instrument both `_read_domain_file` and `Path.read_text` around lexical candidate
+preparation and assert the eligible seed is read only by materialization:
+
+```python
+hits = retrieval.prepare_read_candidates(
+    _cfg(), base, ["d"], "refresh_token", 10, 0.0, mode="lexical"
+)
+
+graph = next(hit for hit in hits if hit["file"] == "graph.md")
+assert graph["source"] == "graph"
+assert graph["hit"] == "lexical"
+assert reads == ["materialize"]
+```
+
+- [x] **Step 2: Run the regression and verify RED**
+
+```bash
+uv run pytest -q tests/test_retrieval.py::test_lexical_graph_reuses_materialized_page_markdown
+```
+
+Expected before the correction: the assertion fails with
+`["materialize", "graph"]`, proving two content reads for one eligible page.
+
+- [x] **Step 3: Inject securely current cached Markdown into graph adjacency**
+
+Extend adjacency and graph ranking with an optional supplied-content mapping:
+
+```python
+def _adjacency(domain_dir: str,
+               markdown_by_file: Mapping[str, str] | None = None
+               ) -> dict[str, set[str]]:
+    ...
+    if markdown_by_file is not None and name in markdown_by_file:
+        content = markdown_by_file[name]
+    else:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+
+def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
+                     depth: int, cap: int,
+                     markdown_by_file: Mapping[str, str] | None = None
+                     ) -> list[dict]:
+    ...
+    adjacency = _adjacency(domain_dir, markdown_by_file)
+```
+
+Pass only same-domain cache entries whose secure current fingerprint still equals the
+materialization fingerprint. A changed entry is omitted so adjacency retains its prior
+current-disk fallback. Do no graph-stage work when there are no seeds:
+
+```python
+if graph_seeds:
+    graph_markdown = {
+        file: page.markdown
+        for (cached_domain, file), page in page_cache.items()
+        if cached_domain == domain and page is not None
+        and _stamp_domain_file(base, domain, file) == page.stamp
+    }
+    graph_pages = hier.rank_graph_pages(
+        graph_seeds, domain_dir(base, domain), cfg.graph_depth, cfg.bfs_top_k,
+        markdown_by_file=graph_markdown,
+    )
+else:
+    graph_pages = []
+```
+
+- [x] **Step 4: Cover freshness fallback, partial mappings, and no-seed work**
+
+Add focused tests proving:
+
+- a page changed after materialization contributes its current graph edge, not a stale
+  cached edge;
+- a mapped page avoids `Path.read_text` while an unmapped page retains disk fallback;
+- a no-hit lexical request performs no graph freshness stamp calls.
+
+Run:
+
+```bash
+uv run pytest -q tests/test_retrieval.py tests/engine/test_hier.py tests/engine/test_hier_adjacency.py tests/test_server_search.py
+```
+
+Expected: all focused tests pass; graph result metadata, ordering, reserved-artifact
+filtering, and fail-soft fallback remain unchanged.
+
+- [x] **Step 5: Run complete verification and commit the correction**
+
+```bash
+uv run pytest -q
+uv run flake8 src tests
+uv run python -m compileall -q src/iwiki_mcp tests
+git diff --check
+git add src/iwiki_mcp/engine/hier.py src/iwiki_mcp/retrieval.py tests/engine/test_hier_adjacency.py tests/test_retrieval.py
+git commit -m "perf(search): reuse materialized markdown in graph"
+```
+
+Execution evidence (2026-07-19): the original regression observed two content reads;
+the correction reduced the normal path to one content read, preserved current-content
+fallback after mutation, skipped graph stamp work without seeds, and passed 536 tests
+with flake8, compileall, and whitespace checks clean.
 
 ## Post-plan chain gates
 
