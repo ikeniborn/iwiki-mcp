@@ -20,6 +20,35 @@ def test_long_section_splits_with_overlap_and_indexes():
     assert [c.chunk for c in chunks] == list(range(len(chunks)))
 
 
+def test_repeated_headings_continue_chunk_numbers_without_deduplication():
+    md = (
+        "## Setup\none two three four\n"
+        "## Other\nmiddle\n"
+        "## Setup\nfive six seven eight\n"
+    )
+    chunks = chunk_markdown("f.md", md, size=2, overlap=0)
+    setup = [c for c in chunks if c.heading == "Setup"]
+    assert [(c.chunk, c.ordinal) for c in setup] == [
+        (0, 0), (1, 0), (2, 2), (3, 2),
+    ]
+    assert [c.text for c in setup] == [
+        "## Setup\none two",
+        "## Setup\nthree four",
+        "## Setup\nfive six",
+        "## Setup\nseven eight",
+    ]
+
+
+def test_identical_repeated_sections_remain_distinct_chunks():
+    md = "## Setup\nsame body\n## Setup\nsame body\n"
+    chunks = chunk_markdown("f.md", md, size=512, overlap=64)
+    assert [(c.heading, c.chunk, c.ordinal) for c in chunks] == [
+        ("Setup", 0, 0),
+        ("Setup", 1, 1),
+    ]
+    assert chunks[0].hash == chunks[1].hash
+
+
 PAGE = (
     "# Proxy Management\n\n"
     "## Overview\n"

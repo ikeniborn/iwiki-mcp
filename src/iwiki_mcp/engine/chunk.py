@@ -22,7 +22,7 @@ _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 class Chunk:
     file: str
     heading: str
-    chunk: int           # sub-chunk index within the section (0-based)
+    chunk: int           # window index within the same heading across the page
     text: str            # the text that gets embedded
     hash: str            # sha256(text)[:16]
     type: str | None = None
@@ -83,11 +83,16 @@ def chunk_markdown(file: str, content: str, size: int, overlap: int,
     # link sections (migration also strips it from the body).
     excluded = (*_fm.RESERVED_SECTIONS, _fm.OVERVIEW_HEADING)
     secs = [(h, b) for h, b in _sections(content) if h.lower() not in excluded]
+    chunk_offsets: dict[str, int] = {}
     for ordinal, (heading, body) in enumerate(secs):
         prefix = f"## {heading}"
-        for ci, piece in enumerate(_split_section(body.split(), size, overlap)):
+        pieces = _split_section(body.split(), size, overlap)
+        first_chunk = chunk_offsets.get(heading, 0)
+        for offset, piece in enumerate(pieces):
             text = prefix + "\n" + " ".join(piece)
-            out.append(Chunk(file=file, heading=heading, chunk=ci, text=text,
+            chunk_index = first_chunk + offset
+            out.append(Chunk(file=file, heading=heading, chunk=chunk_index, text=text,
                              hash=_hash(text), type=ptype, tags=list(ptags),
                              kind="section", ordinal=ordinal))
+        chunk_offsets[heading] = first_chunk + len(pieces)
     return out

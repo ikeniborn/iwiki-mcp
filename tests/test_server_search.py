@@ -170,6 +170,42 @@ def test_configured_reranker_adds_metadata(tmp_path, monkeypatch):
     assert captured["top_n"] == 3
 
 
+def test_search_threads_one_page_cache_to_prepare_and_hydrate(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("IWIKI_RERANK_MODEL", "model")
+    candidate = {
+        "domain": "backend", "file": "auth.md", "heading": "Token", "chunk": 0,
+        "score": 0.5, "hit": "lexical", "source": "lexical",
+    }
+    captured = {}
+
+    def prepare(*args, page_cache=None, **kwargs):
+        captured["prepare"] = page_cache
+        captured["initial"] = dict(page_cache)
+        return [candidate]
+
+    def hydrate(cfg, base, candidates, page_cache=None):
+        captured["hydrate"] = page_cache
+        return [{**candidates[0], "text": "token"}]
+
+    monkeypatch.setattr(server.retrieval, "prepare_read_candidates", prepare)
+    monkeypatch.setattr(server.retrieval, "hydrate_candidates", hydrate)
+    monkeypatch.setattr(
+        server.rerank, "rerank_candidates",
+        lambda cfg, query, candidates, top_n: (
+            [{key: value for key, value in candidates[0].items() if key != "text"}],
+            {"applied": True},
+        ),
+    )
+
+    server.wiki_search("token", mode="lexical")
+
+    assert captured["initial"] == {}
+    assert captured["prepare"] is captured["hydrate"]
+
+
 def test_reranker_can_promote_candidate_below_preliminary_top_k(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     monkeypatch.setenv("IWIKI_RERANK_MODEL", "model")
@@ -183,7 +219,9 @@ def test_reranker_can_promote_candidate_below_preliminary_top_k(tmp_path, monkey
     )
     monkeypatch.setattr(
         server.retrieval, "hydrate_candidates",
-        lambda cfg, base, items: [{**item, "text": item["file"]} for item in items],
+        lambda cfg, base, items, page_cache=None: [
+            {**item, "text": item["file"]} for item in items
+        ],
     )
     monkeypatch.setattr(
         server.rerank, "rerank_candidates",
@@ -241,7 +279,7 @@ def test_partial_rerank_preserves_all_unscored_preliminary_order(
     )
     monkeypatch.setattr(
         server.retrieval, "hydrate_candidates",
-        lambda cfg, base, items: [
+        lambda cfg, base, items, page_cache=None: [
             {**item, "text": item["file"]} for item in items[1:]
         ],
     )
@@ -276,7 +314,9 @@ def test_configured_reranker_with_no_hydrated_candidates_fails_soft(
     monkeypatch.setattr(
         server.retrieval, "prepare_read_candidates", lambda *args, **kwargs: preliminary,
     )
-    monkeypatch.setattr(server.retrieval, "hydrate_candidates", lambda *args: [])
+    monkeypatch.setattr(
+        server.retrieval, "hydrate_candidates", lambda *args, **kwargs: []
+    )
     out = server.wiki_search("token")
     assert out["results"] == preliminary
     assert out["rerank"] == {"applied": False, "warning": "reranker unavailable"}

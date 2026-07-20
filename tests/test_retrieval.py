@@ -1,5 +1,7 @@
 import builtins
 import json
+import multiprocessing
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,6 +47,263 @@ def _seed(tmp_path, monkeypatch):
     return str(base)
 
 
+def _long_lexical_page(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "long.md").write_text(
+        "---\ndescription: long page\ntags: [wanted]\n---\n"
+        "# Long\n\n## Details\none two three needle five six\n",
+        encoding="utf-8",
+    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=0)
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+    return cfg, str(base)
+
+
+def test_lexical_signal_targets_exact_current_chunk(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+
+    signals = retrieval._domain_signals(
+        cfg, base, "d", "needle", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    direct = signals["lexical_section"]
+    assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in direct] == [
+        ("long.md", "Details", 1)
+    ]
+
+
+def test_lexical_signal_omits_stale_indexed_chunk(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    (Path(base) / "d" / "long.md").write_text(
+        "---\ndescription: long page\n---\n"
+        "# Long\n\n## Details\nreplacement two three needle five six\n",
+        encoding="utf-8",
+    )
+
+    signals = retrieval._domain_signals(
+        cfg, base, "d", "replacement", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    assert signals.get("lexical_section", []) == []
+
+
+def test_lexical_collision_uses_all_loaded_sections(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    path = wiki_base.index_path(base, "d")
+    records = store.load_index(path)
+    section = next(
+        record for record in records
+        if record.kind == "section" and record.heading == "Details" and record.chunk == 0
+    )
+    store.save_index(path, [*records, replace(section, tags=["other"])])
+
+    signals = retrieval._domain_signals(
+        cfg, base, "d", "one", None, "lexical", 10, 0.0, None, ["wanted"], {}
+    )
+
+    assert signals.get("lexical_section", []) == []
+
+
+def test_lexical_signal_distinguishes_repeated_heading_chunks(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "repeated.md").write_text(
+        "---\ndescription: repeated page\n---\n# Repeated\n\n"
+        "## Setup\nfirst\n\n## Setup\nneedle later\n",
+        encoding="utf-8",
+    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=0)
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+
+    signals = retrieval._domain_signals(
+        cfg, str(base), "d", "needle", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    direct = signals["lexical_section"]
+    assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in direct] == [
+        ("repeated.md", "Setup", 1)
+    ]
+
+
+def test_materialize_page_rejects_change_during_read(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    stamps = iter(((1, 2, 10, 100), (1, 2, 20, 200)))
+    monkeypatch.setattr(retrieval, "_file_stamp", lambda path: next(stamps))
+
+    page = retrieval._materialize_page(cfg, base, "d", "long.md", cache)
+
+    assert page is None
+    assert cache[("d", "long.md")] is None
+
+
+def test_materialize_page_rejects_file_symlink_swap_after_validation(
+        tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    page_path = Path(base) / "d" / "long.md"
+    secret = tmp_path / "secret.md"
+    secret.write_text(
+        "# Secret\n\n## Details\nexternal secret needle\n", encoding="utf-8"
+    )
+    original_domain_file_path = retrieval._domain_file_path
+    swapped = False
+
+    def swap_after_validation(base, domain, file):
+        nonlocal swapped
+        validated = original_domain_file_path(base, domain, file)
+        if validated is not None and not swapped:
+            swapped = True
+            page_path.unlink()
+            try:
+                page_path.symlink_to(secret)
+            except OSError:
+                pytest.skip("symlinks are not supported")
+        return validated
+
+    monkeypatch.setattr(retrieval, "_domain_file_path", swap_after_validation)
+    cache = {}
+
+    page = retrieval._materialize_page(cfg, base, "d", "long.md", cache)
+
+    assert page is None
+    assert cache[("d", "long.md")] is None
+
+
+def test_materialize_page_rejects_parent_symlink_swap_after_validation(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    nested = base / "d" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "page.md").write_text(
+        "# Page\n\n## Details\nsafe text\n", encoding="utf-8"
+    )
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "page.md").write_text(
+        "# Secret\n\n## Details\nexternal secret\n", encoding="utf-8"
+    )
+    original_domain_file_path = retrieval._domain_file_path
+    swapped = False
+
+    def swap_after_validation(base, domain, file):
+        nonlocal swapped
+        validated = original_domain_file_path(base, domain, file)
+        if validated is not None and not swapped:
+            swapped = True
+            nested.rename(nested.with_name("nested-original"))
+            try:
+                nested.symlink_to(external, target_is_directory=True)
+            except OSError:
+                pytest.skip("symlinks are not supported")
+        return validated
+
+    monkeypatch.setattr(retrieval, "_domain_file_path", swap_after_validation)
+    cache = {}
+
+    page = retrieval._materialize_page(
+        _cfg(), str(base), "d", "nested/page.md", cache
+    )
+
+    assert page is None
+    assert cache[("d", "nested/page.md")] is None
+
+
+def test_read_domain_file_rejects_fifo_without_blocking_or_leaking_fd(tmp_path):
+    if not hasattr(os, "mkfifo") or "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("FIFO fork test requires POSIX")
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    os.mkfifo(domain / "pipe.md")
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+    fd_directory = Path("/proc/self/fd")
+
+    def read_fifo():
+        before = len(os.listdir(fd_directory)) if fd_directory.is_dir() else None
+        result = retrieval._read_domain_file(str(base), "d", "pipe.md")
+        after = len(os.listdir(fd_directory)) if fd_directory.is_dir() else None
+        results.put((result, before, after))
+
+    process = context.Process(target=read_fifo)
+    process.start()
+    process.join(1)
+    blocked = process.is_alive()
+    outcome = None
+    if blocked:
+        process.terminate()
+        process.join()
+    else:
+        outcome = results.get(timeout=1)
+    results.close()
+    results.join_thread()
+
+    assert not blocked
+    result, before, after = outcome
+    assert result is None
+    if before is not None:
+        assert after == before
+
+
+def test_read_domain_file_fails_closed_when_dir_fd_is_unsupported(
+        tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    del cfg
+    real_open = retrieval.os.open
+    opened = []
+
+    def unsupported_dir_fd(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            raise NotImplementedError("dir_fd unavailable")
+        fd = real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(retrieval.os, "open", unsupported_dir_fd)
+
+    assert retrieval._read_domain_file(base, "d", "long.md") is None
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_lexical_page_seed_uses_source_term_frequency_not_overlap(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "overlap.md").write_text(
+        "---\ndescription: overlap page\n---\n# Overlap\n\n"
+        "## Details\none two needle four five\n",
+        encoding="utf-8",
+    )
+    (domain / "twice.md").write_text(
+        "---\ndescription: twice page\n---\n# Twice\n\n"
+        "## Details\nneedle x needle\n",
+        encoding="utf-8",
+    )
+    cfg = replace(_cfg(), chunk_size=3, chunk_overlap=2, seed_top_k=1)
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(cfg, str(base), "d")
+
+    signals = retrieval._domain_signals(
+        cfg, str(base), "d", "needle", None, "lexical", 10, 0.0, None, None, {}
+    )
+
+    assert {hit["file"] for hit in signals["lexical_page"]} == {"twice.md"}
+
+
 @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
 def test_semantic_modes_embed_query_once(tmp_path, monkeypatch, mode):
     base = _seed(tmp_path, monkeypatch)
@@ -74,6 +333,103 @@ def test_lexical_mode_never_embeds_and_returns_only_lexical_hits(tmp_path, monke
 
     assert hits
     assert all(hit["hit"] == "lexical" for hit in hits)
+
+
+def test_lexical_graph_reuses_materialized_page_markdown(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    target = Path(base) / "d" / "seed.md"
+    reads = []
+    real_read_domain_file = retrieval._read_domain_file
+    real_path_read_text = Path.read_text
+
+    def tracked_read_domain_file(base, domain, file):
+        if domain == "d" and file == "seed.md":
+            reads.append("materialize")
+        return real_read_domain_file(base, domain, file)
+
+    def tracked_path_read_text(path, *args, **kwargs):
+        if path == target:
+            reads.append("graph")
+        return real_path_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(retrieval, "_read_domain_file", tracked_read_domain_file)
+    monkeypatch.setattr(Path, "read_text", tracked_path_read_text)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    graph = next(hit for hit in hits if hit["file"] == "graph.md")
+    assert graph["source"] == "graph"
+    assert graph["hit"] == "lexical"
+    assert reads == ["materialize"]
+
+
+def test_lexical_graph_falls_back_when_materialized_page_changes(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    seed = domain / "seed.md"
+    seed.write_text(
+        "# Seed\n\n## Match\nrefresh_token\n\n[Old](old.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "old.md").write_text(
+        "# Old\n\n## Details\nold details\n", encoding="utf-8"
+    )
+    (domain / "new-target.md").write_text(
+        "# New\n\n## Details\nnew details\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(_cfg(), str(base), "d")
+    real_score_sections = retrieval.score_sections
+    mutated = False
+
+    def mutate_after_materialization(file, markdown, query):
+        nonlocal mutated
+        if file == "seed.md" and not mutated:
+            mutated = True
+            seed.write_text(
+                "# Seed\n\n## Match\nrefresh_token\n\n[New](new-target.md)\n",
+                encoding="utf-8",
+            )
+        return real_score_sections(file, markdown, query)
+
+    monkeypatch.setattr(retrieval, "score_sections", mutate_after_materialization)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    graph_files = {
+        hit["file"] for hit in hits if hit["source"] == "graph"
+    }
+    assert "new-target.md" in graph_files
+    assert "old.md" not in graph_files
+
+
+def test_lexical_no_seed_skips_graph_freshness_checks(tmp_path, monkeypatch):
+    base = _seed(tmp_path, monkeypatch)
+    stamp_calls = []
+    real_stamp_domain_file = retrieval._stamp_domain_file
+
+    def tracked_stamp_domain_file(*args, **kwargs):
+        stamp_calls.append(args)
+        return real_stamp_domain_file(*args, **kwargs)
+
+    monkeypatch.setattr(
+        retrieval, "_stamp_domain_file", tracked_stamp_domain_file
+    )
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["d"], "absent_token_xyz", 10, 0.0, mode="lexical"
+    )
+
+    assert hits == []
+    assert stamp_calls == []
 
 
 def test_hybrid_duplicate_hit_is_both(tmp_path, monkeypatch):
@@ -171,6 +527,17 @@ def test_vector_search_is_semantic_compatibility_alias(tmp_path, monkeypatch):
     json.dumps(hits)
 
 
+def test_lexical_search_delegates_to_canonical_flow(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+
+    hits = retrieval.lexical_search(
+        cfg, base, ["d"], "needle", 10, type=None, tags=None
+    )
+
+    direct = next(hit for hit in hits if hit["heading"] == "Details")
+    assert direct["chunk"] == 1
+
+
 def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypatch):
     base = tmp_path / "wiki"
     page = base / "d" / "nested" / "page.md"
@@ -199,6 +566,99 @@ def test_hydrate_candidates_preserves_order_and_exact_chunks(tmp_path, monkeypat
     assert hydrated[0]["text"] == "## Long\nfour five six"
     assert "frontmatter" not in hydrated[0]["text"]
     assert "Other" not in hydrated[0]["text"]
+
+
+def test_hydration_reuses_prepared_materialization(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    read_calls = 0
+    chunk_calls = 0
+    final_opens = 0
+    real_read = retrieval._read_domain_file
+    real_chunk = retrieval.chunk_markdown
+    real_open = retrieval.os.open
+
+    def tracked_read(*args, **kwargs):
+        nonlocal read_calls
+        read_calls += 1
+        return real_read(*args, **kwargs)
+
+    def tracked_chunk(*args, **kwargs):
+        nonlocal chunk_calls
+        chunk_calls += 1
+        return real_chunk(*args, **kwargs)
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal final_opens
+        if path == "long.md":
+            final_opens += 1
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(retrieval, "_read_domain_file", tracked_read)
+    monkeypatch.setattr(retrieval, "chunk_markdown", tracked_chunk)
+    monkeypatch.setattr(retrieval.os, "open", tracked_open)
+
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0, mode="lexical", page_cache=cache
+    )
+    hydrated = retrieval.hydrate_candidates(
+        cfg, base, candidates, page_cache=cache
+    )
+
+    target = next(
+        hit for hit in hydrated
+        if hit["file"] == "long.md" and hit["heading"] == "Details"
+        and hit["chunk"] == 1
+    )
+    assert target["text"] == "## Details\nneedle five six"
+    assert read_calls == 1
+    assert chunk_calls == 1
+    assert final_opens == 3
+
+
+def test_hydration_omits_cached_page_changed_after_preparation(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0, mode="lexical", page_cache=cache
+    )
+    target = [
+        hit for hit in candidates
+        if hit["file"] == "long.md" and hit["heading"] == "Details"
+    ]
+    (Path(base) / "d" / "long.md").write_text(
+        "# Long\n\n## Details\nreplacement content with a different size\n",
+        encoding="utf-8",
+    )
+
+    assert retrieval.hydrate_candidates(
+        cfg, base, target, page_cache=cache
+    ) == []
+
+
+def test_hydration_omits_ambiguous_indexed_identity(tmp_path, monkeypatch):
+    cfg, base = _long_lexical_page(tmp_path, monkeypatch)
+    cache = {}
+    candidates = retrieval.prepare_read_candidates(
+        cfg, base, ["d"], "needle", 10, 0.0, mode="lexical", page_cache=cache
+    )
+    target = next(
+        hit for hit in candidates
+        if hit["file"] == "long.md" and hit["heading"] == "Details"
+        and hit["chunk"] == 1
+    )
+    path = wiki_base.index_path(base, "d")
+    records = store.load_index(path)
+    duplicate = next(
+        record for record in records
+        if record.kind == "section" and record.file == target["file"]
+        and record.heading == target["heading"] and record.chunk == target["chunk"]
+    )
+    store.save_index(path, [*records, duplicate])
+
+    assert retrieval.hydrate_candidates(
+        cfg, base, [target], page_cache=cache
+    ) == []
 
 
 def test_hydrate_candidates_omits_stale_heading_and_missing_page(tmp_path, monkeypatch):

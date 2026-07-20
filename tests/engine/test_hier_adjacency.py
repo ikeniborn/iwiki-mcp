@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from iwiki_mcp.engine.hier import _adjacency
 
 
@@ -32,3 +34,33 @@ def test_adjacency_excludes_reserved_okf_hub(tmp_path):
     assert "index.md" not in adj
     assert "index.md" not in adj.get("guide/a.md", set())
     assert "index.md" not in adj.get("api/b.md", set())
+
+
+def test_adjacency_uses_partial_markdown_mapping_and_disk_fallback(
+        tmp_path, monkeypatch):
+    cached = tmp_path / "cached.md"
+    fallback = tmp_path / "fallback.md"
+    cached.write_text("[Disk](disk-only.md)\n", encoding="utf-8")
+    fallback.write_text("[Target](fallback-target.md)\n", encoding="utf-8")
+    (tmp_path / "mapped.md").write_text("# Mapped\n", encoding="utf-8")
+    (tmp_path / "disk-only.md").write_text("# Disk\n", encoding="utf-8")
+    (tmp_path / "fallback-target.md").write_text("# Target\n", encoding="utf-8")
+    reads = []
+    real_read_text = Path.read_text
+
+    def tracked_read_text(path, *args, **kwargs):
+        reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+
+    adjacency = _adjacency(
+        str(tmp_path), {"cached.md": "[Mapped](mapped.md)\n"}
+    )
+
+    assert cached not in reads
+    assert fallback in reads
+    assert adjacency["cached.md"] == {"mapped.md"}
+    assert "cached.md" in adjacency["mapped.md"]
+    assert "disk-only.md" not in adjacency.get("cached.md", set())
+    assert adjacency["fallback.md"] == {"fallback-target.md"}

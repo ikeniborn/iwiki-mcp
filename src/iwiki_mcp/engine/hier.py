@@ -3,6 +3,7 @@ wiki-graph expansion into a candidate pool, then clean-section ranking inside it
 Ported for parity from obsidian-ai-wiki's page-similarity/query flow."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from .store import Record, dequantize, cosine
@@ -22,7 +23,9 @@ def seed_articles(query_vec: list[float], summary_recs: list[Record],
     return scored[:top_k]
 
 
-def _adjacency(domain_dir: str) -> dict[str, set[str]]:
+def _adjacency(domain_dir: str,
+               markdown_by_file: Mapping[str, str] | None = None
+               ) -> dict[str, set[str]]:
     """Undirected page graph keyed by domain-relative '<type>/<slug>.md'. An edge
     a->b also adds b->a. Walks the nested type-dir tree; a link target is
     normalized to '<type>/<slug>' by parse_links and matched with a '.md' suffix.
@@ -37,10 +40,13 @@ def _adjacency(domain_dir: str) -> dict[str, set[str]]:
         name = path.relative_to(root).as_posix()
         if name in RESERVED_OKF:
             continue
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
+        if markdown_by_file is not None and name in markdown_by_file:
+            content = markdown_by_file[name]
+        else:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
         for link in parse_links(content):
             base = link.split("#", 1)[0]
             if not base:
@@ -73,7 +79,9 @@ def expand_graph(seed_files: list[str], domain_dir: str, depth: int,
 
 
 def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
-                     depth: int, cap: int) -> list[dict]:
+                     depth: int, cap: int,
+                     markdown_by_file: Mapping[str, str] | None = None
+                     ) -> list[dict]:
     rows: dict[str, dict] = {}
     discovery = 0
     for file, origin, seed_rank in sorted(
@@ -89,7 +97,7 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
             row["seed_rank"] = min(row["seed_rank"], seed_rank)
 
     seed_count = len(rows)
-    adjacency = _adjacency(domain_dir)
+    adjacency = _adjacency(domain_dir, markdown_by_file)
     frontier = list(rows)
     for distance in range(1, max(0, depth) + 1):
         next_frontier: list[str] = []

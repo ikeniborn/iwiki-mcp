@@ -55,7 +55,7 @@ def test_wiki_search_whitespace_type_becomes_no_filter(monkeypatch):
     captured = {}
 
     def fake_candidates(cfg, base, doms, query, top_k, threshold, mode,
-                        type=None, tags=None):
+                        type=None, tags=None, page_cache=None):
         captured.update(type=type, tags=tags)
         return []
 
