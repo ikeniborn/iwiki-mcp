@@ -241,6 +241,24 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 
 Сервер также предоставляет MCP-ресурс `iwiki://authoring-rules` с правилами структуры страниц.
 
+## Pareto-бенчмарк
+
+Запустите только оценочный Pareto-эксперимент на live-размеченном корпусе поиска:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out ./pareto-evidence --env-file /path/to/operator.env --pareto
+```
+
+`--env-file` читает созданный оператором файл окружения только для этого процесса; он
+не создаёт, не изменяет и не записывает в файл учётные данные. Храните файл вне
+каталога отчётов и вне контроля версий. В отчёты попадают только очищенные данные.
+
+`--pareto` - команда оценки, а не переключатель production-конфигурации. Production
+константы fusion-весов или rerank-batch применяются только если отчёт содержит
+прошедшую рекомендацию для соответствующих quality- и latency-gate. Решение
+`needs_work`, включая `no_passing_weight_map`, оставляет production-поведение поиска
+без изменений.
+
 ## Совместимость с OKF
 
 Каждая страница несёт небольшой блок YAML-фронтматтера над `# Title` H1, который автоматически записывают `wiki_write_page` / `wiki_update_page` / `wiki_apply_okf`. Поля:

@@ -244,6 +244,25 @@ release does not silently change that behavior.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
 
+## Pareto benchmark
+
+Run the evaluation-only Pareto experiment against a live, labeled search corpus:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out ./pareto-evidence --env-file /path/to/operator.env --pareto
+```
+
+`--env-file` reads an operator-created environment file for that process only; it does
+not create, modify, or write credentials back to the file. Keep the file outside the
+report output directory and out of version control. The reports record sanitized
+evidence only.
+
+`--pareto` is an evaluation command, not a production configuration switch. Production
+fusion weights or rerank batch constants are applied only after the report contains a
+passing recommendation for the corresponding quality and latency gates. A
+`needs_work` decision, including `no_passing_weight_map`, leaves production retrieval
+behavior unchanged.
+
 ## OKF compatibility
 
 Every page carries a small YAML frontmatter block above the `# Title` H1, written automatically by `wiki_write_page` / `wiki_update_page` / `wiki_apply_okf`. Fields:
