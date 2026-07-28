@@ -128,6 +128,47 @@ def test_validate_env_file_warns_when_file_appears_git_tracked(
     assert calls[0][:3] == ["git", "-C", str(env.parent)]
 
 
+def test_validate_env_file_checks_tracked_symlink_by_lexical_repo_path(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    secrets = repo / "secrets"
+    secrets.mkdir(parents=True)
+    outside = tmp_path / ".benchmark.env"
+    outside.write_text("IWIKI_LLM_KEY=secret\n", encoding="utf-8")
+    env = secrets / ".benchmark.env"
+    try:
+        env.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    calls = []
+    monkeypatch.setattr(
+        "eval.search_pipeline.envfile._git_root",
+        lambda path: repo.resolve(),
+    )
+
+    def fake_run(*args, **kwargs):
+        calls.append(args[0])
+        return None
+
+    monkeypatch.setattr("eval.search_pipeline.envfile.subprocess.run", fake_run)
+
+    result = validate_env_file_path(env, tmp_path / "out")
+
+    assert result["warnings"] == ["env file appears tracked by git"]
+    assert calls == [
+        [
+            "git",
+            "-C",
+            str(repo.resolve()),
+            "ls-files",
+            "--error-unmatch",
+            "secrets/.benchmark.env",
+        ]
+    ]
+
+
 def test_safe_config_fingerprint_redacts_key_base_url_and_secret_fields():
     cfg = Config(
         base_url="https://secret.example/v1",

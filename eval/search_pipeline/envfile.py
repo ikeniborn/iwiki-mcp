@@ -78,7 +78,7 @@ def _is_tracked(path: Path) -> bool:
     if root is None:
         return False
     try:
-        relative = path.resolve().relative_to(root)
+        relative = path.absolute().relative_to(root)
     except ValueError:
         return False
     try:
