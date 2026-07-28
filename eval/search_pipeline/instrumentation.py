@@ -142,21 +142,28 @@ def trace_query(
         "domain": case.domain,
         "query": case.query,
         "mode": mode,
-        "signal_counts": {name: len(hits) for name, hits in sorted(signals.items())},
-        "fusion": {
-            "candidate_count": len(fused),
-            "identities": requested,
-            "source_mix": source_mix(fused),
+        "k": case.k,
+        "stages": {
+            "signals": {
+                "counts": {
+                    name: len(hits)
+                    for name, hits in sorted(signals.items())
+                },
+            },
+            "fusion": {
+                "candidate_count": len(fused),
+                "candidate_identities": requested,
+                "source_mix": source_mix(fused),
+            },
+            "hydration": {
+                "requested": len(fused),
+                "hydrated": len(hydrated_public),
+                "dropped": len(fused) - len(hydrated_public),
+                "hydrated_identities": hydrated_identities,
+            },
+            "rerank": dict(rerank_metadata),
         },
-        "hydration": {
-            "requested": len(fused),
-            "hydrated": len(hydrated_public),
-            "dropped": len(fused) - len(hydrated_public),
-            "requested_identities": requested,
-            "hydrated_identities": hydrated_identities,
-        },
-        "rerank": dict(rerank_metadata),
-        "final_results": final_results,
+        "results": final_results,
         "metrics_input": {
             "ranking": ranking,
             "relevant": dict(case.relevant),

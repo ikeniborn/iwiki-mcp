@@ -63,15 +63,35 @@ def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatc
         rerank_enabled=False,
     )
 
-    final_identities = [identity(result) for result in trace["final_results"]]
+    assert set(trace) == {
+        "case_id",
+        "domain",
+        "query",
+        "mode",
+        "k",
+        "latency",
+        "stages",
+        "results",
+        "metrics_input",
+    }
+    assert set(trace["stages"]) == {"signals", "fusion", "hydration", "rerank"}
+    final_identities = [identity(result) for result in trace["results"]]
     assert final_identities[0] == "eval/guide/auth.md#Rotation:0"
-    assert trace["signal_counts"]["semantic_chunk"] >= 1
-    assert trace["signal_counts"]["lexical_section"] >= 1
-    assert trace["fusion"]["candidate_count"] >= 1
-    assert trace["fusion"]["identities"][0] == "eval/guide/auth.md#Rotation:0"
-    assert trace["hydration"]["requested"] == trace["fusion"]["candidate_count"]
-    assert trace["hydration"]["hydrated"] >= 1
-    assert trace["rerank"] == {
+    assert trace["k"] == case.k
+    assert trace["stages"]["signals"]["counts"]["semantic_chunk"] >= 1
+    assert trace["stages"]["signals"]["counts"]["lexical_section"] >= 1
+    assert trace["stages"]["fusion"]["candidate_count"] >= 1
+    assert (
+        trace["stages"]["fusion"]["candidate_identities"][0]
+        == "eval/guide/auth.md#Rotation:0"
+    )
+    assert (
+        trace["stages"]["hydration"]["requested"]
+        == trace["stages"]["fusion"]["candidate_count"]
+    )
+    assert trace["stages"]["hydration"]["hydrated"] >= 1
+    assert "requested_identities" not in trace["stages"]["hydration"]
+    assert trace["stages"]["rerank"] == {
         "applied": False,
         "warning": "rerank disabled",
     }
