@@ -41,7 +41,7 @@ def test_quality_metrics_use_case_relevance():
         "iwiki-mcp/mcp-server.md#Tool surface:0",
     ]
 
-    assert recall_at_k(ranking, case, 2) == 1.0
+    assert recall_at_k(ranking, case, 2) == 0.5
     assert mrr_at_k(ranking, case, 3) == 1.0
     assert ndcg_at_k(ranking, case, 3) == pytest.approx(0.730929, rel=1e-6)
     assert intent_coverage_at_k(ranking, case, 2) == 0.5
@@ -99,6 +99,24 @@ def test_ndcg_counts_duplicate_relevant_identity_once():
     ]
 
     assert ndcg_at_k(ranking, case, 2) == 1.0
+
+
+def test_recall_counts_duplicate_relevant_identity_once():
+    case = BenchmarkCase(
+        case_id="duplicate-recall",
+        domain="iwiki-mcp",
+        query="duplicate recall identity",
+        relevant={
+            "iwiki-mcp/retrieval.md#Hybrid search:0": 3,
+            "iwiki-mcp/mcp-server.md#Tool surface:0": 3,
+        },
+    )
+    ranking = [
+        "iwiki-mcp/retrieval.md#Hybrid search:0",
+        "iwiki-mcp/retrieval.md#Hybrid search:0",
+    ]
+
+    assert recall_at_k(ranking, case, 2) == 0.5
 
 
 def test_source_mix_counts_hit_and_source_fields():
