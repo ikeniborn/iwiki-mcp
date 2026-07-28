@@ -1,1574 +1,725 @@
 ---
+review:
+  plan_hash: a470f200f2ab3acf
+  last_run: 2026-07-28
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    dependencies: { status: passed }
+    verifiability: { status: passed }
+    consistency: { status: passed }
+  findings: []
 chain:
   intent: docs/superpowers/intents/2026-07-28-search-pipeline-benchmark-intent.md
   spec: docs/superpowers/specs/2026-07-28-search-pipeline-benchmark-design.md
 ---
 
-# Search Pipeline Benchmark Implementation Plan
+# Search Retrieval Pareto Fix Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development (recommended) or
+> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox
+> (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a live-first benchmark in `eval/search_pipeline/` that measures the current wiki search context pipeline, identifies bottlenecks with evidence, and emits JSON plus Markdown/HTML reports.
+**Goal:** Improve preliminary wiki search quality with evidence-selected weighted RRF,
+then reduce rerank latency only when a fixed smaller candidate batch passes the approved
+quality gates.
 
-**Architecture:** Add a standalone eval package under `eval/search_pipeline/`. Keep production `wiki_search` behavior unchanged; instrumentation may call existing private retrieval helpers from eval code to collect stage evidence. Live benchmark runs are read-only and env-gated, while deterministic offline fixtures test metrics, classifier, reports, and safety guards.
+**Architecture:** Extend the existing eval package with deterministic replay and one
+bounded Pareto experiment. Production receives only two internal constants selected by
+that evidence: one signal-weight map and, if it passes, one rerank batch limit. Public
+`wiki_search`, models, chunking, index schema, safety guards, and read-only benchmark
+behavior stay unchanged.
 
-**Tech Stack:** Python standard library, existing `iwiki_mcp` modules, pytest, local Markdown/HTML generation with no new runtime dependency.
+**Tech Stack:** Python 3.10+, existing `iwiki_mcp` retrieval/rerank modules, existing
+`eval.search_pipeline` package, pytest, standard-library JSON/statistics, uv.
 
 ---
+
+## Baseline Evidence
+
+- Rerank-off aggregate: Recall@8 `0.907407`, MRR@8 `0.777778`, nDCG@8
+  `0.686564`, intent coverage `0.944444`, mean latency `125.5 ms`.
+- Rerank-on aggregate: Recall@8/MRR@8/intent coverage `1.0`, nDCG@8
+  `0.982244`, mean latency `1206 ms`.
+- Confirmed loss point: equal-weight RRF places two relevant semantic candidates at
+  fused ranks 22 and 26 even though chunks, index, dimensions, signals, and hydration
+  are valid.
+- Confirmed latency point: rerank adds about `1.1 s` and dominates total latency.
+- Current test baseline on 2026-07-28: `605 passed`, one unrelated failure because
+  `docs/reports/iwiki-mcp-server-report.html` is absent. This plan does not create that
+  unrelated report.
+
+## Requirements And Closure Map
+
+| ID | Requirement | Closed by |
+| --- | --- | --- |
+| R1 | Weighted RRF supports validated internal signal weights while omitted weights preserve equal RRF. | Task 1 |
+| R2 | Exactly 12 reviewed live cases cover the six approved query classes. | Task 2 |
+| R3 | Captured signal rankings deterministically select one passing weight map or no change. | Task 2 |
+| R4 | Live evidence compares rerank batches 16, 24, and 32 with one warm-up and two measured passes. | Task 3 |
+| R5 | Reports show selected/rejected settings, gate reasons, stage metrics, findings, and ranked backlog without secrets or paths. | Task 3 |
+| R6 | Production retrieval uses selected weights only after every fusion quality gate passes. | Task 4 |
+| R7 | Production rerank uses 16 or 24 only after quality and 25% p95 latency gates pass; otherwise 32 remains. | Task 5 |
+| R8 | `wiki_search` arguments, result fields, fail-soft order, models, chunks, index schema, and read-only behavior stay stable. | Tasks 1, 3, 4, 5, 6 |
+| R9 | English/Russian docs, iwiki, version metadata, and verification evidence match shipped behavior. | Task 6 |
 
 ## File Structure
 
-- Create `eval/search_pipeline/__init__.py`: package marker and public version-free exports.
-- Create `eval/search_pipeline/metrics.py`: quality, source-mix, and latency metrics.
-- Create `eval/search_pipeline/fixtures.py`: live benchmark cases plus deterministic offline cases.
-- Create `eval/search_pipeline/envfile.py`: operator env-file loader and safety checks.
-- Create `eval/search_pipeline/instrumentation.py`: read-only stage tracing around retrieval, hydration, and optional rerank.
-- Create `eval/search_pipeline/analyzer.py`: bottleneck classification and ranked backlog.
-- Create `eval/search_pipeline/report.py`: sanitized JSON, Markdown, and HTML report generation.
-- Create `eval/search_pipeline/runner.py`: benchmark orchestration for live and offline cases.
-- Create `eval/search_pipeline/__main__.py`: CLI entry point.
-- Create `tests/eval/test_search_pipeline_metrics.py`: metrics tests.
-- Create `tests/eval/test_search_pipeline_envfile.py`: credential file and sanitization guard tests.
-- Create `tests/eval/test_search_pipeline_analyzer.py`: bottleneck classifier tests.
-- Create `tests/eval/test_search_pipeline_report.py`: JSON/Markdown/HTML schema tests.
-- Create `tests/eval/test_search_pipeline_runner.py`: offline runner and CLI smoke tests.
-- Modify `docs/TODO.md`: mark plan checked after validation.
-- Modify `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `uv.lock`: patch version bump for the implementation change.
+- Modify `src/iwiki_mcp/engine/fusion.py`: optional validated RRF weights.
+- Modify `src/iwiki_mcp/retrieval.py`: one evidence-selected production weight map.
+- Modify `src/iwiki_mcp/server.py`: one evidence-selected rerank batch limit when the
+  limit is 16 or 24.
+- Modify `eval/search_pipeline/fixtures.py`: 12 reviewed cases and query-class labels.
+- Create `eval/search_pipeline/selection.py`: deterministic fusion replay, quality gates,
+  p95 calculation, and rerank batch selection.
+- Modify `eval/search_pipeline/instrumentation.py`: eval-only fusion and rerank-batch
+  overrides.
+- Modify `eval/search_pipeline/runner.py`: bounded Pareto experiment orchestration.
+- Modify `eval/search_pipeline/__main__.py`: explicit `--pareto` experiment mode.
+- Modify `eval/search_pipeline/report.py`: selection evidence in Markdown/HTML.
+- Modify `tests/engine/test_fusion.py`, `tests/test_retrieval.py`, and
+  `tests/test_server_search.py`: production behavior tests.
+- Create `tests/eval/test_search_pipeline_selection.py`: deterministic selector tests.
+- Modify `tests/eval/test_search_pipeline_runner.py` and
+  `tests/eval/test_search_pipeline_report.py`: experiment, safety, and report tests.
+- Modify `README.md` and `docs/README.ru.md`: actual weighted fusion/rerank behavior and
+  eval command.
+- Modify `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `uv.lock`: patch version
+  `0.7.9` to `0.7.10`.
+- Modify `docs/TODO.md`: chain state only through `$check-chain`.
 
----
+## Task 1: Add Weighted RRF Primitive
 
-### Task 1: Metrics And Fixture Contracts
-
-**Files:**
-- Create: `eval/search_pipeline/__init__.py`
-- Create: `eval/search_pipeline/metrics.py`
-- Create: `eval/search_pipeline/fixtures.py`
-- Test: `tests/eval/test_search_pipeline_metrics.py`
-
-- [ ] **Step 1: Write failing metrics tests**
-
-Create `tests/eval/test_search_pipeline_metrics.py`:
-
-```python
-import pytest
-
-from eval.search_pipeline.fixtures import BenchmarkCase
-from eval.search_pipeline.metrics import (
-    identity,
-    intent_coverage_at_k,
-    latency_summary,
-    mrr_at_k,
-    ndcg_at_k,
-    recall_at_k,
-    source_mix,
-)
-
-
-def test_identity_uses_public_search_fields():
-    assert identity({
-        "domain": "iwiki-mcp",
-        "file": "retrieval.md",
-        "heading": "Hybrid search",
-        "chunk": 0,
-    }) == "iwiki-mcp/retrieval.md#Hybrid search:0"
-
-
-def test_quality_metrics_use_case_relevance():
-    case = BenchmarkCase(
-        case_id="modes",
-        domain="iwiki-mcp",
-        query="search mode enum",
-        relevant={
-            "iwiki-mcp/mcp-server.md#Tool surface:0": 3,
-            "iwiki-mcp/retrieval.md#Hybrid search:0": 2,
-        },
-        intents={
-            "api": ["iwiki-mcp/mcp-server.md#Tool surface:0"],
-            "retrieval": ["iwiki-mcp/retrieval.md#Hybrid search:0"],
-        },
-    )
-    ranking = [
-        "iwiki-mcp/retrieval.md#Hybrid search:0",
-        "iwiki-mcp/indexing.md#Configuration:0",
-        "iwiki-mcp/mcp-server.md#Tool surface:0",
-    ]
-
-    assert recall_at_k(ranking, case, 2) == 0.5
-    assert mrr_at_k(ranking, case, 3) == 1.0
-    assert ndcg_at_k(ranking, case, 3) == pytest.approx(0.730929, rel=1e-6)
-    assert intent_coverage_at_k(ranking, case, 2) == 0.5
-
-
-def test_source_mix_counts_hit_and_source_fields():
-    mix = source_mix([
-        {"hit": "both", "source": "seed"},
-        {"hit": "lexical", "source": "lexical"},
-        {"hit": "semantic", "source": "graph"},
-    ])
-
-    assert mix == {
-        "hit": {"both": 1, "lexical": 1, "semantic": 1},
-        "source": {"graph": 1, "lexical": 1, "seed": 1},
-    }
-
-
-def test_latency_summary_is_stable_and_rounded():
-    assert latency_summary({"embed_ms": 1.23456, "fusion_ms": 0.1}) == {
-        "embed_ms": 1.235,
-        "fusion_ms": 0.1,
-        "total_ms": 1.335,
-    }
-```
-
-- [ ] **Step 2: Run metrics tests and verify they fail**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_metrics.py
-```
-
-Expected: import failure for `eval.search_pipeline`.
-
-- [ ] **Step 3: Add fixture dataclass and default cases**
-
-Create `eval/search_pipeline/__init__.py`:
-
-```python
-"""Live-first benchmark for iwiki search pipeline diagnostics."""
-```
-
-Create `eval/search_pipeline/fixtures.py`:
-
-```python
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-
-
-@dataclass(frozen=True)
-class BenchmarkCase:
-    case_id: str
-    domain: str
-    query: str
-    relevant: dict[str, int]
-    intents: dict[str, list[str]] = field(default_factory=dict)
-    k: int = 8
-
-
-DEFAULT_LIVE_CASES = [
-    BenchmarkCase(
-        case_id="search-mode-api",
-        domain="iwiki-mcp",
-        query="IWIKI_SEARCH_MODE semantic lexical hybrid wiki_search mode enum",
-        relevant={
-            "iwiki-mcp/mcp-server.md#Tool surface:0": 3,
-            "iwiki-mcp/retrieval.md#Hybrid search:0": 2,
-        },
-        intents={
-            "api": ["iwiki-mcp/mcp-server.md#Tool surface:0"],
-            "retrieval": ["iwiki-mcp/retrieval.md#Hybrid search:0"],
-        },
-    ),
-    BenchmarkCase(
-        case_id="chunking",
-        domain="iwiki-mcp",
-        query="Markdown chunking summary section chunk repeated heading",
-        relevant={
-            "iwiki-mcp/indexing.md#Markdown chunking:0": 3,
-        },
-        intents={
-            "chunking": ["iwiki-mcp/indexing.md#Markdown chunking:0"],
-        },
-    ),
-    BenchmarkCase(
-        case_id="rerank-hydration",
-        domain="iwiki-mcp",
-        query="rerank candidates hydration stale provider top_n",
-        relevant={
-            "iwiki-mcp/retrieval.md#Hybrid search:0": 3,
-            "iwiki-mcp/retrieval.md#Result shape:0": 2,
-            "iwiki-mcp/mcp-server.md#Tool surface:0": 2,
-        },
-        intents={
-            "rerank": ["iwiki-mcp/retrieval.md#Hybrid search:0"],
-            "shape": ["iwiki-mcp/retrieval.md#Result shape:0"],
-        },
-    ),
-]
-
-
-OFFLINE_CASES = [
-    BenchmarkCase(
-        case_id="offline-symbol",
-        domain="eval",
-        query="refresh_token credentials",
-        relevant={"eval/guide/auth.md#Rotation:0": 3},
-        intents={"symbol": ["eval/guide/auth.md#Rotation:0"]},
-        k=3,
-    ),
-    BenchmarkCase(
-        case_id="offline-lost-before-top-k",
-        domain="eval",
-        query="needle late chunk",
-        relevant={"eval/guide/long.md#Details:1": 3},
-        intents={"chunk": ["eval/guide/long.md#Details:1"]},
-        k=3,
-    ),
-]
-```
-
-- [ ] **Step 4: Add metrics implementation**
-
-Create `eval/search_pipeline/metrics.py`:
-
-```python
-from __future__ import annotations
-
-import math
-
-from .fixtures import BenchmarkCase
-
-
-def identity(result: dict) -> str:
-    return (
-        f"{result['domain']}/{result['file']}#"
-        f"{result['heading']}:{result['chunk']}"
-    )
-
-
-def recall_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
-    if k <= 0:
-        return 0.0
-    if not case.relevant:
-        return 0.0
-    selected = set(ranking[:k])
-    return len(selected & set(case.relevant)) / len(case.relevant)
-
-
-def mrr_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
-    relevant = set(case.relevant)
-    for rank, item in enumerate(ranking[:k], 1):
-        if item in relevant:
-            return 1.0 / rank
-    return 0.0
-
-
-def ndcg_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
-    def dcg(items: list[str]) -> float:
-        return sum(
-            (2 ** case.relevant.get(item, 0) - 1) / math.log2(rank + 2)
-            for rank, item in enumerate(items[:k])
-        )
-
-    ideal = sorted(case.relevant.values(), reverse=True)[:k]
-    ideal_score = sum(
-        (2 ** grade - 1) / math.log2(rank + 2)
-        for rank, grade in enumerate(ideal)
-    )
-    return dcg(ranking) / ideal_score if ideal_score else 0.0
-
-
-def intent_coverage_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
-    if not case.intents:
-        return 0.0
-    selected = set(ranking[:k])
-    covered = sum(
-        any(identity in selected for identity in identities)
-        for identities in case.intents.values()
-    )
-    return covered / len(case.intents)
-
-
-def source_mix(results: list[dict]) -> dict[str, dict[str, int]]:
-    mix = {"hit": {}, "source": {}}
-    for result in results:
-        for field in mix:
-            value = result.get(field, "unknown")
-            mix[field][value] = mix[field].get(value, 0) + 1
-    return {
-        field: dict(sorted(counts.items()))
-        for field, counts in mix.items()
-    }
-
-
-def latency_summary(stage_ms: dict[str, float]) -> dict[str, float]:
-    rounded = {
-        name: round(value, 3)
-        for name, value in sorted(stage_ms.items())
-    }
-    rounded["total_ms"] = round(sum(stage_ms.values()), 3)
-    return rounded
-```
-
-- [ ] **Step 5: Run metrics tests and commit**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_metrics.py
-```
-
-Expected: `4 passed`.
-
-Commit:
-
-```bash
-git add eval/search_pipeline/__init__.py eval/search_pipeline/fixtures.py eval/search_pipeline/metrics.py tests/eval/test_search_pipeline_metrics.py
-git commit -m "test(eval): add search pipeline metrics contract"
-```
-
----
-
-### Task 2: Env File And Sanitization Guards
+**Closes:** R1 and the fusion part of R8.
 
 **Files:**
-- Create: `eval/search_pipeline/envfile.py`
-- Test: `tests/eval/test_search_pipeline_envfile.py`
+- Modify: `src/iwiki_mcp/engine/fusion.py`
+- Modify: `tests/engine/test_fusion.py`
 
-- [ ] **Step 1: Write failing env-file tests**
+- [ ] **Step 1: Write failing weighted-RRF and validation tests**
 
-Create `tests/eval/test_search_pipeline_envfile.py`:
+Add tests proving lower page/discovery weights cannot outvote a rank-1 direct section,
+missing weights remain `1.0`, deterministic ties remain stable, and invalid explicit
+weights fail closed:
 
 ```python
-from pathlib import Path
-
-from eval.search_pipeline.envfile import (
-    apply_env_file,
-    load_env_file,
-    safe_config_fingerprint,
-    validate_env_file_path,
-)
-from iwiki_mcp.engine.config import Config
-
-
-def test_load_env_file_accepts_comments_and_quoted_values(tmp_path):
-    env = tmp_path / ".benchmark.env"
-    env.write_text(
-        "# local only\n"
-        "IWIKI_LLM_KEY='secret key'\n"
-        "IWIKI_RERANK_MODEL=rerank-model\n",
-        encoding="utf-8",
-    )
-
-    assert load_env_file(env) == {
-        "IWIKI_LLM_KEY": "secret key",
-        "IWIKI_RERANK_MODEL": "rerank-model",
+def test_fuse_ranked_weights_direct_section_above_broad_page_fanout():
+    signals = {
+        "semantic_page": [_hit("noise", "N")],
+        "graph_page": [_hit("noise", "N")],
+        "semantic_chunk": [_hit("answer", "A")],
     }
 
-
-def test_apply_env_file_restores_previous_values(tmp_path, monkeypatch):
-    env = tmp_path / ".benchmark.env"
-    env.write_text("IWIKI_LLM_KEY=file-secret\n", encoding="utf-8")
-    monkeypatch.setenv("IWIKI_LLM_KEY", "shell-secret")
-
-    with apply_env_file(env):
-        assert __import__("os").environ["IWIKI_LLM_KEY"] == "file-secret"
-
-    assert __import__("os").environ["IWIKI_LLM_KEY"] == "shell-secret"
-
-
-def test_validate_env_file_rejects_output_tree(tmp_path):
-    out = tmp_path / "evidence"
-    out.mkdir()
-    env = out / ".benchmark.env"
-    env.write_text("IWIKI_LLM_KEY=secret\n", encoding="utf-8")
-
-    result = validate_env_file_path(env, out)
-
-    assert result["ok"] is False
-    assert "inside output directory" in result["errors"][0]
-
-
-def test_safe_config_fingerprint_redacts_key_and_base_url():
-    cfg = Config(
-        base_url="https://secret.example/v1",
-        api_key="secret",
-        embed_model="embed-model",
-        dimensions=2,
-        chunk_size=512,
-        chunk_overlap=64,
-        summary_max=400,
-        top_k=8,
-        score_threshold=0.2,
-        graph_depth=2,
-        ignore=None,
-        rerank_model="rerank-model",
+    fused = fuse_ranked(
+        signals,
+        limit=2,
+        signal_weights={
+            "semantic_page": 0.05,
+            "graph_page": 0.01,
+            "semantic_chunk": 1.0,
+        },
     )
 
-    fingerprint = safe_config_fingerprint(cfg)
-
-    assert fingerprint["embed_model"] == "embed-model"
-    assert fingerprint["rerank_enabled"] is True
-    assert "secret" not in repr(fingerprint)
-    assert "base_url" not in fingerprint
-    assert "api_key" not in fingerprint
-```
-
-- [ ] **Step 2: Run env-file tests and verify they fail**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_envfile.py
-```
-
-Expected: import failure for `eval.search_pipeline.envfile`.
-
-- [ ] **Step 3: Implement env-file loader and fingerprinting**
-
-Create `eval/search_pipeline/envfile.py`:
-
-```python
-from __future__ import annotations
-
-from contextlib import contextmanager
-import os
-from pathlib import Path
-import shlex
-import subprocess
-
-from iwiki_mcp.engine.config import Config
+    assert [hit["file"] for hit in fused] == ["answer", "noise"]
 
 
-def load_env_file(path: str | Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in Path(path).read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].strip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key:
-            values[key] = shlex.split(value, posix=True)[0] if value.strip() else ""
-    return values
+def test_fuse_ranked_missing_weight_preserves_equal_rrf_contribution():
+    signals = {
+        "semantic": [_hit("a", "A")],
+        "lexical": [_hit("b", "B")],
+    }
+
+    fused = fuse_ranked(signals, 2, signal_weights={"semantic": 1.0})
+
+    assert [hit["file"] for hit in fused] == ["a", "b"]
+    assert fused[0]["score"] == fused[1]["score"]
 
 
-@contextmanager
-def apply_env_file(path: str | Path):
-    values = load_env_file(path)
-    previous = {key: os.environ.get(key) for key in values}
-    try:
-        os.environ.update(values)
-        yield values
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-def _is_tracked(path: Path) -> bool:
-    try:
-        subprocess.run(
-            ["git", "ls-files", "--error-unmatch", str(path)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+@pytest.mark.parametrize("weight", [0.0, -1.0, float("inf"), float("nan"), "bad"])
+def test_fuse_ranked_rejects_invalid_explicit_weight(weight):
+    with pytest.raises(ValueError, match="signal weight"):
+        fuse_ranked(
+            {"semantic": [_hit("a", "A")]},
+            1,
+            signal_weights={"semantic": weight},
         )
-        return True
-    except (OSError, subprocess.CalledProcessError):
-        return False
-
-
-def validate_env_file_path(path: str | Path, out_dir: str | Path) -> dict:
-    env_path = Path(path).resolve()
-    out_path = Path(out_dir).resolve()
-    errors: list[str] = []
-    warnings: list[str] = []
-    if not env_path.is_file():
-        errors.append("env file not found")
-    try:
-        env_path.relative_to(out_path)
-        errors.append("env file is inside output directory")
-    except ValueError:
-        pass
-    if _is_tracked(env_path):
-        warnings.append("env file appears tracked by git")
-    return {"ok": not errors, "errors": errors, "warnings": warnings}
-
-
-def safe_config_fingerprint(cfg: Config) -> dict:
-    return {
-        "embed_model": cfg.embed_model,
-        "dimensions": cfg.dimensions,
-        "chunk_size": cfg.chunk_size,
-        "chunk_overlap": cfg.chunk_overlap,
-        "summary_max": cfg.summary_max,
-        "top_k": cfg.top_k,
-        "score_threshold": cfg.score_threshold,
-        "graph_depth": cfg.graph_depth,
-        "seed_top_k": cfg.seed_top_k,
-        "bfs_top_k": cfg.bfs_top_k,
-        "seed_threshold": cfg.seed_threshold,
-        "search_mode": cfg.search_mode,
-        "rerank_enabled": bool(cfg.rerank_model),
-        "rerank_model": cfg.rerank_model or None,
-    }
 ```
 
-- [ ] **Step 4: Run env-file tests and commit**
-
-Run:
+- [ ] **Step 2: Run the tests and verify RED**
 
 ```bash
-uv run pytest -q tests/eval/test_search_pipeline_envfile.py
+uv run pytest -q tests/engine/test_fusion.py
 ```
 
-Expected: `4 passed`.
+Expected: new tests fail because `fuse_ranked` does not accept `signal_weights`.
 
-Commit:
+- [ ] **Step 3: Implement minimal weighted RRF**
+
+Change the function contract to:
+
+```python
+def fuse_ranked(
+    signals: dict[str, list[dict]],
+    limit: int,
+    signal_weights: dict[str, float] | None = None,
+) -> list[dict]:
+```
+
+Resolve each contribution once per signal. Missing mapping entries use `1.0`; explicit
+values are converted to float and rejected with `ValueError` when conversion fails, the
+value is non-finite, or the value is not positive. Replace the current contribution with:
+
+```python
+weight = _signal_weight(signal, signal_weights)
+fused["score"] += weight / (_RRF_K + rank)
+```
+
+Keep identity handling, duplicate suppression, tie ordering, and `limit <= 0` behavior
+unchanged.
+
+- [ ] **Step 4: Run focused fusion tests and verify GREEN**
 
 ```bash
-git add eval/search_pipeline/envfile.py tests/eval/test_search_pipeline_envfile.py
-git commit -m "feat(eval): add benchmark env file guards"
+uv run pytest -q tests/engine/test_fusion.py
 ```
 
----
+Expected: all fusion tests pass.
 
-### Task 3: Read-Only Stage Instrumentation
+- [ ] **Step 5: Commit Task 1**
+
+```bash
+git add src/iwiki_mcp/engine/fusion.py tests/engine/test_fusion.py
+git commit -m "feat(search): support weighted rank fusion"
+```
+
+## Task 2: Add Reviewed Corpus And Deterministic Selection
+
+**Closes:** R2, R3, and deterministic parts of R5/R8.
 
 **Files:**
-- Create: `eval/search_pipeline/instrumentation.py`
-- Test: `tests/eval/test_search_pipeline_runner.py`
-
-- [ ] **Step 1: Write failing offline trace tests**
-
-Create `tests/eval/test_search_pipeline_runner.py` with this initial content:
-
-```python
-from pathlib import Path
-
-from eval.search_pipeline.fixtures import BenchmarkCase
-from eval.search_pipeline.instrumentation import trace_query
-from iwiki_mcp import indexer, retrieval
-from iwiki_mcp.engine.config import Config
-
-
-def _cfg():
-    return Config(
-        base_url="http://offline.test/v1",
-        api_key="offline",
-        embed_model="offline",
-        dimensions=2,
-        chunk_size=3,
-        chunk_overlap=0,
-        summary_max=400,
-        top_k=3,
-        score_threshold=0.0,
-        graph_depth=1,
-        ignore=None,
-        seed_top_k=2,
-        bfs_top_k=10,
-        seed_threshold=0.0,
-    )
-
-
-def _seed_domain(tmp_path, monkeypatch):
-    base = tmp_path / "wiki"
-    domain = base / "eval"
-    domain.mkdir(parents=True)
-    (domain / "guide" / "auth.md").parent.mkdir(parents=True)
-    (domain / "guide" / "auth.md").write_text(
-        "---\ndescription: credential lifecycle\n---\n"
-        "# Auth\n\n## Rotation\nrefresh_token rotates credentials\n",
-        encoding="utf-8",
-    )
-    (domain / "guide" / "long.md").write_text(
-        "---\ndescription: late token page\n---\n"
-        "# Long\n\n## Details\none two three needle five six\n",
-        encoding="utf-8",
-    )
-
-    def embed(cfg, texts):
-        out = []
-        for text in texts:
-            lowered = text.lower()
-            out.append([
-                float(lowered.count("refresh_token") + lowered.count("credentials")),
-                float(lowered.count("needle")),
-            ])
-        return out
-
-    monkeypatch.setattr(indexer, "embed_texts", embed)
-    monkeypatch.setattr(retrieval, "embed_texts", embed)
-    indexer.index_domain(_cfg(), str(base), "eval")
-    return base
-
-
-def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatch):
-    base = _seed_domain(tmp_path, monkeypatch)
-    case = BenchmarkCase(
-        case_id="offline-symbol",
-        domain="eval",
-        query="refresh_token credentials",
-        relevant={"eval/guide/auth.md#Rotation:0": 3},
-        k=3,
-    )
-
-    trace = trace_query(_cfg(), str(base), case, mode="hybrid", rerank_enabled=False)
-
-    assert trace["case_id"] == "offline-symbol"
-    assert trace["mode"] == "hybrid"
-    assert trace["metrics_input"]["ranking"][0] == "eval/guide/auth.md#Rotation:0"
-    assert trace["stages"]["signals"]["counts"]["lexical_section"] >= 1
-    assert trace["stages"]["fusion"]["candidate_count"] >= 1
-    assert trace["stages"]["hydration"]["requested"] >= trace["stages"]["hydration"]["hydrated"]
-    assert "total_ms" in trace["latency"]
-```
-
-- [ ] **Step 2: Run offline trace test and verify it fails**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_runner.py::test_trace_query_records_stage_counts_and_final_results
-```
-
-Expected: import failure for `trace_query`.
-
-- [ ] **Step 3: Implement `trace_query`**
-
-Create `eval/search_pipeline/instrumentation.py`:
-
-```python
-from __future__ import annotations
-
-from time import perf_counter
-
-import numpy as np
-
-from iwiki_mcp import retrieval
-from iwiki_mcp.engine import fusion, rerank
-from iwiki_mcp.engine.config import Config
-
-from .fixtures import BenchmarkCase
-from .metrics import identity, latency_summary, source_mix
-
-
-def _public_from_fused(fused: list[dict]) -> list[dict]:
-    public = []
-    for candidate in fused:
-        item = dict(candidate)
-        signal_names = set(item.pop("signals"))
-        origins = set(item.get("seed_origins", []))
-        semantic = bool(signal_names & {"semantic_page", "semantic_chunk"})
-        lexical = bool(signal_names & {"lexical_page", "lexical_section"})
-        if "graph_page" in signal_names:
-            semantic = semantic or "semantic" in origins
-            lexical = lexical or "lexical" in origins
-        item["hit"] = (
-            "both" if semantic and lexical else "semantic" if semantic else "lexical"
-        )
-        item.pop("ordinal", None)
-        item.pop("seed_origins", None)
-        public.append({
-            key: item[key]
-            for key in ("domain", "file", "heading", "chunk", "score", "hit", "source")
-        })
-    return public
-
-
-def _timed(stage_ms: dict[str, float], name: str, fn):
-    start = perf_counter()
-    value = fn()
-    stage_ms[name] = (perf_counter() - start) * 1000
-    return value
-
-
-def _ranked_with_rerank(cfg: Config, query: str, candidates: list[dict],
-                        hydrated: list[dict], k: int) -> tuple[list[dict], dict]:
-    ranked, metadata = rerank.rerank_candidates(cfg, query, hydrated, top_n=k)
-    if not metadata["applied"]:
-        return candidates[:k], metadata
-    scored_count = metadata.pop("_scored_count", len(ranked))
-    scored = ranked[:scored_count]
-    scored_keys = {
-        (item["domain"], item["file"], item["heading"], item["chunk"])
-        for item in scored
-    }
-    unscored = [
-        item for item in candidates
-        if (item["domain"], item["file"], item["heading"], item["chunk"])
-        not in scored_keys
-    ]
-    return (scored + unscored)[:k], metadata
-
-
-def trace_query(cfg: Config, base: str, case: BenchmarkCase, mode: str,
-                rerank_enabled: bool) -> dict:
-    stage_ms: dict[str, float] = {}
-    page_cache = {}
-    limit = max(case.k, retrieval.CANDIDATE_LIMIT)
-
-    query_vec = None
-    if mode in ("semantic", "hybrid"):
-        query_vec = _timed(
-            stage_ms,
-            "embedding_ms",
-            lambda: list(
-                np.asarray(retrieval.embed_texts(cfg, [case.query])[0], dtype=np.float32)
-            ),
-        )
-
-    def build_signals():
-        return retrieval._domain_signals(
-            cfg,
-            base,
-            case.domain,
-            case.query,
-            query_vec,
-            mode,
-            limit,
-            cfg.score_threshold,
-            None,
-            None,
-            page_cache,
-        )
-
-    signals = _timed(stage_ms, "signals_ms", build_signals)
-    for hits in signals.values():
-        hits.sort(key=lambda hit: (
-            hit["rank_key"], hit["domain"], hit["file"], hit["ordinal"], hit["chunk"]
-        ))
-        for hit in hits:
-            hit.pop("rank_key")
-
-    fused = _timed(stage_ms, "fusion_ms", lambda: fusion.fuse_ranked(signals, limit))
-    candidates = _public_from_fused(fused)
-    hydrated = _timed(
-        stage_ms,
-        "hydration_ms",
-        lambda: retrieval.hydrate_candidates(cfg, base, candidates, page_cache=page_cache),
-    )
-
-    metadata = {"applied": False, "warning": "rerank disabled"}
-    final = candidates[:case.k]
-    if rerank_enabled and cfg.rerank_model:
-        final, metadata = _timed(
-            stage_ms,
-            "rerank_ms",
-            lambda: _ranked_with_rerank(cfg, case.query, candidates, hydrated, case.k),
-        )
-    else:
-        stage_ms["rerank_ms"] = 0.0
-        if rerank_enabled:
-            metadata = {"applied": False, "warning": "rerank unavailable"}
-
-    ranking = [identity(result) for result in final]
-    candidate_identities = [identity(result) for result in candidates]
-    hydrated_identities = [identity(result) for result in hydrated]
-    return {
-        "case_id": case.case_id,
-        "domain": case.domain,
-        "query": case.query,
-        "mode": mode,
-        "k": case.k,
-        "latency": latency_summary(stage_ms),
-        "stages": {
-            "signals": {
-                "counts": {name: len(hits) for name, hits in sorted(signals.items())},
-            },
-            "fusion": {
-                "candidate_count": len(candidates),
-                "candidate_identities": candidate_identities,
-                "source_mix": source_mix(candidates),
-            },
-            "hydration": {
-                "requested": len(candidates),
-                "hydrated": len(hydrated),
-                "dropped": len(candidates) - len(hydrated),
-                "hydrated_identities": hydrated_identities,
-            },
-            "rerank": metadata,
-        },
-        "results": final,
-        "metrics_input": {
-            "ranking": ranking,
-            "relevant": case.relevant,
-            "intents": case.intents,
-        },
-    }
-```
-
-- [ ] **Step 4: Run trace test**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_runner.py::test_trace_query_records_stage_counts_and_final_results
-```
-
-Expected after implementation: `1 passed`.
-
-- [ ] **Step 5: Commit instrumentation**
-
-Commit:
-
-```bash
-git add eval/search_pipeline/instrumentation.py tests/eval/test_search_pipeline_runner.py
-git commit -m "feat(eval): trace search pipeline stages"
-```
-
----
-
-### Task 4: Analyzer And Ranked Backlog
-
-**Files:**
-- Create: `eval/search_pipeline/analyzer.py`
-- Test: `tests/eval/test_search_pipeline_analyzer.py`
-
-- [ ] **Step 1: Write failing analyzer tests**
-
-Create `tests/eval/test_search_pipeline_analyzer.py`:
-
-```python
-from eval.search_pipeline.analyzer import analyze_trace, ranked_backlog
-from eval.search_pipeline.fixtures import BenchmarkCase
-
-
-def _case():
-    return BenchmarkCase(
-        case_id="case",
-        domain="iwiki-mcp",
-        query="query",
-        relevant={"iwiki-mcp/retrieval.md#Hybrid search:0": 3},
-        k=2,
-    )
-
-
-def test_analyze_trace_marks_missing_candidate_pool():
-    trace = {
-        "metrics_input": {"ranking": [], "relevant": _case().relevant},
-        "stages": {
-            "fusion": {"candidate_identities": []},
-            "hydration": {"hydrated_identities": []},
-            "rerank": {"applied": False},
-        },
-    }
-
-    finding = analyze_trace(_case(), trace)[0]
-
-    assert finding["class"] == "missing_from_candidate_pool"
-    assert finding["severity"] == "high"
-
-
-def test_analyze_trace_marks_lost_after_top_k():
-    trace = {
-        "metrics_input": {
-            "ranking": ["iwiki-mcp/noise.md#Noise:0"],
-            "relevant": _case().relevant,
-        },
-        "stages": {
-            "fusion": {
-                "candidate_identities": [
-                    "iwiki-mcp/noise.md#Noise:0",
-                    "iwiki-mcp/retrieval.md#Hybrid search:0",
-                ],
-            },
-            "hydration": {"hydrated_identities": ["iwiki-mcp/retrieval.md#Hybrid search:0"]},
-            "rerank": {"applied": False},
-        },
-    }
-
-    finding = analyze_trace(_case(), trace)[0]
-
-    assert finding["class"] == "lost_after_fusion_topk"
-    assert finding["evidence"]["candidate_rank"] == 2
-
-
-def test_ranked_backlog_groups_findings():
-    findings = [
-        {"class": "missing_from_candidate_pool", "severity": "high"},
-        {"class": "missing_from_candidate_pool", "severity": "high"},
-        {"class": "hydration_drop", "severity": "medium"},
-    ]
-
-    backlog = ranked_backlog(findings)
-
-    assert backlog[0]["class"] == "missing_from_candidate_pool"
-    assert backlog[0]["count"] == 2
-```
-
-- [ ] **Step 2: Run analyzer tests and verify they fail**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_analyzer.py
-```
-
-Expected: import failure for `analyzer`.
-
-- [ ] **Step 3: Implement analyzer**
-
-Create `eval/search_pipeline/analyzer.py`:
-
-```python
-from __future__ import annotations
-
-from collections import Counter
-
-from .fixtures import BenchmarkCase
-
-
-_SEVERITY_WEIGHT = {"high": 3, "medium": 2, "low": 1}
-
-
-def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
-    findings = []
-    relevant = set(case.relevant)
-    ranking = trace["metrics_input"]["ranking"]
-    candidates = trace["stages"]["fusion"].get("candidate_identities", [])
-    hydrated = set(trace["stages"]["hydration"].get("hydrated_identities", []))
-    selected = set(ranking[:case.k])
-
-    missing = relevant - set(candidates)
-    for identity in sorted(missing):
-        findings.append({
-            "case_id": case.case_id,
-            "class": "missing_from_candidate_pool",
-            "severity": "high",
-            "identity": identity,
-            "evidence": {"candidate_count": len(candidates)},
-        })
-
-    for identity in sorted((relevant & set(candidates)) - selected):
-        findings.append({
-            "case_id": case.case_id,
-            "class": "lost_after_fusion_topk",
-            "severity": "medium",
-            "identity": identity,
-            "evidence": {"candidate_rank": candidates.index(identity) + 1},
-        })
-
-    for identity in sorted((relevant & set(candidates)) - hydrated):
-        if trace["stages"]["hydration"].get("requested", 0):
-            findings.append({
-                "case_id": case.case_id,
-                "class": "hydration_drop",
-                "severity": "medium",
-                "identity": identity,
-                "evidence": trace["stages"]["hydration"],
-            })
-
-    if trace["stages"].get("rerank", {}).get("applied") and relevant & set(candidates):
-        candidate_best = min(candidates.index(item) for item in relevant & set(candidates))
-        ranked_best = min(
-            [ranking.index(item) for item in relevant & set(ranking)]
-            or [len(ranking)]
-        )
-        if ranked_best > candidate_best:
-            findings.append({
-                "case_id": case.case_id,
-                "class": "rerank_worsened_order",
-                "severity": "medium",
-                "identity": candidates[candidate_best],
-                "evidence": {
-                    "candidate_rank": candidate_best + 1,
-                    "reranked_rank": ranked_best + 1,
-                },
-            })
-
-    if not findings and not (selected & relevant):
-        findings.append({
-            "case_id": case.case_id,
-            "class": "unknown_quality_loss",
-            "severity": "low",
-            "identity": None,
-            "evidence": {"ranking": ranking},
-        })
-    return findings
-
-
-def ranked_backlog(findings: list[dict]) -> list[dict]:
-    counts = Counter(finding["class"] for finding in findings)
-    severity = {}
-    for finding in findings:
-        current = severity.get(finding["class"], "low")
-        if _SEVERITY_WEIGHT[finding["severity"]] > _SEVERITY_WEIGHT[current]:
-            severity[finding["class"]] = finding["severity"]
-    return [
-        {"class": name, "count": count, "severity": severity.get(name, "low")}
-        for name, count in sorted(
-            counts.items(),
-            key=lambda item: (-_SEVERITY_WEIGHT[severity.get(item[0], "low")], -item[1], item[0]),
-        )
-    ]
-```
-
-- [ ] **Step 4: Run analyzer tests and commit**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_analyzer.py
-```
-
-Expected: `3 passed`.
-
-Commit:
-
-```bash
-git add eval/search_pipeline/analyzer.py tests/eval/test_search_pipeline_analyzer.py
-git commit -m "feat(eval): classify search pipeline bottlenecks"
-```
-
----
-
-### Task 5: Runner Aggregation And Reports
-
-**Files:**
-- Create: `eval/search_pipeline/report.py`
-- Create: `eval/search_pipeline/runner.py`
-- Test: `tests/eval/test_search_pipeline_report.py`
+- Modify: `eval/search_pipeline/fixtures.py`
+- Create: `eval/search_pipeline/selection.py`
+- Create: `tests/eval/test_search_pipeline_selection.py`
 - Modify: `tests/eval/test_search_pipeline_runner.py`
 
-- [ ] **Step 1: Add failing runner/report tests**
+- [ ] **Step 1: Write failing corpus-contract tests**
 
-Append to `tests/eval/test_search_pipeline_runner.py`:
-
-```python
-from eval.search_pipeline.runner import summarize_trace, run_offline_traces
-
-
-def test_summarize_trace_computes_quality_metrics(tmp_path, monkeypatch):
-    base = _seed_domain(tmp_path, monkeypatch)
-    case = BenchmarkCase(
-        case_id="offline-symbol",
-        domain="eval",
-        query="refresh_token credentials",
-        relevant={"eval/guide/auth.md#Rotation:0": 3},
-        intents={"symbol": ["eval/guide/auth.md#Rotation:0"]},
-        k=3,
-    )
-    trace = trace_query(_cfg(), str(base), case, mode="hybrid", rerank_enabled=False)
-
-    summary = summarize_trace(case, trace)
-
-    assert summary["recall_at_k"] == 1.0
-    assert summary["mrr_at_k"] == 1.0
-    assert summary["intent_coverage_at_k"] == 1.0
-
-
-def test_run_offline_traces_returns_evidence(tmp_path, monkeypatch):
-    base = _seed_domain(tmp_path, monkeypatch)
-    case = BenchmarkCase(
-        case_id="offline-symbol",
-        domain="eval",
-        query="refresh_token credentials",
-        relevant={"eval/guide/auth.md#Rotation:0": 3},
-        k=3,
-    )
-
-    evidence = run_offline_traces(_cfg(), str(base), [case], modes=["hybrid"])
-
-    assert evidence["kind"] == "offline"
-    assert evidence["cases"][0]["case_id"] == "offline-symbol"
-    assert "backlog" in evidence
-```
-
-Create `tests/eval/test_search_pipeline_report.py`:
+Add an optional `query_class: str = "unspecified"` field to `BenchmarkCase`, then test
+that `DEFAULT_LIVE_CASES` has 12 unique IDs and exactly two cases in each class:
 
 ```python
-import json
-
-from eval.search_pipeline.report import render_html, render_markdown, write_reports
-
-
-def _evidence():
-    return {
-        "kind": "live",
-        "timestamp": "2026-07-28T00:00:00+00:00",
-        "config": {"embed_model": "embed", "rerank_enabled": False},
-        "summary": {"mean_recall_at_k": 0.5, "mean_mrr_at_k": 0.25},
-        "backlog": [{"class": "missing_from_candidate_pool", "count": 2, "severity": "high"}],
-        "cases": [],
-    }
+EXPECTED_CLASSES = {
+    "exact_identifier",
+    "semantic_paraphrase",
+    "multi_intent",
+    "repeated_heading",
+    "graph_distractor",
+    "competing_evidence",
+}
 
 
-def test_render_markdown_includes_metrics_and_backlog():
-    text = render_markdown(_evidence())
-
-    assert "# Search Pipeline Benchmark" in text
-    assert "mean_recall_at_k" in text
-    assert "missing_from_candidate_pool" in text
-
-
-def test_render_html_is_standalone_and_escaped():
-    html = render_html({**_evidence(), "backlog": [{"class": "<x>", "count": 1, "severity": "high"}]})
-
-    assert "<html" in html
-    assert "&lt;x&gt;" in html
-
-
-def test_write_reports_writes_json_markdown_and_html(tmp_path):
-    written = write_reports(_evidence(), tmp_path)
-
-    assert json.loads(written["json"].read_text(encoding="utf-8"))["kind"] == "live"
-    assert written["markdown"].read_text(encoding="utf-8").startswith("# Search Pipeline Benchmark")
-    assert "<html" in written["html"].read_text(encoding="utf-8")
+def test_live_corpus_has_two_reviewed_cases_per_query_class():
+    assert len(DEFAULT_LIVE_CASES) == 12
+    assert len({case.case_id for case in DEFAULT_LIVE_CASES}) == 12
+    counts = Counter(case.query_class for case in DEFAULT_LIVE_CASES)
+    assert counts == {name: 2 for name in EXPECTED_CLASSES}
+    assert all(case.relevant and case.intents and case.k == 8
+               for case in DEFAULT_LIVE_CASES)
 ```
 
-- [ ] **Step 2: Run runner/report tests and verify they fail**
+Use these reviewed cases and exact current section identities:
 
-Run:
+| Class | Case ID | Query | Graded relevance and intent groups |
+| --- | --- | --- | --- |
+| exact_identifier | `search-mode-api` | `IWIKI_SEARCH_MODE semantic lexical hybrid wiki_search mode enum` | `mcp-server.md#Tool surface:0` = 3 `[api]`; `retrieval.md#Hybrid search:0` = 2 `[retrieval]` |
+| exact_identifier | `update-page-api` | `wiki_update_page heading new_body source description status` | `architecture.md#wiki_update_page transaction:0` = 3 `[transaction]`; `mcp-server.md#Tool surface:0` = 2 `[api]` |
+| semantic_paraphrase | `stale-write-protection` | `prevent overwriting newer remote knowledge before changing a page` | `git-sync.md#Pre-write freshness guard:0` = 3 `[freshness]` |
+| semantic_paraphrase | `binding-resolution` | `choose knowledge base and project domain from current workspace` | `base-binding.md#Resolving the binding:0` = 3 `[binding]`; `base-binding.md#Binding model:0` = 2 `[binding]` |
+| multi_intent | `rerank-hydration` | `rerank candidates hydration stale provider top_n result fields` | `retrieval.md#Hybrid search:0` = 3 `[rerank]`; `retrieval.md#Result shape:0` = 2 `[shape]`; `mcp-server.md#Tool surface:0` = 2 `[api]` |
+| multi_intent | `embedding-storage-config` | `configure embedding endpoint dimensions and persist vectors` | `installation.md#Required environment:0` = 3 `[config]`; `indexing.md#Embeddings client:0` = 3 `[config]`; `indexing.md#Vector store:0` = 2 `[storage]` |
+| repeated_heading | `chunking` | `Markdown chunking summary section chunk repeated heading` | `indexing.md#Markdown chunking:0` = 3 `[chunking]` |
+| repeated_heading | `okf-repeated-section` | `migrate apply OKF frontmatter repeated section chunks` | `okf-governance.md#Migrate and apply tools:0` = 3 `[migration]`; `okf-governance.md#Migrate and apply tools:1` = 3 `[migration]` |
+| graph_distractor | `sync-locking` | `coordinate concurrent pull rebase push without repository races` | `git-sync.md#Inter-process locking:0` = 3 `[concurrency]`; `git-sync.md#Explicit sync:0` = 2 `[sync]` |
+| graph_distractor | `related-sections` | `find neighboring knowledge through vectors links and backlinks` | `retrieval.md#Related sections:0` = 3 `[related]` |
+| competing_evidence | `search-scope` | `project bound explicit domains scope resolution for wiki search` | `base-binding.md#Search scope:0` = 3 `[scope]`; `mcp-server.md#Tool surface:0` = 2 `[api]` |
+| competing_evidence | `frontmatter-migration` | `derive type tags from source log then migrate metadata` | `okf-governance.md#Frontmatter assembly:0` = 3 `[assembly]`; `okf-governance.md#Migrate and apply tools:0` = 2 `[migration]` |
 
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
-```
+Every identity is prefixed with `iwiki-mcp/` in fixture code. Queries must describe the
+named behavior without copying the complete target heading for semantic-paraphrase and
+graph-distractor cases.
 
-Expected: import failures for `runner` and `report`.
+- [ ] **Step 2: Write failing deterministic selector tests**
 
-- [ ] **Step 3: Implement runner aggregation**
-
-Create `eval/search_pipeline/runner.py`:
+Import and test this eval-only API:
 
 ```python
-from __future__ import annotations
-
-from datetime import datetime, timezone
-from statistics import mean
-
-from iwiki_mcp.engine.config import Config
-
-from .analyzer import analyze_trace, ranked_backlog
-from .fixtures import BenchmarkCase
-from .instrumentation import trace_query
-from .metrics import (
-    intent_coverage_at_k,
-    mrr_at_k,
-    ndcg_at_k,
-    recall_at_k,
+from eval.search_pipeline.selection import (
+    GRAPH_WEIGHTS,
+    PAGE_WEIGHTS,
+    RERANK_BATCHES,
+    fusion_weight_grid,
+    replay_fusion,
+    select_fusion_weights,
+    select_rerank_batch,
 )
 
-
-def summarize_trace(case: BenchmarkCase, trace: dict) -> dict:
-    ranking = trace["metrics_input"]["ranking"]
-    return {
-        "case_id": case.case_id,
-        "mode": trace["mode"],
-        "recall_at_k": recall_at_k(ranking, case, case.k),
-        "mrr_at_k": mrr_at_k(ranking, case, case.k),
-        "ndcg_at_k": ndcg_at_k(ranking, case, case.k),
-        "intent_coverage_at_k": intent_coverage_at_k(ranking, case, case.k),
-        "latency": trace["latency"],
-    }
-
-
-def _rollup(summaries: list[dict]) -> dict:
-    if not summaries:
-        return {
-            "mean_recall_at_k": 0.0,
-            "mean_mrr_at_k": 0.0,
-            "mean_ndcg_at_k": 0.0,
-            "mean_intent_coverage_at_k": 0.0,
-        }
-    return {
-        "mean_recall_at_k": mean(item["recall_at_k"] for item in summaries),
-        "mean_mrr_at_k": mean(item["mrr_at_k"] for item in summaries),
-        "mean_ndcg_at_k": mean(item["ndcg_at_k"] for item in summaries),
-        "mean_intent_coverage_at_k": mean(
-            item["intent_coverage_at_k"] for item in summaries
-        ),
-    }
-
-
-def run_offline_traces(cfg: Config, base: str, cases: list[BenchmarkCase],
-                       modes: list[str]) -> dict:
-    traces = []
-    summaries = []
-    findings = []
-    for case in cases:
-        for mode in modes:
-            trace = trace_query(cfg, base, case, mode, rerank_enabled=False)
-            traces.append(trace)
-            summaries.append(summarize_trace(case, trace))
-            findings.extend(analyze_trace(case, trace))
-    return {
-        "kind": "offline",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "summary": _rollup(summaries),
-        "backlog": ranked_backlog(findings),
-        "cases": traces,
-    }
+assert PAGE_WEIGHTS == (0.025, 0.05, 0.1)
+assert GRAPH_WEIGHTS == (0.01, 0.025, 0.05)
+assert RERANK_BATCHES == (16, 24, 32)
 ```
 
-- [ ] **Step 4: Implement reports**
-
-Create `eval/search_pipeline/report.py`:
+Tests must prove:
 
 ```python
-from __future__ import annotations
-
-import html
-import json
-from pathlib import Path
-
-
-def render_markdown(evidence: dict) -> str:
-    lines = [
-        "# Search Pipeline Benchmark",
-        "",
-        f"- kind: `{evidence.get('kind')}`",
-        f"- timestamp: `{evidence.get('timestamp')}`",
-        "",
-        "## Summary",
-        "",
-    ]
-    for key, value in sorted(evidence.get("summary", {}).items()):
-        lines.append(f"- `{key}`: `{value}`")
-    lines.extend(["", "## Ranked Backlog", ""])
-    backlog = evidence.get("backlog", [])
-    if not backlog:
-        lines.append("- No bottleneck findings.")
-    for item in backlog:
-        lines.append(
-            f"- `{item['severity']}` `{item['class']}`: {item['count']} case(s)"
-        )
-    lines.extend(["", "## Cases", ""])
-    for case in evidence.get("cases", []):
-        lines.append(f"- `{case['case_id']}` mode `{case['mode']}`")
-    return "\n".join(lines) + "\n"
+def test_fusion_grid_is_bounded_and_deterministic():
+    first = fusion_weight_grid()
+    assert first == fusion_weight_grid()
+    assert len(first) == 8
+    assert all(item["graph_page"] <= item["semantic_page"] for item in first)
 
 
-def render_html(evidence: dict) -> str:
-    markdown = html.escape(render_markdown(evidence))
-    return (
-        "<!doctype html>\n"
-        "<html><head><meta charset=\"utf-8\"><title>Search Pipeline Benchmark</title>"
-        "<style>body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;"
-        "line-height:1.45}pre{white-space:pre-wrap;background:#f6f8fa;padding:1rem}</style>"
-        "</head><body><pre>"
-        f"{markdown}"
-        "</pre></body></html>\n"
+def test_selector_rejects_recall_regression_before_ndcg_optimization():
+    decision = select_fusion_weights(CASES, TRACES)
+    rejected = {item["weights_key"]: item["reasons"]
+                for item in decision["candidates"] if not item["passed"]}
+    assert "recall_regression" in rejected[REGRESSING_KEY]
+
+
+def test_selector_output_is_byte_stable_for_same_captured_traces():
+    first = json.dumps(
+        select_fusion_weights(CASES, TRACES), sort_keys=True, separators=(",", ":")
     )
-
-
-def write_reports(evidence: dict, out_dir: str | Path) -> dict[str, Path]:
-    root = Path(out_dir)
-    root.mkdir(parents=True, exist_ok=True)
-    paths = {
-        "json": root / "search-pipeline-benchmark.json",
-        "markdown": root / "search-pipeline-benchmark.md",
-        "html": root / "search-pipeline-benchmark.html",
-    }
-    paths["json"].write_text(
-        json.dumps(evidence, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    second = json.dumps(
+        select_fusion_weights(CASES, TRACES), sort_keys=True, separators=(",", ":")
     )
-    paths["markdown"].write_text(render_markdown(evidence), encoding="utf-8")
-    paths["html"].write_text(render_html(evidence), encoding="utf-8")
-    return paths
+    assert first == second
 ```
 
-- [ ] **Step 5: Run runner/report tests and commit**
+Add separate cases proving rejection for per-mode nDCG loss over `0.01`, a new
+`lost_after_fusion_top_k` finding, rerank quality regression, and p95 improvement below
+25%.
 
-Run:
+- [ ] **Step 3: Run new tests and verify RED**
 
 ```bash
-uv run pytest -q tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
+uv run pytest -q tests/eval/test_search_pipeline_selection.py tests/eval/test_search_pipeline_runner.py
 ```
 
-Expected: all tests in those files pass.
+Expected: imports/contracts fail because selection module and query classes do not exist.
 
-Commit:
+- [ ] **Step 4: Implement the bounded selectors**
+
+`fusion_weight_grid()` emits direct weights `1.0`, equal page weights for
+`semantic_page`/`lexical_page`, and one graph weight, retaining only
+`graph_weight <= page_weight`. `replay_fusion()` rebuilds minimal hit dictionaries from
+the trace's existing `stages.signals.identities` and calls production
+`fusion.fuse_ranked`; it does not duplicate RRF math.
+
+`select_fusion_weights()` evaluates equal RRF plus the eight mappings. Gate order is:
+
+1. per-mode Recall@8 and intent coverage must not decrease from equal RRF;
+2. per-mode mean nDCG@8 loss must be `<= 0.01`;
+3. no new `lost_after_fusion_top_k` finding;
+4. the two confirmed identities previously at ranks 22 and 26 must enter top-8;
+5. maximize aggregate nDCG@8, then MRR@8;
+6. break remaining ties by the smallest sum of absolute deviations from `1.0`, then a
+   serialized weight key.
+
+`select_rerank_batch()` uses batch 32 as baseline. Compute p95 with nearest-rank
+`ceil(0.95 * n) - 1`. Evaluate 16 then 24 and return the first batch with unchanged
+Recall/intent coverage, mean nDCG loss `<= 0.01`, no new missing/worsened finding, and
+p95 rerank improvement `>= 25%`. Otherwise return batch 32 with status `needs_work` and
+reason `latency_gate_unresolved`.
+
+Both selectors return sorted candidate records containing metrics, `passed`, and stable
+reason codes. They never include query text, base paths, provider URLs, or secrets.
+
+- [ ] **Step 5: Run selector and existing eval tests**
 
 ```bash
-git add eval/search_pipeline/runner.py eval/search_pipeline/report.py tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
-git commit -m "feat(eval): aggregate benchmark evidence and reports"
+uv run pytest -q tests/eval/test_search_pipeline_selection.py tests/eval/test_search_pipeline_metrics.py tests/eval/test_search_pipeline_analyzer.py tests/eval/test_search_pipeline_runner.py
 ```
 
----
+Expected: all selected tests pass and repeated selector JSON is identical.
 
-### Task 6: CLI And Live-First Execution
+- [ ] **Step 6: Commit Task 2**
+
+```bash
+git add eval/search_pipeline/fixtures.py eval/search_pipeline/selection.py tests/eval/test_search_pipeline_selection.py tests/eval/test_search_pipeline_runner.py
+git commit -m "feat(eval): select bounded search settings"
+```
+
+## Task 3: Run One Pareto Experiment Through The Existing CLI
+
+**Closes:** R4, R5, and eval/read-only parts of R8.
 
 **Files:**
-- Create: `eval/search_pipeline/__main__.py`
+- Modify: `eval/search_pipeline/instrumentation.py`
 - Modify: `eval/search_pipeline/runner.py`
+- Modify: `eval/search_pipeline/__main__.py`
+- Modify: `eval/search_pipeline/report.py`
 - Modify: `tests/eval/test_search_pipeline_runner.py`
+- Modify: `tests/eval/test_search_pipeline_report.py`
 
-- [ ] **Step 1: Add failing CLI tests**
+- [ ] **Step 1: Write failing instrumentation and orchestration tests**
 
-Append to `tests/eval/test_search_pipeline_runner.py`:
-
-```python
-import subprocess
-import sys
-
-
-def test_cli_help_exits_successfully():
-    result = subprocess.run(
-        [sys.executable, "-m", "eval.search_pipeline", "--help"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert "--domain" in result.stdout
-    assert "--env-file" in result.stdout
-
-
-def test_cli_requires_live_config_without_offline_flag(tmp_path):
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "eval.search_pipeline",
-            "--domain",
-            "iwiki-mcp",
-            "--out",
-            str(tmp_path),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={},
-    )
-
-    assert result.returncode == 2
-    assert "IWIKI_LLM_BASE_URL" in result.stderr
-    assert "secret" not in result.stderr.lower()
-```
-
-- [ ] **Step 2: Run CLI tests and verify they fail**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval/test_search_pipeline_runner.py::test_cli_help_exits_successfully tests/eval/test_search_pipeline_runner.py::test_cli_requires_live_config_without_offline_flag
-```
-
-Expected: module execution failure for missing `__main__.py`.
-
-- [ ] **Step 3: Add live runner function**
-
-Append to `eval/search_pipeline/runner.py`:
+Extend `trace_query()` with eval-only keyword arguments:
 
 ```python
-from iwiki_mcp import base as wiki_base
-from .envfile import safe_config_fingerprint
-
-
-def run_live_traces(cfg: Config, domain: str, modes: list[str],
-                    cases: list[BenchmarkCase]) -> dict:
-    binding = wiki_base.resolve_binding()
-    traces = []
-    summaries = []
-    findings = []
-    for case in cases:
-        if case.domain != domain:
-            continue
-        for mode in modes:
-            trace = trace_query(
-                cfg,
-                binding.base,
-                case,
-                mode,
-                rerank_enabled=bool(cfg.rerank_model),
-            )
-            traces.append(trace)
-            summaries.append(summarize_trace(case, trace))
-            findings.extend(analyze_trace(case, trace))
-    return {
-        "kind": "live",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "config": safe_config_fingerprint(cfg),
-        "summary": _rollup(summaries),
-        "backlog": ranked_backlog(findings),
-        "cases": traces,
-    }
+def trace_query(
+    cfg: Config,
+    base: str,
+    case: BenchmarkCase,
+    mode: str,
+    rerank_enabled: bool,
+    *,
+    fusion_weights: dict[str, float] | None = None,
+    rerank_candidate_limit: int | None = None,
+) -> dict:
 ```
 
-- [ ] **Step 4: Add CLI entry point**
-
-Create `eval/search_pipeline/__main__.py`:
+Tests assert the fusion override is passed to `fuse_ranked`, only the leading requested
+rerank batch is hydrated/submitted, the complete fused pool remains in evidence, and
+fallback still returns original fused top-k. Add an orchestration test with stub traces:
 
 ```python
-from __future__ import annotations
+def test_pareto_experiment_runs_required_matrix_and_excludes_warmups(monkeypatch):
+    evidence = run_pareto_experiment(CFG, "iwiki-mcp", CASES, base="/wiki")
 
-import argparse
-import sys
-from pathlib import Path
-
-from iwiki_mcp.engine.config import Config, ConfigError
-
-from .envfile import apply_env_file, validate_env_file_path
-from .fixtures import DEFAULT_LIVE_CASES
-from .report import write_reports
-from .runner import run_live_traces
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run iwiki search pipeline benchmark")
-    parser.add_argument("--domain", default="iwiki-mcp")
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--env-file")
-    parser.add_argument("--modes", default="hybrid,lexical,semantic")
-    return parser
-
-
-def _run(args) -> int:
-    out_dir = Path(args.out)
-    modes = [mode.strip() for mode in args.modes.split(",") if mode.strip()]
-    context = apply_env_file(args.env_file) if args.env_file else None
-    if args.env_file:
-        validation = validate_env_file_path(args.env_file, out_dir)
-        for warning in validation["warnings"]:
-            print(f"WARNING: {warning}", file=sys.stderr)
-        if not validation["ok"]:
-            print("; ".join(validation["errors"]), file=sys.stderr)
-            return 2
-    try:
-        if context is None:
-            cfg = Config.load()
-            evidence = run_live_traces(cfg, args.domain, modes, DEFAULT_LIVE_CASES)
-        else:
-            with context:
-                cfg = Config.load()
-                evidence = run_live_traces(cfg, args.domain, modes, DEFAULT_LIVE_CASES)
-    except ConfigError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    paths = write_reports(evidence, out_dir)
-    print(f"wrote {paths['json']}")
-    print(f"wrote {paths['markdown']}")
-    print(f"wrote {paths['html']}")
-    return 0
-
-
-def main() -> int:
-    return _run(_parser().parse_args())
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    assert evidence["kind"] == "live-pareto"
+    assert evidence["baseline"]["modes"] == ["hybrid", "lexical", "semantic"]
+    assert set(evidence["rerank_batches"]) == {"16", "24", "32"}
+    assert all(run["sample_count"] == 24
+               for run in evidence["rerank_batches"].values())
+    assert evidence["run_settings"]["warmup_passes"] == 1
+    assert evidence["run_settings"]["measured_passes"] == 2
 ```
 
-- [ ] **Step 5: Run CLI tests and commit**
+Also assert invalid `--pareto` mode subsets exit 2 before provider calls and sanitized
+errors contain no env values.
 
-Run:
+- [ ] **Step 2: Run focused eval tests and verify RED**
 
 ```bash
-uv run pytest -q tests/eval/test_search_pipeline_runner.py
+uv run pytest -q tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
 ```
 
-Expected: all runner/CLI tests pass.
+Expected: failures for missing overrides, `run_pareto_experiment`, and `--pareto`.
 
-Commit:
+- [ ] **Step 3: Implement instrumentation overrides**
 
-```bash
-git add eval/search_pipeline/__main__.py eval/search_pipeline/runner.py tests/eval/test_search_pipeline_runner.py
-git commit -m "feat(eval): add live search pipeline benchmark CLI"
-```
-
----
-
-### Task 7: Version, Focused Verification, And Docs State
-
-**Files:**
-- Modify: `pyproject.toml`
-- Modify: `src/iwiki_mcp/__init__.py`
-- Modify: `uv.lock`
-- Modify: `docs/TODO.md`
-
-- [ ] **Step 1: Bump package version**
-
-Patch all package-version locations from the current version to the next patch version.
-After the checked plan commit, the implementation target version is `0.7.8`:
+Pass `fusion_weights` directly to `fusion.fuse_ranked`. For rerank-enabled traces, use:
 
 ```python
-# src/iwiki_mcp/__init__.py
-__version__ = "0.7.8"
+rerank_pool = fused
+if rerank_candidate_limit is not None:
+    effective_limit = max(case.k, rerank_candidate_limit)
+    rerank_pool = fused[:effective_limit]
+hydrated = retrieval.hydrate_candidates(
+    cfg,
+    base,
+    [dict(candidate) for candidate in rerank_pool],
+    page_cache,
+)
 ```
 
-```toml
-# pyproject.toml
-version = "0.7.8"
-```
+The fusion stage still records all 32 candidates. Hydration records the actual batch.
+Unscored candidates are appended from the complete `fused` list. A rerank failure uses
+`fused[:case.k]` exactly as before.
 
-```toml
-# uv.lock package block
-name = "iwiki-mcp"
-version = "0.7.8"
-```
+- [ ] **Step 4: Implement `run_pareto_experiment`**
 
-- [ ] **Step 2: Update task log**
+Add one runner entry point that:
 
-Update `docs/TODO.md` row:
+1. captures rerank-off traces for 12 cases in `hybrid`, `lexical`, and `semantic`;
+2. calls `select_fusion_weights` on those captured signals;
+3. stops with `decision.status = needs_work` when no fusion mapping passes;
+4. for a passing mapping, runs hybrid batches 16, 24, and 32;
+5. excludes one full warm-up pass per batch;
+6. retains two measured passes, exactly 24 samples per batch;
+7. calls `select_rerank_batch` and emits one production recommendation;
+8. merges only evidence-supported unresolved findings into `ranked_backlog`.
 
-```markdown
-| search-pipeline-benchmark | in-progress | ✓ | ✓ | ✓ | – | 2026-07-28 |  | plan OK — implementation complete pending result gate |
-```
+Keep existing `run_live_traces()` behavior compatible. Add explicit optional overrides
+rather than reading experiment settings from environment variables.
 
-- [ ] **Step 3: Run focused verification**
+- [ ] **Step 5: Add `--pareto` and report sections**
 
-Run:
+`--pareto` selects `run_pareto_experiment`; without it, the existing live benchmark path
+is unchanged. Pareto mode requires the default three-mode set. JSON gains bounded
+`fusion_selection`, `rerank_batches`, and `decision` objects. Markdown/HTML gain compact
+tables for weights, gate failures, batch quality, p50/p95, and final recommendation.
+
+Do not render base paths, provider URLs, raw provider payloads, auth headers, keys, or raw
+exceptions. Preserve sorted JSON keys and stable ordering of deterministic arrays.
+
+- [ ] **Step 6: Run eval safety/report tests and CLI help**
 
 ```bash
-uv run pytest -q tests/eval/test_search_pipeline_metrics.py tests/eval/test_search_pipeline_envfile.py tests/eval/test_search_pipeline_analyzer.py tests/eval/test_search_pipeline_report.py tests/eval/test_search_pipeline_runner.py tests/test_package.py
-```
-
-Expected: all selected tests pass.
-
-- [ ] **Step 4: Run existing focused search verification**
-
-Run:
-
-```bash
-uv run pytest -q tests/eval tests/engine/test_rerank.py tests/test_server_search.py
-```
-
-Expected: all selected tests pass.
-
-- [ ] **Step 5: Run CLI help**
-
-Run:
-
-```bash
+uv run pytest -q tests/eval/test_search_pipeline_envfile.py tests/eval/test_search_pipeline_selection.py tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
 uv run python -m eval.search_pipeline --help
 ```
 
-Expected: exit 0 and output includes `--domain`, `--out`, and `--env-file`.
+Expected: tests pass; help lists `--pareto`, `--env-file`, `--domain`, and `--out`.
 
-- [ ] **Step 6: Run full test suite and record current status**
+- [ ] **Step 7: Commit Task 3**
 
-Run:
+```bash
+git add eval/search_pipeline/instrumentation.py eval/search_pipeline/runner.py eval/search_pipeline/__main__.py eval/search_pipeline/report.py tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
+git commit -m "feat(eval): run Pareto search experiment"
+```
+
+## Task 4: Evidence Gate And Production Fusion
+
+**Closes:** R6 and fusion-related parts of R8.
+
+**Files:**
+- Modify: `src/iwiki_mcp/retrieval.py`
+- Modify: `tests/test_retrieval.py`
+- Evidence only: operator-provided `tmp/creds.env` and a private `/tmp` output directory
+
+- [ ] **Step 1: Run the read-only live Pareto experiment**
+
+HUMAN CHECKPOINT satisfied by the already operator-provided `tmp/creds.env`; do not
+print, copy, commit, or include that file in output.
+
+```bash
+evidence_dir="$(mktemp -d /tmp/.private/altuser/iwiki-search-pareto.XXXXXX)"
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out "$evidence_dir" --env-file tmp/creds.env --pareto
+printf '%s\n' "$evidence_dir"
+```
+
+Expected: 12 cases, 36 rerank-off baseline traces, 24 measured samples for each rerank
+batch, no failed queries, no secret-bearing output, and a deterministic fusion decision.
+
+- [ ] **Step 2: Enforce the automatic fusion gate**
+
+Continue only when JSON says `fusion_selection.status = selected`, no Recall/intent
+regression exists, per-mode nDCG loss is `<= 0.01`, no new lost-after-fusion finding
+exists, and the two confirmed identities enter top-8 without rerank. If any condition
+fails, leave production fusion unchanged, record `needs_work`, and stop Tasks 4-5 rather
+than weakening a gate.
+
+- [ ] **Step 3: Write a failing retrieval wiring test**
+
+Monkeypatch `retrieval.fusion.fuse_ranked`, call `prepare_read_candidates`, and assert the
+provided `signal_weights` exactly match the selected JSON map. Also retain the existing
+public field assertion:
+
+```python
+assert set(result) == {
+    "domain", "file", "heading", "chunk", "score", "hit", "source"
+}
+```
+
+- [ ] **Step 4: Run the retrieval test and verify RED**
+
+```bash
+uv run pytest -q tests/test_retrieval.py
+```
+
+Expected: the new wiring assertion fails because production retrieval still calls equal
+RRF.
+
+- [ ] **Step 5: Apply the selected fixed map**
+
+Add a private module constant containing the exact selector output. The only permitted
+values are direct `1.0`, page one of `0.025/0.05/0.1`, and graph one of
+`0.01/0.025/0.05`. Pass it as `signal_weights` from
+`prepare_read_candidates`. Do not add config fields, environment variables, or API
+arguments.
+
+- [ ] **Step 6: Verify retrieval behavior and rerank-off quality**
+
+```bash
+uv run pytest -q tests/engine/test_fusion.py tests/test_retrieval.py tests/test_retrieval_facets.py tests/test_server_search.py
+```
+
+Expected: tests pass; public fields and search modes remain unchanged.
+
+- [ ] **Step 7: Commit Task 4**
+
+```bash
+git add src/iwiki_mcp/retrieval.py tests/test_retrieval.py
+git commit -m "fix(search): weight direct retrieval evidence"
+```
+
+## Task 5: Evidence-Gated Production Rerank Batch
+
+**Closes:** R7 and rerank-related parts of R8.
+
+**Files:**
+- Modify only when batch 16 or 24 passes: `src/iwiki_mcp/server.py`
+- Modify only when batch 16 or 24 passes: `tests/test_server_search.py`
+
+- [ ] **Step 1: Enforce the automatic rerank gate**
+
+Read `decision.rerank_batch` from Task 4 evidence. Continue with server edits only for
+16 or 24 and only when quality gates pass plus p95 rerank latency improves at least 25%
+versus 32. If decision is 32, retain current production behavior and record
+`latency_gate_unresolved`; do not claim the full follow-up accepted.
+
+- [ ] **Step 2: Write failing bounded-batch server tests**
+
+For a passing 16/24 decision, generate 32 preliminary candidates and assert hydration
+receives only the selected budget for `k=8`. Add an explicit `k` above the budget and
+assert hydration receives `max(k, budget)` candidates. Verify a scored candidate is
+promoted, all unscored preliminary candidates keep original order, provider failure
+returns unchanged top-k, and response keys/metadata are unchanged.
+
+```python
+assert hydrated_input == preliminary[:server._RERANK_CANDIDATE_LIMIT]
+assert set(output) == {"results", "rerank"}
+assert all("text" not in item for item in output["results"])
+```
+
+- [ ] **Step 3: Run server tests and verify RED**
+
+```bash
+uv run pytest -q tests/test_server_search.py
+```
+
+Expected: bounded hydration assertion fails because all candidates are currently
+hydrated.
+
+- [ ] **Step 4: Apply the passing literal batch**
+
+If decision is 16, add `_RERANK_CANDIDATE_LIMIT = 16`; if decision is 24, add
+`_RERANK_CANDIDATE_LIMIT = 24`. Preserve an explicit larger public `k` and slice
+candidates only for hydration/provider submission:
+
+```python
+rerank_budget = max(requested_top_k, _RERANK_CANDIDATE_LIMIT)
+rerank_candidates = candidates[:rerank_budget]
+hydrated = retrieval.hydrate_candidates(
+    cfg, bind.base, rerank_candidates, page_cache=page_cache
+)
+```
+
+Keep `candidates` unchanged for fail-soft fallback and unscored append. Keep provider
+`top_n=requested_top_k` and existing sanitized metadata.
+
+- [ ] **Step 5: Run server and reranker regression tests**
+
+```bash
+uv run pytest -q tests/test_server_search.py tests/eval/test_reranker_experiment.py tests/eval/test_search_pipeline_runner.py
+```
+
+Expected: tests pass; bounded provider input and complete fallback order are proven.
+
+- [ ] **Step 6: Commit Task 5 when a smaller batch passed**
+
+```bash
+git add src/iwiki_mcp/server.py tests/test_server_search.py
+git commit -m "perf(search): bound rerank candidate batch"
+```
+
+If 32 remains, skip this commit and preserve the evidence-backed `needs_work` latency
+outcome.
+
+## Task 6: Documentation, Version, And Final Verification
+
+**Closes:** R5, R8, and R9.
+
+**Files:**
+- Modify: `README.md`
+- Modify: `docs/README.ru.md`
+- Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `uv.lock`
+- Modify through chain gate: `docs/TODO.md`
+- Update through iwiki MCP: `retrieval`, `mcp-server`, and
+  `reference/search-pipeline-benchmark`
+
+- [ ] **Step 1: Update repository documentation**
+
+Document weighted RRF as an internal fixed policy, the actual rerank batch only when it
+changed, preserved fail-soft behavior, and the reproducible Pareto command. English and
+Russian docs must describe the same behavior. Do not include private output paths,
+provider URLs, or credentials.
+
+- [ ] **Step 2: Bump patch version**
+
+Set `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and the local package stanza in
+`uv.lock` from `0.7.9` to `0.7.10`.
+
+```bash
+uv lock
+uv run pytest -q tests/test_package.py
+```
+
+Expected: lock metadata is current and package/distribution versions both equal
+`0.7.10`.
+
+- [ ] **Step 3: Run focused verification**
+
+```bash
+uv run pytest -q tests/engine/test_fusion.py tests/test_retrieval.py tests/test_retrieval_facets.py tests/test_server_search.py tests/eval/test_search_pipeline_selection.py tests/eval/test_search_pipeline_metrics.py tests/eval/test_search_pipeline_analyzer.py tests/eval/test_search_pipeline_envfile.py tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py tests/test_package.py
+uv run flake8 src/iwiki_mcp eval/search_pipeline tests/engine/test_fusion.py tests/test_retrieval.py tests/test_server_search.py tests/eval/test_search_pipeline_selection.py tests/eval/test_search_pipeline_runner.py tests/eval/test_search_pipeline_report.py
+uv run python -m eval.search_pipeline --help
+git diff --check
+```
+
+Expected: all focused tests pass, flake8 is clean, CLI help succeeds, diff check is
+clean.
+
+- [ ] **Step 4: Run full-suite comparison against baseline**
 
 ```bash
 uv run pytest -q
+uv run pytest -q -k "not test_repository_server_report_lists_current_search_modes_and_tool_surface"
 ```
 
-Expected: either full pass or the known unrelated repository failures documented before this plan: `tests/test_resources.py::test_repository_server_report_lists_current_search_modes_and_tool_surface` and `tests/test_sync_parallel.py::test_sync_aborts_true_rebase_conflict_without_retry_or_commit_loss` if still present. Any new failure in `eval/search_pipeline` or search/rerank tests blocks completion.
+Expected: no new failure. The first command may retain only the known missing
+`docs/reports/iwiki-mcp-server-report.html` failure recorded before implementation; the
+second command must pass completely. Any additional failure blocks completion.
 
-- [ ] **Step 7: Check wiki lint**
+- [ ] **Step 5: Rerun final live evidence and safety checks**
 
-Run through MCP:
+Rerun the Task 4 command after production constants are applied. Confirm report decision
+matches source constants, all 12 cases complete, no API/model/chunk/index setting drift
+exists, and evidence contains no provider URL, local base path, auth header, raw payload,
+or env-file value. Compare production-base git HEAD/status before and after without
+writing to it.
 
-```text
-wiki_lint(domain="iwiki-mcp")
-```
+- [ ] **Step 6: Update iwiki through MCP and lint**
 
-Expected: no broken refs, no stale pages, no missing source. Pre-existing orphan, long-lead advisory, or tag drift may remain and must be reported as pre-existing.
+Use `wiki_update_page` for existing sections in `retrieval`, `mcp-server`, and
+`reference/search-pipeline-benchmark`. Describe only behavior actually shipped. Then run
+`wiki_lint`; broken refs, stale pages, or contradictory text block result completion.
 
-- [ ] **Step 8: Commit implementation**
+- [ ] **Step 7: Run result reconciliation**
 
-Commit:
+Run `$check-chain result docs/superpowers/plans/2026-07-28-search-pipeline-benchmark.md`.
+Expected: every implemented plan step maps to diff/test/live evidence; a retained batch
+32 leaves latency result `needs_work` rather than being reported as fixed.
+
+- [ ] **Step 8: Commit final metadata and docs**
 
 ```bash
-git add eval/search_pipeline tests/eval pyproject.toml src/iwiki_mcp/__init__.py uv.lock docs/TODO.md
-git commit -m "feat(eval): add live search pipeline benchmark"
+git add README.md docs/README.ru.md pyproject.toml src/iwiki_mcp/__init__.py uv.lock docs/TODO.md docs/superpowers/plans/2026-07-28-search-pipeline-benchmark.md
+git commit -m "docs(search): record Pareto retrieval policy"
 ```
 
----
+Do not stage `.gitignore`, `tmp/creds.env`, private evidence, generated caches, or any
+unrelated file.
 
-## Self-Review
+## Execution Stop Rules
 
-- Spec coverage: Tasks 1-6 cover live-first benchmark, per-stage metrics, bottleneck evidence, ranked backlog, comparison modes, credential file flow, read-only safety, and search-context-only scope. Task 7 covers versioning and verification.
-- Placeholder scan: no task contains unspecified implementation placeholders; every new file has concrete content.
-- Type consistency: `BenchmarkCase`, `trace_query`, `summarize_trace`, `run_live_traces`, `write_reports`, and CLI flags use consistent names across tasks.
+- Stop before production fusion changes when no weight map passes every quality gate.
+- Keep rerank batch 32 and mark latency `needs_work` when neither 16 nor 24 passes.
+- Stop on any secret/path leakage, wiki-base write, public API/response change, new full
+  suite failure, model/chunk/index drift, or failed read-only verification.
+- Never weaken a metric gate to obtain a production change.
+
+## Expected Result
+
+- Preliminary fusion no longer loses the two confirmed relevant sections and does not
+  regress Recall/intent coverage or per-mode nDCG beyond the approved tolerance.
+- Rerank latency decreases only if live evidence proves a smaller fixed batch preserves
+  trust; otherwise the current batch remains and the unresolved bottleneck is explicit.
+- Reports retain per-stage metrics, evidence-backed bottlenecks, rejected alternatives,
+  ranked backlog, deterministic replay, and safe live fingerprints.
+- Public `wiki_search`, keys, wiki-base write behavior, chunking, embeddings, models, and
+  index schema remain unchanged.
