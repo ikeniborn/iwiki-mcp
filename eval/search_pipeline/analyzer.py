@@ -75,10 +75,7 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
         if (
             has_candidate_evidence
             and identity not in ranking_set
-            and (
-                candidate_rank > case.k
-                or not rerank.get("applied")
-            )
+            and candidate_rank > case.k
         ):
             findings.append({
                 "case_id": case.case_id,
@@ -123,17 +120,12 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
                 )
             )
         ]
-        ranking_relevant = [
-            identity for identity in ranking
-            if identity in relevant
-        ]
         if fusion_relevant:
             fusion_identity = fusion_relevant[0]
             fusion_best_rank = candidate_ranks[fusion_identity]
-            ranking_identity = ranking_relevant[0] if ranking_relevant else None
-            ranking_best_rank = (
-                ranking_ranks[ranking_identity]
-                if ranking_identity is not None else None
+            ranking_best_rank = ranking_ranks.get(fusion_identity)
+            ranking_identity = (
+                fusion_identity if ranking_best_rank is not None else None
             )
             if ranking_best_rank is None or ranking_best_rank > fusion_best_rank:
                 findings.append({

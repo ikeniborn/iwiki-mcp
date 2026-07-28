@@ -103,7 +103,7 @@ def test_analyze_trace_reports_relevant_identity_lost_after_fusion_topk():
     ]
 
 
-def test_analyze_trace_reports_lost_topk_when_rerank_not_applied():
+def test_analyze_trace_reports_unknown_when_topk_loss_is_not_evidenced():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case(k=3)
     trace = _trace(
@@ -117,13 +117,13 @@ def test_analyze_trace_reports_lost_topk_when_rerank_not_applied():
     assert findings == [
         {
             "case_id": "case-a",
-            "class": "lost_after_fusion_topk",
-            "severity": "medium",
+            "class": "unknown_quality_loss",
+            "severity": "low",
             "identity": identity,
             "evidence": {
-                "candidate_rank": 2,
-                "k": 3,
                 "ranking_count": 1,
+                "candidate_count": 2,
+                "selected_relevant_count": 0,
                 "relevance_grade": 3,
             },
         },
@@ -188,8 +188,8 @@ def test_analyze_trace_reports_rerank_worsened_order_only_when_applied():
             "identity": better,
             "evidence": {
                 "fusion_best_rank": 1,
-                "ranking_best_rank": 2,
-                "ranking_identity": worse,
+                "ranking_best_rank": 3,
+                "ranking_identity": better,
                 "rerank": {"applied": True, "scored_count": 3},
             },
         },
@@ -214,6 +214,35 @@ def test_analyze_trace_reports_rerank_removal_for_fusion_topk_relevant():
             "class": "rerank_worsened_order",
             "severity": "medium",
             "identity": identity,
+            "evidence": {
+                "fusion_best_rank": 1,
+                "ranking_best_rank": None,
+                "ranking_identity": None,
+                "rerank": {"applied": True, "scored_count": 2},
+            },
+        },
+    ]
+
+
+def test_analyze_trace_tracks_best_fusion_relevant_identity_for_rerank():
+    best = "eval/guide/auth.md#Rotation:0"
+    second = "eval/guide/backup.md#Rotation:0"
+    case = _case(relevant={best: 3, second: 2}, k=3)
+    trace = _trace(
+        ranking=[second],
+        relevant=case.relevant,
+        candidates=[best, second],
+        rerank={"applied": True, "scored_count": 2},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "rerank_worsened_order",
+            "severity": "medium",
+            "identity": best,
             "evidence": {
                 "fusion_best_rank": 1,
                 "ranking_best_rank": None,
