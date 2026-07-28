@@ -6,8 +6,11 @@ from time import perf_counter
 
 import numpy as np
 
+from iwiki_mcp.base import index_path
 from iwiki_mcp.engine import fusion, rerank
+from iwiki_mcp.engine.chunk import chunk_markdown
 from iwiki_mcp.engine.config import Config
+from iwiki_mcp.engine.store import VectorStore
 from iwiki_mcp import retrieval
 
 from .fixtures import BenchmarkCase
@@ -67,6 +70,134 @@ def _public_projection(candidate: dict) -> dict:
     return {key: candidate[key] for key in _PUBLIC_FIELDS}
 
 
+def _record_identity(domain: str, record) -> str:
+    return identity({
+        "domain": domain,
+        "file": record.file,
+        "heading": record.heading,
+        "chunk": record.chunk,
+    })
+
+
+def _parse_identity(value: str, domain: str) -> tuple[str, str, int] | None:
+    prefix = f"{domain}/"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    rest = value[len(prefix):]
+    file_heading, separator, chunk_text = rest.rpartition(":")
+    if not separator or "#" not in file_heading:
+        return None
+    file, heading = file_heading.split("#", 1)
+    try:
+        chunk_index = int(chunk_text)
+    except ValueError:
+        return None
+    return file, heading, chunk_index
+
+
+def _chunk_status(
+    cfg: Config,
+    base: str,
+    domain: str,
+    file: str,
+    heading: str,
+    chunk_index: int,
+) -> tuple[bool, object | None]:
+    path = retrieval._domain_file_path(base, domain, file)
+    if path is None or not path.is_file():
+        return False, None
+    try:
+        markdown = path.read_text(encoding="utf-8")
+    except OSError:
+        return False, None
+    chunks = chunk_markdown(
+        file,
+        markdown,
+        cfg.chunk_size,
+        cfg.chunk_overlap,
+        cfg.summary_max,
+    )
+    for chunk in chunks:
+        if (
+            chunk.kind == "section"
+            and chunk.heading == heading
+            and chunk.chunk == chunk_index
+        ):
+            return True, chunk
+    return True, None
+
+
+def _index_stage(
+    cfg: Config,
+    base: str,
+    domain: str,
+    case: BenchmarkCase,
+    query_vec: list[float] | None,
+) -> dict:
+    records = VectorStore(index_path(base, domain)).load()
+    sections = [record for record in records if record.kind == "section"]
+    summaries = [record for record in records if record.kind == "summary"]
+    records_by_identity = {
+        _record_identity(domain, record): record
+        for record in sections
+    }
+    relevant = {}
+    for value in sorted(case.relevant):
+        parts = _parse_identity(value, domain)
+        if parts is None:
+            relevant[value] = {
+                "parseable": False,
+                "file_exists": False,
+                "chunk_present": False,
+                "indexed": False,
+                "hash_matches": None,
+                "embedding_dim_matches": None,
+                "eligible": False,
+            }
+            continue
+        file, heading, chunk_index = parts
+        file_exists, chunk = _chunk_status(
+            cfg,
+            base,
+            domain,
+            file,
+            heading,
+            chunk_index,
+        )
+        record = records_by_identity.get(value)
+        indexed = record is not None
+        hash_matches = (
+            record.hash == chunk.hash
+            if record is not None and chunk is not None
+            else None
+        )
+        if record is not None and query_vec is not None:
+            embedding_dim_matches = record.dim == len(query_vec)
+        elif record is not None:
+            embedding_dim_matches = True
+        else:
+            embedding_dim_matches = None
+        relevant[value] = {
+            "parseable": True,
+            "file_exists": file_exists,
+            "chunk_present": chunk is not None,
+            "indexed": indexed,
+            "hash_matches": hash_matches,
+            "embedding_dim_matches": embedding_dim_matches,
+            "eligible": (
+                file_exists
+                and indexed
+                and embedding_dim_matches is not False
+            ),
+        }
+    return {
+        "record_count": len(records),
+        "summary_count": len(summaries),
+        "section_count": len(sections),
+        "relevant": relevant,
+    }
+
+
 def _candidate_key(candidate: dict) -> tuple:
     return (
         candidate["domain"],
@@ -119,6 +250,10 @@ def trace_query(
     stage_ms["embedding_ms"] = _elapsed_ms(start)
 
     start = perf_counter()
+    index_stage = _index_stage(cfg, base, domain, case, query_vec)
+    stage_ms["index_ms"] = _elapsed_ms(start)
+
+    start = perf_counter()
     signals: dict[str, list[dict]] = {}
     with _without_store_migration():
         domain_signals = retrieval._domain_signals(
@@ -147,6 +282,21 @@ def trace_query(
         for hit in hits:
             hit.pop("rank_key", None)
     stage_ms["signals_ms"] = _elapsed_ms(start)
+    signal_identities = {
+        name: [_public_identity(hit) for hit in hits]
+        for name, hits in sorted(signals.items())
+    }
+    signal_identity_sets = {
+        name: set(values)
+        for name, values in signal_identities.items()
+    }
+    relevant_signal_presence = {
+        value: [
+            name for name in sorted(signal_identity_sets)
+            if value in signal_identity_sets[name]
+        ]
+        for value in sorted(case.relevant)
+    }
 
     start = perf_counter()
     fused_internal = fusion.fuse_ranked(signals, limit)
@@ -210,11 +360,14 @@ def trace_query(
         "mode": mode,
         "k": case.k,
         "stages": {
+            "index": index_stage,
             "signals": {
                 "counts": {
                     name: len(hits)
                     for name, hits in sorted(signals.items())
                 },
+                "identities": signal_identities,
+                "relevant_presence": relevant_signal_presence,
             },
             "fusion": {
                 "candidate_count": len(fused),

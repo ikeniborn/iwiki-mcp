@@ -92,12 +92,38 @@ def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatc
         "results",
         "metrics_input",
     }
-    assert set(trace["stages"]) == {"signals", "fusion", "hydration", "rerank"}
+    assert set(trace["stages"]) == {
+        "index",
+        "signals",
+        "fusion",
+        "hydration",
+        "rerank",
+    }
     final_identities = [identity(result) for result in trace["results"]]
     assert final_identities[0] == "eval/guide/auth.md#Rotation:0"
     assert trace["k"] == case.k
+    relevant_identity = "eval/guide/auth.md#Rotation:0"
+    assert trace["stages"]["index"]["section_count"] >= 2
+    assert trace["stages"]["index"]["relevant"][relevant_identity] == {
+        "parseable": True,
+        "file_exists": True,
+        "chunk_present": True,
+        "indexed": True,
+        "hash_matches": True,
+        "embedding_dim_matches": True,
+        "eligible": True,
+    }
     assert trace["stages"]["signals"]["counts"]["semantic_chunk"] >= 1
     assert trace["stages"]["signals"]["counts"]["lexical_section"] >= 1
+    signal_identities = trace["stages"]["signals"]["identities"]
+    assert relevant_identity in signal_identities["semantic_chunk"]
+    assert relevant_identity in signal_identities["lexical_section"]
+    assert set(
+        trace["stages"]["signals"]["relevant_presence"][relevant_identity]
+    ) >= {
+        "lexical_section",
+        "semantic_chunk",
+    }
     assert trace["stages"]["fusion"]["candidate_count"] >= 1
     assert (
         trace["stages"]["fusion"]["candidate_identities"][0]

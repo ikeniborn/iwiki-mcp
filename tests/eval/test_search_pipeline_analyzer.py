@@ -52,6 +52,41 @@ def _trace(
     }
 
 
+def _missing_trace_with_index(index_evidence, *, signal_presence=None):
+    identity = "eval/guide/auth.md#Rotation:0"
+    trace = _trace(
+        ranking=["eval/guide/other.md#Overview:0"],
+        candidates=["eval/guide/other.md#Overview:0"],
+    )
+    trace["mode"] = "hybrid"
+    trace["stages"]["index"] = {
+        "section_count": 3,
+        "relevant": {
+            identity: {
+                "parseable": True,
+                "file_exists": True,
+                "chunk_present": True,
+                "indexed": True,
+                "hash_matches": True,
+                "embedding_dim_matches": True,
+                "eligible": True,
+                **index_evidence,
+            },
+        },
+    }
+    trace["stages"]["signals"] = {
+        "counts": {"semantic_chunk": 1, "lexical_section": 1},
+        "identities": {
+            "semantic_chunk": [],
+            "lexical_section": [],
+        },
+        "relevant_presence": {
+            identity: list(signal_presence or []),
+        },
+    }
+    return trace
+
+
 def test_analyze_trace_reports_missing_relevant_identity_from_candidate_pool():
     case = _case()
     trace = _trace(
@@ -70,6 +105,115 @@ def test_analyze_trace_reports_missing_relevant_identity_from_candidate_pool():
             "evidence": {
                 "candidate_count": 1,
                 "relevance_grade": 3,
+            },
+        },
+    ]
+
+
+def test_analyze_trace_reports_missing_relevant_identity_from_chunks():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _missing_trace_with_index({
+        "chunk_present": False,
+        "indexed": False,
+        "hash_matches": None,
+        "eligible": False,
+    })
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "missing_from_chunks",
+            "severity": "high",
+            "identity": identity,
+            "evidence": {
+                "candidate_count": 1,
+                "relevance_grade": 3,
+                "index": trace["stages"]["index"]["relevant"][identity],
+            },
+        },
+    ]
+
+
+def test_analyze_trace_reports_missing_relevant_identity_from_index():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _missing_trace_with_index({
+        "indexed": False,
+        "hash_matches": None,
+        "eligible": False,
+    })
+
+    findings = analyze_trace(case, trace)
+
+    assert findings[0]["class"] == "missing_from_index"
+    assert findings[0]["evidence"]["index"]["chunk_present"] is True
+    assert findings[0]["evidence"]["index"]["indexed"] is False
+
+
+def test_analyze_trace_reports_embedding_dimension_mismatch():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _missing_trace_with_index({
+        "embedding_dim_matches": False,
+        "eligible": False,
+    })
+
+    findings = analyze_trace(case, trace)
+
+    assert findings[0]["class"] == "embedding_dimension_mismatch"
+    assert findings[0]["identity"] == identity
+    assert findings[0]["evidence"]["index"]["embedding_dim_matches"] is False
+
+
+def test_analyze_trace_reports_signal_recall_miss_when_index_is_eligible():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _missing_trace_with_index({})
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "signal_recall_miss",
+            "severity": "high",
+            "identity": identity,
+            "evidence": {
+                "candidate_count": 1,
+                "relevance_grade": 3,
+                "mode": "hybrid",
+                "signal_counts": {"semantic_chunk": 1, "lexical_section": 1},
+                "signal_presence": [],
+            },
+        },
+    ]
+
+
+def test_analyze_trace_reports_loss_between_signals_and_fusion_candidates():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _missing_trace_with_index(
+        {},
+        signal_presence=["semantic_chunk"],
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "lost_during_fusion",
+            "severity": "high",
+            "identity": identity,
+            "evidence": {
+                "candidate_count": 1,
+                "relevance_grade": 3,
+                "mode": "hybrid",
+                "signal_counts": {"semantic_chunk": 1, "lexical_section": 1},
+                "signal_presence": ["semantic_chunk"],
             },
         },
     ]

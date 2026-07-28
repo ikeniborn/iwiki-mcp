@@ -46,6 +46,103 @@ def _rerank(trace: dict) -> dict:
     return dict(trace.get("stages", {}).get("rerank", {}))
 
 
+def _index_relevant(trace: dict, identity: str) -> dict | None:
+    relevant = trace.get("stages", {}).get("index", {}).get("relevant", {})
+    value = relevant.get(identity)
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _signal_counts(trace: dict) -> dict:
+    return dict(trace.get("stages", {}).get("signals", {}).get("counts", {}))
+
+
+def _signal_presence(trace: dict, identity: str) -> list[str] | None:
+    signals = trace.get("stages", {}).get("signals", {})
+    presence = signals.get("relevant_presence", {})
+    if identity in presence:
+        return list(presence.get(identity, []))
+    identities = signals.get("identities")
+    if not isinstance(identities, dict):
+        return None
+    return [
+        name for name, values in sorted(identities.items())
+        if identity in set(values)
+    ]
+
+
+def _candidate_pool_loss(trace: dict, case: BenchmarkCase, identity: str,
+                         grade: int, candidate_count: int) -> dict:
+    index = _index_relevant(trace, identity)
+    if index is not None:
+        evidence = {
+            "candidate_count": candidate_count,
+            "relevance_grade": grade,
+            "index": index,
+        }
+        if not index.get("chunk_present"):
+            return {
+                "case_id": case.case_id,
+                "class": "missing_from_chunks",
+                "severity": "high",
+                "identity": identity,
+                "evidence": evidence,
+            }
+        if not index.get("indexed"):
+            return {
+                "case_id": case.case_id,
+                "class": "missing_from_index",
+                "severity": "high",
+                "identity": identity,
+                "evidence": evidence,
+            }
+        if index.get("hash_matches") is False:
+            return {
+                "case_id": case.case_id,
+                "class": "stale_index_chunk",
+                "severity": "high",
+                "identity": identity,
+                "evidence": evidence,
+            }
+        if index.get("embedding_dim_matches") is False:
+            return {
+                "case_id": case.case_id,
+                "class": "embedding_dimension_mismatch",
+                "severity": "high",
+                "identity": identity,
+                "evidence": evidence,
+            }
+
+    presence = _signal_presence(trace, identity)
+    if presence is not None:
+        signal_evidence = {
+            "candidate_count": candidate_count,
+            "relevance_grade": grade,
+            "mode": trace.get("mode"),
+            "signal_counts": _signal_counts(trace),
+            "signal_presence": presence,
+        }
+        return {
+            "case_id": case.case_id,
+            "class": (
+                "lost_during_fusion" if presence else "signal_recall_miss"
+            ),
+            "severity": "high",
+            "identity": identity,
+            "evidence": signal_evidence,
+        }
+
+    return {
+        "case_id": case.case_id,
+        "class": "missing_from_candidate_pool",
+        "severity": "high",
+        "identity": identity,
+        "evidence": {
+            "candidate_count": candidate_count,
+            "relevance_grade": grade,
+        },
+    }
+
+
 def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
     relevant = _relevant(case, trace)
     ranking = _ranking(trace)
@@ -63,16 +160,9 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
     findings = []
     for identity, grade in sorted(relevant.items()):
         if has_candidate_evidence and identity not in candidate_set:
-            findings.append({
-                "case_id": case.case_id,
-                "class": "missing_from_candidate_pool",
-                "severity": "high",
-                "identity": identity,
-                "evidence": {
-                    "candidate_count": len(candidates),
-                    "relevance_grade": grade,
-                },
-            })
+            findings.append(
+                _candidate_pool_loss(trace, case, identity, grade, len(candidates))
+            )
             continue
 
         candidate_rank = candidate_ranks.get(identity)
