@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from time import perf_counter
 
 import numpy as np
@@ -18,6 +18,22 @@ _PUBLIC_FIELDS = ("domain", "file", "heading", "chunk", "score", "hit", "source"
 
 def _elapsed_ms(start: float) -> float:
     return (perf_counter() - start) * 1000
+
+
+def _validate_domain(domain: str) -> str:
+    if not domain:
+        raise ValueError("invalid domain: empty")
+    if domain.startswith("."):
+        raise ValueError(f"invalid domain '{domain}'")
+    if "/" in domain or "\\" in domain:
+        raise ValueError(f"invalid domain '{domain}'")
+    if domain in (".", ".."):
+        raise ValueError(f"invalid domain '{domain}'")
+    if Path(domain).is_absolute() or PureWindowsPath(domain).is_absolute():
+        raise ValueError(f"invalid domain '{domain}'")
+    if PureWindowsPath(domain).drive:
+        raise ValueError(f"invalid domain '{domain}'")
+    return domain
 
 
 def _ensure_read_only_store_layout(base: str, domain: str) -> None:
@@ -76,7 +92,8 @@ def trace_query(
     if mode not in retrieval._VALID_MODES:
         allowed = ", ".join(sorted(retrieval._VALID_MODES))
         raise ValueError(f"invalid search mode: {mode}; allowed values: {allowed}")
-    _ensure_read_only_store_layout(base, case.domain)
+    domain = _validate_domain(case.domain)
+    _ensure_read_only_store_layout(base, domain)
 
     stage_ms: dict[str, float] = {}
     page_cache = {}
@@ -95,7 +112,7 @@ def trace_query(
     domain_signals = retrieval._domain_signals(
         cfg,
         base,
-        case.domain,
+        domain,
         case.query,
         query_vec,
         mode,
@@ -175,7 +192,7 @@ def trace_query(
     hydrated_identities = [_public_identity(candidate) for candidate in hydrated_public]
     trace = {
         "case_id": case.case_id,
-        "domain": case.domain,
+        "domain": domain,
         "query": case.query,
         "mode": mode,
         "k": case.k,

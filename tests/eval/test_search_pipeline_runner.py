@@ -203,6 +203,35 @@ def test_trace_query_refuses_legacy_store_before_retrieval_helpers(
         )
 
 
+def test_trace_query_rejects_invalid_domain_before_retrieval_helpers(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
+    invalid_case = BenchmarkCase(
+        case_id=case.case_id,
+        domain="../outside",
+        query=case.query,
+        relevant=case.relevant,
+        intents=case.intents,
+        k=case.k,
+    )
+
+    def fail_domain_signals(*args, **kwargs):
+        raise AssertionError("_domain_signals must not be called")
+
+    monkeypatch.setattr("iwiki_mcp.retrieval._domain_signals", fail_domain_signals)
+
+    with pytest.raises(ValueError, match="invalid domain"):
+        trace_query(
+            cfg,
+            base,
+            invalid_case,
+            mode="hybrid",
+            rerank_enabled=False,
+        )
+
+
 def test_trace_query_merges_applied_rerank_with_unscored_fused_candidates(
     tmp_path,
     monkeypatch,
