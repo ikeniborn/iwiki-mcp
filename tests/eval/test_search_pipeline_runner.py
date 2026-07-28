@@ -1,3 +1,5 @@
+import pytest
+
 from eval.search_pipeline.fixtures import BenchmarkCase
 from eval.search_pipeline.instrumentation import trace_query
 from eval.search_pipeline.metrics import identity
@@ -16,6 +18,12 @@ def _build_trace_fixture(tmp_path, monkeypatch, *, rerank_model=""):
         "refresh_token credentials rotate safely without exposing secrets.\n\n"
         "## Overview\n\n"
         "general authentication overview.\n",
+        encoding="utf-8",
+    )
+    (page_dir / "backup.md").write_text(
+        "# Backup Guide\n\n"
+        "## Rotation\n\n"
+        "backup refresh_token credentials procedure for operators.\n",
         encoding="utf-8",
     )
 
@@ -171,3 +179,70 @@ def test_trace_query_keeps_fused_results_when_rerank_falls_back(
     result_identities = [identity(result) for result in trace["results"]]
     assert trace["stages"]["rerank"] == {"applied": False, "warning": "fallback"}
     assert result_identities == fused_identities[:case.k]
+
+
+def test_trace_query_refuses_legacy_store_before_retrieval_helpers(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
+    (tmp_path / "base" / case.domain / ".iwiki").mkdir()
+
+    def fail_domain_signals(*args, **kwargs):
+        raise AssertionError("_domain_signals must not be called")
+
+    monkeypatch.setattr("iwiki_mcp.retrieval._domain_signals", fail_domain_signals)
+
+    with pytest.raises(RuntimeError, match="legacy store layout"):
+        trace_query(
+            cfg,
+            base,
+            case,
+            mode="hybrid",
+            rerank_enabled=False,
+        )
+
+
+def test_trace_query_merges_applied_rerank_with_unscored_fused_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(
+        tmp_path,
+        monkeypatch,
+        rerank_model="test-rerank",
+    )
+    captured = {}
+
+    def fake_rerank_candidates(cfg, query, candidates, top_n=None):
+        assert len(candidates) >= 2
+        reranked = dict(candidates[1])
+        reranked["score"] = 42.0
+        captured["scored_identity"] = identity(reranked)
+        return [reranked], {"applied": True, "_scored_count": 1}
+
+    monkeypatch.setattr(
+        "eval.search_pipeline.instrumentation.rerank.rerank_candidates",
+        fake_rerank_candidates,
+    )
+
+    trace = trace_query(
+        cfg,
+        base,
+        case,
+        mode="hybrid",
+        rerank_enabled=True,
+    )
+
+    rerank_metadata = trace["stages"]["rerank"]
+    fused_identities = trace["stages"]["fusion"]["candidate_identities"]
+    expected = [captured["scored_identity"]]
+    expected.extend(
+        item for item in fused_identities
+        if item != captured["scored_identity"]
+    )
+    result_identities = [identity(result) for result in trace["results"]]
+    assert rerank_metadata["applied"] is True
+    assert "_scored_count" not in rerank_metadata
+    assert rerank_metadata["scored_count"] == 1
+    assert result_identities == expected[:case.k]

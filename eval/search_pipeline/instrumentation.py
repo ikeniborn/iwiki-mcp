@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -17,6 +18,15 @@ _PUBLIC_FIELDS = ("domain", "file", "heading", "chunk", "score", "hit", "source"
 
 def _elapsed_ms(start: float) -> float:
     return (perf_counter() - start) * 1000
+
+
+def _ensure_read_only_store_layout(base: str, domain: str) -> None:
+    legacy_store_dir = Path(base) / domain / ".iwiki"
+    if legacy_store_dir.exists():
+        raise RuntimeError(
+            "benchmark refuses legacy store layout because it would require "
+            f"migration writes: {legacy_store_dir}"
+        )
 
 
 def _public_identity(candidate: dict) -> str:
@@ -66,6 +76,7 @@ def trace_query(
     if mode not in retrieval._VALID_MODES:
         allowed = ", ".join(sorted(retrieval._VALID_MODES))
         raise ValueError(f"invalid search mode: {mode}; allowed values: {allowed}")
+    _ensure_read_only_store_layout(base, case.domain)
 
     stage_ms: dict[str, float] = {}
     page_cache = {}
