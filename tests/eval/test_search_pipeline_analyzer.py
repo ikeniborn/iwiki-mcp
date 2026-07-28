@@ -134,7 +134,7 @@ def test_analyze_trace_reports_hydration_drop_only_when_requested():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case()
     dropped_trace = _trace(
-        ranking=[identity],
+        ranking=["eval/guide/other.md#Overview:0"],
         candidates=[identity],
         hydrated=[],
         hydration_requested=1,
@@ -163,6 +163,19 @@ def test_analyze_trace_reports_hydration_drop_only_when_requested():
     assert analyze_trace(case, unrequested_trace) == []
 
 
+def test_analyze_trace_does_not_report_hydration_drop_when_final_ranking_kept_identity():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _trace(
+        ranking=[identity],
+        candidates=[identity],
+        hydrated=[],
+        hydration_requested=1,
+    )
+
+    assert analyze_trace(case, trace) == []
+
+
 def test_analyze_trace_reports_rerank_worsened_order_only_when_applied():
     better = "eval/guide/auth.md#Rotation:0"
     worse = "eval/guide/backup.md#Rotation:0"
@@ -187,9 +200,8 @@ def test_analyze_trace_reports_rerank_worsened_order_only_when_applied():
             "severity": "medium",
             "identity": better,
             "evidence": {
-                "fusion_best_rank": 1,
-                "ranking_best_rank": 3,
-                "ranking_identity": better,
+                "fusion_rank": 1,
+                "ranking_rank": 3,
                 "rerank": {"applied": True, "scored_count": 3},
             },
         },
@@ -215,9 +227,8 @@ def test_analyze_trace_reports_rerank_removal_for_fusion_topk_relevant():
             "severity": "medium",
             "identity": identity,
             "evidence": {
-                "fusion_best_rank": 1,
-                "ranking_best_rank": None,
-                "ranking_identity": None,
+                "fusion_rank": 1,
+                "ranking_rank": None,
                 "rerank": {"applied": True, "scored_count": 2},
             },
         },
@@ -244,10 +255,40 @@ def test_analyze_trace_tracks_best_fusion_relevant_identity_for_rerank():
             "severity": "medium",
             "identity": best,
             "evidence": {
-                "fusion_best_rank": 1,
-                "ranking_best_rank": None,
-                "ranking_identity": None,
+                "fusion_rank": 1,
+                "ranking_rank": None,
                 "rerank": {"applied": True, "scored_count": 2},
+            },
+        },
+    ]
+
+
+def test_analyze_trace_reports_rerank_loss_for_each_worsened_relevant():
+    best = "eval/guide/auth.md#Rotation:0"
+    second = "eval/guide/backup.md#Rotation:0"
+    noise = "eval/guide/other.md#Overview:0"
+    case = _case(relevant={best: 3, second: 2}, k=2)
+    trace = _trace(
+        ranking=[best, noise],
+        relevant=case.relevant,
+        candidates=[best, second, noise],
+        hydrated=[best, second, noise],
+        hydration_requested=3,
+        rerank={"applied": True, "scored_count": 3},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "rerank_worsened_order",
+            "severity": "medium",
+            "identity": second,
+            "evidence": {
+                "fusion_rank": 2,
+                "ranking_rank": None,
+                "rerank": {"applied": True, "scored_count": 3},
             },
         },
     ]
