@@ -114,7 +114,14 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
     if has_candidate_evidence and rerank.get("applied"):
         fusion_relevant = [
             identity for identity in candidates
-            if identity in relevant and candidate_ranks[identity] <= case.k
+            if (
+                identity in relevant
+                and candidate_ranks[identity] <= case.k
+                and (
+                    hydration.get("requested", 0) <= 0
+                    or identity in hydrated_set
+                )
+            )
         ]
         ranking_relevant = [
             identity for identity in ranking

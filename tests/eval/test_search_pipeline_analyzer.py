@@ -224,6 +224,36 @@ def test_analyze_trace_reports_rerank_removal_for_fusion_topk_relevant():
     ]
 
 
+def test_analyze_trace_does_not_blame_rerank_for_unhydrated_relevant():
+    identity = "eval/guide/auth.md#Rotation:0"
+    other = "eval/guide/other.md#Overview:0"
+    case = _case(k=3)
+    trace = _trace(
+        ranking=[other],
+        candidates=[identity, other],
+        hydrated=[other],
+        hydration_requested=2,
+        rerank={"applied": True, "scored_count": 1},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "hydration_drop",
+            "severity": "medium",
+            "identity": identity,
+            "evidence": {
+                "hydration_requested": 2,
+                "hydration_hydrated": 1,
+                "hydration_dropped": 1,
+                "relevance_grade": 3,
+            },
+        },
+    ]
+
+
 def test_analyze_trace_keeps_applied_rerank_out_of_fusion_topk_loss():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case(k=1)
