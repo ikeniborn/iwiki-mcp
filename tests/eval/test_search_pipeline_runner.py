@@ -5,7 +5,7 @@ from iwiki_mcp.engine.config import Config
 from iwiki_mcp.indexer import index_domain
 
 
-def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatch):
+def _build_trace_fixture(tmp_path, monkeypatch, *, rerank_model=""):
     base = tmp_path / "base"
     domain = "eval"
     page_dir = base / domain / "guide"
@@ -44,6 +44,7 @@ def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatc
         seed_top_k=2,
         bfs_top_k=2,
         seed_threshold=0.0,
+        rerank_model=rerank_model,
     )
     index_domain(cfg, str(base), domain)
     case = BenchmarkCase(
@@ -54,10 +55,15 @@ def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatc
         intents={"symbol": ["eval/guide/auth.md#Rotation:0"]},
         k=3,
     )
+    return cfg, str(base), case
+
+
+def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatch):
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
 
     trace = trace_query(
         cfg,
-        str(base),
+        base,
         case,
         mode="hybrid",
         rerank_enabled=False,
@@ -109,3 +115,59 @@ def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatc
         "rerank_ms",
     ):
         assert stage in trace["latency"]
+
+
+def test_trace_query_keeps_fused_results_when_hydration_drops_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "iwiki_mcp.retrieval.hydrate_candidates",
+        lambda *args, **kwargs: [],
+    )
+
+    trace = trace_query(
+        cfg,
+        base,
+        case,
+        mode="hybrid",
+        rerank_enabled=False,
+    )
+
+    fused_identities = trace["stages"]["fusion"]["candidate_identities"]
+    result_identities = [identity(result) for result in trace["results"]]
+    assert (
+        trace["stages"]["hydration"]["dropped"]
+        == trace["stages"]["fusion"]["candidate_count"]
+    )
+    assert trace["stages"]["hydration"]["hydrated"] == 0
+    assert result_identities == fused_identities[:case.k]
+
+
+def test_trace_query_keeps_fused_results_when_rerank_falls_back(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(
+        tmp_path,
+        monkeypatch,
+        rerank_model="test-rerank",
+    )
+    monkeypatch.setattr(
+        "eval.search_pipeline.instrumentation.rerank.rerank_candidates",
+        lambda *args, **kwargs: ([], {"applied": False, "warning": "fallback"}),
+    )
+
+    trace = trace_query(
+        cfg,
+        base,
+        case,
+        mode="hybrid",
+        rerank_enabled=True,
+    )
+
+    fused_identities = trace["stages"]["fusion"]["candidate_identities"]
+    result_identities = [identity(result) for result in trace["results"]]
+    assert trace["stages"]["rerank"] == {"applied": False, "warning": "fallback"}
+    assert result_identities == fused_identities[:case.k]

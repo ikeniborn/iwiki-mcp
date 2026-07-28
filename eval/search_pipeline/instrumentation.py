@@ -30,6 +30,15 @@ def _public_projection(candidate: dict) -> dict:
     return {key: candidate[key] for key in _PUBLIC_FIELDS}
 
 
+def _candidate_key(candidate: dict) -> tuple:
+    return (
+        candidate["domain"],
+        candidate["file"],
+        candidate["heading"],
+        candidate["chunk"],
+    )
+
+
 def _project_fused_candidate(candidate: dict) -> dict:
     projected = dict(candidate)
     signal_names = set(projected.pop("signals", []))
@@ -116,10 +125,10 @@ def trace_query(
 
     start = perf_counter()
     if not rerank_enabled:
-        final_results = hydrated_public[:case.k]
+        final_results = fused[:case.k]
         rerank_metadata = {"applied": False, "warning": "rerank disabled"}
     elif not cfg.rerank_model:
-        final_results = hydrated_public[:case.k]
+        final_results = fused[:case.k]
         rerank_metadata = {
             "applied": False,
             "warning": "reranker unavailable: no rerank model",
@@ -131,7 +140,23 @@ def trace_query(
             [dict(candidate) for candidate in hydrated],
             top_n=case.k,
         )
-        final_results = [_public_projection(candidate) for candidate in ranked[:case.k]]
+        rerank_metadata = dict(rerank_metadata)
+        if rerank_metadata.get("applied"):
+            scored_count = rerank_metadata.pop("_scored_count", len(ranked))
+            rerank_metadata["scored_count"] = scored_count
+            scored = [
+                _public_projection(candidate)
+                for candidate in ranked[:scored_count]
+            ]
+            scored_keys = {_candidate_key(candidate) for candidate in scored}
+            unscored = [
+                candidate for candidate in fused
+                if _candidate_key(candidate) not in scored_keys
+            ]
+            final_results = (scored + unscored)[:case.k]
+        else:
+            rerank_metadata.pop("_scored_count", None)
+            final_results = fused[:case.k]
     stage_ms["rerank_ms"] = _elapsed_ms(start)
 
     ranking = [_public_identity(result) for result in final_results]
