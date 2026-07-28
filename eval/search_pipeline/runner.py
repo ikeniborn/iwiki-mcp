@@ -1,22 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass, replace
-from datetime import datetime, timezone
+from dataclasses import asdict
+from dataclasses import is_dataclass
+from dataclasses import replace
+from datetime import datetime
+from datetime import timezone
+import math
+from statistics import median
 from typing import Iterable
 
 from iwiki_mcp.base import resolve_binding
 from iwiki_mcp.engine.config import Config
 
-from .analyzer import analyze_trace, ranked_backlog
+from .analyzer import analyze_trace
+from .analyzer import ranked_backlog
 from .envfile import safe_config_fingerprint
 from .fixtures import BenchmarkCase
 from .instrumentation import trace_query
-from .metrics import (
-    intent_coverage_at_k,
-    mrr_at_k,
-    ndcg_at_k,
-    recall_at_k,
-)
+from .metrics import intent_coverage_at_k
+from .metrics import mrr_at_k
+from .metrics import ndcg_at_k
+from .metrics import recall_at_k
+from .selection import RERANK_BATCHES
+from .selection import select_fusion_weights
+from .selection import select_rerank_batch
 
 
 _ROLLUP_FIELDS = (
@@ -218,6 +225,10 @@ def run_live_traces(
     *,
     base: str | None = None,
     latency_ceiling_ms: float | None = None,
+    rerank_enabled: bool | None = None,
+    fusion_weights: dict[str, float] | None = None,
+    rerank_candidate_limit: int | None = None,
+    sample_id: str | None = None,
 ) -> dict:
     wiki_base = base if base is not None else resolve_binding().base
     traces = []
@@ -228,24 +239,38 @@ def run_live_traces(
         key=lambda item: item.case_id,
     )
     mode_list = list(modes)
-    rerank_enabled = bool(getattr(cfg, "rerank_model", ""))
+    effective_rerank_enabled = (
+        bool(getattr(cfg, "rerank_model", ""))
+        if rerank_enabled is None
+        else rerank_enabled
+    )
 
     for case in case_list:
         for mode in mode_list:
             try:
+                trace_kwargs = {}
+                if fusion_weights is not None:
+                    trace_kwargs["fusion_weights"] = fusion_weights
+                if rerank_candidate_limit is not None:
+                    trace_kwargs["rerank_candidate_limit"] = rerank_candidate_limit
                 trace = trace_query(
                     cfg,
                     wiki_base,
                     case,
                     mode=mode,
-                    rerank_enabled=rerank_enabled,
+                    rerank_enabled=effective_rerank_enabled,
+                    **trace_kwargs,
                 )
             except Exception as exc:
                 trace = _failed_trace(case, mode, exc)
+                if sample_id is not None:
+                    trace["sample_id"] = sample_id
                 traces.append(trace)
                 findings.append(_failed_finding(trace))
                 continue
             trace = {**trace, "status": trace.get("status", "passed")}
+            if sample_id is not None:
+                trace["sample_id"] = sample_id
             traces.append(trace)
             summaries.append(summarize_trace(case, trace))
             findings.extend(
@@ -255,7 +280,7 @@ def run_live_traces(
 
     run_settings = {
         "domain": domain,
-        "rerank_enabled": rerank_enabled,
+        "rerank_enabled": effective_rerank_enabled,
     }
     if latency_ceiling_ms is not None:
         run_settings["latency_ceiling_ms"] = latency_ceiling_ms
@@ -276,3 +301,167 @@ def run_live_traces(
         "findings": findings,
         "backlog": ranked_backlog(findings),
     }
+
+
+def _safe_pareto_trace(trace: dict) -> dict:
+    return {key: value for key, value in trace.items() if key != "query"}
+
+
+def _safe_pareto_cases(cases: Iterable[BenchmarkCase]) -> list[dict]:
+    return [
+        {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query_class": case.query_class,
+            "k": case.k,
+            "relevant": dict(case.relevant),
+            "intents": {
+                name: list(values) for name, values in case.intents.items()
+            },
+        }
+        for case in cases
+    ]
+
+
+def _batch_evidence(run: dict) -> dict:
+    traces = run["traces"]
+    rerank_samples = []
+    for trace in traces:
+        latency = trace.get("latency")
+        sample = latency.get("rerank_ms") if isinstance(latency, dict) else None
+        if (
+            trace.get("status") != "passed"
+            or trace.get("sample_id") is None
+            or isinstance(sample, bool)
+            or not isinstance(sample, (int, float))
+            or not math.isfinite(sample)
+            or sample < 0.0
+        ):
+            rerank_samples = None
+            break
+        rerank_samples.append(float(sample))
+    return {
+        "sample_count": len(traces),
+        "p50_rerank_ms": (
+            round(median(rerank_samples), 6)
+            if rerank_samples is not None and rerank_samples
+            else None
+        ),
+        "p95_rerank_ms": (
+            sorted(rerank_samples)[
+                max(0, int(len(rerank_samples) * 0.95 + 0.999999) - 1)
+            ]
+            if rerank_samples is not None and rerank_samples
+            else None
+        ),
+        "summary": run["summary"],
+        "findings": run["findings"],
+        "traces": [_safe_pareto_trace(trace) for trace in traces],
+    }
+
+
+def run_pareto_experiment(
+    cfg,
+    domain: str,
+    cases: Iterable[BenchmarkCase],
+    *,
+    base: str | None = None,
+) -> dict:
+    case_list = sorted(
+        [case for case in cases if case.domain == domain],
+        key=lambda case: case.case_id,
+    )
+    modes = ["hybrid", "lexical", "semantic"]
+    baseline = run_live_traces(
+        cfg,
+        domain,
+        modes,
+        case_list,
+        base=base,
+        rerank_enabled=False,
+    )
+    fusion_selection = select_fusion_weights(case_list, baseline["traces"])
+    safe_baseline = {
+        **baseline,
+        "traces": [_safe_pareto_trace(trace) for trace in baseline["traces"]],
+        "cases": _safe_pareto_cases(case_list),
+    }
+    evidence = {
+        "kind": "live-pareto",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "domain": domain,
+        "run_settings": {
+            "warmup_passes": 1,
+            "measured_passes": 2,
+            "baseline_rerank_enabled": False,
+        },
+        "config": _config_payload(cfg),
+        "cases": _safe_pareto_cases(case_list),
+        "baseline": safe_baseline,
+        "fusion_selection": fusion_selection,
+        "summary": safe_baseline["summary"],
+        "traces": safe_baseline["traces"],
+        "findings": safe_baseline["findings"],
+        "backlog": safe_baseline["backlog"],
+    }
+    if fusion_selection.get("status") != "passed":
+        evidence["decision"] = {
+            "status": "needs_work",
+            "reason": fusion_selection.get("reason", "fusion_selection_failed"),
+        }
+        return evidence
+
+    weights = fusion_selection["weights"]
+    batch_runs = {}
+    batch_evidence = {}
+    all_findings = list(safe_baseline["findings"])
+    for batch in RERANK_BATCHES:
+        run_live_traces(
+            cfg,
+            domain,
+            ["hybrid"],
+            case_list,
+            base=base,
+            rerank_enabled=True,
+            fusion_weights=weights,
+            rerank_candidate_limit=batch,
+            sample_id=f"batch-{batch}-warmup",
+        )
+        measured_traces = []
+        measured_summaries = []
+        measured_findings = []
+        for pass_index in range(2):
+            measured = run_live_traces(
+                cfg,
+                domain,
+                ["hybrid"],
+                case_list,
+                base=base,
+                rerank_enabled=True,
+                fusion_weights=weights,
+                rerank_candidate_limit=batch,
+                sample_id=f"batch-{batch}-pass-{pass_index + 1}",
+            )
+            measured_traces.extend(measured["traces"])
+            measured_summaries.extend(measured["summary"]["cases"])
+            measured_findings.extend(measured["findings"])
+        batch_run = {
+            "traces": measured_traces,
+            "summary": {
+                "rollup": _rollup(measured_summaries),
+                "cases": measured_summaries,
+            },
+            "findings": measured_findings,
+        }
+        batch_runs[batch] = measured_traces
+        batch_evidence[str(batch)] = _batch_evidence(batch_run)
+        all_findings.extend(measured_findings)
+
+    decision = select_rerank_batch(case_list, batch_runs)
+    evidence.update({
+        "rerank_batches": batch_evidence,
+        "decision": decision,
+        "findings": all_findings,
+        "backlog": ranked_backlog(all_findings),
+    })
+    return evidence

@@ -241,6 +241,9 @@ def trace_query(
     case: BenchmarkCase,
     mode: str,
     rerank_enabled: bool,
+    *,
+    fusion_weights: dict[str, float] | None = None,
+    rerank_candidate_limit: int | None = None,
 ) -> dict:
     if mode not in retrieval._VALID_MODES:
         allowed = ", ".join(sorted(retrieval._VALID_MODES))
@@ -314,16 +317,19 @@ def trace_query(
     }
 
     start = perf_counter()
-    fused_internal = fusion.fuse_ranked(signals, limit)
+    fused_internal = fusion.fuse_ranked(signals, limit, fusion_weights)
     fused = [_project_fused_candidate(candidate) for candidate in fused_internal]
     stage_ms["fusion_ms"] = _elapsed_ms(start)
 
     start = perf_counter()
+    hydration_pool = fused
+    if rerank_enabled and rerank_candidate_limit is not None:
+        hydration_pool = fused[:max(case.k, rerank_candidate_limit)]
     with _without_store_migration():
         hydrated = retrieval.hydrate_candidates(
             cfg,
             base,
-            [dict(candidate) for candidate in fused],
+            [dict(candidate) for candidate in hydration_pool],
             page_cache,
         )
     hydrated_public = [_public_projection(candidate) for candidate in hydrated]
@@ -391,9 +397,9 @@ def trace_query(
                 "source_mix": source_mix(fused),
             },
             "hydration": {
-                "requested": len(fused),
+                "requested": len(hydration_pool),
                 "hydrated": len(hydrated_public),
-                "dropped": len(fused) - len(hydrated_public),
+                "dropped": len(hydration_pool) - len(hydrated_public),
                 "hydrated_identities": hydrated_identities,
             },
             "rerank": dict(rerank_metadata),

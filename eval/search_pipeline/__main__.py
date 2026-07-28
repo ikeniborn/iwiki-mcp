@@ -7,12 +7,16 @@ import sys
 from typing import Iterable
 
 from iwiki_mcp.base import BaseError
-from iwiki_mcp.engine.config import Config, ConfigError
+from iwiki_mcp.engine.config import Config
+from iwiki_mcp.engine.config import ConfigError
 
-from .envfile import apply_env_file, validate_env_file_path
-from .fixtures import DEFAULT_LIVE_CASES, BenchmarkCase
+from .envfile import apply_env_file
+from .envfile import validate_env_file_path
+from .fixtures import BenchmarkCase
+from .fixtures import DEFAULT_LIVE_CASES
 from .report import write_reports
 from .runner import run_live_traces
+from .runner import run_pareto_experiment
 
 
 _VALID_MODES = {"hybrid", "lexical", "semantic"}
@@ -59,6 +63,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override k for live benchmark cases.",
     )
     parser.add_argument("--latency-ceiling-ms", type=float)
+    parser.add_argument(
+        "--pareto",
+        action="store_true",
+        help="Run the fixed live Pareto fusion and rerank experiment.",
+    )
     return parser
 
 
@@ -107,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code)
 
+    if args.pareto and args.modes != ["hybrid", "lexical", "semantic"]:
+        print(
+            "error: --pareto requires --modes hybrid,lexical,semantic",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.env_file:
         validation = validate_env_file_path(args.env_file, args.out)
         rejected = _reject_env_file(validation)
@@ -128,13 +144,17 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            evidence = run_live_traces(
-                cfg,
-                args.domain,
-                args.modes,
-                _with_k(DEFAULT_LIVE_CASES, args.k),
-                latency_ceiling_ms=args.latency_ceiling_ms,
-            )
+            cases = _with_k(DEFAULT_LIVE_CASES, args.k)
+            if args.pareto:
+                evidence = run_pareto_experiment(cfg, args.domain, cases)
+            else:
+                evidence = run_live_traces(
+                    cfg,
+                    args.domain,
+                    args.modes,
+                    cases,
+                    latency_ceiling_ms=args.latency_ceiling_ms,
+                )
             _mark_latency_ceiling(evidence, args.latency_ceiling_ms)
             paths = write_reports(evidence, args.out)
     except (ConfigError, BaseError) as exc:

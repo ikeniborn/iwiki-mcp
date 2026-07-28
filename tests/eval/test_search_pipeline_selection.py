@@ -86,6 +86,13 @@ def _trace(*, mode="hybrid", signals=None, ranking=None, rerank_ms=100.0, k=2):
     }
 
 
+def _measured(traces):
+    for sample_id, trace in enumerate(traces, 1):
+        trace["sample_id"] = sample_id
+        trace["status"] = "passed"
+    return traces
+
+
 def _all_modes(trace):
     return [
         {**deepcopy(trace), "mode": mode}
@@ -440,9 +447,16 @@ def test_rerank_selector_requires_quality_and_latency_gates():
     case = _case(k=1)
     answer = "iwiki-mcp/mcp-server.md#Tool surface:0"
     noise = "iwiki-mcp/retrieval.md#Hybrid search:0"
-    baseline = [_trace(rerank_ms=value, k=1) for value in (100, 110, 120)]
-    low_quality = [_trace(ranking=[noise, answer], rerank_ms=value, k=1) for value in (50, 55, 60)]
-    slow = [_trace(rerank_ms=value, k=1) for value in (80, 85, 91)]
+    baseline = _measured([
+        _trace(rerank_ms=value, k=1) for value in (100, 110, 120)
+    ])
+    low_quality = _measured([
+        _trace(ranking=[noise, answer], rerank_ms=value, k=1)
+        for value in (50, 55, 60)
+    ])
+    slow = _measured([
+        _trace(rerank_ms=value, k=1) for value in (80, 85, 91)
+    ])
 
     decision = select_rerank_batch(
         [case],
@@ -467,8 +481,12 @@ def test_rerank_selector_rejects_invalid_latency_for_every_batch(
     invalid_latency,
 ):
     case = _case()
-    baseline = [_trace(rerank_ms=value) for value in (100, 110, 120)]
-    faster = [_trace(rerank_ms=value) for value in (50, 55, 60)]
+    baseline = _measured([
+        _trace(rerank_ms=value) for value in (100, 110, 120)
+    ])
+    faster = _measured([
+        _trace(rerank_ms=value) for value in (50, 55, 60)
+    ])
     faster[0]["latency"]["rerank_ms"] = invalid_latency
 
     decision = select_rerank_batch(
@@ -477,19 +495,43 @@ def test_rerank_selector_rejects_invalid_latency_for_every_batch(
     )
 
     assert decision["status"] == "needs_work"
-    assert decision["reason"] == "invalid_rerank_latency"
+    assert decision["reason"] == "invalid_rerank_evidence"
     assert all(item["passed"] is False for item in decision["candidates"])
     assert all(
-        "invalid_rerank_latency" in item["reasons"]
+        "invalid_rerank_evidence" in item["reasons"]
         for item in decision["candidates"]
     )
+
+
+def test_rerank_selector_rejects_missing_measured_sample_id():
+    case = _case()
+    baseline = _measured([
+        _trace(rerank_ms=value) for value in (100, 110, 120)
+    ])
+    faster = _measured([
+        _trace(rerank_ms=value) for value in (50, 55, 60)
+    ])
+    del faster[0]["sample_id"]
+
+    decision = select_rerank_batch(
+        [case],
+        {32: baseline, 16: faster, 24: faster},
+    )
+
+    assert decision["status"] == "needs_work"
+    assert decision["reason"] == "invalid_rerank_evidence"
+    assert all(item["p95_rerank_ms"] is None for item in decision["candidates"])
 
 
 @pytest.mark.parametrize("unknown_batch", (32, 16))
 def test_rerank_selector_rejects_unknown_reviewed_case_samples(unknown_batch):
     case = _case()
-    baseline = [_trace(rerank_ms=value) for value in (100, 110, 120)]
-    faster = [_trace(rerank_ms=value) for value in (50, 55, 60)]
+    baseline = _measured([
+        _trace(rerank_ms=value) for value in (100, 110, 120)
+    ])
+    faster = _measured([
+        _trace(rerank_ms=value) for value in (50, 55, 60)
+    ])
     runs = {32: baseline, 16: faster, 24: faster}
     runs[unknown_batch][0]["case_id"] = "case-unknown"
 
@@ -658,8 +700,12 @@ def test_rerank_selector_rejects_duplicate_measured_sample_in_any_batch(
 
 def test_rerank_selector_returns_first_passing_smaller_batch():
     case = _case()
-    baseline = [_trace(rerank_ms=value) for value in (100, 110, 120)]
-    faster = [_trace(rerank_ms=value) for value in (50, 55, 60)]
+    baseline = _measured([
+        _trace(rerank_ms=value) for value in (100, 110, 120)
+    ])
+    faster = _measured([
+        _trace(rerank_ms=value) for value in (50, 55, 60)
+    ])
 
     decision = select_rerank_batch(
         [case],

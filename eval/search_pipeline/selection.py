@@ -428,7 +428,10 @@ def _p95(values: list[float]) -> float:
 def _rerank_latency_samples(traces: list[dict]) -> tuple[list[float], bool]:
     samples = []
     for trace in traces:
-        sample = trace.get("latency", {}).get("rerank_ms", 0.0)
+        latency = trace.get("latency")
+        if not isinstance(latency, dict) or "rerank_ms" not in latency:
+            return [], False
+        sample = latency["rerank_ms"]
         if isinstance(sample, bool) or not isinstance(sample, (int, float)):
             return [], False
         sample = float(sample)
@@ -436,6 +439,14 @@ def _rerank_latency_samples(traces: list[dict]) -> tuple[list[float], bool]:
             return [], False
         samples.append(sample)
     return samples, True
+
+
+def _has_valid_rerank_measurements(traces: list[dict]) -> bool:
+    return all(
+        trace.get("status") == "passed"
+        and trace.get("sample_id") is not None
+        for trace in traces
+    )
 
 
 def _case_mode_samples(traces: list[dict]) -> Counter[tuple[str, str, object]]:
@@ -480,6 +491,13 @@ def select_rerank_batch(cases, batch_runs) -> dict:
         for batch, traces in runs.items()
     }
     latency_evidence_valid = all(valid for _, valid in latency_samples.values())
+    measurement_evidence_valid = all(
+        _has_valid_rerank_measurements(traces)
+        for traces in runs.values()
+    )
+    rerank_evidence_valid = (
+        latency_evidence_valid and measurement_evidence_valid
+    )
     case_mode_evidence_valid = all(
         _has_valid_rerank_case_mode_evidence(case_by_id, traces)
         for traces in runs.values()
@@ -505,8 +523,8 @@ def select_rerank_batch(cases, batch_runs) -> dict:
     baseline_samples = _case_mode_samples(baseline)
     baseline_p95 = (
         _p95(latency_samples.get(32, ([], True))[0])
-        if latency_evidence_valid
-        else 0.0
+        if rerank_evidence_valid
+        else None
     )
 
     candidates = []
@@ -527,17 +545,17 @@ def select_rerank_batch(cases, batch_runs) -> dict:
         modes = _per_mode(records)
         p95 = (
             _p95(latency_samples.get(batch, ([], True))[0])
-            if latency_evidence_valid
-            else 0.0
+            if rerank_evidence_valid
+            else None
         )
         improvement = (
             (baseline_p95 - p95) / baseline_p95 * 100.0
-            if baseline_p95
+            if baseline_p95 is not None and p95 is not None and baseline_p95
             else 0.0
         )
         reasons = []
-        if not latency_evidence_valid:
-            reasons.append("invalid_rerank_latency")
+        if not rerank_evidence_valid:
+            reasons.append("invalid_rerank_evidence")
         if not case_mode_evidence_valid:
             reasons.append("case_mode_sample_mismatch")
         if duplicate_measured_sample:
@@ -576,7 +594,7 @@ def select_rerank_batch(cases, batch_runs) -> dict:
                     "aggregate": _mean_metrics([value for _, value in records]),
                     "modes": modes,
                 },
-                "p95_rerank_ms": round(p95, 6),
+                "p95_rerank_ms": round(p95, 6) if p95 is not None else None,
                 "p95_improvement_percent": round(improvement, 6),
                 "passed": not reasons,
                 "reasons": sorted(reasons),
@@ -598,8 +616,8 @@ def select_rerank_batch(cases, batch_runs) -> dict:
                 "candidates": candidates,
             }
     reason = (
-        "invalid_rerank_latency"
-        if not latency_evidence_valid
+        "invalid_rerank_evidence"
+        if not rerank_evidence_valid
         else "latency_gate_unresolved"
     )
     return {

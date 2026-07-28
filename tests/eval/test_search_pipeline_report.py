@@ -1,10 +1,8 @@
 import json
 
-from eval.search_pipeline.report import (
-    render_html_report,
-    render_markdown_report,
-    write_reports,
-)
+from eval.search_pipeline.report import render_html_report
+from eval.search_pipeline.report import render_markdown_report
+from eval.search_pipeline.report import write_reports
 
 
 def _evidence():
@@ -52,6 +50,38 @@ def _evidence():
     }
 
 
+def _pareto_evidence():
+    evidence = _evidence()
+    evidence.update({
+        "kind": "live-pareto",
+        "fusion_selection": {
+            "status": "passed",
+            "weights": {"graph_page": 0.01, "semantic_chunk": 1.0},
+            "candidates": [{
+                "weights": {"graph_page": 0.1},
+                "passed": False,
+                "reasons": ["recall_regression", "<unsafe>"],
+            }],
+        },
+        "rerank_batches": {
+            "16": {
+                "sample_count": 24,
+                "p50_rerank_ms": 4.0,
+                "p95_rerank_ms": 8.0,
+                "summary": {"rollup": {"ndcg_at_k": 0.9}},
+            },
+            "32": {
+                "sample_count": 24,
+                "p50_rerank_ms": 8.0,
+                "p95_rerank_ms": 16.0,
+                "summary": {"rollup": {"ndcg_at_k": 1.0}},
+            },
+        },
+        "decision": {"status": "passed", "batch": 16},
+    })
+    return evidence
+
+
 def test_render_markdown_report_includes_summary_and_escapes_table_pipes():
     markdown = render_markdown_report(_evidence())
 
@@ -68,6 +98,21 @@ def test_render_html_report_escapes_values_and_uses_no_external_assets():
     assert "missing_&lt;candidate&gt;" in html
     assert "<script>alert" not in html
     assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in html
+    assert "http://" not in html
+    assert "https://" not in html
+
+
+def test_pareto_reports_render_selection_batches_and_recommendation_safely():
+    markdown = render_markdown_report(_pareto_evidence())
+    html = render_html_report(_pareto_evidence())
+
+    assert "## Fusion Selection" in markdown
+    assert "recall_regression" in markdown
+    assert "## Rerank Batches" in markdown
+    assert "Recommendation" in markdown
+    assert "Fusion Selection" in html
+    assert "Rerank Batches" in html
+    assert "&lt;unsafe&gt;" in html
     assert "http://" not in html
     assert "https://" not in html
 

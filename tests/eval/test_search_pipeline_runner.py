@@ -217,6 +217,60 @@ def test_trace_query_keeps_fused_results_when_rerank_falls_back(
     assert result_identities == fused_identities[:case.k]
 
 
+def test_trace_query_applies_eval_overrides_without_shrinking_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(
+        tmp_path,
+        monkeypatch,
+        rerank_model="test-rerank",
+    )
+    captured = {}
+    original_fuse_ranked = __import__(
+        "eval.search_pipeline.instrumentation",
+        fromlist=["fusion"],
+    ).fusion.fuse_ranked
+
+    def capture_fusion(signals, limit, weights=None):
+        captured["weights"] = weights
+        return original_fuse_ranked(signals, limit, weights)
+
+    def capture_hydration(cfg, base, candidates, page_cache):
+        captured["hydrated_input"] = list(candidates)
+        return list(candidates)
+
+    monkeypatch.setattr(
+        "eval.search_pipeline.instrumentation.fusion.fuse_ranked",
+        capture_fusion,
+    )
+    monkeypatch.setattr(
+        "iwiki_mcp.retrieval.hydrate_candidates",
+        capture_hydration,
+    )
+    monkeypatch.setattr(
+        "eval.search_pipeline.instrumentation.rerank.rerank_candidates",
+        lambda *args, **kwargs: ([], {"applied": False, "warning": "fallback"}),
+    )
+
+    weights = {"semantic_chunk": 1.0, "graph_page": 0.01}
+    trace = trace_query(
+        cfg,
+        base,
+        case,
+        mode="hybrid",
+        rerank_enabled=True,
+        fusion_weights=weights,
+        rerank_candidate_limit=1,
+    )
+
+    fused = trace["stages"]["fusion"]["candidate_identities"]
+    assert captured["weights"] == weights
+    assert trace["stages"]["hydration"]["requested"] == len(captured["hydrated_input"])
+    assert len(captured["hydrated_input"]) == min(len(fused), case.k)
+    assert [identity(result) for result in trace["results"]] == fused[:case.k]
+
+
 def test_trace_query_refuses_legacy_store_before_retrieval_helpers(
     tmp_path,
     monkeypatch,
@@ -691,6 +745,27 @@ def test_cli_help_exits_zero_and_lists_required_flags():
     assert "--domain" in result.stdout
     assert "--env-file" in result.stdout
     assert "--out" in result.stdout
+    assert "--pareto" in result.stdout
+
+
+def test_cli_rejects_pareto_mode_subset_before_loading_config(tmp_path, monkeypatch):
+    from eval.search_pipeline import __main__ as cli
+
+    monkeypatch.setattr(
+        cli.Config,
+        "load",
+        lambda: pytest.fail("Config.load must not be called"),
+    )
+
+    code = cli.main([
+        "--out",
+        str(tmp_path),
+        "--pareto",
+        "--modes",
+        "hybrid,lexical",
+    ])
+
+    assert code == 2
 
 
 def test_cli_without_live_config_exits_two_without_secret_values(
@@ -1177,3 +1252,200 @@ def test_run_live_traces_suppresses_store_migration_on_read_path(
     assert evidence["kind"] == "live"
     assert evidence["summary"]["rollup"]["case_count"] == 1
     assert evidence["traces"][0]["case_id"] == case.case_id
+
+
+def test_pareto_experiment_runs_required_matrix_and_excludes_warmups(monkeypatch):
+    from eval.search_pipeline import runner
+
+    cases = [
+        BenchmarkCase(
+            case_id=f"case-{index}",
+            domain="iwiki-mcp",
+            query=f"query {index}",
+            relevant={f"iwiki-mcp/{index}.md#Section:0": 3},
+            intents={"intent": [f"iwiki-mcp/{index}.md#Section:0"]},
+            k=8,
+        )
+        for index in range(12)
+    ]
+    calls = []
+
+    def fake_trace_query(
+        cfg,
+        base,
+        case,
+        mode,
+        rerank_enabled,
+        *,
+        fusion_weights=None,
+        rerank_candidate_limit=None,
+    ):
+        calls.append((mode, rerank_enabled, rerank_candidate_limit, fusion_weights))
+        ranking = list(case.relevant)
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 10.0, "rerank_ms": 4.0},
+            "stages": {"signals": {"ranked": {}}, "fusion": {}},
+            "results": [],
+            "metrics_input": {
+                "ranking": ranking,
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_weights",
+        lambda cases, traces: {
+            "status": "passed",
+            "weights": {"semantic_chunk": 1.0, "graph_page": 0.01},
+            "candidates": [],
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "select_rerank_batch",
+        lambda cases, batch_runs: {
+            "status": "passed", "batch": 16, "candidates": [],
+        },
+    )
+
+    evidence = runner.run_pareto_experiment({}, "iwiki-mcp", cases, base="/wiki")
+
+    assert evidence["kind"] == "live-pareto"
+    assert evidence["baseline"]["modes"] == ["hybrid", "lexical", "semantic"]
+    assert set(evidence["rerank_batches"]) == {"16", "24", "32"}
+    assert all(run["sample_count"] == 24 for run in evidence["rerank_batches"].values())
+    assert evidence["run_settings"]["warmup_passes"] == 1
+    assert evidence["run_settings"]["measured_passes"] == 2
+    assert len(calls) == 36 + (3 * 12) + (3 * 2 * 12)
+    assert all("query" not in trace for trace in evidence["traces"])
+    measured = [
+        trace
+        for run in evidence["rerank_batches"].values()
+        for trace in run["traces"]
+    ]
+    assert len({trace["sample_id"] for trace in measured}) == 6
+
+
+def test_pareto_experiment_stops_before_rerank_matrix_when_fusion_needs_work(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="secret query text",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"a": ["iwiki-mcp/a.md#A:0"]},
+        k=8,
+    )
+    calls = []
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled, **kwargs):
+        calls.append((mode, rerank_enabled))
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0, "rerank_ms": 0.0},
+            "stages": {"signals": {"ranked": {}}},
+            "results": [],
+            "metrics_input": {
+                "ranking": [],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_weights",
+        lambda cases, traces: {
+            "status": "needs_work",
+            "reason": "no_passing_weight_map",
+            "candidates": [],
+        },
+    )
+
+    evidence = runner.run_pareto_experiment({}, "iwiki-mcp", [case], base="/wiki")
+
+    assert evidence["decision"]["status"] == "needs_work"
+    assert "rerank_batches" not in evidence
+    assert calls == [(mode, False) for mode in ("hybrid", "lexical", "semantic")]
+    assert "secret query text" not in repr(evidence)
+
+
+def test_pareto_experiment_rejects_failed_batch16_with_valid_batch32(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="query",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"a": ["iwiki-mcp/a.md#A:0"]},
+        k=8,
+    )
+
+    def fake_trace_query(
+        cfg,
+        base,
+        case,
+        mode,
+        rerank_enabled,
+        *,
+        rerank_candidate_limit=None,
+        **kwargs,
+    ):
+        trace = {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "status": "passed",
+            "latency": {"total_ms": 10.0, "rerank_ms": 100.0},
+            "stages": {"signals": {"ranked": {}}, "fusion": {}},
+            "results": [],
+            "metrics_input": {
+                "ranking": list(case.relevant),
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+        if rerank_enabled and rerank_candidate_limit == 16:
+            trace["status"] = "failed"
+            trace["latency"] = {"total_ms": 10.0}
+        return trace
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_weights",
+        lambda cases, traces: {
+            "status": "passed",
+            "weights": {"semantic_chunk": 1.0, "graph_page": 0.01},
+            "candidates": [],
+        },
+    )
+
+    evidence = runner.run_pareto_experiment({}, "iwiki-mcp", [case], base="/wiki")
+
+    assert evidence["rerank_batches"]["16"]["p50_rerank_ms"] is None
+    assert evidence["rerank_batches"]["16"]["p95_rerank_ms"] is None
+    assert evidence["rerank_batches"]["32"]["p95_rerank_ms"] == 100.0
+    assert evidence["decision"]["status"] == "needs_work"
+    assert evidence["decision"]["reason"] == "invalid_rerank_evidence"

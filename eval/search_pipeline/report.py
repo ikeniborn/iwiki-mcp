@@ -73,6 +73,53 @@ def render_markdown_report(evidence: dict) -> str:
             )
             + " |"
         )
+    fusion_selection = evidence.get("fusion_selection")
+    if fusion_selection:
+        lines.extend(["", "## Fusion Selection", ""])
+        lines.append(
+            f"- Status: {_md_cell(fusion_selection.get('status', 'unknown'))}"
+        )
+        lines.append(
+            "- Weights: "
+            + _md_cell(json.dumps(fusion_selection.get("weights"), sort_keys=True))
+        )
+        lines.extend([
+            "",
+            "| Weights | Passed | Rejection reasons |",
+            "| --- | --- | --- |",
+        ])
+        for candidate in fusion_selection.get("candidates", []):
+            lines.append("| " + " | ".join([
+                _md_cell(json.dumps(candidate.get("weights", {}), sort_keys=True)),
+                _md_cell(candidate.get("passed", False)),
+                _md_cell(", ".join(candidate.get("reasons", []))),
+            ]) + " |")
+    rerank_batches = evidence.get("rerank_batches")
+    if rerank_batches:
+        lines.extend([
+            "",
+            "## Rerank Batches",
+            "",
+            "| Batch | Samples | NDCG | P50 ms | P95 ms |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ])
+        for batch, run in sorted(
+            rerank_batches.items(), key=lambda item: int(item[0])
+        ):
+            lines.append("| " + " | ".join([
+                _md_cell(batch),
+                _md_cell(run.get("sample_count", 0)),
+                _md_cell(
+                    run.get("summary", {}).get("rollup", {}).get(
+                        "ndcg_at_k", 0.0
+                    )
+                ),
+                _md_cell(run.get("p50_rerank_ms", 0.0)),
+                _md_cell(run.get("p95_rerank_ms", 0.0)),
+            ]) + " |")
+    if evidence.get("decision"):
+        lines.extend(["", "## Recommendation", ""])
+        lines.append(_md_cell(json.dumps(evidence["decision"], sort_keys=True)))
     return "\n".join(lines) + "\n"
 
 
@@ -114,6 +161,53 @@ def render_html_report(evidence: dict) -> str:
     findings_json = html.escape(
         json.dumps(findings, indent=2, ensure_ascii=False, sort_keys=True)
     )
+    fusion_selection = evidence.get("fusion_selection", {})
+    fusion_rows = "\n".join(
+        "<tr>"
+        + "".join(_html_cell(value) for value in (
+            json.dumps(candidate.get("weights", {}), sort_keys=True),
+            candidate.get("passed", False),
+            ", ".join(candidate.get("reasons", [])),
+        ))
+        + "</tr>"
+        for candidate in fusion_selection.get("candidates", [])
+    )
+    rerank_rows = "\n".join(
+        "<tr>" + "".join(_html_cell(value) for value in (
+            batch,
+            run.get("sample_count", 0),
+            run.get("summary", {}).get("rollup", {}).get(
+                "ndcg_at_k", 0.0
+            ),
+            run.get("p50_rerank_ms", 0.0),
+            run.get("p95_rerank_ms", 0.0),
+        )) + "</tr>"
+        for batch, run in sorted(
+            evidence.get("rerank_batches", {}).items(), key=lambda item: int(item[0])
+        )
+    )
+    pareto_sections = ""
+    if fusion_selection:
+        pareto_sections += f"""
+<h2>Fusion Selection</h2>
+<p>Status: {html.escape(_fmt(fusion_selection.get('status', 'unknown')))}</p>
+<pre>{html.escape(json.dumps(fusion_selection.get('weights'), sort_keys=True))}</pre>
+<table><thead><tr><th>Weights</th><th>Passed</th><th>Rejection reasons</th></tr></thead>
+<tbody>{fusion_rows}</tbody></table>
+"""
+    if evidence.get("rerank_batches"):
+        pareto_sections += f"""
+<h2>Rerank Batches</h2>
+<table><thead><tr><th>Batch</th><th>Samples</th><th>NDCG</th><th>P50 ms</th>
+<th>P95 ms</th></tr></thead>
+<tbody>{rerank_rows}</tbody></table>
+"""
+    if evidence.get("decision"):
+        pareto_sections += (
+            "<h2>Recommendation</h2><pre>"
+            + html.escape(json.dumps(evidence["decision"], sort_keys=True))
+            + "</pre>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -142,7 +236,8 @@ pre {{ overflow: auto; padding: 1rem; }}
 </dl>
 <h2>Case Summaries</h2>
 <table>
-<thead><tr><th>Case</th><th>Mode</th><th>Recall</th><th>MRR</th><th>NDCG</th><th>Intent Coverage</th><th>Latency ms</th></tr></thead>
+<thead><tr><th>Case</th><th>Mode</th><th>Recall</th><th>MRR</th><th>NDCG</th>
+<th>Intent Coverage</th><th>Latency ms</th></tr></thead>
 <tbody>
 {summary_rows}
 </tbody>
@@ -156,6 +251,7 @@ pre {{ overflow: auto; padding: 1rem; }}
 </table>
 <h2>Findings</h2>
 <pre>{findings_json}</pre>
+{pareto_sections}
 </body>
 </html>
 """
