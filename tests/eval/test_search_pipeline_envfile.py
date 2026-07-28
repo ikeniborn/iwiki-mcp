@@ -104,6 +104,7 @@ def test_safe_config_fingerprint_redacts_key_base_url_and_secret_fields():
 
     assert fingerprint["embed_model"] == "embed-model"
     assert fingerprint["chat_model"] == "chat-model"
+    assert fingerprint["rerank_model"] == "rerank-model"
     assert fingerprint["rerank_enabled"] is True
     assert "secret" not in repr(fingerprint)
     assert "base_url" not in fingerprint

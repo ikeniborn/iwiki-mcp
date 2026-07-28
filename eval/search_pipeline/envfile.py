@@ -118,5 +118,6 @@ def safe_config_fingerprint(cfg: Config) -> dict:
         "write_seed_threshold": cfg.write_seed_threshold,
         "chat_model": cfg.chat_model,
         "search_mode": cfg.search_mode,
+        "rerank_model": cfg.rerank_model or None,
         "rerank_enabled": bool(cfg.rerank_model),
     }
