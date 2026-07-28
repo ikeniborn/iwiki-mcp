@@ -18,4 +18,4 @@
 | embedding-startup-check | done | ✓ | ✓ | ✓ | OK | 2026-07-13 | 2026-07-13 | check-chain result: OK — 6/6 tasks DONE, R1–R8 covered, 446 tests pass, flake8/CLI/version/diff clean, final review READY, wiki current |
 | configurable-search-mode-api | done | ✓ | ✓ | ✓ | OK | 2026-07-15 | 2026-07-16 | check-chain result re-audit: OK — R13 docs/wiki gaps fixed with RED→GREEN regressions, unrelated binding removed, 11/11 tasks and R1–R14 covered, 505 tests pass, v0.7.1, wiki current; live connector restart required to expose new schema. |
 | lexical-retrieval-chunk-scoring | done | ✓ | ✓ | ✓ | OK | 2026-07-18 | 2026-07-20 | check-chain result: OK — Tasks 1–7 DONE, R1–R11 and acceptance covered, 536 tests + 81 focused pass, flake8/compileall/CLI/diff clean, six bound domains reindexed, wiki current, final review merge-ready |
-| search-pipeline-benchmark | done | ✓ | ✓ | ✓ | OK | 2026-07-28 | 2026-07-28 | result OK — Tasks 1-7 DONE; focused eval/search checks passed; full suite has one known unrelated report artifact failure; wiki current |
+| search-pipeline-benchmark | in-progress | ✓ | ✓ | – | – | 2026-07-28 |  | follow-up spec approved; production plan pending |

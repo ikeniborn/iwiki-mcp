@@ -1,13 +1,12 @@
 ---
 review:
-  spec_hash: b5bf9cc7db7a6009
+  spec_hash: a17e3b5aa06987aa
   last_run: 2026-07-28
   phases:
     structure: { status: passed }
     coverage: { status: passed }
     clarity: { status: passed }
     consistency: { status: passed }
-    alignment: { status: passed }
   findings: []
 chain:
   intent: docs/superpowers/intents/2026-07-28-search-pipeline-benchmark-intent.md
@@ -20,110 +19,170 @@ chain:
 
 ## Acceptance (from intent)
 
-- Per-stage metrics are visible for every involved search pipeline stage.
-- Bottlenecks are listed with concrete evidence.
-- The output includes a ranked backlog of follow-up fixes or experiments.
-- Search modes, chunk settings, and model settings can be compared.
+- Per-stage metrics remain visible for every involved search pipeline stage.
+- Bottlenecks and algorithm changes are supported by concrete evidence.
+- Reports retain a ranked, evidence-backed backlog of unresolved bottlenecks.
+- Search modes, fusion settings, and rerank candidate budgets can be compared; sanitized
+  chunk and model fingerprints preserve cross-run comparison of those settings.
 - API keys and provider details remain safe: no key is persisted, printed, or written
   into benchmark artifacts.
 - The public `wiki_search` API and response shape remain stable.
-- Latency ceiling does not degrade unless a separate explicit decision approves the
-  trade-off.
-- The benchmark does not write to the wiki base unless a separate explicit action is
-  requested.
-- Benchmark results are reproducible from committed fixtures, judgments, and commands.
+- The benchmark and production read path do not write to the wiki base.
+- Live results remain timestamped evidence rather than deterministic CI assertions.
+- Chunk defaults, embedding and rerank models, and the index schema remain unchanged.
+
+## Evidence And Problem Statement
+
+The live benchmark completed nine traces over three labeled cases in `hybrid`,
+`lexical`, and `semantic` modes. Without reranking, lexical produced mean nDCG@8
+`0.873` at `25 ms`, hybrid produced `0.829` at `182 ms`, and semantic produced
+`0.358` at `170 ms`. Semantic Recall@8 was `0.722`.
+
+The missing semantic results were present in valid chunks, the current index, semantic
+signals, and the 32-candidate fused pool. Equal-weight RRF placed the relevant sections
+at candidate ranks 22 and 26, outside final top-8. Broad page and graph signals emit
+every section from discovered pages and can outvote high-ranked direct section matches.
+No evidence identifies chunking, stale records, embedding dimensions, or hydration as a
+quality bottleneck.
+
+Reranking raised aggregate nDCG@8 from `0.687` to `0.982` and brought Recall@8, MRR@8,
+and intent coverage to `1.0`, but added approximately `1.1 s` per query. The server sends
+up to 32 hydrated documents while the provider returns final top-k scores. The design
+must improve preliminary fusion first, then reduce the rerank document batch only when
+quality evidence permits it.
 
 ## Scope
 
-The benchmark is live-first. Its primary output comes from read-only runs against real
-iwiki domains and the currently configured provider stack. Offline deterministic
-fixtures remain in scope only as regression guards for the harness, metrics, report
-schema, and bottleneck classifier. The benchmark evaluates returned search context, not
-LLM-generated answers.
+This follow-up applies one Pareto strategy: weighted reciprocal rank fusion followed by
+a fixed, quality-gated rerank candidate budget. It extends the existing benchmark only
+as needed to select and verify those two internal constants.
 
-The live benchmark measures the current search pipeline without changing default
-behavior: chunk and index shape, semantic embedding lookup, lexical hits, graph
-expansion, Reciprocal Rank Fusion, hydration, and optional reranking. Live evidence is
-timestamped, labeled as non-deterministic, and includes a sanitized configuration
-fingerprint rather than secrets or raw provider payloads.
+The user explicitly approved this production follow-up under the existing intent's
+proposal-first autonomy rule and requested that no new intent artifact be created.
 
-Out of scope: changing `wiki_search` API or response shape, changing default embedding or
-rerank models, changing chunk defaults, changing the index schema, writing to the wiki
-base, and treating live-provider output as a deterministic CI assertion.
+In scope:
 
-## Architecture
+- expand the labeled live set from three to twelve compact, reviewed cases;
+- replay captured signal rankings through candidate RRF weights;
+- select fixed internal weights for direct section, page, and graph signals;
+- evaluate rerank batches of 16, 24, and 32 candidates after fusion calibration;
+- apply the smallest batch that passes all quality gates;
+- rerun live A/B evidence with rerank enabled and disabled.
 
-Add a new `eval/search_pipeline/` package:
+Out of scope:
 
-- `fixtures.py` defines live benchmark cases: domains, queries, `k`, modes, and expected
-  relevant section identities. It also defines a small synthetic offline fixture used by
-  tests.
-- `metrics.py` implements `Recall@k`, `MRR@k`, `nDCG@k`, intent coverage, source mix,
-  and latency summaries.
-- `instrumentation.py` exposes read-only probes around retrieval stages. The probes
-  gather signal and candidate counts, per-stage timings, hydration counts, stale/drop
-  counts, and rerank metadata without changing public `wiki_search` output.
-- `runner.py` executes live cases through the local server/retrieval path using the
-  active iwiki binding and `Config.load()`. It can compare `hybrid`, `lexical`, and
-  `semantic`, and it can compare rerank-on versus rerank-off only when this can be done
-  without changing persisted configuration or writing to the wiki base.
-- `analyzer.py` classifies likely bottlenecks from stage evidence and generates a ranked
-  backlog.
-- `report.py` writes sanitized JSON evidence plus a compact Markdown and/or standalone
-  HTML report.
-- `__main__.py` provides the CLI:
-  `uv run python -m eval.search_pipeline --domain iwiki-mcp --out docs/...`.
+- query classification or dynamic routing;
+- public weight, mode-policy, or candidate-budget configuration;
+- changes to chunking, embeddings, model selection, index schema, or result shape;
+- generated-answer evaluation;
+- writes, migrations, or reindexing during benchmark execution.
 
-The implementation keeps the benchmark as an eval tool, not a production API. Production
-search behavior remains inside `iwiki_mcp.retrieval` and `iwiki_mcp.server`.
+## Production Design
+
+### Weighted RRF
+
+`engine.fusion.fuse_ranked` accepts an optional internal signal-weight mapping. Each
+unique signal contribution becomes `weight / (60 + rank)`. Missing weights default to
+`1.0`, preserving existing behavior for callers that do not supply a mapping.
+
+`retrieval.prepare_read_candidates` supplies one fixed selected mapping. Signals belong
+to three evidence classes:
+
+- direct section evidence: `semantic_chunk`, `lexical_section`;
+- page evidence: `semantic_page`, `lexical_page`;
+- discovery evidence: `graph_page`.
+
+Direct evidence has fixed weight `1.0`. The eval selection procedure chooses page weight
+from `{0.025, 0.05, 0.1}` and graph weight from `{0.01, 0.025, 0.05}`, constrained by
+`graph <= page`. Equal-weight RRF remains the explicit baseline. This eight-mapping grid
+is intentionally small and includes mappings that already eliminate the two observed
+losses in replay; the twelve-case corpus determines whether they generalize.
+
+### Bounded Rerank Batch
+
+Retrieval continues to produce the 32-candidate safety pool. The selected rerank batch
+limit applies only before hydration/provider submission; it does not shrink preliminary
+retrieval evidence or fail-soft fallback coverage.
+
+`server.wiki_search` hydrates at most the selected leading 16, 24, or 32 candidates for
+reranking. Successful provider scores remain first, and all unscored, stale, or
+unhydrated preliminary candidates continue in original order before final top-k. A
+reranker failure returns the unchanged preliminary order and current sanitized metadata.
+
+No new public argument, response field, or environment variable is introduced.
+
+## Selection Procedure
+
+### Labeled Corpus
+
+`eval/search_pipeline/fixtures.py` contains exactly twelve reviewed cases covering:
+
+- exact identifiers and API names;
+- semantic paraphrases with little lexical overlap;
+- multi-intent requests;
+- long or repeated-heading sections;
+- graph-adjacent distractors;
+- competing page-level and direct-section evidence.
+
+Every case declares graded relevant identities and intent groups. Cases are deterministic
+inputs; live provider output remains non-deterministic evidence.
+
+### Fusion Weight Selection
+
+The eval layer replays recorded per-signal identity rankings through a bounded weight
+grid. The direct weight remains `1.0`; only the bounded page and graph values defined
+above vary. Selection is
+lexicographic and trust-first:
+
+1. reject mappings that reduce Recall@8 or intent coverage versus equal-weight RRF;
+2. reject mappings that reduce mean nDCG@8 by more than `0.01` in any compared mode;
+3. reject mappings that introduce a new lost-after-fusion finding;
+4. maximize mean nDCG@8 across all cases and modes;
+5. break ties by MRR@8, then by the mapping closest to equal weights.
+
+The selected mapping must also eliminate the two benchmark-confirmed top-k losses. If no
+mapping passes, production fusion remains unchanged and the result is reported as
+`needs_work` rather than weakening a gate.
+
+### Rerank Batch Selection
+
+After the fusion mapping passes, live runs compare batches 16, 24, and 32 in the default
+hybrid mode using the same queries, provider configuration, and final `k`. Each batch
+gets one excluded warm-up followed by two measured passes over all twelve cases, yielding
+24 latency samples. Select the smallest batch satisfying:
+
+- Recall@8 and intent coverage do not decrease from batch 32;
+- mean nDCG@8 decreases by no more than `0.01`;
+- no new rerank-worsened-order or missing-candidate finding appears;
+- p95 rerank latency improves by at least `25%` versus batch 32.
+
+If neither 16 nor 24 passes, production keeps 32. This preserves trust but leaves the
+latency bottleneck unresolved, so the latency part of the final result remains
+`needs_work`; the implementation cannot claim the complete follow-up as accepted.
 
 ## Data Flow
 
-1. The CLI loads the benchmark case list and live configuration. If a benchmark-specific
-   credential file is required, the operator supplies it explicitly with `--env-file`.
-2. For each case, the runner executes the selected mode/settings matrix. The initial
-   matrix includes `hybrid`, `lexical`, and `semantic`; optional rerank comparisons are
-   recorded only when credentials and model settings are available safely.
-3. Instrumentation records final result identities and scores, stage timings, signal
-   counts, candidate counts, source mix, hydration outcomes, rerank metadata, and
-   sanitized config fingerprints.
-4. Metrics compare final and intermediate identities against expected relevant sections.
-5. The analyzer assigns bottleneck classes:
-   - relevant section missing from chunks or index;
-   - relevant section exists in chunks/index but never enters the candidate pool;
-   - relevant section appears before fusion but is lost after fusion or top-k;
-   - relevant section is dropped during hydration because it is stale, unsafe, missing,
-     or unhydrated;
-   - rerank improves or worsens ordering;
-   - final context contains excessive judged noise.
-6. The report writes JSON evidence and a concise Markdown/HTML summary with metrics,
-   bottlenecks, and ranked follow-up tasks.
+1. Live benchmark tracing records signal identity order, the fused pool, final ranking,
+   quality metrics, and per-stage latency without wiki writes.
+2. Offline replay applies the bounded fusion weight grid to recorded signal orders and
+   emits one deterministic winning mapping or no-change result.
+3. The selected mapping is applied to production candidate fusion and verified by unit
+   and integration tests.
+4. Live rerank runs compare candidate batches 16, 24, and 32 after the fusion fix.
+5. The smallest passing fixed batch is applied before hydration and provider submission.
+6. Final reports compare baseline, fusion-only, and fusion-plus-rerank results.
 
-## Metrics
+## Metrics And Evidence
 
-Quality metrics:
+Quality gates use Recall@8, MRR@8, nDCG@8, intent coverage, and bottleneck findings.
+Latency evidence records embedding, signal, fusion, hydration, rerank, and total timings,
+plus p50 and p95 over each batch setting. Reports include the selected weights and batch
+size, rejected alternatives with gate failures, source mix, hydration counts, and
+sanitized model/config fingerprints. They retain a ranked backlog containing only
+bottlenecks that remain supported by the current evidence.
 
-- `Recall@k`: fraction of expected relevant section identities represented in top-k
-  context.
-- `MRR@k`: reciprocal rank of the first relevant section.
-- `nDCG@k`: graded ranking quality when a case supplies relevance grades.
-- Intent coverage: distinct expected intents represented in the top-k context.
-
-Pipeline metrics:
-
-- candidates per stage and mode;
-- source mix across `semantic`, `lexical`, `both`, `seed`, `graph`, `global`, and
-  `lexical`;
-- hydration requested/scored/dropped counts;
-- rerank applied/fallback state and scored count;
-- total and per-stage latency.
-
-Chunk/index metrics:
-
-- page, section, and chunk counts;
-- repeated heading count;
-- chunk length distribution;
-- relevant-section chunk identity coverage.
+Live evidence must not include provider URLs, keys, authorization data, raw requests,
+raw responses, or local base paths.
 
 ## Credential And Env Handling
 
@@ -146,16 +205,44 @@ secret-bearing errors are never written.
 - A failed query/domain case is marked failed while the remaining cases continue.
 - The benchmark does not call wiki write/update/delete/index tools in live mode.
 - Every report labels live measurements as timestamped, non-deterministic evidence.
+- Missing fusion weights default to equal contribution in generic fusion callers.
+  Non-finite or non-positive explicit weights are rejected; production retrieval uses
+  only reviewed module constants.
+- A rerank batch that fails any quality gate cannot become the production constant.
+- Existing descriptor-based path safety, index-hash validation, and fail-soft rerank
+  behavior remain unchanged.
 
 ## Testing
 
-Unit tests cover metric math, report schema, sanitization, credential-file guards, and
-bottleneck classification. Offline integration tests use a synthetic mini-vault to prove
-the harness can identify at least these cases: relevant section missing from chunks,
-relevant section lost before top-k, and rerank improving or degrading order.
+Unit tests cover weighted RRF math, deterministic ties, missing-weight compatibility,
+weight-grid gate ordering, and rerank-batch selection. Retrieval tests prove direct
+section evidence can outrank broad page/graph fan-out without changing public result
+fields. Server tests prove only the selected leading batch is hydrated/submitted while
+partial, stale, unhydrated, and fail-soft candidates preserve preliminary order.
 
-CLI smoke tests cover `--help` and controlled failure without live credentials. Live
-benchmark execution is manual and env-gated, not a CI requirement. Verification should
-include focused eval tests and `tests/test_package.py`. Full `uv run pytest -q` remains a
-desired final check, but the plan must account for current unrelated repository failures
-if they still exist.
+Benchmark regression tests retain existing metric, report, sanitization, env-file,
+read-only, and bottleneck-classification coverage. The twelve labeled cases are reviewed
+fixtures, not assertions over live provider scores in CI.
+
+Final verification includes focused fusion/retrieval/rerank/server/eval tests, the full
+test suite, CLI help, one read-only live A/B matrix, secret scans of reports, and wiki
+documentation/lint after production behavior changes.
+
+## Acceptance Criteria
+
+- Twelve reviewed cases cover all six named query classes.
+- The selected fixed fusion weights introduce no Recall@8 or intent-coverage regression
+  and no new lost-after-fusion finding versus equal-weight RRF.
+- The confirmed candidates at ranks 22 and 26 enter final top-8 without reranking.
+- Mean nDCG@8 does not decrease by more than `0.01` in any compared mode.
+- A batch of 16 or 24 is applied only when it improves p95 rerank latency by at least
+  `25%` while satisfying every quality gate; otherwise 32 is retained and the latency
+  outcome is reported as `needs_work`.
+- `wiki_search` arguments, public fields, rerank metadata, and fail-soft behavior remain
+  unchanged.
+- Benchmark runs remain read-only and reports contain no keys, provider URLs, raw
+  provider payloads, or local base paths.
+- Chunk defaults, embedding/rerank models, and index schema remain unchanged.
+- Replaying the same captured signal rankings produces identical selected weights,
+  rejection reasons, and deterministic JSON metrics; live timing fields remain
+  timestamped evidence.

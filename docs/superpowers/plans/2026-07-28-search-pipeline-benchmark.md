@@ -1,20 +1,4 @@
 ---
-review:
-  plan_hash: faeaceda3b67963d
-  last_run: 2026-07-28
-  phases:
-    structure: { status: passed }
-    coverage: { status: passed }
-    executability: { status: passed }
-    verification: { status: passed }
-    alignment: { status: passed }
-  findings: []
-result_check:
-  verdict: OK
-  plan_hash: faeaceda3b67963d
-  last_run: 2026-07-28
-  reviewed: true
-  docs_checked: true
 chain:
   intent: docs/superpowers/intents/2026-07-28-search-pipeline-benchmark-intent.md
   spec: docs/superpowers/specs/2026-07-28-search-pipeline-benchmark-design.md
