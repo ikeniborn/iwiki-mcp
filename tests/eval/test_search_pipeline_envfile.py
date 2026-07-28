@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from eval.search_pipeline.envfile import (
     apply_env_file,
     load_env_file,
@@ -23,6 +25,22 @@ def test_load_env_file_accepts_comments_export_and_quoted_values(tmp_path):
         "IWIKI_LLM_KEY": "secret key",
         "IWIKI_LLM_BASE_URL": "https://secret.example/v1",
         "IWIKI_RERANK_MODEL": "rerank-model",
+    }
+
+
+def test_load_env_file_preserves_unquoted_spaces_before_inline_comment(tmp_path):
+    env = tmp_path / ".benchmark.env"
+    env.write_text(
+        "PLAIN=value with spaces # local comment\n"
+        "TRAILING=value with trailing spaces   \n"
+        "QUOTED='quoted # value' # local comment\n",
+        encoding="utf-8",
+    )
+
+    assert load_env_file(env) == {
+        "PLAIN": "value with spaces",
+        "TRAILING": "value with trailing spaces",
+        "QUOTED": "quoted # value",
     }
 
 
@@ -64,14 +82,40 @@ def test_validate_env_file_rejects_output_tree_without_leaking_values(
     assert "secret" not in captured.err
 
 
+def test_validate_env_file_rejects_symlink_location_inside_output_tree(tmp_path):
+    out = tmp_path / "evidence"
+    out.mkdir()
+    outside = tmp_path / ".benchmark.env"
+    outside.write_text("IWIKI_LLM_KEY=secret\n", encoding="utf-8")
+    env = out / ".benchmark.env"
+    try:
+        env.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    result = validate_env_file_path(env, out)
+
+    assert result["ok"] is False
+    assert "inside output directory" in result["errors"][0]
+
+
 def test_validate_env_file_warns_when_file_appears_git_tracked(
     tmp_path, monkeypatch
 ):
     env = tmp_path / ".benchmark.env"
     env.write_text("IWIKI_LLM_KEY=secret\n", encoding="utf-8")
 
+    calls = []
+
     def fake_run(*args, **kwargs):
-        if args[0][:3] == ["git", "rev-parse", "--show-toplevel"]:
+        calls.append(args[0])
+        if args[0][:5] == [
+            "git",
+            "-C",
+            str(env.parent),
+            "rev-parse",
+            "--show-toplevel",
+        ]:
             return SimpleNamespace(stdout=str(tmp_path))
         return None
 
@@ -81,6 +125,7 @@ def test_validate_env_file_warns_when_file_appears_git_tracked(
 
     assert result["ok"] is True
     assert result["warnings"] == ["env file appears tracked by git"]
+    assert calls[0][:3] == ["git", "-C", str(env.parent)]
 
 
 def test_safe_config_fingerprint_redacts_key_base_url_and_secret_fields():

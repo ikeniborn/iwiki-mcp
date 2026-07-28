@@ -3,11 +3,26 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 from pathlib import Path
-import shlex
 import subprocess
 from collections.abc import Iterator
 
 from iwiki_mcp.engine.config import Config
+
+
+def _parse_value(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    if stripped[0] in ("'", '"'):
+        quote = stripped[0]
+        end = stripped.find(quote, 1)
+        if end == -1:
+            raise ValueError("unterminated quoted env value")
+        trailing = stripped[end + 1:].strip()
+        if trailing and not trailing.startswith("#"):
+            raise ValueError("unexpected text after quoted env value")
+        return stripped[1:end]
+    return stripped.split(" #", 1)[0].strip()
 
 
 def load_env_file(path: str | Path) -> dict[str, str]:
@@ -24,12 +39,7 @@ def load_env_file(path: str | Path) -> dict[str, str]:
         key = key.strip()
         if not key:
             continue
-        value = value.strip()
-        if not value:
-            values[key] = ""
-            continue
-        parts = shlex.split(value, posix=True)
-        values[key] = parts[0] if parts else ""
+        values[key] = _parse_value(value)
     return values
 
 
@@ -48,10 +58,10 @@ def apply_env_file(path: str | Path) -> Iterator[dict[str, str]]:
                 os.environ[key] = value
 
 
-def _git_root() -> Path | None:
+def _git_root(path: Path) -> Path | None:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(path.parent), "rev-parse", "--show-toplevel"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -64,7 +74,7 @@ def _git_root() -> Path | None:
 
 
 def _is_tracked(path: Path) -> bool:
-    root = _git_root()
+    root = _git_root(path)
     if root is None:
         return False
     try:
@@ -84,20 +94,25 @@ def _is_tracked(path: Path) -> bool:
 
 
 def validate_env_file_path(path: str | Path, out_dir: str | Path) -> dict:
-    env_path = Path(path).resolve()
+    raw_env_path = Path(path).absolute()
+    env_path = raw_env_path.resolve()
+    raw_out_path = Path(out_dir).absolute()
     out_path = Path(out_dir).resolve()
     errors: list[str] = []
     warnings: list[str] = []
 
     if not env_path.is_file():
         errors.append("env file not found")
-    try:
-        env_path.relative_to(out_path)
-    except ValueError:
-        pass
-    else:
+    inside_output = False
+    for candidate, root in ((raw_env_path, raw_out_path), (env_path, out_path)):
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        inside_output = True
+    if inside_output:
         errors.append("env file is inside output directory")
-    if _is_tracked(env_path):
+    if _is_tracked(raw_env_path):
         warnings.append("env file appears tracked by git")
     return {"ok": not errors, "errors": errors, "warnings": warnings}
 
