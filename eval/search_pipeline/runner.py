@@ -4,6 +4,7 @@ from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 from typing import Iterable
 
+from iwiki_mcp.base import resolve_binding
 from iwiki_mcp.engine.config import Config
 
 from .analyzer import analyze_trace, ranked_backlog
@@ -142,6 +143,67 @@ def run_offline_traces(
         "run_settings": {
             "rerank_enabled": False,
         },
+        "config": _config_payload(cfg),
+        "modes": mode_list,
+        "cases": [_case_payload(case) for case in case_list],
+        "summary": {
+            "rollup": _rollup(summaries),
+            "cases": summaries,
+        },
+        "traces": traces,
+        "findings": findings,
+        "backlog": ranked_backlog(findings),
+    }
+
+
+def run_live_traces(
+    cfg,
+    domain: str,
+    modes: Iterable[str],
+    cases: Iterable[BenchmarkCase],
+    *,
+    base: str | None = None,
+    latency_ceiling_ms: float | None = None,
+) -> dict:
+    wiki_base = base if base is not None else resolve_binding().base
+    traces = []
+    summaries = []
+    findings = []
+    case_list = sorted(
+        [case for case in cases if case.domain == domain],
+        key=lambda item: item.case_id,
+    )
+    mode_list = list(modes)
+    rerank_enabled = bool(getattr(cfg, "rerank_model", ""))
+
+    for case in case_list:
+        for mode in mode_list:
+            trace = trace_query(
+                cfg,
+                wiki_base,
+                case,
+                mode=mode,
+                rerank_enabled=rerank_enabled,
+            )
+            traces.append(trace)
+            summaries.append(summarize_trace(case, trace))
+            findings.extend(
+                {**finding, "mode": mode}
+                for finding in analyze_trace(case, trace)
+            )
+
+    run_settings = {
+        "domain": domain,
+        "rerank_enabled": rerank_enabled,
+    }
+    if latency_ceiling_ms is not None:
+        run_settings["latency_ceiling_ms"] = latency_ceiling_ms
+
+    return {
+        "kind": "live",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "domain": domain,
+        "run_settings": run_settings,
         "config": _config_payload(cfg),
         "modes": mode_list,
         "cases": [_case_payload(case) for case in case_list],

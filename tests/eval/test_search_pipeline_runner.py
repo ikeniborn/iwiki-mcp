@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import pytest
 
 from eval.search_pipeline.fixtures import BenchmarkCase
@@ -635,3 +639,328 @@ def test_run_offline_traces_records_rerank_disabled_run_setting(monkeypatch):
     assert evidence["run_settings"] == {"rerank_enabled": False}
     assert evidence["config"]["rerank_enabled"] is True
     assert evidence["config"]["rerank_model"] == "rerank-model"
+
+
+def test_cli_help_exits_zero_and_lists_required_flags():
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "eval.search_pipeline", "--help"],
+        cwd=os.getcwd(),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--domain" in result.stdout
+    assert "--env-file" in result.stdout
+    assert "--out" in result.stdout
+
+
+def test_cli_without_live_config_exits_two_without_secret_values(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from eval.search_pipeline import __main__ as cli
+
+    monkeypatch.delenv("IWIKI_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("IWIKI_LLM_KEY", raising=False)
+    monkeypatch.setattr(
+        cli,
+        "write_reports",
+        lambda *args, **kwargs: pytest.fail("write_reports must not be called"),
+    )
+
+    code = cli.main(["--out", str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "IWIKI_LLM_BASE_URL" in captured.err
+    assert "secret" not in captured.err.lower()
+
+
+def test_cli_invalid_mode_exits_two_before_loading_config(tmp_path, monkeypatch):
+    from eval.search_pipeline import __main__ as cli
+
+    monkeypatch.setattr(
+        cli.Config,
+        "load",
+        lambda: pytest.fail("Config.load must not be called"),
+    )
+
+    code = cli.main(["--out", str(tmp_path), "--modes", "hybrid,invalid"])
+
+    assert code == 2
+
+
+def test_cli_rejects_env_file_under_output_dir_before_applying(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from eval.search_pipeline import __main__ as cli
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    env_file = out_dir / ".env"
+    env_file.write_text("IWIKI_LLM_KEY=secret\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "apply_env_file",
+        lambda *args, **kwargs: pytest.fail("apply_env_file must not be called"),
+    )
+    monkeypatch.setattr(
+        cli.Config,
+        "load",
+        lambda: pytest.fail("Config.load must not be called"),
+    )
+
+    code = cli.main(["--out", str(out_dir), "--env-file", str(env_file)])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "env file is inside output directory" in captured.err
+    assert "secret" not in captured.err.lower()
+
+
+def test_cli_success_writes_reports_and_applies_live_overrides(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from eval.search_pipeline import __main__ as cli
+
+    cfg = Config(
+        base_url="https://provider.example/v1",
+        api_key="secret-token",
+        embed_model="test-embed",
+        dimensions=2,
+        chunk_size=256,
+        chunk_overlap=32,
+        summary_max=120,
+        top_k=3,
+        score_threshold=0.0,
+        graph_depth=1,
+        ignore=None,
+        seed_top_k=2,
+        bfs_top_k=2,
+        seed_threshold=0.0,
+        rerank_model="",
+    )
+    captured_run = {}
+
+    def fake_run_live_traces(loaded_cfg, domain, modes, cases, latency_ceiling_ms=None):
+        captured_run["cfg"] = loaded_cfg
+        captured_run["domain"] = domain
+        captured_run["modes"] = modes
+        captured_run["case_ks"] = [case.k for case in cases]
+        captured_run["latency_ceiling_ms"] = latency_ceiling_ms
+        return {
+            "kind": "live",
+            "summary": {"rollup": {"latency_ms": 42.0}, "cases": []},
+            "run_settings": {},
+            "traces": [],
+            "findings": [],
+            "backlog": [],
+        }
+
+    def fake_write_reports(evidence, out_dir):
+        captured_run["evidence"] = evidence
+        captured_run["out_dir"] = out_dir
+        return {
+            "json": tmp_path / "report.json",
+            "markdown": tmp_path / "report.md",
+            "html": tmp_path / "report.html",
+        }
+
+    monkeypatch.setattr(cli.Config, "load", lambda: cfg)
+    monkeypatch.setattr(cli, "run_live_traces", fake_run_live_traces)
+    monkeypatch.setattr(cli, "write_reports", fake_write_reports)
+
+    code = cli.main([
+        "--domain",
+        "iwiki-mcp",
+        "--out",
+        str(tmp_path / "reports"),
+        "--modes",
+        "semantic,lexical",
+        "--k",
+        "5",
+        "--latency-ceiling-ms",
+        "10",
+    ])
+
+    output = capsys.readouterr()
+    assert code == 0
+    assert captured_run["cfg"] is cfg
+    assert captured_run["domain"] == "iwiki-mcp"
+    assert captured_run["modes"] == ["semantic", "lexical"]
+    assert set(captured_run["case_ks"]) == {5}
+    assert captured_run["latency_ceiling_ms"] == 10.0
+    assert captured_run["evidence"]["run_settings"]["latency_ceiling_ms"] == 10.0
+    assert captured_run["evidence"]["run_settings"]["latency_ceiling_exceeded"] is True
+    assert str(tmp_path / "report.json") in output.out
+
+
+def test_run_live_traces_filters_domain_and_records_live_evidence(monkeypatch):
+    from eval.search_pipeline import runner
+
+    cfg = Config(
+        base_url="https://provider.example/v1",
+        api_key="secret-token",
+        embed_model="test-embed",
+        dimensions=2,
+        chunk_size=256,
+        chunk_overlap=32,
+        summary_max=120,
+        top_k=3,
+        score_threshold=0.0,
+        graph_depth=1,
+        ignore=None,
+        seed_top_k=2,
+        bfs_top_k=2,
+        seed_threshold=0.0,
+        rerank_model="test-rerank",
+    )
+    selected_case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="alpha",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"a": ["iwiki-mcp/a.md#A:0"]},
+        k=2,
+    )
+    skipped_case = BenchmarkCase(
+        case_id="case-b",
+        domain="other",
+        query="beta",
+        relevant={"other/b.md#B:0": 3},
+        intents={"b": ["other/b.md#B:0"]},
+        k=2,
+    )
+    calls = []
+    analyzer_finding = {
+        "case_id": "case-a",
+        "class": "missing_from_candidate_pool",
+        "severity": "high",
+        "identity": "iwiki-mcp/a.md#A:0",
+        "evidence": {},
+    }
+
+    class Binding:
+        base = "/tmp/live-wiki"
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        calls.append((cfg, base, case.case_id, mode, rerank_enabled))
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 2.0},
+            "stages": {},
+            "results": [],
+            "metrics_input": {
+                "ranking": ["iwiki-mcp/a.md#A:0"],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "resolve_binding", lambda: Binding())
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(runner, "analyze_trace", lambda case, trace: [analyzer_finding])
+
+    evidence = runner.run_live_traces(
+        cfg,
+        "iwiki-mcp",
+        ["semantic", "lexical"],
+        [skipped_case, selected_case],
+    )
+
+    assert calls == [
+        (cfg, "/tmp/live-wiki", "case-a", "semantic", True),
+        (cfg, "/tmp/live-wiki", "case-a", "lexical", True),
+    ]
+    assert evidence["kind"] == "live"
+    assert evidence["domain"] == "iwiki-mcp"
+    assert evidence["run_settings"] == {
+        "domain": "iwiki-mcp",
+        "rerank_enabled": True,
+    }
+    assert evidence["config"]["rerank_model"] == "test-rerank"
+    assert evidence["config"]["rerank_enabled"] is True
+    assert "secret-token" not in repr(evidence)
+    assert "provider.example" not in repr(evidence)
+    assert evidence["modes"] == ["semantic", "lexical"]
+    assert [case["case_id"] for case in evidence["cases"]] == ["case-a"]
+    assert evidence["summary"]["rollup"] == {
+        "case_count": 2,
+        "recall_at_k": 1.0,
+        "mrr_at_k": 1.0,
+        "ndcg_at_k": 1.0,
+        "intent_coverage_at_k": 1.0,
+        "latency_ms": 2.0,
+    }
+    assert [finding["mode"] for finding in evidence["findings"]] == [
+        "semantic",
+        "lexical",
+    ]
+    assert "mode" not in analyzer_finding
+    assert evidence["backlog"] == [
+        {
+            "class": "missing_from_candidate_pool",
+            "count": 2,
+            "severity": "high",
+        }
+    ]
+
+
+def test_run_live_traces_returns_empty_live_evidence_for_unmatched_domain(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="other",
+        query="alpha",
+        relevant={"other/a.md#A:0": 3},
+    )
+
+    monkeypatch.setattr(
+        runner,
+        "trace_query",
+        lambda *args, **kwargs: pytest.fail("trace_query must not be called"),
+    )
+
+    evidence = runner.run_live_traces(
+        {"rerank_model": "secret-rerank", "top_k": 3},
+        "iwiki-mcp",
+        ["hybrid"],
+        [case],
+        base="/tmp/live-wiki",
+    )
+
+    assert evidence["kind"] == "live"
+    assert evidence["domain"] == "iwiki-mcp"
+    assert evidence["cases"] == []
+    assert evidence["summary"] == {
+        "rollup": {
+            "case_count": 0,
+            "recall_at_k": 0.0,
+            "mrr_at_k": 0.0,
+            "ndcg_at_k": 0.0,
+            "intent_coverage_at_k": 0.0,
+            "latency_ms": 0.0,
+        },
+        "cases": [],
+    }
+    assert evidence["traces"] == []
+    assert evidence["findings"] == []
+    assert evidence["backlog"] == []
