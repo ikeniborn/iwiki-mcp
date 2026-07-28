@@ -1,3 +1,7 @@
+import math
+
+import pytest
+
 from iwiki_mcp.engine.fusion import fuse_ranked
 
 
@@ -51,3 +55,63 @@ def test_fuse_ranked_ignores_duplicate_identity_within_signal():
 
     assert len(fused) == 1
     assert fused[0]["score"] == 1 / 61
+
+
+def test_fuse_ranked_weighted_direct_signal_beats_page_and_graph_fanout():
+    signals = {
+        "semantic_chunk": [_hit("direct", "Direct")],
+        "semantic_page": [
+            _hit("broad-a", "A"),
+            _hit("broad-b", "B"),
+            _hit("broad-c", "C"),
+        ],
+        "graph_page": [
+            _hit("broad-a", "A"),
+            _hit("broad-b", "B"),
+            _hit("broad-c", "C"),
+        ],
+    }
+
+    fused = fuse_ranked(
+        signals,
+        limit=4,
+        signal_weights={"semantic_page": 0.1, "graph_page": 0.1},
+    )
+
+    assert [hit["file"] for hit in fused] == [
+        "direct",
+        "broad-a",
+        "broad-b",
+        "broad-c",
+    ]
+
+
+def test_fuse_ranked_missing_signal_weight_defaults_to_one():
+    signals = {
+        "semantic": [_hit("a", "A")],
+        "lexical": [_hit("b", "B")],
+    }
+
+    assert fuse_ranked(signals, limit=2) == fuse_ranked(
+        signals,
+        limit=2,
+        signal_weights={"semantic": 1.0},
+    )
+
+
+@pytest.mark.parametrize("weight", [0, -1, math.inf, math.nan, "bad"])
+def test_fuse_ranked_rejects_invalid_signal_weight(weight):
+    with pytest.raises(ValueError, match="signal weight"):
+        fuse_ranked(
+            {"semantic": [_hit("a", "A")]},
+            limit=1,
+            signal_weights={"semantic": weight},
+        )
+
+
+def test_fuse_ranked_zero_limit_returns_before_validating_weights():
+    assert fuse_ranked(
+        {"semantic": [_hit("a", "A")]},
+        limit=0,
+        signal_weights={"semantic": 0},
+    ) == []
