@@ -93,6 +93,7 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
         if (
             has_candidate_evidence
             and hydration.get("requested", 0) > 0
+            and candidate_rank <= case.k
             and identity not in hydrated_set
             and identity not in ranking_set
         ):

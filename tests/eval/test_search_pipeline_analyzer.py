@@ -103,6 +103,34 @@ def test_analyze_trace_reports_relevant_identity_lost_after_fusion_topk():
     ]
 
 
+def test_analyze_trace_does_not_report_hydration_drop_below_fusion_topk():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case(k=1)
+    trace = _trace(
+        ranking=["eval/guide/other.md#Overview:0"],
+        candidates=["eval/guide/other.md#Overview:0", identity],
+        hydrated=["eval/guide/other.md#Overview:0"],
+        hydration_requested=2,
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "lost_after_fusion_topk",
+            "severity": "medium",
+            "identity": identity,
+            "evidence": {
+                "candidate_rank": 2,
+                "k": 1,
+                "ranking_count": 1,
+                "relevance_grade": 3,
+            },
+        },
+    ]
+
+
 def test_analyze_trace_reports_unknown_when_topk_loss_is_not_evidenced():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case(k=3)
