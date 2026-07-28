@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: c4710787450b8e19
+  plan_hash: faeaceda3b67963d
   last_run: 2026-07-28
   phases:
     structure: { status: passed }
@@ -248,8 +248,12 @@ def identity(result: dict) -> str:
 
 
 def recall_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
+    if k <= 0:
+        return 0.0
+    if not case.relevant:
+        return 0.0
     selected = set(ranking[:k])
-    return 1.0 if selected & set(case.relevant) else 0.0
+    return len(selected & set(case.relevant)) / len(case.relevant)
 
 
 def mrr_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
