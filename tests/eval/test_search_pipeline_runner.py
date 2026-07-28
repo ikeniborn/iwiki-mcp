@@ -197,7 +197,7 @@ def test_trace_query_refuses_legacy_store_before_retrieval_helpers(
 
     monkeypatch.setattr("iwiki_mcp.retrieval._domain_signals", fail_domain_signals)
 
-    with pytest.raises(RuntimeError, match="legacy store layout"):
+    with pytest.raises(RuntimeError, match="legacy store layout") as exc_info:
         trace_query(
             cfg,
             base,
@@ -205,6 +205,7 @@ def test_trace_query_refuses_legacy_store_before_retrieval_helpers(
             mode="hybrid",
             rerank_enabled=False,
         )
+    assert str(tmp_path) not in str(exc_info.value)
 
 
 def test_trace_query_rejects_invalid_domain_before_retrieval_helpers(
@@ -704,6 +705,48 @@ def test_cli_sanitizes_env_value_parse_errors(tmp_path, monkeypatch, capsys):
     assert "LEAK_SENTINEL_123" not in captured.err
 
 
+def test_cli_sanitizes_unexpected_runtime_failures(tmp_path, monkeypatch, capsys):
+    from eval.search_pipeline import __main__ as cli
+
+    cfg = Config(
+        base_url="https://provider.example/v1",
+        api_key="secret-token",
+        embed_model="test-embed",
+        dimensions=2,
+        chunk_size=256,
+        chunk_overlap=32,
+        summary_max=120,
+        top_k=3,
+        score_threshold=0.0,
+        graph_depth=1,
+        ignore=None,
+        seed_top_k=2,
+        bfs_top_k=2,
+        seed_threshold=0.0,
+        rerank_model="",
+    )
+    monkeypatch.setattr(cli.Config, "load", lambda: cfg)
+
+    def fail_run_live_traces(*args, **kwargs):
+        raise RuntimeError(f"LEAK_SENTINEL_123 at {tmp_path}/private/base")
+
+    monkeypatch.setattr(cli, "run_live_traces", fail_run_live_traces)
+    monkeypatch.setattr(
+        cli,
+        "write_reports",
+        lambda *args, **kwargs: pytest.fail("write_reports must not be called"),
+    )
+
+    code = cli.main(["--out", str(tmp_path / "reports")])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "benchmark failed unexpectedly" in captured.err
+    assert "Traceback" not in captured.err
+    assert "LEAK_SENTINEL_123" not in captured.err
+    assert str(tmp_path) not in captured.err
+
+
 def test_cli_invalid_mode_exits_two_before_loading_config(tmp_path, monkeypatch):
     from eval.search_pipeline import __main__ as cli
 
@@ -985,6 +1028,96 @@ def test_run_live_traces_returns_empty_live_evidence_for_unmatched_domain(
     assert evidence["traces"] == []
     assert evidence["findings"] == []
     assert evidence["backlog"] == []
+
+
+def test_run_live_traces_captures_failed_query_and_continues(monkeypatch):
+    from eval.search_pipeline import runner
+
+    failing_case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="alpha",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"a": ["iwiki-mcp/a.md#A:0"]},
+        k=2,
+    )
+    passing_case = BenchmarkCase(
+        case_id="case-b",
+        domain="iwiki-mcp",
+        query="beta",
+        relevant={"iwiki-mcp/b.md#B:0": 3},
+        intents={"b": ["iwiki-mcp/b.md#B:0"]},
+        k=2,
+    )
+    analyze_calls = []
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        if case.case_id == "case-a":
+            raise RuntimeError(
+                "LEAK_SENTINEL_123 provider failure at /tmp/private/wiki-base"
+            )
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 2.0},
+            "stages": {},
+            "results": [],
+            "metrics_input": {
+                "ranking": ["iwiki-mcp/b.md#B:0"],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    def fake_analyze_trace(case, trace):
+        analyze_calls.append((case.case_id, trace["status"]))
+        return []
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(runner, "analyze_trace", fake_analyze_trace)
+
+    evidence = runner.run_live_traces(
+        {},
+        "iwiki-mcp",
+        ["hybrid"],
+        [failing_case, passing_case],
+        base="/tmp/wiki",
+    )
+
+    assert [(trace["case_id"], trace["status"]) for trace in evidence["traces"]] == [
+        ("case-a", "failed"),
+        ("case-b", "passed"),
+    ]
+    failed_trace = evidence["traces"][0]
+    assert failed_trace["mode"] == "hybrid"
+    assert failed_trace["error"] == {
+        "type": "RuntimeError",
+        "category": "query_runtime_error",
+        "message": "query failed during benchmark execution",
+    }
+    assert evidence["summary"]["rollup"]["case_count"] == 1
+    assert analyze_calls == [("case-b", "passed")]
+    assert evidence["findings"] == [
+        {
+            "case_id": "case-a",
+            "class": "query_failed",
+            "severity": "high",
+            "mode": "hybrid",
+            "evidence": {
+                "domain": "iwiki-mcp",
+                "error_type": "RuntimeError",
+                "error_category": "query_runtime_error",
+            },
+        }
+    ]
+    assert evidence["backlog"] == [
+        {"class": "query_failed", "count": 1, "severity": "high"}
+    ]
+    assert "LEAK_SENTINEL_123" not in repr(evidence)
+    assert "/tmp/private/wiki-base" not in repr(evidence)
 
 
 def test_run_live_traces_suppresses_store_migration_on_read_path(

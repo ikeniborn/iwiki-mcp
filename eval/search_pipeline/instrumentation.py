@@ -41,8 +41,8 @@ def _ensure_read_only_store_layout(base: str, domain: str) -> None:
     legacy_store_dir = Path(base) / domain / ".iwiki"
     if legacy_store_dir.exists():
         raise RuntimeError(
-            "benchmark refuses legacy store layout because it would require "
-            f"migration writes: {legacy_store_dir}"
+            "benchmark refuses legacy store layout for domain "
+            f"'{domain}' because it would require migration writes"
         )
 
 

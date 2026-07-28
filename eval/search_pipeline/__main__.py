@@ -146,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    except Exception:
+        print(
+            "error: benchmark failed unexpectedly; no raw provider details shown.",
+            file=sys.stderr,
+        )
+        return 2
 
     for label, path in sorted(paths.items()):
         print(f"{label}: {path}")

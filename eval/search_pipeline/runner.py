@@ -109,6 +109,60 @@ def _is_json_scalar(value) -> bool:
     return value is None or isinstance(value, (str, int, float, bool))
 
 
+def _safe_error_type(exc: Exception) -> str:
+    name = type(exc).__name__
+    safe = "".join(char for char in name if char.isalnum() or char == "_")
+    return safe or "Exception"
+
+
+def _safe_error_category(exc: Exception) -> str:
+    if isinstance(exc, ValueError):
+        return "invalid_query_input"
+    if "legacy store layout" in str(exc).lower():
+        return "legacy_store_layout"
+    return "query_runtime_error"
+
+
+def _safe_error_payload(exc: Exception) -> dict:
+    category = _safe_error_category(exc)
+    messages = {
+        "invalid_query_input": "query input is invalid for benchmark execution",
+        "legacy_store_layout": "legacy store layout requires migration before benchmark",
+        "query_runtime_error": "query failed during benchmark execution",
+    }
+    return {
+        "type": _safe_error_type(exc),
+        "category": category,
+        "message": messages[category],
+    }
+
+
+def _failed_trace(case: BenchmarkCase, mode: str, exc: Exception) -> dict:
+    return {
+        "case_id": case.case_id,
+        "domain": case.domain,
+        "mode": mode,
+        "k": case.k,
+        "status": "failed",
+        "error": _safe_error_payload(exc),
+    }
+
+
+def _failed_finding(trace: dict) -> dict:
+    error = trace["error"]
+    return {
+        "case_id": trace["case_id"],
+        "class": "query_failed",
+        "severity": "high",
+        "mode": trace["mode"],
+        "evidence": {
+            "domain": trace["domain"],
+            "error_type": error["type"],
+            "error_category": error["category"],
+        },
+    }
+
+
 def run_offline_traces(
     cfg,
     base: str,
@@ -178,13 +232,20 @@ def run_live_traces(
 
     for case in case_list:
         for mode in mode_list:
-            trace = trace_query(
-                cfg,
-                wiki_base,
-                case,
-                mode=mode,
-                rerank_enabled=rerank_enabled,
-            )
+            try:
+                trace = trace_query(
+                    cfg,
+                    wiki_base,
+                    case,
+                    mode=mode,
+                    rerank_enabled=rerank_enabled,
+                )
+            except Exception as exc:
+                trace = _failed_trace(case, mode, exc)
+                traces.append(trace)
+                findings.append(_failed_finding(trace))
+                continue
+            trace = {**trace, "status": trace.get("status", "passed")}
             traces.append(trace)
             summaries.append(summarize_trace(case, trace))
             findings.extend(
