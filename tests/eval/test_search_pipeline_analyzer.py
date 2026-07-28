@@ -3,11 +3,15 @@ from eval.search_pipeline.fixtures import BenchmarkCase
 
 
 def _case(*, relevant=None, k=2):
+    relevant = (
+        {"eval/guide/auth.md#Rotation:0": 3}
+        if relevant is None else relevant
+    )
     return BenchmarkCase(
         case_id="case-a",
         domain="eval",
         query="needle",
-        relevant=relevant or {"eval/guide/auth.md#Rotation:0": 3},
+        relevant=relevant,
         k=k,
     )
 
@@ -22,7 +26,10 @@ def _trace(
     rerank=None,
 ):
     ranking = ranking if ranking is not None else []
-    relevant = relevant or {"eval/guide/auth.md#Rotation:0": 3}
+    relevant = (
+        {"eval/guide/auth.md#Rotation:0": 3}
+        if relevant is None else relevant
+    )
     candidates = candidates if candidates is not None else []
     hydrated = hydrated if hydrated is not None else candidates
     return {
@@ -70,7 +77,7 @@ def test_analyze_trace_reports_missing_relevant_identity_from_candidate_pool():
 
 def test_analyze_trace_reports_relevant_identity_lost_after_fusion_topk():
     identity = "eval/guide/auth.md#Rotation:0"
-    case = _case()
+    case = _case(k=1)
     trace = _trace(
         ranking=["eval/guide/other.md#Overview:0"],
         candidates=["eval/guide/other.md#Overview:0", identity],
@@ -88,6 +95,34 @@ def test_analyze_trace_reports_relevant_identity_lost_after_fusion_topk():
             "identity": identity,
             "evidence": {
                 "candidate_rank": 2,
+                "k": 1,
+                "ranking_count": 1,
+                "relevance_grade": 3,
+            },
+        },
+    ]
+
+
+def test_analyze_trace_reports_lost_topk_when_rerank_not_applied():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case(k=3)
+    trace = _trace(
+        ranking=["eval/guide/other.md#Overview:0"],
+        candidates=["eval/guide/other.md#Overview:0", identity],
+        rerank={"applied": False},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "lost_after_fusion_topk",
+            "severity": "medium",
+            "identity": identity,
+            "evidence": {
+                "candidate_rank": 2,
+                "k": 3,
                 "ranking_count": 1,
                 "relevance_grade": 3,
             },
@@ -162,6 +197,71 @@ def test_analyze_trace_reports_rerank_worsened_order_only_when_applied():
     assert analyze_trace(case, disabled_trace) == []
 
 
+def test_analyze_trace_reports_rerank_removal_for_fusion_topk_relevant():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case(k=3)
+    trace = _trace(
+        ranking=["eval/guide/other.md#Overview:0"],
+        candidates=[identity, "eval/guide/other.md#Overview:0"],
+        rerank={"applied": True, "scored_count": 2},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "rerank_worsened_order",
+            "severity": "medium",
+            "identity": identity,
+            "evidence": {
+                "fusion_best_rank": 1,
+                "ranking_best_rank": None,
+                "ranking_identity": None,
+                "rerank": {"applied": True, "scored_count": 2},
+            },
+        },
+    ]
+
+
+def test_analyze_trace_keeps_applied_rerank_out_of_fusion_topk_loss():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case(k=1)
+    trace = _trace(
+        ranking=["eval/guide/other.md#Overview:0"],
+        candidates=["eval/guide/other.md#Overview:0", identity],
+        rerank={"applied": True, "scored_count": 1},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "lost_after_fusion_topk",
+            "severity": "medium",
+            "identity": identity,
+            "evidence": {
+                "candidate_rank": 2,
+                "k": 1,
+                "ranking_count": 1,
+                "relevance_grade": 3,
+            },
+        },
+    ]
+
+
+def test_analyze_trace_returns_no_findings_without_relevance():
+    case = _case(relevant={})
+    trace = _trace(
+        ranking=[],
+        relevant=case.relevant,
+        candidates=[],
+    )
+
+    assert analyze_trace(case, trace) == []
+
+
 def test_analyze_trace_reports_unknown_quality_loss_when_unexplained():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case()
@@ -183,7 +283,7 @@ def test_analyze_trace_reports_unknown_quality_loss_when_unexplained():
             "identity": identity,
             "evidence": {
                 "ranking_count": 0,
-                "candidate_count": 0,
+                "candidate_count": None,
                 "selected_relevant_count": 0,
                 "relevance_grade": 3,
             },
