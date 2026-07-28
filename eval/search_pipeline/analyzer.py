@@ -123,8 +123,10 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
                 and candidate_ranks[identity] <= case.k
                 and (
                     hydration.get("requested", 0) <= 0
-                    or not has_hydrated_identity_evidence
-                    or identity in hydrated_set
+                    or (
+                        has_hydrated_identity_evidence
+                        and identity in hydrated_set
+                    )
                 )
             ):
                 fusion_relevant.append(identity)

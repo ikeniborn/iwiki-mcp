@@ -376,6 +376,37 @@ def test_analyze_trace_dedupes_duplicate_candidate_identities_for_rerank():
     ]
 
 
+def test_analyze_trace_does_not_blame_rerank_without_hydrated_identity_evidence():
+    identity = "eval/guide/auth.md#Rotation:0"
+    noise = "eval/guide/other.md#Overview:0"
+    case = _case(k=3)
+    trace = _trace(
+        ranking=[noise],
+        candidates=[identity, noise],
+        hydrated=[],
+        hydration_requested=1,
+        rerank={"applied": True, "scored_count": 1},
+    )
+    del trace["stages"]["hydration"]["hydrated_identities"]
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "unknown_quality_loss",
+            "severity": "low",
+            "identity": identity,
+            "evidence": {
+                "ranking_count": 1,
+                "candidate_count": 2,
+                "selected_relevant_count": 0,
+                "relevance_grade": 3,
+            },
+        },
+    ]
+
+
 def test_analyze_trace_does_not_blame_rerank_for_unhydrated_relevant():
     identity = "eval/guide/auth.md#Rotation:0"
     other = "eval/guide/other.md#Overview:0"
