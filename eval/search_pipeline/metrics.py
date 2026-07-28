@@ -5,9 +5,6 @@ import math
 from .fixtures import BenchmarkCase
 
 
-_NDCG_GAIN_EXPONENT = 0.862171454732692
-
-
 def identity(result: dict) -> str:
     return (
         f"{result['domain']}/{result['file']}#"
@@ -30,7 +27,7 @@ def mrr_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
 
 def ndcg_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
     def gain(grade: int) -> float:
-        return grade ** _NDCG_GAIN_EXPONENT if grade > 0 else 0.0
+        return 2 ** grade - 1
 
     def dcg(items: list[str]) -> float:
         return sum(

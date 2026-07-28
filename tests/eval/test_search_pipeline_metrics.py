@@ -43,7 +43,7 @@ def test_quality_metrics_use_case_relevance():
 
     assert recall_at_k(ranking, case, 2) == 1.0
     assert mrr_at_k(ranking, case, 3) == 1.0
-    assert ndcg_at_k(ranking, case, 3) == pytest.approx(0.834017, rel=1e-6)
+    assert ndcg_at_k(ranking, case, 3) == pytest.approx(0.730929, rel=1e-6)
     assert intent_coverage_at_k(ranking, case, 2) == 0.5
 
 
