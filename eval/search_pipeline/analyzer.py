@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .fixtures import BenchmarkCase
+from .metrics import ndcg_at_k
 
 
 _SEVERITY_WEIGHT = {
@@ -112,7 +115,14 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
                 },
             })
 
-    if has_candidate_evidence and rerank.get("applied"):
+    metric_case = replace(case, relevant=relevant)
+    fusion_ndcg = ndcg_at_k(candidates, metric_case, case.k)
+    ranking_ndcg = ndcg_at_k(ranking, metric_case, case.k)
+    if (
+        has_candidate_evidence
+        and rerank.get("applied")
+        and ranking_ndcg < fusion_ndcg
+    ):
         fusion_relevant = []
         seen_relevant = set()
         for identity in candidates:
@@ -143,13 +153,16 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
                     "evidence": {
                         "fusion_rank": fusion_rank,
                         "ranking_rank": ranking_rank,
+                        "fusion_ndcg_at_k": round(fusion_ndcg, 6),
+                        "ranking_ndcg_at_k": round(ranking_ndcg, 6),
                         "rerank": rerank,
                     },
                 })
 
     selected_relevant = set(relevant) & ranking_set
-    if not selected_relevant and not findings:
-        for identity, grade in sorted(relevant.items()):
+    finding_identities = {finding["identity"] for finding in findings}
+    for identity, grade in sorted(relevant.items()):
+        if identity not in ranking_set and identity not in finding_identities:
             findings.append({
                 "case_id": case.case_id,
                 "class": "unknown_quality_loss",
@@ -160,7 +173,7 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
                     "candidate_count": (
                         len(candidates) if has_candidate_evidence else None
                     ),
-                    "selected_relevant_count": 0,
+                    "selected_relevant_count": len(selected_relevant),
                     "relevance_grade": grade,
                 },
             })

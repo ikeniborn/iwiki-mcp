@@ -158,6 +158,48 @@ def test_analyze_trace_reports_unknown_when_topk_loss_is_not_evidenced():
     ]
 
 
+def test_analyze_trace_reports_unknown_per_identity_in_mixed_cause_trace():
+    lost = "eval/guide/auth.md#Rotation:0"
+    unknown = "eval/guide/backup.md#Rotation:0"
+    noise = "eval/guide/other.md#Overview:0"
+    case = _case(relevant={lost: 3, unknown: 2}, k=2)
+    trace = _trace(
+        ranking=[noise],
+        relevant=case.relevant,
+        candidates=[noise, unknown, lost],
+        rerank={"applied": False},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "lost_after_fusion_topk",
+            "severity": "medium",
+            "identity": lost,
+            "evidence": {
+                "candidate_rank": 3,
+                "k": 2,
+                "ranking_count": 1,
+                "relevance_grade": 3,
+            },
+        },
+        {
+            "case_id": "case-a",
+            "class": "unknown_quality_loss",
+            "severity": "low",
+            "identity": unknown,
+            "evidence": {
+                "ranking_count": 1,
+                "candidate_count": 3,
+                "selected_relevant_count": 0,
+                "relevance_grade": 2,
+            },
+        },
+    ]
+
+
 def test_analyze_trace_reports_hydration_drop_only_when_requested():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case()
@@ -257,11 +299,27 @@ def test_analyze_trace_reports_rerank_worsened_order_only_when_applied():
             "evidence": {
                 "fusion_rank": 1,
                 "ranking_rank": 3,
+                "fusion_ndcg_at_k": 1.0,
+                "ranking_ndcg_at_k": 0.212845,
                 "rerank": {"applied": True, "scored_count": 3},
             },
         },
     ]
     assert analyze_trace(case, disabled_trace) == []
+
+
+def test_analyze_trace_skips_rerank_loss_when_graded_quality_improves():
+    lower = "eval/guide/auth.md#Rotation:0"
+    higher = "eval/guide/backup.md#Rotation:0"
+    case = _case(relevant={lower: 2, higher: 3}, k=2)
+    trace = _trace(
+        ranking=[higher, lower],
+        relevant=case.relevant,
+        candidates=[lower, higher],
+        rerank={"applied": True, "scored_count": 2},
+    )
+
+    assert analyze_trace(case, trace) == []
 
 
 def test_analyze_trace_reports_rerank_removal_for_fusion_topk_relevant():
@@ -284,6 +342,8 @@ def test_analyze_trace_reports_rerank_removal_for_fusion_topk_relevant():
             "evidence": {
                 "fusion_rank": 1,
                 "ranking_rank": None,
+                "fusion_ndcg_at_k": 1.0,
+                "ranking_ndcg_at_k": 0.0,
                 "rerank": {"applied": True, "scored_count": 2},
             },
         },
@@ -312,6 +372,8 @@ def test_analyze_trace_tracks_best_fusion_relevant_identity_for_rerank():
             "evidence": {
                 "fusion_rank": 1,
                 "ranking_rank": None,
+                "fusion_ndcg_at_k": 1.0,
+                "ranking_ndcg_at_k": 0.337352,
                 "rerank": {"applied": True, "scored_count": 2},
             },
         },
@@ -343,6 +405,8 @@ def test_analyze_trace_reports_rerank_loss_for_each_worsened_relevant():
             "evidence": {
                 "fusion_rank": 2,
                 "ranking_rank": None,
+                "fusion_ndcg_at_k": 1.0,
+                "ranking_ndcg_at_k": 0.787155,
                 "rerank": {"applied": True, "scored_count": 3},
             },
         },
@@ -370,6 +434,8 @@ def test_analyze_trace_dedupes_duplicate_candidate_identities_for_rerank():
             "evidence": {
                 "fusion_rank": 1,
                 "ranking_rank": None,
+                "fusion_ndcg_at_k": 1.0,
+                "ranking_ndcg_at_k": 0.0,
                 "rerank": {"applied": True, "scored_count": 3},
             },
         },
