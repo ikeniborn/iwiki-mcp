@@ -13,11 +13,15 @@ def identity(result: dict) -> str:
 
 
 def recall_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
+    if k <= 0:
+        return 0.0
     selected = set(ranking[:k])
     return 1.0 if selected & set(case.relevant) else 0.0
 
 
 def mrr_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
+    if k <= 0:
+        return 0.0
     relevant = set(case.relevant)
     for rank, item in enumerate(ranking[:k], 1):
         if item in relevant:
@@ -26,6 +30,9 @@ def mrr_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
 
 
 def ndcg_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
+    if k <= 0:
+        return 0.0
+
     def gain(grade: int) -> float:
         return 2 ** grade - 1
 
@@ -44,6 +51,8 @@ def ndcg_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
 
 
 def intent_coverage_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
+    if k <= 0:
+        return 0.0
     if not case.intents:
         return 0.0
     selected = set(ranking[:k])

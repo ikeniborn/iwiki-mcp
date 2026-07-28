@@ -47,6 +47,45 @@ def test_quality_metrics_use_case_relevance():
     assert intent_coverage_at_k(ranking, case, 2) == 0.5
 
 
+def test_quality_metrics_return_zero_without_relevance():
+    case = BenchmarkCase(
+        case_id="empty",
+        domain="iwiki-mcp",
+        query="empty relevance",
+        relevant={},
+        intents={"missing": ["iwiki-mcp/missing.md#Missing:0"]},
+    )
+    ranking = [
+        "iwiki-mcp/retrieval.md#Hybrid search:0",
+        "iwiki-mcp/indexing.md#Configuration:0",
+    ]
+
+    assert recall_at_k(ranking, case, 1) == 0.0
+    assert mrr_at_k(ranking, case, 1) == 0.0
+    assert ndcg_at_k(ranking, case, 1) == 0.0
+    assert intent_coverage_at_k(ranking, case, 1) == 0.0
+
+
+def test_cutoff_metrics_return_zero_for_non_positive_k():
+    case = BenchmarkCase(
+        case_id="cutoff",
+        domain="iwiki-mcp",
+        query="non positive cutoff",
+        relevant={"iwiki-mcp/retrieval.md#Hybrid search:0": 3},
+        intents={"retrieval": ["iwiki-mcp/retrieval.md#Hybrid search:0"]},
+    )
+    ranking = [
+        "iwiki-mcp/retrieval.md#Hybrid search:0",
+        "iwiki-mcp/indexing.md#Configuration:0",
+    ]
+
+    for k in (0, -1):
+        assert recall_at_k(ranking, case, k) == 0.0
+        assert mrr_at_k(ranking, case, k) == 0.0
+        assert ndcg_at_k(ranking, case, k) == 0.0
+        assert intent_coverage_at_k(ranking, case, k) == 0.0
+
+
 def test_source_mix_counts_hit_and_source_fields():
     mix = source_mix([
         {"hit": "both", "source": "seed"},
@@ -57,6 +96,19 @@ def test_source_mix_counts_hit_and_source_fields():
     assert mix == {
         "hit": {"both": 1, "lexical": 1, "semantic": 1},
         "source": {"graph": 1, "lexical": 1, "seed": 1},
+    }
+
+
+def test_source_mix_uses_unknown_for_missing_fields():
+    mix = source_mix([
+        {"hit": "lexical"},
+        {"source": "graph"},
+        {},
+    ])
+
+    assert mix == {
+        "hit": {"lexical": 1, "unknown": 2},
+        "source": {"graph": 1, "unknown": 2},
     }
 
 
