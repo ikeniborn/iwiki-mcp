@@ -275,3 +275,160 @@ def test_trace_query_merges_applied_rerank_with_unscored_fused_candidates(
     assert "_scored_count" not in rerank_metadata
     assert rerank_metadata["scored_count"] == 1
     assert result_identities == expected[:case.k]
+
+
+def test_summarize_trace_computes_quality_and_latency_metrics():
+    from eval.search_pipeline.runner import summarize_trace
+
+    case = BenchmarkCase(
+        case_id="offline-symbol",
+        domain="eval",
+        query="refresh_token credentials",
+        relevant={
+            "eval/guide/auth.md#Rotation:0": 3,
+            "eval/guide/backup.md#Rotation:0": 2,
+        },
+        intents={
+            "auth": ["eval/guide/auth.md#Rotation:0"],
+            "backup": ["eval/guide/backup.md#Rotation:0"],
+        },
+        k=2,
+    )
+    trace = {
+        "case_id": case.case_id,
+        "mode": "hybrid",
+        "k": 2,
+        "latency": {"total_ms": 12.3456},
+        "metrics_input": {
+            "ranking": [
+                "eval/guide/noise.md#Other:0",
+                "eval/guide/auth.md#Rotation:0",
+            ],
+        },
+    }
+
+    summary = summarize_trace(case, trace)
+
+    assert summary == {
+        "case_id": "offline-symbol",
+        "mode": "hybrid",
+        "k": 2,
+        "recall_at_k": 0.5,
+        "mrr_at_k": 0.5,
+        "ndcg_at_k": pytest.approx(0.496639, rel=1e-6),
+        "intent_coverage_at_k": 0.5,
+        "latency_ms": 12.346,
+    }
+
+
+def test_rollup_means_quality_metrics_and_empty_defaults_to_zero():
+    from eval.search_pipeline.runner import _rollup
+
+    assert _rollup([]) == {
+        "case_count": 0,
+        "recall_at_k": 0.0,
+        "mrr_at_k": 0.0,
+        "ndcg_at_k": 0.0,
+        "intent_coverage_at_k": 0.0,
+        "latency_ms": 0.0,
+    }
+
+    summaries = [
+        {
+            "recall_at_k": 1.0,
+            "mrr_at_k": 0.5,
+            "ndcg_at_k": 0.25,
+            "intent_coverage_at_k": 1.0,
+            "latency_ms": 10.0,
+        },
+        {
+            "recall_at_k": 0.0,
+            "mrr_at_k": 1.0,
+            "ndcg_at_k": 0.75,
+            "intent_coverage_at_k": 0.0,
+            "latency_ms": 20.0,
+        },
+    ]
+
+    assert _rollup(summaries) == {
+        "case_count": 2,
+        "recall_at_k": 0.5,
+        "mrr_at_k": 0.75,
+        "ndcg_at_k": 0.5,
+        "intent_coverage_at_k": 0.5,
+        "latency_ms": 15.0,
+    }
+
+
+def test_run_offline_traces_aggregates_evidence_without_rerank(monkeypatch):
+    from eval.search_pipeline import runner
+
+    calls = []
+    cases = [
+        BenchmarkCase(
+            case_id="case-a",
+            domain="eval",
+            query="alpha",
+            relevant={"eval/a.md#A:0": 3},
+            intents={"a": ["eval/a.md#A:0"]},
+            k=2,
+        ),
+        BenchmarkCase(
+            case_id="case-b",
+            domain="eval",
+            query="beta",
+            relevant={"eval/b.md#B:0": 3},
+            intents={"b": ["eval/b.md#B:0"]},
+            k=2,
+        ),
+    ]
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        calls.append((cfg, base, case.case_id, mode, rerank_enabled))
+        ranking = [next(iter(case.relevant))]
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0 if case.case_id == "case-a" else 3.0},
+            "stages": {"fusion": {"candidate_identities": ranking}},
+            "results": [],
+            "metrics_input": {
+                "ranking": ranking,
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+
+    evidence = runner.run_offline_traces(
+        cfg={"safe": True},
+        base="/tmp/wiki",
+        cases=cases,
+        modes=["lexical", "hybrid"],
+    )
+
+    assert evidence["kind"] == "offline"
+    assert isinstance(evidence["timestamp"], str)
+    assert evidence["config"] == {"safe": True}
+    assert len(calls) == 4
+    assert {call[4] for call in calls} == {False}
+    assert [summary["case_id"] for summary in evidence["summary"]["cases"]] == [
+        "case-a",
+        "case-a",
+        "case-b",
+        "case-b",
+    ]
+    assert evidence["summary"]["rollup"] == {
+        "case_count": 4,
+        "recall_at_k": 1.0,
+        "mrr_at_k": 1.0,
+        "ndcg_at_k": 1.0,
+        "intent_coverage_at_k": 1.0,
+        "latency_ms": 2.0,
+    }
+    assert len(evidence["traces"]) == 4
+    assert evidence["backlog"] == []
