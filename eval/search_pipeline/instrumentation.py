@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
 from time import perf_counter
 
@@ -43,6 +44,16 @@ def _ensure_read_only_store_layout(base: str, domain: str) -> None:
             "benchmark refuses legacy store layout because it would require "
             f"migration writes: {legacy_store_dir}"
         )
+
+
+@contextmanager
+def _without_store_migration():
+    original = retrieval.migrate_store_location
+    retrieval.migrate_store_location = lambda *args, **kwargs: None
+    try:
+        yield
+    finally:
+        retrieval.migrate_store_location = original
 
 
 def _public_identity(candidate: dict) -> str:
@@ -109,19 +120,20 @@ def trace_query(
 
     start = perf_counter()
     signals: dict[str, list[dict]] = {}
-    domain_signals = retrieval._domain_signals(
-        cfg,
-        base,
-        domain,
-        case.query,
-        query_vec,
-        mode,
-        limit,
-        cfg.score_threshold,
-        None,
-        None,
-        page_cache,
-    )
+    with _without_store_migration():
+        domain_signals = retrieval._domain_signals(
+            cfg,
+            base,
+            domain,
+            case.query,
+            query_vec,
+            mode,
+            limit,
+            cfg.score_threshold,
+            None,
+            None,
+            page_cache,
+        )
     for name, hits in domain_signals.items():
         signals.setdefault(name, []).extend(dict(hit) for hit in hits)
     for hits in signals.values():
@@ -142,12 +154,13 @@ def trace_query(
     stage_ms["fusion_ms"] = _elapsed_ms(start)
 
     start = perf_counter()
-    hydrated = retrieval.hydrate_candidates(
-        cfg,
-        base,
-        [dict(candidate) for candidate in fused],
-        page_cache,
-    )
+    with _without_store_migration():
+        hydrated = retrieval.hydrate_candidates(
+            cfg,
+            base,
+            [dict(candidate) for candidate in fused],
+            page_cache,
+        )
     hydrated_public = [_public_projection(candidate) for candidate in hydrated]
     stage_ms["hydration_ms"] = _elapsed_ms(start)
 

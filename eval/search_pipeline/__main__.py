@@ -119,7 +119,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with env_context:
-            cfg = Config.load()
+            try:
+                cfg = Config.load()
+            except ValueError:
+                print(
+                    "error: invalid numeric configuration; check IWIKI_* "
+                    "numeric environment variables.",
+                    file=sys.stderr,
+                )
+                return 2
             evidence = run_live_traces(
                 cfg,
                 args.domain,
@@ -132,8 +140,11 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, BaseError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except ValueError:
+        print(
+            "error: invalid benchmark input; check CLI arguments and cases.",
+            file=sys.stderr,
+        )
         return 2
 
     for label, path in sorted(paths.items()):

@@ -683,6 +683,27 @@ def test_cli_without_live_config_exits_two_without_secret_values(
     assert "secret" not in captured.err.lower()
 
 
+def test_cli_sanitizes_env_value_parse_errors(tmp_path, monkeypatch, capsys):
+    from eval.search_pipeline import __main__ as cli
+
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("IWIKI_LLM_KEY", "test-key")
+    monkeypatch.setenv("IWIKI_TOP_K", "LEAK_SENTINEL_123")
+    monkeypatch.setattr(
+        cli,
+        "write_reports",
+        lambda *args, **kwargs: pytest.fail("write_reports must not be called"),
+    )
+
+    code = cli.main(["--out", str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "invalid numeric configuration" in captured.err
+    assert "IWIKI_" in captured.err
+    assert "LEAK_SENTINEL_123" not in captured.err
+
+
 def test_cli_invalid_mode_exits_two_before_loading_config(tmp_path, monkeypatch):
     from eval.search_pipeline import __main__ as cli
 
@@ -964,3 +985,30 @@ def test_run_live_traces_returns_empty_live_evidence_for_unmatched_domain(
     assert evidence["traces"] == []
     assert evidence["findings"] == []
     assert evidence["backlog"] == []
+
+
+def test_run_live_traces_suppresses_store_migration_on_read_path(
+    tmp_path,
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+    from iwiki_mcp import retrieval
+
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
+
+    def fail_migration(*args, **kwargs):
+        raise AssertionError("benchmark read path must not migrate store")
+
+    monkeypatch.setattr(retrieval, "migrate_store_location", fail_migration)
+
+    evidence = runner.run_live_traces(
+        cfg,
+        case.domain,
+        ["hybrid"],
+        [case],
+        base=base,
+    )
+
+    assert evidence["kind"] == "live"
+    assert evidence["summary"]["rollup"]["case_count"] == 1
+    assert evidence["traces"][0]["case_id"] == case.case_id
