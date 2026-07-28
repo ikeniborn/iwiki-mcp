@@ -1,7 +1,7 @@
 ---
 review:
-  spec_hash: c9090ef72257a2e1
-  last_run: 2026-07-28
+  spec_hash: 09970ba1b952343e
+  last_run: 2026-07-29
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -14,7 +14,7 @@ chain:
 
 # Design: search-pipeline-benchmark
 
-**Date:** 2026-07-28
+**Date:** 2026-07-29
 **Status:** approved
 
 ## Acceptance (from intent)
@@ -22,8 +22,9 @@ chain:
 - Per-stage metrics remain visible for every involved search pipeline stage.
 - Bottlenecks and algorithm changes are supported by concrete evidence.
 - Reports retain a ranked, evidence-backed backlog of unresolved bottlenecks.
-- Search modes, fusion settings, and rerank candidate budgets can be compared; sanitized
-  chunk and model fingerprints preserve cross-run comparison of those settings.
+- Search modes and the four approved fusion families can be compared; sanitized chunk
+  and model fingerprints preserve cross-run comparison while rerank-budget evaluation
+  remains explicitly deferred.
 - API keys and provider details remain safe: no key is persisted, printed, or written
   into benchmark artifacts.
 - The public `wiki_search` API and response shape remain stable.
@@ -33,221 +34,204 @@ chain:
 
 ## Evidence And Problem Statement
 
-The live benchmark completed nine traces over three labeled cases in `hybrid`,
-`lexical`, and `semantic` modes. Without reranking, lexical produced mean nDCG@8
-`0.873` at `25 ms`, hybrid produced `0.829` at `182 ms`, and semantic produced
-`0.358` at `170 ms`. Semantic Recall@8 was `0.722`.
+The first twelve-case Pareto run completed 36 rerank-disabled traces across `hybrid`,
+`lexical`, and `semantic`. It measured Recall@8 `0.699074`, MRR@8 `0.531779`, nDCG@8
+`0.477597`, intent coverage `0.712963`, and mean latency `130.753306 ms`. The backlog
+contained 19 `lost_after_fusion_topk` findings.
 
-The missing semantic results were present in valid chunks, the current index, semantic
-signals, and the 32-candidate fused pool. Equal-weight RRF placed the relevant sections
-at candidate ranks 22 and 26, outside final top-8. Broad page and graph signals emit
-every section from discovered pages and can outvote high-ranked direct section matches.
-No evidence identifies chunking, stale records, embedding dimensions, or hydration as a
-quality bottleneck.
+All eight tested page/graph weight maps failed the fixed quality gates. Every map
+introduced at least one new top-k fusion loss, and four maps also failed to recover the
+confirmed losses at fused ranks 22 and 26. The result was
+`needs_work: no_passing_weight_map`; the rerank batch matrix did not run and production
+fusion and rerank constants remained unchanged.
 
-Reranking raised aggregate nDCG@8 from `0.687` to `0.982` and brought Recall@8, MRR@8,
-and intent coverage to `1.0`, but added approximately `1.1 s` per query. The server sends
-up to 32 hydrated documents while the provider returns final top-k scores. The design
-must improve preliminary fusion first, then reduce the rerank document batch only when
-quality evidence permits it.
+This evidence rejects global suppression of page and graph signals. It does not yet
+distinguish four narrower explanations: RRF rank smoothing may be too strong; direct
+section evidence may need bounded positive support; direct candidates may need a small
+top-k reserve; or correlated page/graph fan-out may overcount sections from one page.
+The next experiment compares those explanations without changing production.
+
+No current evidence identifies chunk creation, stale index records, embedding
+dimensions, or hydration as the cause of the confirmed rank-22/rank-26 losses. Those
+components remain observable in the report but are not changed by this experiment.
 
 ## Scope
 
-This follow-up applies one Pareto strategy: weighted reciprocal rank fusion followed by
-a fixed, quality-gated rerank candidate budget. It extends the existing benchmark only
-as needed to select and verify those two internal constants.
-
-The user explicitly approved this production follow-up under the existing intent's
-proposal-first autonomy rule and requested that no new intent artifact be created.
+This cycle is evidence-only. It replays the four approved fusion families against the
+already captured complete signal rankings, selects at most one replay candidate, and
+performs one rerank-disabled live confirmation only if replay passes. It does not apply
+the candidate to production.
 
 In scope:
 
-- expand the labeled live set from three to twelve compact, reviewed cases;
-- replay captured signal rankings through candidate RRF weights;
-- select fixed internal weights for direct section, page, and graph signals;
-- evaluate rerank batches of 16, 24, and 32 candidates after fusion calibration;
-- apply the smallest batch that passes all quality gates;
-- rerun live A/B evidence with rerank enabled and disabled.
+- compare RRF constants `10`, `20`, and `40` against baseline `60`;
+- compare direct-section multipliers `1.25`, `1.5`, and `2.0`;
+- compare direct-candidate quotas `1`, `2`, and `3` within final top-8;
+- compare broad-signal per-page fan-out caps `1`, `2`, and `4`;
+- test at most six pairwise combinations formed from passing family winners;
+- preserve deterministic JSON, Markdown, and HTML evidence for every acceptance or
+  rejection reason;
+- run a single live confirmation of the replay winner across all twelve cases and three
+  modes.
 
 Out of scope:
 
-- query classification or dynamic routing;
-- public weight, mode-policy, or candidate-budget configuration;
-- changes to chunking, embeddings, model selection, index schema, or result shape;
+- production retrieval or server constants;
+- rerank candidate-budget evaluation;
+- query classification, dynamic routing, or learned fusion;
+- changes to chunks, embeddings, models, index schema, hydration, or result shape;
 - generated-answer evaluation;
-- writes, migrations, or reindexing during benchmark execution.
+- wiki writes, migrations, or reindexing during benchmark execution.
 
-## Production Design
+## Candidate Families
 
-### Weighted RRF
+### RRF Rank Constant
 
-`engine.fusion.fuse_ranked` accepts an optional internal signal-weight mapping. Each
-unique signal contribution becomes `weight / (60 + rank)`. Missing weights default to
-`1.0`, preserving existing behavior for callers that do not supply a mapping.
+Generic RRF contribution becomes `1 / (rrf_k + rank)`. Baseline remains `rrf_k=60`.
+Replay tests `10`, `20`, and `40`; smaller values make rank differences within each
+signal more important. Identity merging, duplicate suppression, deterministic tie
+ordering, and candidate limits remain unchanged.
 
-`retrieval.prepare_read_candidates` supplies one fixed selected mapping. Signals belong
-to three evidence classes:
+### Direct-Section Multiplier
 
-- direct section evidence: `semantic_chunk`, `lexical_section`;
-- page evidence: `semantic_page`, `lexical_page`;
-- discovery evidence: `graph_page`.
+With `rrf_k=60`, contributions from `semantic_chunk` and `lexical_section` use a fixed
+multiplier from `{1.25, 1.5, 2.0}`. All page and graph contributions remain `1.0`.
+This is the positive counterpart to the rejected page/graph suppression and preserves
+discovery evidence at its baseline strength.
 
-Direct evidence has fixed weight `1.0`. The eval selection procedure chooses page weight
-from `{0.025, 0.05, 0.1}` and graph weight from `{0.01, 0.025, 0.05}`, constrained by
-`graph <= page`. Equal-weight RRF remains the explicit baseline. This eight-mapping grid
-is intentionally small and includes mappings that already eliminate the two observed
-losses in replay; the twelve-case corpus determines whether they generalize.
+### Direct-Candidate Quota
 
-### Bounded Rerank Batch
+Replay builds both the ordinary baseline order and a direct-only RRF order from
+`semantic_chunk` and `lexical_section`. For quota `q` in `{1, 2, 3}`, the final top-8
+must contain the leading `q` unique direct identities when that many exist. Missing
+reserved identities replace the lowest baseline-ranked non-reserved identities. The
+retained baseline candidates keep their relative order; promoted direct candidates keep
+their direct-only order. Candidates below top-8 remain in baseline order for evidence
+and fail-soft comparison.
 
-Retrieval continues to produce the 32-candidate safety pool. The selected rerank batch
-limit applies only before hydration/provider submission; it does not shrink preliminary
-retrieval evidence or fail-soft fallback coverage.
+### Correlated Fan-Out Cap
 
-For the benchmark's final `k=8`, `server.wiki_search` hydrates the selected leading 16,
-24, or 32 candidates for reranking. Production uses
-`max(requested_top_k, selected_budget)` so an explicit public `k` above the fixed budget
-does not reduce provider coverage. Successful provider scores remain first, and all
-unscored, stale, or unhydrated preliminary candidates continue in original order before
-final top-k. A reranker failure returns the unchanged preliminary order and current
-sanitized metadata.
+Before ordinary RRF, each broad signal (`semantic_page`, `lexical_page`, `graph_page`)
+retains at most `1`, `2`, or `4` identities per `(domain, file)`, in original signal
+rank order. Direct section signals are not capped. Caps apply independently per broad
+signal so one signal cannot erase evidence from another.
 
-No new public argument, response field, or environment variable is introduced.
+## Bounded Combination Procedure
 
-## Selection Procedure
+Stage A evaluates each non-baseline parameter independently, for twelve replay
+candidates total. Each family winner is the highest-quality candidate from that family
+that passes every gate. A family with no passing member contributes no winner.
 
-### Labeled Corpus
+Stage B evaluates pairwise combinations of passing family winners only. Four family
+winners produce at most six unordered pairs. It does not evaluate triples, a full
+Cartesian grid, query-specific parameters, or parameters selected from rejected family
+members. This keeps the search space inspectable and limits overfitting to twelve cases.
 
-`eval/search_pipeline/fixtures.py` contains exactly twelve reviewed cases covering:
+The final replay winner is selected across passing Stage A candidates and Stage B pairs:
 
-- exact identifiers and API names;
-- semantic paraphrases with little lexical overlap;
-- multi-intent requests;
-- long or repeated-heading sections;
-- graph-adjacent distractors;
-- competing page-level and direct-section evidence.
+1. maximize mean nDCG@8 across all cases and modes;
+2. break ties by mean MRR@8;
+3. then prefer fewer transformations;
+4. then use stable family and numeric parameter ordering.
 
-Every case declares graded relevant identities and intent groups. Cases are deterministic
-inputs; live provider output remains non-deterministic evidence.
+If no candidate passes, selection returns `needs_work: no_passing_fusion_candidate`.
 
-### Fusion Weight Selection
+## Quality Gates
 
-The eval layer replays recorded per-signal identity rankings through a bounded weight
-grid. The direct weight remains `1.0`; only the bounded page and graph values defined
-above vary. Selection is
-lexicographic and trust-first:
+Every candidate is compared with equal-weight `rrf_k=60` replay over the exact same
+complete case-mode matrix. A candidate is rejected when any condition holds:
 
-1. reject mappings that reduce Recall@8 or intent coverage versus equal-weight RRF;
-2. reject mappings that reduce mean nDCG@8 by more than `0.01` in any compared mode;
-3. reject mappings that introduce a new lost-after-fusion finding;
-4. maximize mean nDCG@8 across all cases and modes;
-5. break ties by MRR@8, then by the mapping closest to equal weights.
+- Recall@8 decreases in any compared mode;
+- intent coverage decreases in any compared mode;
+- mean nDCG@8 decreases by more than `0.01` in any compared mode;
+- any new case-level `lost_after_fusion_topk` finding appears;
+- either confirmed rank-22 or rank-26 loss is not recovered in fixed final top-8;
+- replay evidence is missing, duplicated, malformed, or contains unknown cases, modes,
+  signals, identities, ranks, or ordinals.
 
-The selected mapping must also eliminate the two benchmark-confirmed top-k losses. If no
-mapping passes, production fusion remains unchanged and the result is reported as
-`needs_work` rather than weakening a gate.
+MRR@8 is a ranking objective and tie-breaker, not a regression gate. Gates are not
+weakened when no candidate passes.
 
-### Rerank Batch Selection
+## Replay And Live Data Flow
 
-After the fusion mapping passes, live runs compare batches 16, 24, and 32 in the default
-hybrid mode using the same queries, provider configuration, and final `k`. Each batch
-gets one excluded warm-up followed by two measured passes over all twelve cases, yielding
-24 latency samples. Select the smallest batch satisfying:
+1. Load the sanitized signal rankings from a complete baseline evidence file.
+2. Validate exact parity with the twelve reviewed cases and three required modes.
+3. Replay Stage A and record metrics, findings, and rejection reasons.
+4. Replay at most six Stage B pairs from passing family winners.
+5. Select one deterministic winner or return `needs_work`.
+6. When a winner exists, capture a fresh rerank-disabled live baseline and winner run
+   over the same twelve cases and modes.
+7. Apply the same quality gates to live identities and metrics.
+8. Emit `validated_candidate` only if replay and live gates both pass. Otherwise emit
+   `needs_work`; production remains unchanged in both outcomes.
 
-- Recall@8 and intent coverage do not decrease from batch 32;
-- mean nDCG@8 decreases by no more than `0.01`;
-- no new rerank-worsened-order or missing-candidate finding appears;
-- p95 rerank latency improves by at least `25%` versus batch 32.
+Live confirmation may vary because embeddings/provider execution is non-deterministic.
+Replay over a fixed evidence file must be byte-stable apart from explicitly excluded
+timestamps and output paths.
 
-If neither 16 nor 24 passes, production keeps 32. This preserves trust but leaves the
-latency bottleneck unresolved, so the latency part of the final result remains
-`needs_work`; the implementation cannot claim the complete follow-up as accepted.
+## Reports And Safety
 
-## Data Flow
+JSON, Markdown, and standalone HTML report:
 
-1. Live benchmark tracing records signal identity order, the fused pool, final ranking,
-   quality metrics, and per-stage latency without wiki writes.
-2. Offline replay applies the bounded fusion weight grid to recorded signal orders and
-   emits one deterministic winning mapping or no-change result.
-3. The selected mapping is applied to production candidate fusion and verified by unit
-   and integration tests.
-4. Live rerank runs compare candidate batches 16, 24, and 32 after the fusion fix.
-5. The smallest passing fixed budget is applied before hydration and provider submission,
-   while an explicit larger `requested_top_k` remains the lower bound.
-6. Final reports compare baseline, fusion-only, and fusion-plus-rerank results.
+- baseline rollups and per-mode quality;
+- all Stage A candidates grouped by family;
+- family winners and all Stage B pairs;
+- metric deltas and exact gate rejection reasons;
+- recovery state for the two confirmed losses;
+- live confirmation results when performed;
+- final status, chosen candidate, and evidence-backed backlog.
 
-## Metrics And Evidence
+Reports contain only sanitized case IDs, query classes, signal names, candidate
+identities, parameters, metrics, counts, findings, and timings. They exclude query text,
+provider URLs, keys, authorization values, raw payloads, raw exceptions, env-file paths,
+and local wiki-base paths.
 
-Quality gates use Recall@8, MRR@8, nDCG@8, intent coverage, and bottleneck findings.
-Latency evidence records embedding, signal, fusion, hydration, rerank, and total timings,
-plus p50 and p95 over each batch setting. Reports include the selected weights and batch
-size, rejected alternatives with gate failures, source mix, hydration counts, and
-sanitized model/config fingerprints. They retain a ranked backlog containing only
-bottlenecks that remain supported by the current evidence.
+The command loads credentials only from current process environment or the existing
+operator-created env file. It does not create, modify, print, copy, or persist that file.
+Replay requires no provider credentials. Both replay and live confirmation remain
+read-only and refuse store layouts that would require migration.
 
-Live evidence must not include provider URLs, keys, authorization data, raw requests,
-raw responses, or local base paths.
+## Error Handling
 
-## Credential And Env Handling
-
-If live benchmark credentials are needed, they come only from an operator-provided env
-file. The operator creates and fills the file outside the tool, then tells the agent it
-is ready. The benchmark may accept the path with `--env-file`, load it at runtime, and
-must not create, commit, print, copy, or include that file in evidence.
-
-The CLI checks that the env file path is not inside the planned evidence output and warns
-if it appears tracked by git. It records only safe presence/config fingerprints: which
-logical providers were enabled, model names when safe to expose, and timing/count data.
-Authorization headers, API keys, raw provider requests, raw provider responses, and raw
-secret-bearing errors are never written.
-
-## Error Handling And Safety
-
-- Missing live configuration produces a controlled error with required variable names but
-  no values.
-- Rerank fallback is recorded as `applied=false` and does not fail the whole benchmark.
-- A failed query/domain case is marked failed while the remaining cases continue.
-- The benchmark does not call wiki write/update/delete/index tools in live mode.
-- Every report labels live measurements as timestamped, non-deterministic evidence.
-- Missing fusion weights default to equal contribution in generic fusion callers.
-  Non-finite or non-positive explicit weights are rejected; production retrieval uses
-  only reviewed module constants.
-- A rerank batch that fails any quality gate cannot become the production constant.
-- Existing descriptor-based path safety, index-hash validation, and fail-soft rerank
-  behavior remain unchanged.
+- Invalid candidate parameters fail before replay and cannot enter reports as passing.
+- Incomplete baseline evidence returns a sanitized `needs_work` decision rather than a
+  partial comparison.
+- A live query failure marks that case-mode sample failed and rejects live validation;
+  remaining samples continue for diagnostic evidence.
+- A candidate implementation exception is reduced to a safe error category; raw error
+  text is not persisted.
+- No replay or live outcome automatically changes production constants.
 
 ## Testing
 
-Unit tests cover weighted RRF math, deterministic ties, missing-weight compatibility,
-weight-grid gate ordering, and rerank-batch selection. Retrieval tests prove direct
-section evidence can outrank broad page/graph fan-out without changing public result
-fields. Server tests prove only `max(requested_top_k, selected_budget)` leading
-candidates are hydrated/submitted while partial, stale, unhydrated, and fail-soft
-candidates preserve preliminary order.
+Unit tests cover each family transformation, boundary values, stable ordering,
+deterministic ties, malformed inputs, Stage A family selection, bounded Stage B pair
+generation, gate ordering, and final tie-breaks. Regression tests prove the existing
+weighted-map selector and ordinary benchmark mode remain compatible.
 
-Benchmark regression tests retain existing metric, report, sanitization, env-file,
-read-only, and bottleneck-classification coverage. The twelve labeled cases are reviewed
-fixtures, not assertions over live provider scores in CI.
+Runner and report tests cover replay-only operation without credentials, conditional
+single-candidate live confirmation, query failure handling, read-only guards, exact
+case-mode parity, deterministic JSON, escaped HTML, and secret/path sanitization. Live
+provider measurements remain evidence artifacts and never become CI assertions.
 
-Final verification includes focused fusion/retrieval/rerank/server/eval tests, the full
-test suite, CLI help, one read-only live A/B matrix, secret scans of reports, and wiki
-documentation/lint after production behavior changes.
+Final verification includes focused eval and fusion tests, the full test suite, CLI
+help, deterministic replay twice against one evidence file, one read-only live
+confirmation when a replay winner exists, report secret scans, and wiki documentation
+and lint updates for shipped benchmark behavior.
 
 ## Acceptance Criteria
 
-- Twelve reviewed cases cover all six named query classes.
-- The selected fixed fusion weights introduce no Recall@8 or intent-coverage regression
-  and no new lost-after-fusion finding versus equal-weight RRF.
-- The confirmed candidates at ranks 22 and 26 enter final top-8 without reranking.
-- Mean nDCG@8 does not decrease by more than `0.01` in any compared mode.
-- A batch of 16 or 24 is applied only when it improves p95 rerank latency by at least
-  `25%` while satisfying every quality gate; otherwise 32 is retained and the latency
-  outcome is reported as `needs_work`.
-- `wiki_search` arguments, public fields, rerank metadata, and fail-soft behavior remain
-  unchanged.
-- Benchmark runs remain read-only and reports contain no keys, provider URLs, raw
-  provider payloads, or local base paths.
-- Chunk defaults, embedding/rerank models, and index schema remain unchanged.
-- Replaying the same captured signal rankings produces identical selected weights,
-  rejection reasons, and deterministic JSON metrics; live timing fields remain
-  timestamped evidence.
+- Exactly twelve Stage A candidates are evaluated from the four fixed families.
+- Stage B evaluates only unordered pairs of passing family winners and never more than
+  six combinations.
+- Every accepted candidate passes all fixed quality gates over the complete 36-trace
+  replay matrix.
+- Replay selection and rejection reasons are deterministic for identical evidence.
+- A live confirmation runs only for one replay winner and cannot validate a candidate
+  when any live quality gate or sample-completeness check fails.
+- Production fusion, rerank budget, public `wiki_search` API, response fields, chunks,
+  models, index schema, and fail-soft behavior remain unchanged.
+- Benchmark runs do not write to the wiki base and reports contain no secrets, provider
+  URLs, raw provider payloads, env-file paths, or local base paths.
+- A passing result reports one `validated_candidate`; a non-passing result reports
+  `needs_work` with exact evidence and does not weaken gates.
