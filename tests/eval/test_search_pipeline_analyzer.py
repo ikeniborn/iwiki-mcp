@@ -191,6 +191,33 @@ def test_analyze_trace_reports_hydration_drop_only_when_requested():
     assert analyze_trace(case, unrequested_trace) == []
 
 
+def test_analyze_trace_does_not_infer_hydration_drop_without_identity_evidence():
+    identity = "eval/guide/auth.md#Rotation:0"
+    case = _case()
+    trace = _trace(
+        ranking=["eval/guide/other.md#Overview:0"],
+        candidates=[identity],
+        hydrated=[],
+        hydration_requested=1,
+    )
+    del trace["stages"]["hydration"]["hydrated_identities"]
+
+    assert analyze_trace(case, trace) == [
+        {
+            "case_id": "case-a",
+            "class": "unknown_quality_loss",
+            "severity": "low",
+            "identity": identity,
+            "evidence": {
+                "ranking_count": 1,
+                "candidate_count": 1,
+                "selected_relevant_count": 0,
+                "relevance_grade": 3,
+            },
+        },
+    ]
+
+
 def test_analyze_trace_does_not_report_hydration_drop_when_final_ranking_kept_identity():
     identity = "eval/guide/auth.md#Rotation:0"
     case = _case()
@@ -315,6 +342,33 @@ def test_analyze_trace_reports_rerank_loss_for_each_worsened_relevant():
             "identity": second,
             "evidence": {
                 "fusion_rank": 2,
+                "ranking_rank": None,
+                "rerank": {"applied": True, "scored_count": 3},
+            },
+        },
+    ]
+
+
+def test_analyze_trace_dedupes_duplicate_candidate_identities_for_rerank():
+    identity = "eval/guide/auth.md#Rotation:0"
+    noise = "eval/guide/other.md#Overview:0"
+    case = _case(k=3)
+    trace = _trace(
+        ranking=[noise],
+        candidates=[identity, identity, noise],
+        rerank={"applied": True, "scored_count": 3},
+    )
+
+    findings = analyze_trace(case, trace)
+
+    assert findings == [
+        {
+            "case_id": "case-a",
+            "class": "rerank_worsened_order",
+            "severity": "medium",
+            "identity": identity,
+            "evidence": {
+                "fusion_rank": 1,
                 "ranking_rank": None,
                 "rerank": {"applied": True, "scored_count": 3},
             },

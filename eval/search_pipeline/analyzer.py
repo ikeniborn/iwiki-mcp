@@ -52,6 +52,7 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
 
     ranking_set = set(ranking)
     candidate_set = set(candidates)
+    has_hydrated_identity_evidence = "hydrated_identities" in hydration
     hydrated_set = set(hydration.get("hydrated_identities", []))
     candidate_ranks = _first_ranks(candidates)
     ranking_ranks = _first_ranks(ranking)
@@ -93,6 +94,7 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
         if (
             has_candidate_evidence
             and hydration.get("requested", 0) > 0
+            and has_hydrated_identity_evidence
             and candidate_rank <= case.k
             and identity not in hydrated_set
             and identity not in ranking_set
@@ -111,17 +113,22 @@ def analyze_trace(case: BenchmarkCase, trace: dict) -> list[dict]:
             })
 
     if has_candidate_evidence and rerank.get("applied"):
-        fusion_relevant = [
-            identity for identity in candidates
+        fusion_relevant = []
+        seen_relevant = set()
+        for identity in candidates:
+            if identity in seen_relevant:
+                continue
             if (
                 identity in relevant
                 and candidate_ranks[identity] <= case.k
                 and (
                     hydration.get("requested", 0) <= 0
+                    or not has_hydrated_identity_evidence
                     or identity in hydrated_set
                 )
-            )
-        ]
+            ):
+                fusion_relevant.append(identity)
+                seen_relevant.add(identity)
         for fusion_identity in fusion_relevant:
             fusion_rank = candidate_ranks[fusion_identity]
             ranking_rank = ranking_ranks.get(fusion_identity)
