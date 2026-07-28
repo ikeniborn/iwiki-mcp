@@ -101,7 +101,7 @@ def _config_payload(cfg) -> dict:
             for key in sorted(cfg)
             if key in _SAFE_CONFIG_FIELDS and _is_json_scalar(cfg[key])
         }
-    return {"repr": repr(cfg)}
+    return {"type": type(cfg).__name__}
 
 
 def _is_json_scalar(value) -> bool:
@@ -131,11 +131,17 @@ def run_offline_traces(
             )
             traces.append(trace)
             summaries.append(summarize_trace(case, trace))
-            findings.extend(analyze_trace(case, trace))
+            findings.extend(
+                {**finding, "mode": mode}
+                for finding in analyze_trace(case, trace)
+            )
 
     return {
         "kind": "offline",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_settings": {
+            "rerank_enabled": False,
+        },
         "config": _config_payload(cfg),
         "modes": mode_list,
         "cases": [_case_payload(case) for case in case_list],

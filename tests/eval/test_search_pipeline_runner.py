@@ -490,3 +490,148 @@ def test_run_offline_traces_sanitizes_dict_config_deterministically(monkeypatch)
     assert "provider.example" not in repr(evidence)
     assert "localhost:11434" not in repr(evidence)
     assert "nested-token" not in repr(evidence)
+
+
+def test_run_offline_traces_uses_safe_type_for_unknown_config(monkeypatch):
+    from eval.search_pipeline import runner
+
+    class SecretConfig:
+        def __repr__(self):
+            return "SecretConfig(api_key='raw-token', base_url='https://provider.example/v1')"
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="eval",
+        query="alpha",
+        relevant={"eval/a.md#A:0": 3},
+        intents={"a": ["eval/a.md#A:0"]},
+        k=2,
+    )
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {},
+            "results": [],
+            "metrics_input": {
+                "ranking": ["eval/a.md#A:0"],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+
+    evidence = runner.run_offline_traces(
+        SecretConfig(),
+        "/tmp/wiki",
+        [case],
+        ["hybrid"],
+    )
+
+    assert evidence["config"] == {"type": "SecretConfig"}
+    assert "raw-token" not in repr(evidence)
+    assert "provider.example" not in repr(evidence)
+
+
+def test_run_offline_traces_adds_mode_to_findings_without_mutating_analyzer(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="eval",
+        query="alpha",
+        relevant={"eval/a.md#A:0": 3},
+        intents={"a": ["eval/a.md#A:0"]},
+        k=2,
+    )
+    analyzer_finding = {
+        "case_id": "case-a",
+        "class": "missing_from_candidate_pool",
+        "severity": "high",
+        "identity": "eval/a.md#A:0",
+        "evidence": {},
+    }
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {},
+            "results": [],
+            "metrics_input": {
+                "ranking": [],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(runner, "analyze_trace", lambda case, trace: [analyzer_finding])
+
+    evidence = runner.run_offline_traces({}, "/tmp/wiki", [case], ["lexical", "hybrid"])
+
+    assert [finding["mode"] for finding in evidence["findings"]] == [
+        "lexical",
+        "hybrid",
+    ]
+    assert "mode" not in analyzer_finding
+
+
+def test_run_offline_traces_records_rerank_disabled_run_setting(monkeypatch):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="eval",
+        query="alpha",
+        relevant={"eval/a.md#A:0": 3},
+        intents={"a": ["eval/a.md#A:0"]},
+        k=2,
+    )
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        assert rerank_enabled is False
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {},
+            "results": [],
+            "metrics_input": {
+                "ranking": ["eval/a.md#A:0"],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+
+    evidence = runner.run_offline_traces(
+        {
+            "rerank_enabled": True,
+            "rerank_model": "rerank-model",
+            "top_k": 2,
+        },
+        "/tmp/wiki",
+        [case],
+        ["hybrid"],
+    )
+
+    assert evidence["run_settings"] == {"rerank_enabled": False}
+    assert evidence["config"]["rerank_enabled"] is True
+    assert evidence["config"]["rerank_model"] == "rerank-model"
