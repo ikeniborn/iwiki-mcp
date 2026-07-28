@@ -405,7 +405,7 @@ def test_run_offline_traces_aggregates_evidence_without_rerank(monkeypatch):
     monkeypatch.setattr(runner, "trace_query", fake_trace_query)
 
     evidence = runner.run_offline_traces(
-        cfg={"safe": True},
+        cfg={"top_k": 2},
         base="/tmp/wiki",
         cases=cases,
         modes=["lexical", "hybrid"],
@@ -413,7 +413,7 @@ def test_run_offline_traces_aggregates_evidence_without_rerank(monkeypatch):
 
     assert evidence["kind"] == "offline"
     assert isinstance(evidence["timestamp"], str)
-    assert evidence["config"] == {"safe": True}
+    assert evidence["config"] == {"top_k": 2}
     assert len(calls) == 4
     assert {call[4] for call in calls} == {False}
     assert [summary["case_id"] for summary in evidence["summary"]["cases"]] == [
@@ -432,3 +432,61 @@ def test_run_offline_traces_aggregates_evidence_without_rerank(monkeypatch):
     }
     assert len(evidence["traces"]) == 4
     assert evidence["backlog"] == []
+
+
+def test_run_offline_traces_sanitizes_dict_config_deterministically(monkeypatch):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="eval",
+        query="alpha",
+        relevant={"eval/a.md#A:0": 3},
+        intents={"a": ["eval/a.md#A:0"]},
+        k=2,
+    )
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled):
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {},
+            "results": [],
+            "metrics_input": {
+                "ranking": ["eval/a.md#A:0"],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+
+    cfg = {
+        "api_key": "raw-token",
+        "base_url": "https://provider.example/v1",
+        "IWIKI_LLM_KEY": "env-token",
+        "endpoint": "http://localhost:11434/v1",
+        "embed_model": "embed-small",
+        "dimensions": 384,
+        "top_k": 8,
+        "rerank_enabled": False,
+        "nested": {"key": "nested-token"},
+    }
+
+    evidence = runner.run_offline_traces(cfg, "/tmp/wiki", [case], ["hybrid"])
+
+    assert evidence["config"] == {
+        "dimensions": 384,
+        "embed_model": "embed-small",
+        "rerank_enabled": False,
+        "top_k": 8,
+    }
+    assert "raw-token" not in repr(evidence)
+    assert "env-token" not in repr(evidence)
+    assert "provider.example" not in repr(evidence)
+    assert "localhost:11434" not in repr(evidence)
+    assert "nested-token" not in repr(evidence)

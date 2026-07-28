@@ -26,6 +26,25 @@ _ROLLUP_FIELDS = (
     "latency_ms",
 )
 
+_SAFE_CONFIG_FIELDS = {
+    "bfs_top_k",
+    "chat_model",
+    "chunk_overlap",
+    "chunk_size",
+    "dimensions",
+    "embed_model",
+    "graph_depth",
+    "rerank_enabled",
+    "rerank_model",
+    "score_threshold",
+    "search_mode",
+    "seed_threshold",
+    "seed_top_k",
+    "summary_max",
+    "top_k",
+    "write_seed_threshold",
+}
+
 
 def summarize_trace(case: BenchmarkCase, trace: dict) -> dict:
     metrics_input = trace.get("metrics_input", {})
@@ -77,8 +96,16 @@ def _config_payload(cfg) -> dict:
     if isinstance(cfg, Config):
         return safe_config_fingerprint(cfg)
     if isinstance(cfg, dict):
-        return dict(cfg)
+        return {
+            key: cfg[key]
+            for key in sorted(cfg)
+            if key in _SAFE_CONFIG_FIELDS and _is_json_scalar(cfg[key])
+        }
     return {"repr": repr(cfg)}
+
+
+def _is_json_scalar(value) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
 
 
 def run_offline_traces(
