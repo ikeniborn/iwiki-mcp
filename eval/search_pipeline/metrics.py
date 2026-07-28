@@ -37,10 +37,13 @@ def ndcg_at_k(ranking: list[str], case: BenchmarkCase, k: int) -> float:
         return 2 ** grade - 1
 
     def dcg(items: list[str]) -> float:
-        return sum(
-            gain(case.relevant.get(item, 0)) / math.log2(rank + 2)
-            for rank, item in enumerate(items[:k])
-        )
+        score = 0.0
+        seen = set()
+        for rank, item in enumerate(items[:k]):
+            grade = 0 if item in seen else case.relevant.get(item, 0)
+            score += gain(grade) / math.log2(rank + 2)
+            seen.add(item)
+        return score
 
     ideal = sorted(case.relevant.values(), reverse=True)[:k]
     ideal_score = sum(

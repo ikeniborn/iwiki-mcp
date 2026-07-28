@@ -86,6 +86,21 @@ def test_cutoff_metrics_return_zero_for_non_positive_k():
         assert intent_coverage_at_k(ranking, case, k) == 0.0
 
 
+def test_ndcg_counts_duplicate_relevant_identity_once():
+    case = BenchmarkCase(
+        case_id="duplicates",
+        domain="iwiki-mcp",
+        query="duplicate result identity",
+        relevant={"iwiki-mcp/retrieval.md#Hybrid search:0": 3},
+    )
+    ranking = [
+        "iwiki-mcp/retrieval.md#Hybrid search:0",
+        "iwiki-mcp/retrieval.md#Hybrid search:0",
+    ]
+
+    assert ndcg_at_k(ranking, case, 2) == 1.0
+
+
 def test_source_mix_counts_hit_and_source_fields():
     mix = source_mix([
         {"hit": "both", "source": "seed"},
