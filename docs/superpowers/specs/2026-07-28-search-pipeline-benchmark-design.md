@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: a17e3b5aa06987aa
+  spec_hash: c9090ef72257a2e1
   last_run: 2026-07-28
   phases:
     structure: { status: passed }
@@ -104,10 +104,13 @@ Retrieval continues to produce the 32-candidate safety pool. The selected rerank
 limit applies only before hydration/provider submission; it does not shrink preliminary
 retrieval evidence or fail-soft fallback coverage.
 
-`server.wiki_search` hydrates at most the selected leading 16, 24, or 32 candidates for
-reranking. Successful provider scores remain first, and all unscored, stale, or
-unhydrated preliminary candidates continue in original order before final top-k. A
-reranker failure returns the unchanged preliminary order and current sanitized metadata.
+For the benchmark's final `k=8`, `server.wiki_search` hydrates the selected leading 16,
+24, or 32 candidates for reranking. Production uses
+`max(requested_top_k, selected_budget)` so an explicit public `k` above the fixed budget
+does not reduce provider coverage. Successful provider scores remain first, and all
+unscored, stale, or unhydrated preliminary candidates continue in original order before
+final top-k. A reranker failure returns the unchanged preliminary order and current
+sanitized metadata.
 
 No new public argument, response field, or environment variable is introduced.
 
@@ -169,7 +172,8 @@ latency bottleneck unresolved, so the latency part of the final result remains
 3. The selected mapping is applied to production candidate fusion and verified by unit
    and integration tests.
 4. Live rerank runs compare candidate batches 16, 24, and 32 after the fusion fix.
-5. The smallest passing fixed batch is applied before hydration and provider submission.
+5. The smallest passing fixed budget is applied before hydration and provider submission,
+   while an explicit larger `requested_top_k` remains the lower bound.
 6. Final reports compare baseline, fusion-only, and fusion-plus-rerank results.
 
 ## Metrics And Evidence
@@ -217,8 +221,9 @@ secret-bearing errors are never written.
 Unit tests cover weighted RRF math, deterministic ties, missing-weight compatibility,
 weight-grid gate ordering, and rerank-batch selection. Retrieval tests prove direct
 section evidence can outrank broad page/graph fan-out without changing public result
-fields. Server tests prove only the selected leading batch is hydrated/submitted while
-partial, stale, unhydrated, and fail-soft candidates preserve preliminary order.
+fields. Server tests prove only `max(requested_top_k, selected_budget)` leading
+candidates are hydrated/submitted while partial, stale, unhydrated, and fail-soft
+candidates preserve preliminary order.
 
 Benchmark regression tests retain existing metric, report, sanitization, env-file,
 read-only, and bottleneck-classification coverage. The twelve labeled cases are reviewed
