@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: e46626e817ea568b
+  plan_hash: c4710787450b8e19
   last_run: 2026-07-28
   phases:
     structure: { status: passed }
@@ -103,9 +103,9 @@ def test_quality_metrics_use_case_relevance():
         "iwiki-mcp/mcp-server.md#Tool surface:0",
     ]
 
-    assert recall_at_k(ranking, case, 2) == 1.0
+    assert recall_at_k(ranking, case, 2) == 0.5
     assert mrr_at_k(ranking, case, 3) == 1.0
-    assert ndcg_at_k(ranking, case, 3) == pytest.approx(0.834017, rel=1e-6)
+    assert ndcg_at_k(ranking, case, 3) == pytest.approx(0.730929, rel=1e-6)
     assert intent_coverage_at_k(ranking, case, 2) == 0.5
 
 

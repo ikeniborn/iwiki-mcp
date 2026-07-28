@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 0598ebd29d924dcf
+  spec_hash: b5bf9cc7db7a6009
   last_run: 2026-07-28
   phases:
     structure: { status: passed }
@@ -103,7 +103,8 @@ search behavior remains inside `iwiki_mcp.retrieval` and `iwiki_mcp.server`.
 
 Quality metrics:
 
-- `Recall@k`: whether any expected relevant section appears in the top-k context.
+- `Recall@k`: fraction of expected relevant section identities represented in top-k
+  context.
 - `MRR@k`: reciprocal rank of the first relevant section.
 - `nDCG@k`: graded ranking quality when a case supplies relevance grades.
 - Intent coverage: distinct expected intents represented in the top-k context.
