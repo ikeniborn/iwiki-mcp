@@ -118,6 +118,12 @@ def test_trace_query_records_stage_counts_and_final_results(tmp_path, monkeypatc
     signal_identities = trace["stages"]["signals"]["identities"]
     assert relevant_identity in signal_identities["semantic_chunk"]
     assert relevant_identity in signal_identities["lexical_section"]
+    ranked_signals = trace["stages"]["signals"]["ranked"]
+    assert ranked_signals["semantic_chunk"]
+    assert set(ranked_signals["semantic_chunk"][0]) == {
+        "domain", "file", "heading", "chunk", "ordinal",
+    }
+    assert "rank_key" not in repr(ranked_signals)
     assert set(
         trace["stages"]["signals"]["relevant_presence"][relevant_identity]
     ) >= {

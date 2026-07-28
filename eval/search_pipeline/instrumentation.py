@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
+from pathlib import PureWindowsPath
 from time import perf_counter
 
 import numpy as np
 
 from iwiki_mcp.base import index_path
-from iwiki_mcp.engine import fusion, rerank
 from iwiki_mcp.engine.chunk import chunk_markdown
 from iwiki_mcp.engine.config import Config
+from iwiki_mcp.engine import fusion
+from iwiki_mcp.engine import rerank
 from iwiki_mcp.engine.store import VectorStore
 from iwiki_mcp import retrieval
 
 from .fixtures import BenchmarkCase
-from .metrics import identity, latency_summary, source_mix
+from .metrics import identity
+from .metrics import latency_summary
+from .metrics import source_mix
 
 
 _PUBLIC_FIELDS = ("domain", "file", "heading", "chunk", "score", "hit", "source")
@@ -68,6 +72,13 @@ def _public_identity(candidate: dict) -> str:
 
 def _public_projection(candidate: dict) -> dict:
     return {key: candidate[key] for key in _PUBLIC_FIELDS}
+
+
+def _ranked_signal_hit(candidate: dict) -> dict:
+    return {
+        key: candidate[key]
+        for key in ("domain", "file", "heading", "chunk", "ordinal")
+    }
 
 
 def _record_identity(domain: str, record) -> str:
@@ -286,6 +297,10 @@ def trace_query(
         name: [_public_identity(hit) for hit in hits]
         for name, hits in sorted(signals.items())
     }
+    ranked_signals = {
+        name: [_ranked_signal_hit(hit) for hit in hits]
+        for name, hits in signals.items()
+    }
     signal_identity_sets = {
         name: set(values)
         for name, values in signal_identities.items()
@@ -367,6 +382,7 @@ def trace_query(
                     for name, hits in sorted(signals.items())
                 },
                 "identities": signal_identities,
+                "ranked": ranked_signals,
                 "relevant_presence": relevant_signal_presence,
             },
             "fusion": {

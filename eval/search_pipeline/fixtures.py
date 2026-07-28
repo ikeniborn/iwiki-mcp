@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 
 
 @dataclass(frozen=True)
@@ -11,6 +12,7 @@ class BenchmarkCase:
     relevant: dict[str, int]
     intents: dict[str, list[str]] = field(default_factory=dict)
     k: int = 8
+    query_class: str = "unspecified"
 
 
 DEFAULT_LIVE_CASES = [
@@ -26,22 +28,54 @@ DEFAULT_LIVE_CASES = [
             "api": ["iwiki-mcp/mcp-server.md#Tool surface:0"],
             "retrieval": ["iwiki-mcp/retrieval.md#Hybrid search:0"],
         },
+        query_class="exact_identifier",
     ),
     BenchmarkCase(
-        case_id="chunking",
+        case_id="update-page-api",
         domain="iwiki-mcp",
-        query="Markdown chunking summary section chunk repeated heading",
+        query="wiki_update_page heading new_body source description status",
         relevant={
-            "iwiki-mcp/indexing.md#Markdown chunking:0": 3,
+            "iwiki-mcp/architecture.md#wiki_update_page transaction:0": 3,
+            "iwiki-mcp/mcp-server.md#Tool surface:0": 2,
         },
         intents={
-            "chunking": ["iwiki-mcp/indexing.md#Markdown chunking:0"],
+            "transaction": [
+                "iwiki-mcp/architecture.md#wiki_update_page transaction:0",
+            ],
+            "api": ["iwiki-mcp/mcp-server.md#Tool surface:0"],
         },
+        query_class="exact_identifier",
+    ),
+    BenchmarkCase(
+        case_id="stale-write-protection",
+        domain="iwiki-mcp",
+        query="prevent overwriting newer remote knowledge before changing a page",
+        relevant={"iwiki-mcp/git-sync.md#Pre-write freshness guard:0": 3},
+        intents={
+            "freshness": ["iwiki-mcp/git-sync.md#Pre-write freshness guard:0"],
+        },
+        query_class="semantic_paraphrase",
+    ),
+    BenchmarkCase(
+        case_id="binding-resolution",
+        domain="iwiki-mcp",
+        query="choose knowledge base and project domain from current workspace",
+        relevant={
+            "iwiki-mcp/base-binding.md#Resolving the binding:0": 3,
+            "iwiki-mcp/base-binding.md#Binding model:0": 2,
+        },
+        intents={
+            "binding": [
+                "iwiki-mcp/base-binding.md#Resolving the binding:0",
+                "iwiki-mcp/base-binding.md#Binding model:0",
+            ],
+        },
+        query_class="semantic_paraphrase",
     ),
     BenchmarkCase(
         case_id="rerank-hydration",
         domain="iwiki-mcp",
-        query="rerank candidates hydration stale provider top_n",
+        query="rerank candidates hydration stale provider top_n result fields",
         relevant={
             "iwiki-mcp/retrieval.md#Hybrid search:0": 3,
             "iwiki-mcp/retrieval.md#Result shape:0": 2,
@@ -50,7 +84,103 @@ DEFAULT_LIVE_CASES = [
         intents={
             "rerank": ["iwiki-mcp/retrieval.md#Hybrid search:0"],
             "shape": ["iwiki-mcp/retrieval.md#Result shape:0"],
+            "api": ["iwiki-mcp/mcp-server.md#Tool surface:0"],
         },
+        query_class="multi_intent",
+    ),
+    BenchmarkCase(
+        case_id="embedding-storage-config",
+        domain="iwiki-mcp",
+        query="configure embedding endpoint dimensions and persist vectors",
+        relevant={
+            "iwiki-mcp/installation.md#Required environment:0": 3,
+            "iwiki-mcp/indexing.md#Embeddings client:0": 3,
+            "iwiki-mcp/indexing.md#Vector store:0": 2,
+        },
+        intents={
+            "config": [
+                "iwiki-mcp/installation.md#Required environment:0",
+                "iwiki-mcp/indexing.md#Embeddings client:0",
+            ],
+            "storage": ["iwiki-mcp/indexing.md#Vector store:0"],
+        },
+        query_class="multi_intent",
+    ),
+    BenchmarkCase(
+        case_id="chunking",
+        domain="iwiki-mcp",
+        query="Markdown chunking summary section chunk repeated heading",
+        relevant={"iwiki-mcp/indexing.md#Markdown chunking:0": 3},
+        intents={"chunking": ["iwiki-mcp/indexing.md#Markdown chunking:0"]},
+        query_class="repeated_heading",
+    ),
+    BenchmarkCase(
+        case_id="okf-repeated-section",
+        domain="iwiki-mcp",
+        query="migrate apply OKF frontmatter repeated section chunks",
+        relevant={
+            "iwiki-mcp/okf-governance.md#Migrate and apply tools:0": 3,
+            "iwiki-mcp/okf-governance.md#Migrate and apply tools:1": 3,
+        },
+        intents={
+            "migration": [
+                "iwiki-mcp/okf-governance.md#Migrate and apply tools:0",
+                "iwiki-mcp/okf-governance.md#Migrate and apply tools:1",
+            ],
+        },
+        query_class="repeated_heading",
+    ),
+    BenchmarkCase(
+        case_id="sync-locking",
+        domain="iwiki-mcp",
+        query="coordinate concurrent pull rebase push without repository races",
+        relevant={
+            "iwiki-mcp/git-sync.md#Inter-process locking:0": 3,
+            "iwiki-mcp/git-sync.md#Explicit sync:0": 2,
+        },
+        intents={
+            "concurrency": ["iwiki-mcp/git-sync.md#Inter-process locking:0"],
+            "sync": ["iwiki-mcp/git-sync.md#Explicit sync:0"],
+        },
+        query_class="graph_distractor",
+    ),
+    BenchmarkCase(
+        case_id="related-sections",
+        domain="iwiki-mcp",
+        query="find neighboring knowledge through vectors links and backlinks",
+        relevant={"iwiki-mcp/retrieval.md#Related sections:0": 3},
+        intents={"related": ["iwiki-mcp/retrieval.md#Related sections:0"]},
+        query_class="graph_distractor",
+    ),
+    BenchmarkCase(
+        case_id="search-scope",
+        domain="iwiki-mcp",
+        query="project bound explicit domains scope resolution for wiki search",
+        relevant={
+            "iwiki-mcp/base-binding.md#Search scope:0": 3,
+            "iwiki-mcp/mcp-server.md#Tool surface:0": 2,
+        },
+        intents={
+            "scope": ["iwiki-mcp/base-binding.md#Search scope:0"],
+            "api": ["iwiki-mcp/mcp-server.md#Tool surface:0"],
+        },
+        query_class="competing_evidence",
+    ),
+    BenchmarkCase(
+        case_id="frontmatter-migration",
+        domain="iwiki-mcp",
+        query="derive type tags from source log then migrate metadata",
+        relevant={
+            "iwiki-mcp/okf-governance.md#Frontmatter assembly:0": 3,
+            "iwiki-mcp/okf-governance.md#Migrate and apply tools:0": 2,
+        },
+        intents={
+            "assembly": ["iwiki-mcp/okf-governance.md#Frontmatter assembly:0"],
+            "migration": [
+                "iwiki-mcp/okf-governance.md#Migrate and apply tools:0",
+            ],
+        },
+        query_class="competing_evidence",
     ),
 ]
 
