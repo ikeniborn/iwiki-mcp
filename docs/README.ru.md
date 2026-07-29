@@ -39,6 +39,22 @@ uv run pytest -q
 
 После этого `uv run iwiki-mcp` запускает сервер из копии без глобальной установки.
 
+## Бенчмарк search pipeline
+
+Bounded fusion benchmark в `eval/search_pipeline/` предназначен только для evaluation: он не меняет production-поиск, production fusion weights и production rerank settings. Изменение rerank-budget отложено.
+
+Воспроизведите существующие evidence без credentials:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --pareto --replay-evidence <evidence.json>
+```
+
+Только после успешного replay запросите подтверждение оператора перед live benchmark. Live-команда использует созданный оператором environment file; не читайте и не копируйте его credentials в репозиторий:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
+```
+
 ### Требования
 
 iwiki-mcp требует OpenAI-совместимый endpoint эмбеддингов. Задайте `IWIKI_LLM_BASE_URL` и `IWIKI_LLM_KEY` в окружении MCP-клиента (см. [Регистрация в Claude Code](#регистрация-в-claude-code) / [Регистрация в Codex](#регистрация-в-codex)).
