@@ -7,12 +7,19 @@ import pytest
 from eval.search_pipeline.fixtures import BenchmarkCase
 from eval.search_pipeline.fixtures import DEFAULT_LIVE_CASES
 from eval.search_pipeline.selection import fusion_weight_grid
+from eval.search_pipeline.selection import FusionCandidate
 from eval.search_pipeline.selection import GRAPH_WEIGHTS
+from eval.search_pipeline.selection import _identity
 from eval.search_pipeline.selection import PAGE_WEIGHTS
 from eval.search_pipeline.selection import replay_fusion
+from eval.search_pipeline.selection import replay_fusion_candidate
 from eval.search_pipeline.selection import RERANK_BATCHES
 from eval.search_pipeline.selection import select_fusion_weights
+from eval.search_pipeline.selection import select_fusion_candidate
 from eval.search_pipeline.selection import select_rerank_batch
+from eval.search_pipeline.selection import stage_a_candidates
+from eval.search_pipeline.selection import stage_b_candidates
+from eval.search_pipeline.selection import transform_candidate_signals
 from iwiki_mcp.engine.fusion import fuse_ranked
 
 
@@ -98,6 +105,196 @@ def _all_modes(trace):
         {**deepcopy(trace), "mode": mode}
         for mode in ("hybrid", "lexical", "semantic")
     ]
+
+
+def _fanout_trace(*, k=8):
+    direct_target = "iwiki-mcp/answer.md#Target:0"
+    fanout = [
+        f"iwiki-mcp/page.md#Noise {index}:{0}"
+        for index in range(8)
+    ]
+    return _trace(
+        k=k,
+        signals={
+            "semantic_chunk": [direct_target],
+            "semantic_page": [
+                "iwiki-mcp/page.md#A:0",
+                "iwiki-mcp/page.md#B:0",
+                "iwiki-mcp/other.md#C:0",
+            ],
+            "lexical_page": [
+                "iwiki-mcp/page.md#A:0",
+                "iwiki-mcp/page.md#B:0",
+                "iwiki-mcp/other.md#C:0",
+            ],
+            "graph_page": fanout,
+        },
+    )
+
+
+def test_stage_a_grid_has_exactly_three_candidates_per_family():
+    candidates = stage_a_candidates()
+
+    assert len(candidates) == 12
+    assert Counter(item.family for item in candidates) == {
+        "rrf_k": 3,
+        "direct_multiplier": 3,
+        "direct_quota": 3,
+        "fanout_cap": 3,
+    }
+    assert candidates == stage_a_candidates()
+
+
+def test_candidate_descriptor_is_frozen_and_serializes_stably():
+    candidate = FusionCandidate(family="rrf_k", rrf_k=20)
+
+    with pytest.raises(AttributeError):
+        candidate.rrf_k = 10
+
+    assert candidate.payload() == {
+        "family": "rrf_k",
+        "rrf_k": 20,
+        "direct_multiplier": 1.0,
+        "direct_quota": 0,
+        "fanout_cap": None,
+        "components": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        FusionCandidate(family="rrf_k", rrf_k=0),
+        FusionCandidate(family="direct_multiplier", direct_multiplier=0.99),
+        FusionCandidate(family="direct_quota", direct_quota=9),
+        FusionCandidate(family="fanout_cap", fanout_cap=0),
+        FusionCandidate(family="unknown"),
+        FusionCandidate(family="rrf_k", rrf_k=20, direct_quota=1),
+    ),
+)
+def test_candidate_transform_rejects_invalid_descriptors(candidate):
+    with pytest.raises(ValueError, match="candidate"):
+        transform_candidate_signals(_ranked(_trace()["stages"]["signals"]["identities"]), candidate)
+
+
+def test_fanout_cap_is_independent_per_broad_signal_and_preserves_order():
+    trace = _fanout_trace()
+    signals = transform_candidate_signals(
+        trace["stages"]["signals"]["ranked"],
+        FusionCandidate(family="fanout_cap", fanout_cap=1),
+    )
+
+    assert [_identity(hit) for hit in signals["semantic_page"]] == [
+        "iwiki-mcp/page.md#A:0",
+        "iwiki-mcp/other.md#C:0",
+    ]
+    assert [_identity(hit) for hit in signals["lexical_page"]] == [
+        "iwiki-mcp/page.md#A:0",
+        "iwiki-mcp/other.md#C:0",
+    ]
+    assert [_identity(hit) for hit in signals["semantic_chunk"]] == [
+        "iwiki-mcp/answer.md#Target:0",
+    ]
+    assert trace["stages"]["signals"]["ranked"]["semantic_page"][1]["heading"] == "B"
+
+
+def test_direct_quota_promotes_missing_direct_identity_into_last_reserved_slot():
+    target = "iwiki-mcp/answer.md#Target:0"
+    broad_hits = [
+        f"iwiki-mcp/page.md#Noise {index}:0"
+        for index in range(8)
+    ]
+    trace = _trace(
+        k=8,
+        signals={
+            "semantic_chunk": [target],
+            "semantic_page": broad_hits,
+            "lexical_page": broad_hits,
+            "graph_page": broad_hits,
+        },
+    )
+    baseline = replay_fusion_candidate(trace, FusionCandidate())
+    ranking = replay_fusion_candidate(
+        trace,
+        FusionCandidate(family="direct_quota", direct_quota=1),
+    )
+
+    assert target not in baseline[:8]
+    assert ranking[7] == target
+    assert ranking[:7] == baseline[:7]
+
+
+def test_stage_b_contains_only_unordered_pairs_of_passing_family_winners():
+    winners = [
+        FusionCandidate(family="rrf_k", rrf_k=20),
+        FusionCandidate(family="direct_multiplier", direct_multiplier=1.5),
+        FusionCandidate(family="direct_quota", direct_quota=2),
+        FusionCandidate(family="fanout_cap", fanout_cap=2),
+    ]
+
+    pairs = stage_b_candidates(winners)
+
+    assert len(pairs) == 6
+    assert all(item.family == "pair" for item in pairs)
+    assert all(len(item.components) == 2 for item in pairs)
+    assert pairs == stage_b_candidates(list(reversed(winners)))
+
+
+def test_candidate_selector_never_combines_rejected_family_winner():
+    traces = _all_modes(_trace())
+
+    decision = select_fusion_candidate([_case()], traces)
+
+    rejected = set(decision["family_rejections"])
+    assert len(decision["stage_a"]) == 12
+    assert len(decision["stage_b"]) <= 6
+    assert all(
+        not rejected.intersection(item["families"])
+        for item in decision["stage_b"]
+    )
+
+
+def test_candidate_selector_returns_needs_work_when_no_candidate_passes(
+    monkeypatch,
+):
+    cases = []
+    traces = []
+    for case_id, rank in (("case-a", 22), ("case-b", 26)):
+        target = f"iwiki-mcp/answer.md#Target {case_id}:0"
+        cases.append(BenchmarkCase(
+            case_id=case_id,
+            domain="iwiki-mcp",
+            query="needle",
+            relevant={target: 3},
+            intents={"api": [target]},
+            k=1,
+        ))
+        trace = _trace(k=1)
+        trace["case_id"] = case_id
+        trace["metrics_input"] = {
+            "ranking": ["iwiki-mcp/noise.md#N:0"],
+            "relevant": {target: 3},
+            "intents": {"api": [target]},
+        }
+        trace["stages"]["fusion"]["candidate_identities"] = [
+            *(f"iwiki-mcp/noise.md#N:{index}" for index in range(rank - 1)),
+            target,
+        ]
+        traces.extend(_all_modes(trace))
+
+    def replay(trace, candidate):
+        target = next(iter(trace["metrics_input"]["relevant"]))
+        return [target] if candidate.family == "baseline" else ["iwiki-mcp/noise.md#N:0"]
+
+    monkeypatch.setattr(
+        "eval.search_pipeline.selection.replay_fusion_candidate", replay,
+    )
+
+    decision = select_fusion_candidate(cases, traces)
+
+    assert decision["status"] == "needs_work"
+    assert decision["reason"] == "no_passing_fusion_candidate"
+    assert decision["candidate"] is None
 
 
 def test_live_corpus_has_two_reviewed_cases_per_query_class():

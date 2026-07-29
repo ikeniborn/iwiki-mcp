@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from dataclasses import replace
+from itertools import combinations
 import json
 import math
 
@@ -22,6 +24,252 @@ _CONFIRMED_LOSS_RANKS = (22, 26)
 _FINAL_RECOVERY_K = 8
 _REQUIRED_FUSION_MODES = ("hybrid", "lexical", "semantic")
 _RANKED_HIT_FIELDS = ("domain", "file", "heading", "chunk", "ordinal")
+_DIRECT_SIGNALS = ("semantic_chunk", "lexical_section")
+_BROAD_SIGNALS = ("semantic_page", "lexical_page", "graph_page")
+
+
+@dataclass(frozen=True)
+class FusionCandidate:
+    family: str = "baseline"
+    rrf_k: int = 60
+    direct_multiplier: float = 1.0
+    direct_quota: int = 0
+    fanout_cap: int | None = None
+    components: tuple[str, ...] = ()
+
+    def payload(self) -> dict:
+        return {
+            "family": self.family,
+            "rrf_k": self.rrf_k,
+            "direct_multiplier": self.direct_multiplier,
+            "direct_quota": self.direct_quota,
+            "fanout_cap": self.fanout_cap,
+            "components": list(self.components),
+        }
+
+
+def _candidate_key(candidate: FusionCandidate) -> str:
+    return json.dumps(candidate.payload(), sort_keys=True, separators=(",", ":"))
+
+
+def _is_positive_int(value) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and value > 0
+    )
+
+
+def _validated_candidate(candidate: FusionCandidate) -> FusionCandidate:
+    if not isinstance(candidate, FusionCandidate):
+        raise ValueError("candidate must be a FusionCandidate")
+    if candidate.family not in {
+        "baseline", "rrf_k", "direct_multiplier", "direct_quota",
+        "fanout_cap", "pair",
+    }:
+        raise ValueError("candidate family is invalid")
+    if not _is_positive_int(candidate.rrf_k):
+        raise ValueError("candidate rrf_k must be a positive integer")
+    if (
+        isinstance(candidate.direct_multiplier, bool)
+        or not isinstance(candidate.direct_multiplier, (int, float))
+        or not math.isfinite(candidate.direct_multiplier)
+        or candidate.direct_multiplier < 1.0
+    ):
+        raise ValueError("candidate direct_multiplier must be at least 1.0")
+    if (
+        isinstance(candidate.direct_quota, bool)
+        or not isinstance(candidate.direct_quota, int)
+        or not 0 <= candidate.direct_quota <= _FINAL_RECOVERY_K
+    ):
+        raise ValueError("candidate direct_quota must be between 0 and 8")
+    if candidate.fanout_cap is not None and not _is_positive_int(candidate.fanout_cap):
+        raise ValueError("candidate fanout_cap must be a positive integer")
+    if (
+        not isinstance(candidate.components, tuple)
+        or not all(isinstance(item, str) and item for item in candidate.components)
+    ):
+        raise ValueError("candidate components are invalid")
+
+    changed = sum((
+        candidate.rrf_k != 60,
+        candidate.direct_multiplier != 1.0,
+        candidate.direct_quota != 0,
+        candidate.fanout_cap is not None,
+    ))
+    expected_changes = {
+        "baseline": 0,
+        "rrf_k": 1,
+        "direct_multiplier": 1,
+        "direct_quota": 1,
+        "fanout_cap": 1,
+        "pair": 2,
+    }[candidate.family]
+    if changed != expected_changes:
+        raise ValueError("candidate has unrelated fields")
+    if candidate.family == "baseline" and candidate.components:
+        raise ValueError("candidate baseline has components")
+    if candidate.family != "pair" and candidate.components:
+        raise ValueError("candidate family has components")
+    if candidate.family == "pair" and len(candidate.components) != 2:
+        raise ValueError("candidate pair must have two components")
+    return candidate
+
+
+def stage_a_candidates() -> list[FusionCandidate]:
+    return [
+        *(FusionCandidate(family="rrf_k", rrf_k=value) for value in (10, 20, 40)),
+        *(
+            FusionCandidate(family="direct_multiplier", direct_multiplier=value)
+            for value in (1.25, 1.5, 2.0)
+        ),
+        *(
+            FusionCandidate(family="direct_quota", direct_quota=value)
+            for value in (1, 2, 3)
+        ),
+        *(FusionCandidate(family="fanout_cap", fanout_cap=value) for value in (1, 2, 4)),
+    ]
+
+
+def stage_b_candidates(winners) -> list[FusionCandidate]:
+    family_winners = sorted(
+        (_validated_candidate(candidate) for candidate in winners),
+        key=_candidate_key,
+    )
+    candidates = []
+    for first, second in combinations(family_winners, 2):
+        if first.family == second.family:
+            continue
+        values = {
+            "rrf_k": 60,
+            "direct_multiplier": 1.0,
+            "direct_quota": 0,
+            "fanout_cap": None,
+        }
+        for candidate in (first, second):
+            for name, default in tuple(values.items()):
+                value = getattr(candidate, name)
+                if value != default:
+                    values[name] = value
+        components = tuple(sorted((_candidate_key(first), _candidate_key(second))))
+        candidates.append(FusionCandidate(
+            family="pair",
+            components=components,
+            **values,
+        ))
+    return sorted(candidates, key=_candidate_key)[:6]
+
+
+def transform_candidate_signals(
+    signals: dict[str, list[dict]],
+    candidate: FusionCandidate,
+) -> dict[str, list[dict]]:
+    candidate = _validated_candidate(candidate)
+    transformed = {}
+    for signal, hits in signals.items():
+        copied_hits = [dict(hit) for hit in hits]
+        if candidate.fanout_cap is not None and signal in _BROAD_SIGNALS:
+            seen_by_file = Counter()
+            capped_hits = []
+            for hit in copied_hits:
+                file_identity = (hit["domain"], hit["file"])
+                seen_by_file[file_identity] += 1
+                if seen_by_file[file_identity] <= candidate.fanout_cap:
+                    capped_hits.append(hit)
+            copied_hits = capped_hits
+        transformed[signal] = copied_hits
+    return transformed
+
+
+def _unique_identity_count(signals: dict[str, list[dict]]) -> int:
+    return len({
+        _identity(hit)
+        for hits in signals.values()
+        for hit in hits
+    })
+
+
+def _quota_ranking(
+    fused: list[dict],
+    direct_hits: list[dict],
+    final_k: int,
+) -> list[dict]:
+    reserved = []
+    reserved_identities = set()
+    for hit in direct_hits:
+        identity = _identity(hit)
+        if identity not in reserved_identities:
+            reserved_identities.add(identity)
+            reserved.append(hit)
+    reserved = reserved[:final_k]
+    reserved_ids = {_identity(hit) for hit in reserved}
+    top = list(fused[:final_k])
+    top_ids = {_identity(hit) for hit in top}
+    missing = [hit for hit in reserved if _identity(hit) not in top_ids]
+    for hit in missing:
+        for index in range(len(top) - 1, -1, -1):
+            if _identity(top[index]) not in reserved_ids:
+                del top[index]
+                break
+        top.append(hit)
+    ordered = top + [
+        hit for hit in fused
+        if _identity(hit) not in {_identity(item) for item in top}
+    ]
+    return ordered
+
+
+def fuse_candidate_signals(
+    signals: dict[str, list[dict]],
+    candidate: FusionCandidate,
+    *,
+    limit: int,
+    final_k: int,
+) -> list[dict]:
+    candidate = _validated_candidate(candidate)
+    transformed = transform_candidate_signals(signals, candidate)
+    weights = {
+        signal: candidate.direct_multiplier
+        for signal in _DIRECT_SIGNALS
+        if signal in transformed
+    }
+    fused = fuse_ranked(
+        transformed,
+        limit,
+        weights,
+        rrf_k=candidate.rrf_k,
+    )
+    if not candidate.direct_quota:
+        return fused
+    direct_signals = {
+        signal: transformed[signal]
+        for signal in _DIRECT_SIGNALS
+        if signal in transformed
+    }
+    direct_hits = fuse_ranked(
+        direct_signals,
+        _unique_identity_count(direct_signals),
+        weights,
+        rrf_k=candidate.rrf_k,
+    )[:candidate.direct_quota]
+    return _quota_ranking(fused, direct_hits, final_k)
+
+
+def replay_fusion_candidate(
+    trace: dict,
+    candidate: FusionCandidate,
+) -> list[str] | None:
+    signals = _ranked_signals(trace)
+    k = trace.get("k")
+    if signals is None or not _is_positive_int(k):
+        return None
+    fused = fuse_candidate_signals(
+        signals,
+        candidate,
+        limit=_unique_identity_count(signals),
+        final_k=k,
+    )
+    return [_identity(hit) for hit in fused]
 
 
 def fusion_weight_grid() -> list[dict[str, float]]:
@@ -212,6 +460,56 @@ def _has_valid_trace_k(traces: list[dict]) -> bool:
     )
 
 
+def _fusion_gate_reasons(
+    modes: dict[str, dict[str, float]],
+    baseline_modes: dict[str, dict[str, float]],
+    findings: set[tuple],
+    baseline_findings: set[tuple],
+    trace_list: list[dict],
+    rankings: list[list[str] | None],
+    confirmed_losses: set[tuple[str, str, int, str]],
+    *,
+    case_mode_evidence_complete: bool,
+    replay_evidence_incomplete: bool,
+    confirmed_loss_evidence_incomplete: bool,
+) -> list[str]:
+    reasons = []
+    if not case_mode_evidence_complete:
+        reasons.append("case_mode_evidence_incomplete")
+    if replay_evidence_incomplete or any(ranking is None for ranking in rankings):
+        reasons.append("replay_evidence_incomplete")
+    if confirmed_loss_evidence_incomplete:
+        reasons.append("confirmed_loss_evidence_incomplete")
+    if any(
+        modes[mode]["recall_at_k"] < baseline_modes[mode]["recall_at_k"]
+        for mode in modes
+    ):
+        reasons.append("recall_regression")
+    if any(
+        modes[mode]["intent_coverage_at_k"]
+        < baseline_modes[mode]["intent_coverage_at_k"]
+        for mode in modes
+    ):
+        reasons.append("intent_coverage_regression")
+    if any(
+        modes[mode]["ndcg_at_k"] < baseline_modes[mode]["ndcg_at_k"] - 0.01
+        for mode in modes
+    ):
+        reasons.append("ndcg_loss_exceeds_limit")
+    if findings - baseline_findings:
+        reasons.append("new_lost_after_fusion_top_k")
+    for trace, ranking in zip(trace_list, rankings):
+        confirmed = {
+            record[3]
+            for record in confirmed_losses
+            if record[:2] == (trace["case_id"], trace.get("mode", ""))
+        }
+        if confirmed - set((ranking or [])[:_FINAL_RECOVERY_K]):
+            reasons.append("confirmed_loss_not_recovered")
+            break
+    return sorted(set(reasons))
+
+
 def _invalid_fusion_evidence() -> dict:
     candidates = [
         {
@@ -292,29 +590,6 @@ def select_fusion_weights(cases, traces) -> dict:
             for trace, ranking in zip(trace_list, usable_rankings)
         ]
         modes = _per_mode(records)
-        reasons = []
-        if not case_mode_evidence_complete:
-            reasons.append("case_mode_evidence_incomplete")
-        if replay_evidence_incomplete or any(ranking is None for ranking in rankings):
-            reasons.append("replay_evidence_incomplete")
-        if evidence_incomplete:
-            reasons.append("confirmed_loss_evidence_incomplete")
-        if any(
-            modes[mode]["recall_at_k"] < baseline_modes[mode]["recall_at_k"]
-            for mode in modes
-        ):
-            reasons.append("recall_regression")
-        if any(
-            modes[mode]["intent_coverage_at_k"]
-            < baseline_modes[mode]["intent_coverage_at_k"]
-            for mode in modes
-        ):
-            reasons.append("intent_coverage_regression")
-        if any(
-            modes[mode]["ndcg_at_k"] < baseline_modes[mode]["ndcg_at_k"] - 0.01
-            for mode in modes
-        ):
-            reasons.append("ndcg_loss_exceeds_limit")
         findings = (
             set().union(
                 *[
@@ -325,17 +600,18 @@ def select_fusion_weights(cases, traces) -> dict:
             if trace_list
             else set()
         )
-        if findings - baseline_findings:
-            reasons.append("new_lost_after_fusion_top_k")
-        for trace, ranking in zip(trace_list, usable_rankings):
-            confirmed = {
-                record[3]
-                for record in confirmed_losses
-                if record[:2] == (trace["case_id"], trace.get("mode", ""))
-            }
-            if confirmed - set(ranking[:_FINAL_RECOVERY_K]):
-                reasons.append("confirmed_loss_not_recovered")
-                break
+        reasons = _fusion_gate_reasons(
+            modes,
+            baseline_modes,
+            findings,
+            baseline_findings,
+            trace_list,
+            rankings,
+            confirmed_losses,
+            case_mode_evidence_complete=case_mode_evidence_complete,
+            replay_evidence_incomplete=replay_evidence_incomplete,
+            confirmed_loss_evidence_incomplete=evidence_incomplete,
+        )
         candidates.append(
             {
                 "weights": dict(sorted(weights.items())),
@@ -347,7 +623,7 @@ def select_fusion_weights(cases, traces) -> dict:
                     "modes": modes,
                 },
                 "passed": not reasons,
-                "reasons": sorted(set(reasons)),
+                "reasons": reasons,
             }
         )
 
@@ -395,6 +671,243 @@ def select_fusion_weights(cases, traces) -> dict:
         "weights": selected["weights"],
         "weights_key": selected["weights_key"],
         "candidates": candidates,
+    }
+
+
+def _candidate_families(candidate: FusionCandidate) -> list[str]:
+    if candidate.family != "pair":
+        return [candidate.family]
+    return sorted(json.loads(component)["family"] for component in candidate.components)
+
+
+def _candidate_transformations(candidate: FusionCandidate) -> int:
+    return sum((
+        candidate.rrf_k != 60,
+        candidate.direct_multiplier != 1.0,
+        candidate.direct_quota != 0,
+        candidate.fanout_cap is not None,
+    ))
+
+
+def _evaluate_fusion_candidate(
+    candidate: FusionCandidate,
+    case_by_id: dict[str, BenchmarkCase],
+    trace_list: list[dict],
+    baseline_modes: dict[str, dict[str, float]],
+    baseline_findings: set[tuple],
+    confirmed_losses: set[tuple[str, str, int, str]],
+    *,
+    case_mode_evidence_complete: bool,
+    replay_evidence_incomplete: bool,
+    confirmed_loss_evidence_incomplete: bool,
+) -> dict:
+    rankings = [replay_fusion_candidate(trace, candidate) for trace in trace_list]
+    usable_rankings = [ranking or [] for ranking in rankings]
+    records = [
+        (
+            trace.get("mode", ""),
+            _metrics(case_by_id[trace["case_id"]], trace, ranking),
+        )
+        for trace, ranking in zip(trace_list, usable_rankings)
+    ]
+    modes = _per_mode(records)
+    findings = (
+        set().union(*[
+            _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
+            for trace, ranking in zip(trace_list, usable_rankings)
+        ])
+        if trace_list
+        else set()
+    )
+    reasons = _fusion_gate_reasons(
+        modes,
+        baseline_modes,
+        findings,
+        baseline_findings,
+        trace_list,
+        rankings,
+        confirmed_losses,
+        case_mode_evidence_complete=case_mode_evidence_complete,
+        replay_evidence_incomplete=replay_evidence_incomplete,
+        confirmed_loss_evidence_incomplete=confirmed_loss_evidence_incomplete,
+    )
+    return {
+        "candidate": candidate.payload(),
+        "candidate_key": _candidate_key(candidate),
+        "families": _candidate_families(candidate),
+        "metrics": {
+            "aggregate": _mean_metrics([metrics for _, metrics in records]),
+            "modes": modes,
+        },
+        "passed": not reasons,
+        "reasons": reasons,
+    }
+
+
+def _candidate_selection_key(record: dict) -> tuple:
+    return (
+        -record["metrics"]["aggregate"]["ndcg_at_k"],
+        -record["metrics"]["aggregate"]["mrr_at_k"],
+        _candidate_transformations(FusionCandidate(
+            family=record["candidate"]["family"],
+            rrf_k=record["candidate"]["rrf_k"],
+            direct_multiplier=record["candidate"]["direct_multiplier"],
+            direct_quota=record["candidate"]["direct_quota"],
+            fanout_cap=record["candidate"]["fanout_cap"],
+            components=tuple(record["candidate"]["components"]),
+        )),
+        record["candidate_key"],
+    )
+
+
+def select_fusion_candidate(cases, traces) -> dict:
+    case_list = list(cases)
+    all_traces = list(traces)
+    stage_a = stage_a_candidates()
+    if not _has_valid_trace_k(all_traces):
+        records = [
+            {
+                "candidate": candidate.payload(),
+                "candidate_key": _candidate_key(candidate),
+                "families": [candidate.family],
+                "metrics": {"aggregate": _mean_metrics([]), "modes": {}},
+                "passed": False,
+                "reasons": ["evidence_invalid"],
+            }
+            for candidate in stage_a
+        ]
+        return {
+            "status": "needs_work",
+            "reason": "evidence_invalid",
+            "candidate": None,
+            "baseline": {"metrics": {"aggregate": _mean_metrics([]), "modes": {}}},
+            "stage_a": records,
+            "family_winners": [],
+            "family_rejections": sorted({item.family for item in stage_a}),
+            "stage_b": [],
+        }
+
+    case_by_id = {case.case_id: case for case in case_list}
+    case_mode_evidence_complete = _has_complete_case_mode_evidence(
+        case_list, all_traces,
+    )
+    trace_list = sorted(
+        (trace for trace in all_traces if trace.get("case_id") in case_by_id),
+        key=lambda trace: (trace.get("mode", ""), trace["case_id"]),
+    )
+    baseline_candidate = FusionCandidate()
+    baseline_rankings = [
+        replay_fusion_candidate(trace, baseline_candidate)
+        for trace in trace_list
+    ]
+    replay_evidence_incomplete = any(
+        ranking is None for ranking in baseline_rankings
+    )
+    usable_baseline_rankings = [ranking or [] for ranking in baseline_rankings]
+    baseline_records = [
+        (
+            trace.get("mode", ""),
+            _metrics(case_by_id[trace["case_id"]], trace, ranking),
+        )
+        for trace, ranking in zip(trace_list, usable_baseline_rankings)
+    ]
+    baseline_metrics = {
+        "aggregate": _mean_metrics([metrics for _, metrics in baseline_records]),
+        "modes": _per_mode(baseline_records),
+    }
+    confirmed_losses = set().union(*[
+        _confirmed_loss_records(case_by_id[trace["case_id"]], trace)
+        for trace in trace_list
+    ]) if trace_list else set()
+    confirmed_loss_evidence_incomplete = (
+        not set(_CONFIRMED_LOSS_RANKS).issubset(
+            {record[2] for record in confirmed_losses}
+        )
+        or len(confirmed_losses) < len(_CONFIRMED_LOSS_RANKS)
+    )
+    baseline_findings = (
+        set().union(*[
+            _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
+            for trace, ranking in zip(trace_list, usable_baseline_rankings)
+        ])
+        if trace_list
+        else set()
+    )
+
+    evaluation_args = {
+        "case_mode_evidence_complete": case_mode_evidence_complete,
+        "replay_evidence_incomplete": replay_evidence_incomplete,
+        "confirmed_loss_evidence_incomplete": confirmed_loss_evidence_incomplete,
+    }
+    stage_a_records = [
+        _evaluate_fusion_candidate(
+            candidate,
+            case_by_id,
+            trace_list,
+            baseline_metrics["modes"],
+            baseline_findings,
+            confirmed_losses,
+            **evaluation_args,
+        )
+        for candidate in stage_a
+    ]
+    stage_a_records.sort(key=lambda item: item["candidate_key"])
+    winners = []
+    family_rejections = []
+    for family in sorted({candidate.family for candidate in stage_a}):
+        passing = [
+            item for item in stage_a_records
+            if item["candidate"]["family"] == family and item["passed"]
+        ]
+        if not passing:
+            family_rejections.append(family)
+            continue
+        winners.append(min(passing, key=_candidate_selection_key))
+    winners.sort(key=lambda item: item["candidate_key"])
+    stage_b_records = [
+        _evaluate_fusion_candidate(
+            candidate,
+            case_by_id,
+            trace_list,
+            baseline_metrics["modes"],
+            baseline_findings,
+            confirmed_losses,
+            **evaluation_args,
+        )
+        for candidate in stage_b_candidates([
+            FusionCandidate(
+                family=item["candidate"]["family"],
+                rrf_k=item["candidate"]["rrf_k"],
+                direct_multiplier=item["candidate"]["direct_multiplier"],
+                direct_quota=item["candidate"]["direct_quota"],
+                fanout_cap=item["candidate"]["fanout_cap"],
+                components=tuple(item["candidate"]["components"]),
+            )
+            for item in winners
+        ])
+    ]
+    stage_b_records.sort(key=lambda item: item["candidate_key"])
+    invalid_reason = next((reason for reason, failed in (
+        ("case_mode_evidence_incomplete", not case_mode_evidence_complete),
+        ("replay_evidence_incomplete", replay_evidence_incomplete),
+        ("confirmed_loss_evidence_incomplete", confirmed_loss_evidence_incomplete),
+    ) if failed), None)
+    passing = [
+        item for item in [*stage_a_records, *stage_b_records]
+        if item["passed"]
+    ]
+    selected = min(passing, key=_candidate_selection_key) if passing else None
+    return {
+        "status": "passed" if selected is not None and invalid_reason is None else "needs_work",
+        "reason": invalid_reason or (
+            None if selected is not None else "no_passing_fusion_candidate"
+        ),
+        "candidate": selected["candidate"] if selected is not None and invalid_reason is None else None,
+        "baseline": {"metrics": baseline_metrics},
+        "stage_a": stage_a_records,
+        "family_winners": winners,
+        "family_rejections": family_rejections,
+        "stage_b": stage_b_records,
     }
 
 
