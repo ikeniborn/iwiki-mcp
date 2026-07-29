@@ -55,6 +55,20 @@ After the replay passes, obtain operator confirmation before running a live benc
 uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
 ```
 
+### Hard-negative gate
+
+The bounded fusion decision derives hard-negative activation from the captured
+baseline. It evaluates two reviewed hard-negative contracts; each is reported as
+`active`, `unavailable`, or `invalid` from that baseline. A candidate can pass the
+hard-negative gate only when at least two contracts are active.
+
+`hard_negative_evidence_invalid` means one or more reviewed contracts have invalid
+baseline evidence. `hard_negative_evidence_incomplete` means the evidence is valid
+but fewer than two contracts are active. These diagnostic outcomes are distinct from
+a candidate quality rejection after the gate is evaluated. Absolute ranks remain
+diagnostic only; production search behavior, fusion weights, and rerank settings are
+unchanged.
+
 ### Requirements
 
 iwiki-mcp requires an OpenAI-compatible embeddings endpoint. Set `IWIKI_LLM_BASE_URL` and `IWIKI_LLM_KEY` in the MCP client environment (see [Register in Claude Code](#register-in-claude-code) / [Register in Codex](#register-in-codex)).

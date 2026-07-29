@@ -55,6 +55,20 @@ uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --pa
 uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
 ```
 
+### Hard-negative gate
+
+Активация hard-negative в решении bounded fusion выводится из захваченного
+baseline. Проверяются два рассмотренных контракта hard-negative; по этому baseline
+каждый получает состояние `active`, `unavailable` или `invalid`. Candidate может
+пройти hard-negative gate, только когда active как минимум два контракта.
+
+`hard_negative_evidence_invalid` означает, что baseline evidence одного или
+нескольких рассмотренных контрактов некорректен.
+`hard_negative_evidence_incomplete` означает, что evidence корректен, но active
+меньше двух контрактов. Эти диагностические причины отличаются от rejection
+качества candidate после проверки gate. Absolute ranks используются только для
+диагностики; production search behavior, fusion weights и rerank settings не меняются.
+
 ### Требования
 
 iwiki-mcp требует OpenAI-совместимый endpoint эмбеддингов. Задайте `IWIKI_LLM_BASE_URL` и `IWIKI_LLM_KEY` в окружении MCP-клиента (см. [Регистрация в Claude Code](#регистрация-в-claude-code) / [Регистрация в Codex](#регистрация-в-codex)).
