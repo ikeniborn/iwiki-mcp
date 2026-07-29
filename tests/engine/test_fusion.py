@@ -99,6 +99,43 @@ def test_fuse_ranked_missing_signal_weight_defaults_to_one():
     )
 
 
+def test_fuse_ranked_explicit_default_rrf_k_matches_implicit_default():
+    signals = {
+        "semantic": [_hit("a", "A"), _hit("b", "B")],
+        "lexical": [_hit("b", "B"), _hit("c", "C")],
+    }
+
+    assert fuse_ranked(signals, limit=3) == fuse_ranked(
+        signals,
+        limit=3,
+        rrf_k=60,
+    )
+
+
+def test_fuse_ranked_lower_rrf_k_increases_score_gap_between_ranks():
+    signals = {"semantic": [_hit("a", "A"), _hit("b", "B")]}
+
+    default_scores = fuse_ranked(signals, limit=2)
+    lower_k_scores = fuse_ranked(signals, limit=2, rrf_k=1)
+
+    default_gap = default_scores[0]["score"] - default_scores[1]["score"]
+    lower_k_gap = lower_k_scores[0]["score"] - lower_k_scores[1]["score"]
+
+    assert lower_k_gap > default_gap
+
+
+@pytest.mark.parametrize("rrf_k", [0, -1, True, 1.5, "10"])
+def test_fuse_ranked_rejects_invalid_rrf_k(rrf_k):
+    with pytest.raises(ValueError, match="rrf_k must be a positive integer"):
+        fuse_ranked({"semantic": [_hit("a", "A")]}, limit=1, rrf_k=rrf_k)
+
+
+@pytest.mark.parametrize("rrf_k", [0, True, "10"])
+def test_fuse_ranked_rejects_invalid_rrf_k_before_zero_limit_return(rrf_k):
+    with pytest.raises(ValueError, match="rrf_k must be a positive integer"):
+        fuse_ranked({"semantic": [_hit("a", "A")]}, limit=0, rrf_k=rrf_k)
+
+
 @pytest.mark.parametrize("weight", [0, -1, math.inf, math.nan, "bad"])
 def test_fuse_ranked_rejects_invalid_signal_weight(weight):
     with pytest.raises(ValueError, match="signal weight"):

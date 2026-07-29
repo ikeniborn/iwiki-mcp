@@ -13,7 +13,12 @@ def fuse_ranked(
     signals: dict[str, list[dict]],
     limit: int,
     signal_weights: dict[str, float] | None = None,
+    *,
+    rrf_k: int = _RRF_K,
 ) -> list[dict]:
+    if isinstance(rrf_k, bool) or not isinstance(rrf_k, int) or rrf_k <= 0:
+        raise ValueError("rrf_k must be a positive integer")
+
     if limit <= 0:
         return []
 
@@ -37,7 +42,7 @@ def fuse_ranked(
                 continue
             seen.add(identity)
             fused = merged.setdefault(identity, {**hit, "score": 0.0, "signals": []})
-            fused["score"] += weight / (_RRF_K + rank)
+            fused["score"] += weight / (rrf_k + rank)
             fused["signals"].append(signal)
 
     return sorted(
