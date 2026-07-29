@@ -39,6 +39,36 @@ uv run pytest -q
 
 После этого `uv run iwiki-mcp` запускает сервер из копии без глобальной установки.
 
+## Бенчмарк search pipeline
+
+Bounded fusion benchmark в `eval/search_pipeline/` предназначен только для evaluation: он не меняет production-поиск, production fusion weights и production rerank settings. Изменение rerank-budget отложено.
+
+Воспроизведите существующие evidence без credentials:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --pareto --replay-evidence <evidence.json>
+```
+
+Только после успешного replay запросите подтверждение оператора перед live benchmark. Live-команда использует созданный оператором environment file; не читайте и не копируйте его credentials в репозиторий:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
+```
+
+### Hard-negative gate
+
+Активация hard-negative в решении bounded fusion выводится из захваченного
+baseline. Проверяются два рассмотренных контракта hard-negative; по этому baseline
+каждый получает состояние `active`, `unavailable` или `invalid`. Candidate может
+пройти hard-negative gate, только когда active как минимум два контракта.
+
+`hard_negative_evidence_invalid` означает, что baseline evidence одного или
+нескольких рассмотренных контрактов некорректен.
+`hard_negative_evidence_incomplete` означает, что evidence корректен, но active
+меньше двух контрактов. Эти диагностические причины отличаются от rejection
+качества candidate после проверки gate. Absolute ranks используются только для
+диагностики; production search behavior, fusion weights и rerank settings не меняются.
+
 ### Требования
 
 iwiki-mcp требует OpenAI-совместимый endpoint эмбеддингов. Задайте `IWIKI_LLM_BASE_URL` и `IWIKI_LLM_KEY` в окружении MCP-клиента (см. [Регистрация в Claude Code](#регистрация-в-claude-code) / [Регистрация в Codex](#регистрация-в-codex)).
@@ -240,6 +270,24 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 Разрешение project-relative stale-source остаётся отдельным audited follow-up; этот релиз не меняет его скрыто.
 
 Сервер также предоставляет MCP-ресурс `iwiki://authoring-rules` с правилами структуры страниц.
+
+## Pareto-бенчмарк
+
+Запустите только оценочный Pareto-эксперимент на live-размеченном корпусе поиска:
+
+```bash
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out ./pareto-evidence --env-file /path/to/operator.env --pareto
+```
+
+`--env-file` читает созданный оператором файл окружения только для этого процесса; он
+не создаёт, не изменяет и не записывает в файл учётные данные. Храните файл вне
+каталога отчётов и вне контроля версий. В отчёты попадают только очищенные данные.
+
+`--pareto` - команда оценки, а не переключатель production-конфигурации. Production
+константы fusion-весов или rerank-batch применяются только если отчёт содержит
+прошедшую рекомендацию для соответствующих quality- и latency-gate. Решение
+`needs_work`, включая `no_passing_weight_map`, оставляет production-поведение поиска
+без изменений.
 
 ## Совместимость с OKF
 
