@@ -22,6 +22,14 @@ from .metrics import mrr_at_k
 from .metrics import ndcg_at_k
 from .metrics import recall_at_k
 from .selection import RERANK_BATCHES
+from .selection import FusionCandidate
+from .selection import _confirmed_loss_records
+from .selection import _fusion_gate_reasons
+from .selection import _has_complete_case_mode_evidence
+from .selection import _loss_findings
+from .selection import _metrics
+from .selection import _per_mode
+from .selection import select_fusion_candidate
 from .selection import select_fusion_weights
 from .selection import select_rerank_batch
 
@@ -227,6 +235,7 @@ def run_live_traces(
     latency_ceiling_ms: float | None = None,
     rerank_enabled: bool | None = None,
     fusion_weights: dict[str, float] | None = None,
+    fusion_candidate: FusionCandidate | None = None,
     rerank_candidate_limit: int | None = None,
     sample_id: str | None = None,
 ) -> dict:
@@ -251,6 +260,8 @@ def run_live_traces(
                 trace_kwargs = {}
                 if fusion_weights is not None:
                     trace_kwargs["fusion_weights"] = fusion_weights
+                if fusion_candidate is not None:
+                    trace_kwargs["fusion_candidate"] = fusion_candidate
                 if rerank_candidate_limit is not None:
                     trace_kwargs["rerank_candidate_limit"] = rerank_candidate_limit
                 trace = trace_query(
@@ -301,6 +312,164 @@ def run_live_traces(
         "findings": findings,
         "backlog": ranked_backlog(findings),
     }
+
+
+def _candidate_from_payload(payload: dict | None) -> FusionCandidate | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return FusionCandidate(
+            family=payload["family"],
+            rrf_k=payload["rrf_k"],
+            direct_multiplier=payload["direct_multiplier"],
+            direct_quota=payload["direct_quota"],
+            fanout_cap=payload["fanout_cap"],
+            components=tuple(payload["components"]),
+        )
+    except (KeyError, TypeError):
+        return None
+
+
+def _live_fusion_gate(cases, baseline: dict, confirmation: dict) -> list[str]:
+    case_list = list(cases)
+    case_by_id = {case.case_id: case for case in case_list}
+    baseline_traces = sorted(
+        baseline["traces"], key=lambda trace: (trace.get("mode", ""), trace["case_id"]),
+    )
+    confirmation_traces = sorted(
+        confirmation["traces"],
+        key=lambda trace: (trace.get("mode", ""), trace["case_id"]),
+    )
+    baseline_complete = _has_complete_case_mode_evidence(case_list, baseline_traces)
+    confirmation_complete = _has_complete_case_mode_evidence(
+        case_list, confirmation_traces,
+    )
+    failed = any(
+        trace.get("status", "passed") != "passed"
+        for trace in [*baseline_traces, *confirmation_traces]
+    )
+    if not baseline_complete or not confirmation_complete or failed:
+        return ["live_evidence_incomplete"]
+
+    baseline_rankings = [
+        list(trace.get("metrics_input", {}).get("ranking", []))
+        for trace in baseline_traces
+    ]
+    confirmation_rankings = [
+        list(trace.get("metrics_input", {}).get("ranking", []))
+        for trace in confirmation_traces
+    ]
+    baseline_records = [
+        (
+            trace.get("mode", ""),
+            _metrics(case_by_id[trace["case_id"]], trace, ranking),
+        )
+        for trace, ranking in zip(baseline_traces, baseline_rankings)
+    ]
+    confirmation_records = [
+        (
+            trace.get("mode", ""),
+            _metrics(case_by_id[trace["case_id"]], trace, ranking),
+        )
+        for trace, ranking in zip(confirmation_traces, confirmation_rankings)
+    ]
+    confirmed_losses = set().union(*[
+        _confirmed_loss_records(case_by_id[trace["case_id"]], trace)
+        for trace in baseline_traces
+    ]) if baseline_traces else set()
+    baseline_findings = set().union(*[
+        _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
+        for trace, ranking in zip(baseline_traces, baseline_rankings)
+    ]) if baseline_traces else set()
+    confirmation_findings = set().union(*[
+        _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
+        for trace, ranking in zip(confirmation_traces, confirmation_rankings)
+    ]) if confirmation_traces else set()
+    confirmed_loss_evidence_incomplete = (
+        not {22, 26}.issubset({record[2] for record in confirmed_losses})
+        or len(confirmed_losses) < 2
+    )
+    return _fusion_gate_reasons(
+        _per_mode(confirmation_records),
+        _per_mode(baseline_records),
+        confirmation_findings,
+        baseline_findings,
+        confirmation_traces,
+        confirmation_rankings,
+        confirmed_losses,
+        case_mode_evidence_complete=True,
+        replay_evidence_incomplete=False,
+        confirmed_loss_evidence_incomplete=confirmed_loss_evidence_incomplete,
+    )
+
+
+def run_bounded_fusion_experiment(
+    cfg,
+    domain: str,
+    cases: Iterable[BenchmarkCase],
+    *,
+    base: str | None = None,
+) -> dict:
+    case_list = sorted(
+        [case for case in cases if case.domain == domain],
+        key=lambda case: case.case_id,
+    )
+    modes = ["hybrid", "lexical", "semantic"]
+    baseline = run_live_traces(
+        cfg,
+        domain,
+        modes,
+        case_list,
+        base=base,
+        rerank_enabled=False,
+    )
+    selection = select_fusion_candidate(case_list, baseline["traces"])
+    safe_baseline = {
+        **baseline,
+        "traces": [_safe_pareto_trace(trace) for trace in baseline["traces"]],
+        "cases": _safe_pareto_cases(case_list),
+    }
+    evidence = {
+        "kind": "live-bounded-fusion",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "domain": domain,
+        "run_settings": {"rerank_enabled": False},
+        "config": _config_payload(cfg),
+        "cases": _safe_pareto_cases(case_list),
+        "baseline": safe_baseline,
+        "fusion_selection": selection,
+    }
+    candidate = _candidate_from_payload(selection.get("candidate"))
+    if selection.get("status") != "passed" or candidate is None:
+        evidence["decision"] = {
+            "status": "needs_work",
+            "reason": selection.get("reason", "fusion_selection_failed"),
+            "candidate": None,
+        }
+        return evidence
+
+    confirmation = run_live_traces(
+        cfg,
+        domain,
+        modes,
+        case_list,
+        base=base,
+        rerank_enabled=False,
+        fusion_candidate=candidate,
+    )
+    safe_confirmation = {
+        **confirmation,
+        "traces": [_safe_pareto_trace(trace) for trace in confirmation["traces"]],
+        "cases": _safe_pareto_cases(case_list),
+    }
+    reasons = _live_fusion_gate(case_list, baseline, confirmation)
+    evidence["live_confirmation"] = safe_confirmation
+    evidence["decision"] = {
+        "status": "validated_candidate" if not reasons else "needs_work",
+        "reason": None if not reasons else reasons[0],
+        "candidate": candidate.payload(),
+    }
+    return evidence
 
 
 def _safe_pareto_trace(trace: dict) -> dict:

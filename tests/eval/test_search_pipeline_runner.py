@@ -7,6 +7,7 @@ import pytest
 from eval.search_pipeline.fixtures import BenchmarkCase
 from eval.search_pipeline.instrumentation import trace_query
 from eval.search_pipeline.metrics import identity
+from eval.search_pipeline.selection import FusionCandidate
 from iwiki_mcp.engine.config import Config
 from iwiki_mcp.indexer import index_domain
 
@@ -269,6 +270,60 @@ def test_trace_query_applies_eval_overrides_without_shrinking_fallback(
     assert trace["stages"]["hydration"]["requested"] == len(captured["hydrated_input"])
     assert len(captured["hydrated_input"]) == min(len(fused), case.k)
     assert [identity(result) for result in trace["results"]] == fused[:case.k]
+
+
+def test_trace_query_applies_eval_candidate_without_changing_default(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
+    candidate = FusionCandidate(family="rrf_k", rrf_k=20)
+    config_before = vars(cfg).copy()
+
+    candidate_trace = trace_query(
+        cfg,
+        base,
+        case,
+        mode="hybrid",
+        rerank_enabled=False,
+        fusion_candidate=candidate,
+    )
+    default_trace = trace_query(
+        cfg,
+        base,
+        case,
+        mode="hybrid",
+        rerank_enabled=False,
+    )
+
+    assert candidate_trace["stages"]["fusion"]["candidate"] == candidate.payload()
+    assert "candidate" not in default_trace["stages"]["fusion"]
+    assert candidate_trace["stages"]["hydration"]["requested"] == (
+        candidate_trace["stages"]["fusion"]["candidate_count"]
+    )
+    assert candidate_trace["stages"]["rerank"] == {
+        "applied": False,
+        "warning": "rerank disabled",
+    }
+    assert vars(cfg) == config_before
+
+
+def test_trace_query_rejects_candidate_and_legacy_weights_together(
+    tmp_path,
+    monkeypatch,
+):
+    cfg, base, case = _build_trace_fixture(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="fusion override"):
+        trace_query(
+            cfg,
+            base,
+            case,
+            mode="hybrid",
+            rerank_enabled=False,
+            fusion_weights={"semantic_chunk": 1.0},
+            fusion_candidate=FusionCandidate(family="rrf_k", rrf_k=20),
+        )
 
 
 def test_trace_query_refuses_legacy_store_before_retrieval_helpers(
@@ -1252,6 +1307,222 @@ def test_run_live_traces_suppresses_store_migration_on_read_path(
     assert evidence["kind"] == "live"
     assert evidence["summary"]["rollup"]["case_count"] == 1
     assert evidence["traces"][0]["case_id"] == case.case_id
+
+
+def test_bounded_fusion_experiment_stops_before_live_confirmation_when_replay_needs_work(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="private query",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"a": ["iwiki-mcp/a.md#A:0"]},
+        k=8,
+    )
+    calls = []
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled, **kwargs):
+        calls.append((mode, rerank_enabled, kwargs))
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {"signals": {"ranked": {}}, "fusion": {}},
+            "results": [],
+            "metrics_input": {
+                "ranking": list(case.relevant),
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_candidate",
+        lambda *_: {
+            "status": "needs_work",
+            "reason": "no_passing_fusion_candidate",
+            "candidate": None,
+            "stage_a": [],
+            "stage_b": [],
+        },
+    )
+
+    evidence = runner.run_bounded_fusion_experiment(
+        {}, "iwiki-mcp", [case], base="/wiki",
+    )
+
+    assert evidence["decision"] == {
+        "status": "needs_work",
+        "reason": "no_passing_fusion_candidate",
+        "candidate": None,
+    }
+    assert "live_confirmation" not in evidence
+    assert calls == [
+        (mode, False, {}) for mode in ("hybrid", "lexical", "semantic")
+    ]
+    assert "private query" not in repr(evidence)
+
+
+def test_bounded_fusion_experiment_runs_one_rerank_free_winner_confirmation(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    cases = [
+        BenchmarkCase(
+            case_id=f"case-{index}",
+            domain="iwiki-mcp",
+            query=f"query {index}",
+            relevant={f"iwiki-mcp/{index}.md#Section:0": 3},
+            intents={"intent": [f"iwiki-mcp/{index}.md#Section:0"]},
+            k=8,
+        )
+        for index in range(12)
+    ]
+    selected = FusionCandidate(family="rrf_k", rrf_k=20)
+    calls = []
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled, **kwargs):
+        calls.append((case.case_id, mode, rerank_enabled, kwargs))
+        return {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {"signals": {"ranked": {}}, "fusion": {}},
+            "results": [],
+            "metrics_input": {
+                "ranking": list(case.relevant),
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_candidate",
+        lambda *_: {
+            "status": "passed",
+            "candidate": selected.payload(),
+            "stage_a": [],
+            "stage_b": [],
+        },
+    )
+    monkeypatch.setattr(runner, "_live_fusion_gate", lambda *_: [])
+
+    evidence = runner.run_bounded_fusion_experiment(
+        {}, "iwiki-mcp", cases, base="/wiki",
+    )
+
+    assert evidence["kind"] == "live-bounded-fusion"
+    assert evidence["baseline"]["summary"]["rollup"]["case_count"] == 36
+    assert evidence["live_confirmation"]["summary"]["rollup"]["case_count"] == 36
+    assert evidence["decision"] == {
+        "status": "validated_candidate",
+        "reason": None,
+        "candidate": selected.payload(),
+    }
+    assert len(calls) == 72
+    assert all(rerank_enabled is False for _, _, rerank_enabled, _ in calls)
+    assert all(not kwargs for _, _, _, kwargs in calls[:36])
+    assert all(
+        kwargs == {"fusion_candidate": selected}
+        for _, _, _, kwargs in calls[36:]
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["failed_sample", "recall", "intent", "ndcg", "finding"],
+)
+def test_bounded_fusion_experiment_rejects_live_gate_failures(
+    monkeypatch,
+    failure,
+):
+    from eval.search_pipeline import runner
+
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="query",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"a": ["iwiki-mcp/a.md#A:0"]},
+        k=8,
+    )
+    candidate = FusionCandidate(family="rrf_k", rrf_k=20)
+
+    def fake_trace_query(cfg, base, case, mode, rerank_enabled, **kwargs):
+        is_confirmation = "fusion_candidate" in kwargs
+        ranking = list(case.relevant)
+        if is_confirmation and failure in {"recall", "intent", "ndcg"}:
+            ranking = []
+        trace = {
+            "case_id": case.case_id,
+            "domain": case.domain,
+            "query": case.query,
+            "mode": mode,
+            "k": case.k,
+            "latency": {"total_ms": 1.0},
+            "stages": {"signals": {"ranked": {}}, "fusion": {}},
+            "results": [],
+            "metrics_input": {
+                "ranking": ranking,
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+        if is_confirmation and failure == "failed_sample":
+            trace["status"] = "failed"
+        return trace
+
+    def fake_analyze_trace(case, trace):
+        if (
+            failure == "finding"
+            and trace["metrics_input"]["ranking"] == []
+        ):
+            return [{
+                "case_id": case.case_id,
+                "class": "lost_after_fusion_topk",
+                "severity": "high",
+                "identity": "iwiki-mcp/new.md#New:0",
+                "evidence": {"candidate_rank": 1},
+            }]
+        return []
+
+    monkeypatch.setattr(runner, "trace_query", fake_trace_query)
+    monkeypatch.setattr(runner, "analyze_trace", fake_analyze_trace)
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_candidate",
+        lambda *_: {"status": "passed", "candidate": candidate.payload()},
+    )
+    if failure == "finding":
+        original_trace_query = fake_trace_query
+
+        def finding_trace_query(*args, **kwargs):
+            trace = original_trace_query(*args, **kwargs)
+            if "fusion_candidate" in kwargs:
+                trace["metrics_input"]["ranking"] = []
+            return trace
+
+        monkeypatch.setattr(runner, "trace_query", finding_trace_query)
+
+    evidence = runner.run_bounded_fusion_experiment(
+        {}, "iwiki-mcp", [case], base="/wiki",
+    )
+
+    assert evidence["decision"]["status"] == "needs_work"
 
 
 def test_pareto_experiment_runs_required_matrix_and_excludes_warmups(monkeypatch):

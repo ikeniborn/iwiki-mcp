@@ -19,6 +19,8 @@ from .fixtures import BenchmarkCase
 from .metrics import identity
 from .metrics import latency_summary
 from .metrics import source_mix
+from .selection import FusionCandidate
+from .selection import fuse_candidate_signals
 
 
 _PUBLIC_FIELDS = ("domain", "file", "heading", "chunk", "score", "hit", "source")
@@ -243,8 +245,11 @@ def trace_query(
     rerank_enabled: bool,
     *,
     fusion_weights: dict[str, float] | None = None,
+    fusion_candidate: FusionCandidate | None = None,
     rerank_candidate_limit: int | None = None,
 ) -> dict:
+    if fusion_weights is not None and fusion_candidate is not None:
+        raise ValueError("fusion override accepts either weights or candidate")
     if mode not in retrieval._VALID_MODES:
         allowed = ", ".join(sorted(retrieval._VALID_MODES))
         raise ValueError(f"invalid search mode: {mode}; allowed values: {allowed}")
@@ -317,7 +322,15 @@ def trace_query(
     }
 
     start = perf_counter()
-    fused_internal = fusion.fuse_ranked(signals, limit, fusion_weights)
+    if fusion_candidate is None:
+        fused_internal = fusion.fuse_ranked(signals, limit, fusion_weights)
+    else:
+        fused_internal = fuse_candidate_signals(
+            signals,
+            fusion_candidate,
+            limit=limit,
+            final_k=case.k,
+        )
     fused = [_project_fused_candidate(candidate) for candidate in fused_internal]
     stage_ms["fusion_ms"] = _elapsed_ms(start)
 
@@ -395,6 +408,11 @@ def trace_query(
                 "candidate_count": len(fused),
                 "candidate_identities": requested,
                 "source_mix": source_mix(fused),
+                **(
+                    {"candidate": fusion_candidate.payload()}
+                    if fusion_candidate is not None
+                    else {}
+                ),
             },
             "hydration": {
                 "requested": len(hydration_pool),
