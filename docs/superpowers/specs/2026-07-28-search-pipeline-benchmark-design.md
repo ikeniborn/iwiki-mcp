@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 09970ba1b952343e
+  spec_hash: cdab30733a64fc44
   last_run: 2026-07-29
   phases:
     structure: { status: passed }
@@ -40,8 +40,8 @@ The first twelve-case Pareto run completed 36 rerank-disabled traces across `hyb
 contained 19 `lost_after_fusion_topk` findings.
 
 All eight tested page/graph weight maps failed the fixed quality gates. Every map
-introduced at least one new top-k fusion loss, and four maps also failed to recover the
-confirmed losses at fused ranks 22 and 26. The result was
+introduced at least one new top-k fusion loss, and four maps also failed the historical
+rank-based recovery check. The result was
 `needs_work: no_passing_weight_map`; the rerank batch matrix did not run and production
 fusion and rerank constants remained unchanged.
 
@@ -52,7 +52,7 @@ top-k reserve; or correlated page/graph fan-out may overcount sections from one 
 The next experiment compares those explanations without changing production.
 
 No current evidence identifies chunk creation, stale index records, embedding
-dimensions, or hydration as the cause of the confirmed rank-22/rank-26 losses. Those
+dimensions, or hydration as the cause of the observed fusion losses. Those
 components remain observable in the report but are not changed by this experiment.
 
 ## Scope
@@ -145,12 +145,42 @@ complete case-mode matrix. A candidate is rejected when any condition holds:
 - intent coverage decreases in any compared mode;
 - mean nDCG@8 decreases by more than `0.01` in any compared mode;
 - any new case-level `lost_after_fusion_topk` finding appears;
-- either confirmed rank-22 or rank-26 loss is not recovered in fixed final top-8;
+- any active reviewed hard-negative target is not recovered in fixed final top-8;
+- fewer than two reviewed hard-negative targets are active in the compared baseline;
 - replay evidence is missing, duplicated, malformed, or contains unknown cases, modes,
   signals, identities, ranks, or ordinals.
 
 MRR@8 is a ranking objective and tie-breaker, not a regression gate. Gates are not
 weakened when no candidate passes.
+
+## Revision: Reproducible Hard-Negative Cases
+
+The rank-22 and rank-26 records were historical observations, not a durable corpus
+contract. Replace that positional gate with reviewed hard-negative cases. A hard-negative
+case names its relevant target identity and required mode. A baseline trace activates the
+case only when that exact identity is relevant, occurs after final top-k in fused order,
+and is recorded as `lost_after_fusion_topk`. Candidate recovery is required only for the
+activated identities from the same fresh baseline evidence.
+
+The corpus validator reports each hard-negative as `active`, `unavailable`, or `invalid`.
+An unavailable case cannot silently reject every candidate: the run remains diagnostic
+`needs_work: hard_negative_evidence_incomplete`, preserves all normal quality gates, and
+does not produce a production recommendation. An invalid contract is a fail-closed
+evidence error. Reports include activation state, baseline rank, identity, and candidate
+recovery. The benchmark retains at least two reviewed hard-negative cases, uses no
+query-specific fusion parameters, and does not change production behavior.
+
+The reviewed initial contracts are:
+
+- `related-sections`, mode `semantic`, target
+  `iwiki-mcp/retrieval.md#Related sections:0`;
+- `stale-write-protection`, mode `lexical`, target
+  `iwiki-mcp/git-sync.md#Pre-write freshness guard:0`.
+
+Both contracts are present as `lost_after_fusion_topk` in the 2026-07-28 evidence and
+the 2026-07-29 live evidence. Their absolute ranks are intentionally not part of the
+contract. At least two distinct contracts must be active in the baseline used for a
+selection decision.
 
 ## Replay And Live Data Flow
 
@@ -177,7 +207,7 @@ JSON, Markdown, and standalone HTML report:
 - all Stage A candidates grouped by family;
 - family winners and all Stage B pairs;
 - metric deltas and exact gate rejection reasons;
-- recovery state for the two confirmed losses;
+- activation and recovery state for the reviewed hard-negative targets;
 - live confirmation results when performed;
 - final status, chosen candidate, and evidence-backed backlog.
 
