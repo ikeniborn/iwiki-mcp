@@ -1423,6 +1423,14 @@ def test_bounded_fusion_experiment_stops_before_live_confirmation_when_replay_ne
 ):
     from eval.search_pipeline import runner
 
+    hard_negatives = [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": "iwiki-mcp/a.md#A:0",
+        "state": "active",
+        "baseline_rank": 13,
+    }]
+
     case = BenchmarkCase(
         case_id="case-a",
         domain="iwiki-mcp",
@@ -1459,6 +1467,7 @@ def test_bounded_fusion_experiment_stops_before_live_confirmation_when_replay_ne
             "status": "needs_work",
             "reason": "no_passing_fusion_candidate",
             "candidate": None,
+            "hard_negatives": hard_negatives,
             "stage_a": [],
             "stage_b": [],
         },
@@ -1472,6 +1481,7 @@ def test_bounded_fusion_experiment_stops_before_live_confirmation_when_replay_ne
         "status": "needs_work",
         "reason": "no_passing_fusion_candidate",
         "candidate": None,
+        "hard_negatives": hard_negatives,
     }
     assert "live_confirmation" not in evidence
     assert calls == [
@@ -1497,6 +1507,13 @@ def test_bounded_fusion_experiment_runs_one_rerank_free_winner_confirmation(
         for index in range(12)
     ]
     selected = FusionCandidate(family="rrf_k", rrf_k=20)
+    hard_negatives = [{
+        "case_id": "case-0",
+        "mode": "semantic",
+        "identity": "iwiki-mcp/0.md#Section:0",
+        "state": "active",
+        "baseline_rank": 13,
+    }]
     calls = []
 
     def fake_trace_query(cfg, base, case, mode, rerank_enabled, **kwargs):
@@ -1524,6 +1541,7 @@ def test_bounded_fusion_experiment_runs_one_rerank_free_winner_confirmation(
         lambda *_: {
             "status": "passed",
             "candidate": selected.payload(),
+            "hard_negatives": hard_negatives,
             "stage_a": [],
             "stage_b": [],
         },
@@ -1541,6 +1559,7 @@ def test_bounded_fusion_experiment_runs_one_rerank_free_winner_confirmation(
         "status": "validated_candidate",
         "reason": None,
         "candidate": selected.payload(),
+        "hard_negatives": hard_negatives,
     }
     assert len(calls) == 72
     assert all(rerank_enabled is False for _, _, rerank_enabled, _ in calls)
@@ -1549,6 +1568,150 @@ def test_bounded_fusion_experiment_runs_one_rerank_free_winner_confirmation(
         kwargs == {"fusion_candidate": selected}
         for _, _, _, kwargs in calls[36:]
     )
+
+
+def test_live_fusion_gate_uses_active_hard_negatives_without_rank_fallback():
+    from eval.search_pipeline import runner
+    from eval.search_pipeline.fixtures import HardNegativeTarget
+
+    targets = {
+        "case-a": "iwiki-mcp/a.md#A:0",
+        "case-b": "iwiki-mcp/b.md#B:0",
+    }
+    cases = [
+        BenchmarkCase(
+            case_id=case_id,
+            domain="iwiki-mcp",
+            query="needle",
+            relevant={target: 3},
+            intents={"answer": [target]},
+            hard_negatives=(HardNegativeTarget(target, "semantic"),),
+            k=8,
+        )
+        for case_id, target in targets.items()
+    ]
+
+    def trace(case, mode, *, confirmed):
+        target = targets[case.case_id]
+        candidate_identities = [target]
+        ranking = [target]
+        if mode == "semantic":
+            candidate_identities = [
+                *(f"iwiki-mcp/noise.md#N:{rank}" for rank in range(12)),
+                target,
+            ]
+            ranking = [target] if confirmed else []
+        return {
+            "case_id": case.case_id,
+            "mode": mode,
+            "k": case.k,
+            "stages": {"fusion": {"candidate_identities": candidate_identities}},
+            "metrics_input": {
+                "ranking": ranking,
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    baseline = {"traces": [
+        trace(case, mode, confirmed=False)
+        for case in cases for mode in ("hybrid", "lexical", "semantic")
+    ]}
+    confirmation = {"traces": [
+        trace(case, mode, confirmed=True)
+        for case in cases for mode in ("hybrid", "lexical", "semantic")
+    ]}
+
+    assert runner._live_fusion_gate(cases, baseline, confirmation) == []
+
+
+@pytest.mark.parametrize("mutation", ("identity_list", "mode_list", "stages_none"))
+def test_live_fusion_gate_fails_closed_for_malformed_hard_negative_evidence(
+    mutation,
+):
+    from eval.search_pipeline import runner
+    from eval.search_pipeline.fixtures import HardNegativeTarget
+
+    target = "iwiki-mcp/a.md#A:0"
+    hard_negative = HardNegativeTarget(target, "semantic")
+    if mutation == "identity_list":
+        hard_negative = HardNegativeTarget([], "semantic")
+    if mutation == "mode_list":
+        hard_negative = HardNegativeTarget(target, [])
+    case = BenchmarkCase(
+        case_id="case-a", domain="iwiki-mcp", query="needle",
+        relevant={target: 3}, hard_negatives=(hard_negative,), k=8,
+    )
+    trace = {
+        "case_id": case.case_id,
+        "mode": "semantic",
+        "k": case.k,
+        "stages": {"fusion": {"candidate_identities": [target]}},
+        "metrics_input": {"ranking": [target]},
+    }
+    if mutation == "stages_none":
+        trace["stages"] = None
+
+    assert runner._live_fusion_gate(
+        [case], {"traces": [trace]}, {"traces": [trace]},
+    ) == ["hard_negative_evidence_invalid"]
+
+
+def test_live_fusion_gate_rejects_malformed_confirmation_stages():
+    from eval.search_pipeline import runner
+    from eval.search_pipeline.fixtures import HardNegativeTarget
+
+    cases = [
+        BenchmarkCase(
+            case_id=f"case-{index}", domain="iwiki-mcp", query="needle",
+            relevant={f"iwiki-mcp/{index}.md#Target:0": 3},
+            intents={"answer": [f"iwiki-mcp/{index}.md#Target:0"]},
+            hard_negatives=(HardNegativeTarget(
+                f"iwiki-mcp/{index}.md#Target:0", "semantic",
+            ),),
+            k=8,
+        )
+        for index in range(2)
+    ]
+
+    def trace(case, mode, *, confirmation=False):
+        target = next(iter(case.relevant))
+        candidates = [target]
+        ranking = [target]
+        if mode == "semantic":
+            candidates = [
+                *(f"iwiki-mcp/noise.md#N:{rank}" for rank in range(12)),
+                target,
+            ]
+            ranking = [target] if confirmation else []
+        return {
+            "case_id": case.case_id,
+            "mode": mode,
+            "k": case.k,
+            "stages": {"fusion": {"candidate_identities": candidates}},
+            "metrics_input": {
+                "ranking": ranking,
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+
+    baseline = {"traces": [
+        trace(case, mode)
+        for case in cases for mode in ("hybrid", "lexical", "semantic")
+    ]}
+    confirmation = {"traces": [
+        trace(case, mode, confirmation=True)
+        for case in cases for mode in ("hybrid", "lexical", "semantic")
+    ]}
+    next(
+        trace for trace in confirmation["traces"]
+        if trace["case_id"] == "case-0" and trace["mode"] == "hybrid"
+    )["stages"] = None
+
+    assert runner._live_fusion_gate(
+        cases, baseline, confirmation,
+    ) == ["hard_negative_evidence_invalid"]
 
 
 @pytest.mark.parametrize(
@@ -1569,6 +1732,13 @@ def test_bounded_fusion_experiment_rejects_live_gate_failures(
         intents={"a": ["iwiki-mcp/a.md#A:0"]},
         k=8,
     )
+    hard_negatives = [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": "iwiki-mcp/a.md#A:0",
+        "state": "active",
+        "baseline_rank": 13,
+    }]
     candidate = FusionCandidate(family="rrf_k", rrf_k=20)
 
     def fake_trace_query(cfg, base, case, mode, rerank_enabled, **kwargs):
@@ -1614,7 +1784,11 @@ def test_bounded_fusion_experiment_rejects_live_gate_failures(
     monkeypatch.setattr(
         runner,
         "select_fusion_candidate",
-        lambda *_: {"status": "passed", "candidate": candidate.payload()},
+        lambda *_: {
+            "status": "passed",
+            "candidate": candidate.payload(),
+            "hard_negatives": hard_negatives,
+        },
     )
     if failure == "finding":
         original_trace_query = fake_trace_query
@@ -1632,11 +1806,156 @@ def test_bounded_fusion_experiment_rejects_live_gate_failures(
     )
 
     assert evidence["decision"]["status"] == "needs_work"
+    assert evidence["decision"]["hard_negatives"] == hard_negatives
+
+
+@pytest.mark.parametrize(
+    ("selection", "status", "reason", "candidate"),
+    (
+        (
+            {
+                "status": "passed",
+                "candidate": FusionCandidate(family="rrf_k", rrf_k=20).payload(),
+            },
+            "pending_live_confirmation",
+            "replay_candidate_selected",
+            FusionCandidate(family="rrf_k", rrf_k=20).payload(),
+        ),
+        (
+            {"status": "needs_work", "reason": "hard_negative_evidence_incomplete"},
+            "needs_work",
+            "hard_negative_evidence_incomplete",
+            None,
+        ),
+    ),
+)
+def test_bounded_fusion_replay_decision_includes_selection_hard_negatives(
+    monkeypatch,
+    selection,
+    status,
+    reason,
+    candidate,
+):
+    from eval.search_pipeline import runner
+
+    hard_negatives = [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": "iwiki-mcp/a.md#A:0",
+        "state": "active",
+        "baseline_rank": 13,
+    }]
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_candidate",
+        lambda *_: {**selection, "hard_negatives": hard_negatives},
+    )
+
+    evidence = runner.run_bounded_fusion_replay("iwiki-mcp", [], [])
+
+    assert evidence["decision"] == {
+        "status": status,
+        "reason": reason,
+        "candidate": candidate,
+        "hard_negatives": hard_negatives,
+    }
+
+
+def test_bounded_fusion_replay_fails_closed_when_stages_are_none():
+    from eval.search_pipeline import runner
+
+    target = "iwiki-mcp/a.md#A:0"
+    case = BenchmarkCase(
+        case_id="case-a", domain="iwiki-mcp", query="needle",
+        relevant={target: 3}, intents={"answer": [target]}, k=8,
+    )
+    traces = [
+        {
+            "case_id": case.case_id,
+            "mode": mode,
+            "k": case.k,
+            "stages": None,
+            "metrics_input": {
+                "ranking": [],
+                "relevant": case.relevant,
+                "intents": case.intents,
+            },
+        }
+        for mode in ("hybrid", "lexical", "semantic")
+    ]
+
+    evidence = runner.run_bounded_fusion_replay(
+        "iwiki-mcp", [case], traces,
+    )
+
+    assert evidence["decision"] == {
+        "status": "needs_work",
+        "reason": "replay_evidence_incomplete",
+        "candidate": None,
+        "hard_negatives": [],
+    }
+
+
+def test_pareto_experiment_propagates_hard_negatives_when_fusion_selection_needs_work(
+    monkeypatch,
+):
+    from eval.search_pipeline import runner
+
+    hard_negatives = [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": "iwiki-mcp/a.md#A:0",
+        "state": "active",
+        "baseline_rank": 13,
+    }]
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="query",
+        relevant={"iwiki-mcp/a.md#A:0": 3},
+        intents={"answer": ["iwiki-mcp/a.md#A:0"]},
+        k=8,
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_live_traces",
+        lambda *args, **kwargs: {
+            "traces": [],
+            "cases": [],
+            "summary": {"rollup": {}, "cases": []},
+            "findings": [],
+            "backlog": [],
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "select_fusion_weights",
+        lambda *_: {
+            "status": "needs_work",
+            "reason": "hard_negative_evidence_incomplete",
+            "hard_negatives": hard_negatives,
+        },
+    )
+
+    evidence = runner.run_pareto_experiment({}, "iwiki-mcp", [case])
+
+    assert evidence["decision"] == {
+        "status": "needs_work",
+        "reason": "hard_negative_evidence_incomplete",
+        "hard_negatives": hard_negatives,
+    }
 
 
 def test_pareto_experiment_runs_required_matrix_and_excludes_warmups(monkeypatch):
     from eval.search_pipeline import runner
 
+    hard_negatives = [{
+        "case_id": "case-0",
+        "mode": "semantic",
+        "identity": "iwiki-mcp/0.md#Section:0",
+        "state": "active",
+        "baseline_rank": 13,
+    }]
     cases = [
         BenchmarkCase(
             case_id=f"case-{index}",
@@ -1685,6 +2004,7 @@ def test_pareto_experiment_runs_required_matrix_and_excludes_warmups(monkeypatch
         lambda cases, traces: {
             "status": "passed",
             "weights": {"semantic_chunk": 1.0, "graph_page": 0.01},
+            "hard_negatives": hard_negatives,
             "candidates": [],
         },
     )
@@ -1704,6 +2024,12 @@ def test_pareto_experiment_runs_required_matrix_and_excludes_warmups(monkeypatch
     assert all(run["sample_count"] == 24 for run in evidence["rerank_batches"].values())
     assert evidence["run_settings"]["warmup_passes"] == 1
     assert evidence["run_settings"]["measured_passes"] == 2
+    assert evidence["decision"] == {
+        "status": "passed",
+        "batch": 16,
+        "candidates": [],
+        "hard_negatives": hard_negatives,
+    }
     assert len(calls) == 36 + (3 * 12) + (3 * 2 * 12)
     assert all("query" not in trace for trace in evidence["traces"])
     measured = [

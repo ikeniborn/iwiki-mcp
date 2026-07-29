@@ -4,6 +4,15 @@ from dataclasses import dataclass
 from dataclasses import field
 
 
+_HARD_NEGATIVE_MODES = frozenset(("hybrid", "lexical", "semantic"))
+
+
+@dataclass(frozen=True)
+class HardNegativeTarget:
+    identity: str
+    mode: str
+
+
 @dataclass(frozen=True)
 class BenchmarkCase:
     case_id: str
@@ -13,6 +22,100 @@ class BenchmarkCase:
     intents: dict[str, list[str]] = field(default_factory=dict)
     k: int = 8
     query_class: str = "unspecified"
+    hard_negatives: tuple[HardNegativeTarget, ...] = ()
+
+
+def hard_negative_records(cases, traces) -> list[dict]:
+    trace_list = list(traces)
+    targets = []
+    for case in cases:
+        hard_negatives = case.hard_negatives
+        if not isinstance(hard_negatives, tuple):
+            targets.append((case, None))
+            continue
+        targets.extend((case, target) for target in hard_negatives)
+    counts = {}
+    for case, target in targets:
+        mode = target.mode if isinstance(target, HardNegativeTarget) else None
+        identity = (
+            target.identity if isinstance(target, HardNegativeTarget) else None
+        )
+        if isinstance(mode, str) and isinstance(identity, str):
+            key = (case.case_id, mode, identity)
+            counts[key] = counts.get(key, 0) + 1
+
+    records = []
+    for case, target in targets:
+        mode = target.mode if isinstance(target, HardNegativeTarget) else None
+        identity = (
+            target.identity if isinstance(target, HardNegativeTarget) else None
+        )
+        valid_target = (
+            isinstance(target, HardNegativeTarget)
+            and isinstance(mode, str)
+            and isinstance(identity, str)
+        )
+        key = (case.case_id, mode, identity) if valid_target else None
+        matching = [
+            trace for trace in trace_list
+            if isinstance(trace, dict)
+            and trace.get("case_id") == case.case_id
+            and trace.get("mode") == mode
+        ]
+        ranking = None
+        candidates = None
+        trace_k = None
+        if len(matching) == 1:
+            trace = matching[0]
+            metrics_input = trace.get("metrics_input")
+            stages = trace.get("stages")
+            fusion = stages.get("fusion") if isinstance(stages, dict) else None
+            trace_k = trace.get("k")
+            if isinstance(metrics_input, dict) and isinstance(fusion, dict):
+                ranking = metrics_input.get("ranking")
+                candidates = fusion.get("candidate_identities")
+        valid = (
+            valid_target
+            and mode in _HARD_NEGATIVE_MODES
+            and isinstance(case.relevant, dict)
+            and identity in case.relevant
+            and counts.get(key) == 1
+            and len(matching) == 1
+            and isinstance(ranking, list)
+            and all(isinstance(item, str) for item in ranking)
+            and isinstance(candidates, list)
+            and all(isinstance(item, str) for item in candidates)
+            and isinstance(trace_k, int)
+            and not isinstance(trace_k, bool)
+            and trace_k > 0
+        )
+        baseline_rank = (
+            candidates.index(identity) + 1
+            if valid and identity in candidates
+            else None
+        )
+        state = "invalid"
+        if valid:
+            state = "active" if (
+                baseline_rank is not None
+                and baseline_rank > trace_k
+                and identity not in ranking
+            ) else "unavailable"
+        records.append({
+            "case_id": case.case_id,
+            "mode": mode,
+            "identity": identity,
+            "state": state,
+            "baseline_rank": baseline_rank,
+        })
+    return sorted(
+        records,
+        key=lambda record: (
+            repr(record["case_id"]),
+            repr(record["mode"]),
+            repr(record["identity"]),
+        ),
+    )
 
 
 DEFAULT_LIVE_CASES = [
@@ -55,6 +158,10 @@ DEFAULT_LIVE_CASES = [
             "freshness": ["iwiki-mcp/git-sync.md#Pre-write freshness guard:0"],
         },
         query_class="semantic_paraphrase",
+        hard_negatives=(HardNegativeTarget(
+            identity="iwiki-mcp/git-sync.md#Pre-write freshness guard:0",
+            mode="lexical",
+        ),),
     ),
     BenchmarkCase(
         case_id="binding-resolution",
@@ -151,6 +258,10 @@ DEFAULT_LIVE_CASES = [
         relevant={"iwiki-mcp/retrieval.md#Related sections:0": 3},
         intents={"related": ["iwiki-mcp/retrieval.md#Related sections:0"]},
         query_class="graph_distractor",
+        hard_negatives=(HardNegativeTarget(
+            identity="iwiki-mcp/retrieval.md#Related sections:0",
+            mode="semantic",
+        ),),
     ),
     BenchmarkCase(
         case_id="search-scope",

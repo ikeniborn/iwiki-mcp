@@ -11,6 +11,7 @@ from iwiki_mcp.engine.fusion import fuse_ranked
 
 from .analyzer import analyze_trace
 from .fixtures import BenchmarkCase
+from .fixtures import hard_negative_records
 from .metrics import intent_coverage_at_k
 from .metrics import mrr_at_k
 from .metrics import ndcg_at_k
@@ -20,7 +21,6 @@ from .metrics import recall_at_k
 PAGE_WEIGHTS = (0.025, 0.05, 0.1)
 GRAPH_WEIGHTS = (0.01, 0.025, 0.05)
 RERANK_BATCHES = (16, 24, 32)
-_CONFIRMED_LOSS_RANKS = (22, 26)
 _FINAL_RECOVERY_K = 8
 _REQUIRED_FUSION_MODES = ("hybrid", "lexical", "semantic")
 _RANKED_HIT_FIELDS = ("domain", "file", "heading", "chunk", "ordinal")
@@ -292,7 +292,13 @@ def _identity(hit: dict) -> str:
 
 
 def _ranked_signals(trace: dict) -> dict[str, list[dict]] | None:
-    ranked = trace.get("stages", {}).get("signals", {}).get("ranked")
+    stages = trace.get("stages")
+    if not isinstance(stages, dict):
+        return None
+    signals_stage = stages.get("signals")
+    if not isinstance(signals_stage, dict):
+        return None
+    ranked = signals_stage.get("ranked")
     if not isinstance(ranked, dict):
         return None
     signals = {}
@@ -381,7 +387,8 @@ def _weights_key(weights: dict[str, float]) -> str:
 
 
 def _replayed_trace(trace: dict, ranking: list[str]) -> dict:
-    stages = dict(trace.get("stages", {}))
+    raw_stages = trace.get("stages")
+    stages = dict(raw_stages) if isinstance(raw_stages, dict) else {}
     stages["fusion"] = {"candidate_identities": ranking}
     return {
         **trace,
@@ -403,26 +410,6 @@ def _loss_findings(
         (finding["case_id"], finding["class"], finding["identity"])
         for finding in analyze_trace(case, replay)
         if finding["class"] == "lost_after_fusion_topk"
-    }
-
-
-def _confirmed_loss_records(
-    case: BenchmarkCase,
-    trace: dict,
-) -> set[tuple[str, str, int, str]]:
-    return {
-        (
-            finding["case_id"],
-            trace.get("mode", ""),
-            finding["evidence"]["candidate_rank"],
-            finding["identity"],
-        )
-        for finding in analyze_trace(case, trace)
-        if (
-            finding["class"] == "lost_after_fusion_topk"
-            and finding["evidence"].get("candidate_rank")
-            in _CONFIRMED_LOSS_RANKS
-        )
     }
 
 
@@ -467,19 +454,22 @@ def _fusion_gate_reasons(
     baseline_findings: set[tuple],
     trace_list: list[dict],
     rankings: list[list[str] | None],
-    confirmed_losses: set[tuple[str, str, int, str]],
+    hard_negatives: list[dict],
     *,
     case_mode_evidence_complete: bool,
     replay_evidence_incomplete: bool,
-    confirmed_loss_evidence_incomplete: bool,
+    hard_negative_evidence_invalid: bool,
+    hard_negative_evidence_incomplete: bool,
 ) -> list[str]:
     reasons = []
+    if hard_negative_evidence_invalid:
+        reasons.append("hard_negative_evidence_invalid")
     if not case_mode_evidence_complete:
         reasons.append("case_mode_evidence_incomplete")
     if replay_evidence_incomplete or any(ranking is None for ranking in rankings):
         reasons.append("replay_evidence_incomplete")
-    if confirmed_loss_evidence_incomplete:
-        reasons.append("confirmed_loss_evidence_incomplete")
+    if hard_negative_evidence_incomplete:
+        reasons.append("hard_negative_evidence_incomplete")
     if any(
         modes[mode]["recall_at_k"] < baseline_modes[mode]["recall_at_k"]
         for mode in modes
@@ -498,43 +488,76 @@ def _fusion_gate_reasons(
         reasons.append("ndcg_loss_exceeds_limit")
     if findings - baseline_findings:
         reasons.append("new_lost_after_fusion_top_k")
+    active_targets = {
+        (record["case_id"], record["mode"], record["identity"])
+        for record in hard_negatives
+        if record["state"] == "active"
+    }
     for trace, ranking in zip(trace_list, rankings):
-        confirmed = {
-            record[3]
-            for record in confirmed_losses
-            if record[:2] == (trace["case_id"], trace.get("mode", ""))
+        required = {
+            identity
+            for case_id, mode, identity in active_targets
+            if (case_id, mode) == (trace["case_id"], trace.get("mode", ""))
         }
-        if confirmed - set((ranking or [])[:_FINAL_RECOVERY_K]):
+        if required - set((ranking or [])[:trace["k"]]):
             reasons.append("confirmed_loss_not_recovered")
             break
     return sorted(set(reasons))
 
 
-def _invalid_fusion_evidence() -> dict:
+def _invalid_fusion_evidence(
+    hard_negatives: list[dict],
+    *,
+    reason: str = "evidence_invalid",
+) -> dict:
     candidates = [
         {
             "weights": dict(sorted(weights.items())),
             "weights_key": _weights_key(weights),
             "metrics": {"aggregate": _mean_metrics([]), "modes": {}},
             "passed": False,
-            "reasons": ["evidence_invalid"],
+            "reasons": [reason],
         }
         for weights in fusion_weight_grid()
     ]
     candidates.sort(key=lambda item: item["weights_key"])
     return {
         "status": "needs_work",
-        "reason": "evidence_invalid",
+        "reason": reason,
         "weights": None,
+        "hard_negatives": hard_negatives,
         "candidates": candidates,
+    }
+
+
+def _hard_negative_evidence(cases, traces) -> dict:
+    records = hard_negative_records(cases, traces)
+    active_records = [
+        record for record in records if record["state"] == "active"
+    ]
+    invalid = any(record["state"] == "invalid" for record in records)
+    incomplete = len(active_records) < 2
+    return {
+        "records": records,
+        "active_records": active_records,
+        "invalid": invalid,
+        "incomplete": incomplete,
+        "ready": not invalid and not incomplete,
     }
 
 
 def select_fusion_weights(cases, traces) -> dict:
     case_list = list(cases)
     all_traces = list(traces)
+    hard_negative_evidence = _hard_negative_evidence(case_list, all_traces)
+    hard_negatives = hard_negative_evidence["records"]
+    if hard_negative_evidence["invalid"]:
+        return _invalid_fusion_evidence(
+            hard_negatives,
+            reason="hard_negative_evidence_invalid",
+        )
     if not _has_valid_trace_k(all_traces):
-        return _invalid_fusion_evidence()
+        return _invalid_fusion_evidence(hard_negatives)
     case_by_id = {case.case_id: case for case in case_list}
     case_mode_evidence_complete = _has_complete_case_mode_evidence(
         case_list, all_traces,
@@ -556,17 +579,8 @@ def select_fusion_weights(cases, traces) -> dict:
         for trace, ranking in zip(trace_list, usable_baseline_rankings)
     ]
     baseline_modes = _per_mode(baseline_records)
-    confirmed_loss_records = [
-        _confirmed_loss_records(case_by_id[trace["case_id"]], trace)
-        for trace in trace_list
-    ]
-    confirmed_losses = set().union(*confirmed_loss_records) if trace_list else set()
-    evidence_incomplete = (
-        not set(_CONFIRMED_LOSS_RANKS).issubset(
-            {record[2] for record in confirmed_losses}
-        )
-        or len(confirmed_losses) < len(_CONFIRMED_LOSS_RANKS)
-    )
+    hard_negative_evidence_invalid = hard_negative_evidence["invalid"]
+    hard_negative_evidence_incomplete = hard_negative_evidence["incomplete"]
     baseline_findings = (
         set().union(
             *[
@@ -607,10 +621,11 @@ def select_fusion_weights(cases, traces) -> dict:
             baseline_findings,
             trace_list,
             rankings,
-            confirmed_losses,
+            hard_negatives,
             case_mode_evidence_complete=case_mode_evidence_complete,
             replay_evidence_incomplete=replay_evidence_incomplete,
-            confirmed_loss_evidence_incomplete=evidence_incomplete,
+            hard_negative_evidence_invalid=hard_negative_evidence_invalid,
+            hard_negative_evidence_incomplete=hard_negative_evidence_incomplete,
         )
         candidates.append(
             {
@@ -628,11 +643,20 @@ def select_fusion_weights(cases, traces) -> dict:
         )
 
     candidates.sort(key=lambda item: item["weights_key"])
+    if hard_negative_evidence_invalid:
+        return {
+            "status": "needs_work",
+            "reason": "hard_negative_evidence_invalid",
+            "weights": None,
+            "hard_negatives": hard_negatives,
+            "candidates": candidates,
+        }
     if not case_mode_evidence_complete:
         return {
             "status": "needs_work",
             "reason": "case_mode_evidence_incomplete",
             "weights": None,
+            "hard_negatives": hard_negatives,
             "candidates": candidates,
         }
     if replay_evidence_incomplete:
@@ -640,13 +664,15 @@ def select_fusion_weights(cases, traces) -> dict:
             "status": "needs_work",
             "reason": "replay_evidence_incomplete",
             "weights": None,
+            "hard_negatives": hard_negatives,
             "candidates": candidates,
         }
-    if evidence_incomplete:
+    if hard_negative_evidence_incomplete:
         return {
             "status": "needs_work",
-            "reason": "confirmed_loss_evidence_incomplete",
+            "reason": "hard_negative_evidence_incomplete",
             "weights": None,
+            "hard_negatives": hard_negatives,
             "candidates": candidates,
         }
     passing = [item for item in candidates if item["passed"]]
@@ -655,6 +681,7 @@ def select_fusion_weights(cases, traces) -> dict:
             "status": "needs_work",
             "reason": "no_passing_weight_map",
             "weights": None,
+            "hard_negatives": hard_negatives,
             "candidates": candidates,
         }
     selected = min(
@@ -670,6 +697,7 @@ def select_fusion_weights(cases, traces) -> dict:
         "status": "passed",
         "weights": selected["weights"],
         "weights_key": selected["weights_key"],
+        "hard_negatives": hard_negatives,
         "candidates": candidates,
     }
 
@@ -695,11 +723,12 @@ def _evaluate_fusion_candidate(
     trace_list: list[dict],
     baseline_modes: dict[str, dict[str, float]],
     baseline_findings: set[tuple],
-    confirmed_losses: set[tuple[str, str, int, str]],
+    hard_negatives: list[dict],
     *,
     case_mode_evidence_complete: bool,
     replay_evidence_incomplete: bool,
-    confirmed_loss_evidence_incomplete: bool,
+    hard_negative_evidence_invalid: bool,
+    hard_negative_evidence_incomplete: bool,
 ) -> dict:
     rankings = [replay_fusion_candidate(trace, candidate) for trace in trace_list]
     usable_rankings = [ranking or [] for ranking in rankings]
@@ -726,10 +755,11 @@ def _evaluate_fusion_candidate(
         baseline_findings,
         trace_list,
         rankings,
-        confirmed_losses,
+        hard_negatives,
         case_mode_evidence_complete=case_mode_evidence_complete,
         replay_evidence_incomplete=replay_evidence_incomplete,
-        confirmed_loss_evidence_incomplete=confirmed_loss_evidence_incomplete,
+        hard_negative_evidence_invalid=hard_negative_evidence_invalid,
+        hard_negative_evidence_incomplete=hard_negative_evidence_incomplete,
     )
     return {
         "candidate": candidate.payload(),
@@ -764,7 +794,14 @@ def select_fusion_candidate(cases, traces) -> dict:
     case_list = list(cases)
     all_traces = list(traces)
     stage_a = stage_a_candidates()
-    if not _has_valid_trace_k(all_traces):
+    hard_negative_evidence = _hard_negative_evidence(case_list, all_traces)
+    hard_negatives = hard_negative_evidence["records"]
+    if hard_negative_evidence["invalid"] or not _has_valid_trace_k(all_traces):
+        reason = (
+            "hard_negative_evidence_invalid"
+            if hard_negative_evidence["invalid"]
+            else "evidence_invalid"
+        )
         records = [
             {
                 "candidate": candidate.payload(),
@@ -772,15 +809,16 @@ def select_fusion_candidate(cases, traces) -> dict:
                 "families": [candidate.family],
                 "metrics": {"aggregate": _mean_metrics([]), "modes": {}},
                 "passed": False,
-                "reasons": ["evidence_invalid"],
+                "reasons": [reason],
             }
             for candidate in stage_a
         ]
         return {
             "status": "needs_work",
-            "reason": "evidence_invalid",
+            "reason": reason,
             "candidate": None,
             "baseline": {"metrics": {"aggregate": _mean_metrics([]), "modes": {}}},
+            "hard_negatives": hard_negatives,
             "stage_a": records,
             "family_winners": [],
             "family_rejections": sorted({item.family for item in stage_a}),
@@ -815,16 +853,8 @@ def select_fusion_candidate(cases, traces) -> dict:
         "aggregate": _mean_metrics([metrics for _, metrics in baseline_records]),
         "modes": _per_mode(baseline_records),
     }
-    confirmed_losses = set().union(*[
-        _confirmed_loss_records(case_by_id[trace["case_id"]], trace)
-        for trace in trace_list
-    ]) if trace_list else set()
-    confirmed_loss_evidence_incomplete = (
-        not set(_CONFIRMED_LOSS_RANKS).issubset(
-            {record[2] for record in confirmed_losses}
-        )
-        or len(confirmed_losses) < len(_CONFIRMED_LOSS_RANKS)
-    )
+    hard_negative_evidence_invalid = hard_negative_evidence["invalid"]
+    hard_negative_evidence_incomplete = hard_negative_evidence["incomplete"]
     baseline_findings = (
         set().union(*[
             _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
@@ -837,7 +867,8 @@ def select_fusion_candidate(cases, traces) -> dict:
     evaluation_args = {
         "case_mode_evidence_complete": case_mode_evidence_complete,
         "replay_evidence_incomplete": replay_evidence_incomplete,
-        "confirmed_loss_evidence_incomplete": confirmed_loss_evidence_incomplete,
+        "hard_negative_evidence_invalid": hard_negative_evidence_invalid,
+        "hard_negative_evidence_incomplete": hard_negative_evidence_incomplete,
     }
     stage_a_records = [
         _evaluate_fusion_candidate(
@@ -846,7 +877,7 @@ def select_fusion_candidate(cases, traces) -> dict:
             trace_list,
             baseline_metrics["modes"],
             baseline_findings,
-            confirmed_losses,
+            hard_negatives,
             **evaluation_args,
         )
         for candidate in stage_a
@@ -871,7 +902,7 @@ def select_fusion_candidate(cases, traces) -> dict:
             trace_list,
             baseline_metrics["modes"],
             baseline_findings,
-            confirmed_losses,
+            hard_negatives,
             **evaluation_args,
         )
         for candidate in stage_b_candidates([
@@ -888,9 +919,10 @@ def select_fusion_candidate(cases, traces) -> dict:
     ]
     stage_b_records.sort(key=lambda item: item["candidate_key"])
     invalid_reason = next((reason for reason, failed in (
+        ("hard_negative_evidence_invalid", hard_negative_evidence_invalid),
         ("case_mode_evidence_incomplete", not case_mode_evidence_complete),
         ("replay_evidence_incomplete", replay_evidence_incomplete),
-        ("confirmed_loss_evidence_incomplete", confirmed_loss_evidence_incomplete),
+        ("hard_negative_evidence_incomplete", hard_negative_evidence_incomplete),
     ) if failed), None)
     passing = [
         item for item in [*stage_a_records, *stage_b_records]
@@ -904,6 +936,7 @@ def select_fusion_candidate(cases, traces) -> dict:
         ),
         "candidate": selected["candidate"] if selected is not None and invalid_reason is None else None,
         "baseline": {"metrics": baseline_metrics},
+        "hard_negatives": hard_negatives,
         "stage_a": stage_a_records,
         "family_winners": winners,
         "family_rejections": family_rejections,

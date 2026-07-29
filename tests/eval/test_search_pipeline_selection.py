@@ -6,6 +6,8 @@ import pytest
 
 from eval.search_pipeline.fixtures import BenchmarkCase
 from eval.search_pipeline.fixtures import DEFAULT_LIVE_CASES
+from eval.search_pipeline.fixtures import HardNegativeTarget
+from eval.search_pipeline.fixtures import hard_negative_records
 from eval.search_pipeline.selection import fusion_weight_grid
 from eval.search_pipeline.selection import FusionCandidate
 from eval.search_pipeline.selection import GRAPH_WEIGHTS
@@ -259,7 +261,7 @@ def test_candidate_selector_returns_needs_work_when_no_candidate_passes(
 ):
     cases = []
     traces = []
-    for case_id, rank in (("case-a", 22), ("case-b", 26)):
+    for case_id, rank in (("case-a", 13), ("case-b", 14)):
         target = f"iwiki-mcp/answer.md#Target {case_id}:0"
         cases.append(BenchmarkCase(
             case_id=case_id,
@@ -268,6 +270,7 @@ def test_candidate_selector_returns_needs_work_when_no_candidate_passes(
             relevant={target: 3},
             intents={"api": [target]},
             k=1,
+            hard_negatives=(HardNegativeTarget(target, "semantic"),),
         ))
         trace = _trace(k=1)
         trace["case_id"] = case_id
@@ -313,6 +316,245 @@ def test_live_corpus_has_two_reviewed_cases_per_query_class():
         name: 2 for name in expected
     }
     assert all(case.relevant and case.intents and case.k == 8 for case in DEFAULT_LIVE_CASES)
+
+
+def test_live_corpus_declares_reviewed_hard_negative_contracts():
+    contracts = sorted(
+        (case.case_id, target.mode, target.identity)
+        for case in DEFAULT_LIVE_CASES
+        for target in case.hard_negatives
+    )
+
+    assert contracts == [
+        (
+            "related-sections",
+            "semantic",
+            "iwiki-mcp/retrieval.md#Related sections:0",
+        ),
+        (
+            "stale-write-protection",
+            "lexical",
+            "iwiki-mcp/git-sync.md#Pre-write freshness guard:0",
+        ),
+    ]
+
+
+def test_hard_negative_records_mark_active_rank_thirteen_and_unavailable_top_eight():
+    target = "iwiki-mcp/answer.md#Target:0"
+    case = BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="needle",
+        relevant={target: 3},
+        hard_negatives=(HardNegativeTarget(target, "semantic"),),
+        k=8,
+    )
+    active = _trace(mode="semantic", k=8, ranking=[])
+    active["stages"]["fusion"]["candidate_identities"] = [
+        *(f"iwiki-mcp/noise.md#N:{rank}" for rank in range(12)), target,
+    ]
+    unavailable = _trace(mode="semantic", k=8, ranking=[target])
+    unavailable["stages"]["fusion"]["candidate_identities"] = [target]
+    trace_k_exceeds_target_rank = _trace(mode="semantic", k=15, ranking=[])
+    trace_k_exceeds_target_rank["stages"]["fusion"]["candidate_identities"] = [
+        *(f"iwiki-mcp/noise.md#N:{rank}" for rank in range(12)), target,
+    ]
+
+    assert hard_negative_records([case], [active]) == [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": target,
+        "state": "active",
+        "baseline_rank": 13,
+    }]
+    assert hard_negative_records([case], [unavailable]) == [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": target,
+        "state": "unavailable",
+        "baseline_rank": 1,
+    }]
+    assert hard_negative_records([case], [trace_k_exceeds_target_rank]) == [{
+        "case_id": "case-a",
+        "mode": "semantic",
+        "identity": target,
+        "state": "unavailable",
+        "baseline_rank": 13,
+    }]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "not_relevant", "duplicate", "unsupported_mode", "missing_trace",
+        "malformed_ranking", "identity_list", "mode_list", "stages_none",
+    ),
+)
+def test_hard_negative_records_reject_invalid_contracts(mutation):
+    target = "iwiki-mcp/answer.md#Target:0"
+    targets = (HardNegativeTarget(target, "semantic"),)
+    relevant = {target: 3}
+    if mutation == "not_relevant":
+        targets = (HardNegativeTarget("iwiki-mcp/other.md#Other:0", "semantic"),)
+    else:
+        if mutation == "duplicate":
+            targets = (*targets, HardNegativeTarget(target, "semantic"))
+        if mutation == "unsupported_mode":
+            targets = (HardNegativeTarget(target, "unsupported"),)
+        if mutation == "identity_list":
+            targets = (HardNegativeTarget([], "semantic"),)
+        if mutation == "mode_list":
+            targets = (HardNegativeTarget(target, []),)
+    case = BenchmarkCase(
+        case_id="case-a", domain="iwiki-mcp", query="needle",
+        relevant=relevant, hard_negatives=targets, k=8,
+    )
+
+    trace = _trace(mode="semantic", k=8)
+    if mutation == "missing_trace":
+        trace["mode"] = "hybrid"
+    if mutation == "malformed_ranking":
+        trace["metrics_input"]["ranking"] = "invalid"
+    if mutation == "stages_none":
+        trace["stages"] = None
+    records = hard_negative_records([case], [trace])
+
+    assert records and all(record["state"] == "invalid" for record in records)
+    assert records == hard_negative_records([case], [trace])
+
+
+@pytest.mark.parametrize("mutation", ("identity_list", "mode_list", "stages_none"))
+def test_selectors_fail_closed_for_malformed_hard_negative_evidence(mutation):
+    target = "iwiki-mcp/answer.md#Target:0"
+    hard_negative = HardNegativeTarget(target, "semantic")
+    if mutation == "identity_list":
+        hard_negative = HardNegativeTarget([], "semantic")
+    if mutation == "mode_list":
+        hard_negative = HardNegativeTarget(target, [])
+    case = BenchmarkCase(
+        case_id="case-a", domain="iwiki-mcp", query="needle",
+        relevant={target: 3}, hard_negatives=(hard_negative,), k=8,
+    )
+    trace = _trace(mode="semantic", k=8)
+    if mutation == "stages_none":
+        trace["stages"] = None
+
+    for decision in (
+        select_fusion_weights([case], [trace]),
+        select_fusion_candidate([case], [trace]),
+    ):
+        assert decision["reason"] == "hard_negative_evidence_invalid"
+        assert all(
+            record["state"] == "invalid"
+            for record in decision["hard_negatives"]
+        )
+
+
+@pytest.mark.parametrize(
+    "hard_negatives",
+    (
+        None,
+        {"identity": "iwiki-mcp/answer.md#Target:0"},
+        (("iwiki-mcp/answer.md#Target:0", "semantic"),),
+        (None,),
+    ),
+    ids=("none", "dict", "tuple_value", "none_element"),
+)
+def test_selectors_fail_closed_for_malformed_hard_negative_containers(
+    hard_negatives,
+):
+    target = "iwiki-mcp/answer.md#Target:0"
+    case = BenchmarkCase(
+        case_id="case-a", domain="iwiki-mcp", query="needle",
+        relevant={target: 3}, hard_negatives=hard_negatives, k=8,
+    )
+    trace = _trace(mode="semantic", k=8)
+
+    records = hard_negative_records([case], [trace])
+
+    assert records and all(record["state"] == "invalid" for record in records)
+    assert records == hard_negative_records([case], [trace])
+    for decision in (
+        select_fusion_weights([case], [trace]),
+        select_fusion_candidate([case], [trace]),
+    ):
+        assert decision["reason"] == "hard_negative_evidence_invalid"
+        assert decision["hard_negatives"] == records
+
+
+def test_fusion_selector_reports_invalid_hard_negative_before_matrix_completeness():
+    target = "iwiki-mcp/answer.md#Target:0"
+    case = BenchmarkCase(
+        case_id="case-a", domain="iwiki-mcp", query="needle",
+        relevant={target: 3},
+        hard_negatives=(HardNegativeTarget(target, "unsupported"),), k=8,
+    )
+
+    decision = select_fusion_weights([case], [_trace(mode="hybrid", k=8)])
+
+    assert decision["status"] == "needs_work"
+    assert decision["reason"] == "hard_negative_evidence_invalid"
+
+
+def test_fusion_selector_requires_two_active_hard_negatives_and_exact_recovery(
+    monkeypatch,
+):
+    targets = {
+        "case-a": "iwiki-mcp/a.md#A:0",
+        "case-b": "iwiki-mcp/b.md#B:0",
+    }
+    cases = [
+        BenchmarkCase(
+            case_id=case_id, domain="iwiki-mcp", query="needle",
+            relevant={target: 3}, intents={"answer": [target]}, k=8,
+            hard_negatives=(HardNegativeTarget(target, "semantic"),),
+        )
+        for case_id, target in targets.items()
+    ]
+    traces = []
+    for case_id, target in targets.items():
+        trace = _trace(mode="semantic", k=8, ranking=[])
+        trace["case_id"] = case_id
+        trace["metrics_input"] = {
+            "ranking": [], "relevant": {target: 3}, "intents": {"answer": [target]},
+        }
+        trace["stages"]["fusion"]["candidate_identities"] = [
+            *(f"iwiki-mcp/noise.md#N:{rank}" for rank in range(12)), target,
+        ]
+        traces.extend(_all_modes(trace))
+
+    def replay(trace, candidate):
+        target = targets[trace["case_id"]]
+        return [target] if candidate.family == "direct_quota" else []
+
+    monkeypatch.setattr(
+        "eval.search_pipeline.selection.replay_fusion_candidate", replay,
+    )
+
+    decision = select_fusion_candidate(cases, traces)
+
+    assert decision["status"] == "passed"
+    assert decision["hard_negatives"] == [
+        {
+            "case_id": "case-a",
+            "mode": "semantic",
+            "identity": targets["case-a"],
+            "state": "active",
+            "baseline_rank": 13,
+        },
+        {
+            "case_id": "case-b",
+            "mode": "semantic",
+            "identity": targets["case-b"],
+            "state": "active",
+            "baseline_rank": 13,
+        },
+    ]
+    direct_quota = next(
+        record for record in decision["stage_a"]
+        if record["candidate"]["family"] == "direct_quota"
+    )
+    assert direct_quota["passed"] is True
 
 
 def test_fusion_grid_is_bounded_and_deterministic():
@@ -365,6 +607,19 @@ def test_selector_rejects_legacy_trace_without_ranked_ordinals():
     assert decision["status"] == "needs_work"
     assert decision["reason"] == "replay_evidence_incomplete"
     assert all(item["passed"] is False for item in decision["candidates"])
+
+
+def test_replay_selectors_fail_closed_when_stages_are_none():
+    traces = _all_modes(_trace())
+    for trace in traces:
+        trace["stages"] = None
+
+    for decision in (
+        select_fusion_weights([_case()], traces),
+        select_fusion_candidate([_case()], traces),
+    ):
+        assert decision["status"] == "needs_work"
+        assert decision["reason"] == "replay_evidence_incomplete"
 
 
 def test_selector_output_is_byte_stable_for_same_captured_traces():
@@ -424,7 +679,7 @@ def test_selector_rejects_ndcg_and_new_lost_after_fusion_findings():
     assert any("new_lost_after_fusion_top_k" in item["reasons"] for item in rejected)
 
 
-def test_selector_requires_confirmed_loss_recovery_in_final_top_eight(monkeypatch):
+def test_selector_requires_active_hard_negative_recovery_in_final_k(monkeypatch):
     targets = {
         "case-a": "iwiki-mcp/other.md#Target A:0",
         "case-b": "iwiki-mcp/other.md#Target B:0",
@@ -437,6 +692,7 @@ def test_selector_requires_confirmed_loss_recovery_in_final_top_eight(monkeypatc
             relevant={target: 3},
             intents={"api": [target]},
             k=9,
+            hard_negatives=(HardNegativeTarget(target, "semantic"),),
         )
         for case_id, target in targets.items()
     ]
@@ -449,7 +705,7 @@ def test_selector_requires_confirmed_loss_recovery_in_final_top_eight(monkeypatc
             "relevant": {target: 3},
             "intents": {"api": [target]},
         }
-        rank = 22 if case_id == "case-a" else 26
+        rank = 13 if case_id == "case-a" else 14
         trace["stages"]["fusion"]["candidate_identities"] = [
             *(f"iwiki-mcp/noise.md#N:{item}" for item in range(rank - 1)),
             target,
@@ -459,11 +715,11 @@ def test_selector_requires_confirmed_loss_recovery_in_final_top_eight(monkeypatc
     def fake_replay(trace, weights):
         target = targets[trace["case_id"]]
         return [
-            *(f"iwiki-mcp/noise.md#R:{rank}" for rank in range(8)),
+            *(f"iwiki-mcp/noise.md#R:{rank}" for rank in range(9)),
             target,
         ] if not weights else [
             *([target] if trace["case_id"] == "case-a" else []),
-            *(f"iwiki-mcp/noise.md#R:{rank}" for rank in range(8)),
+            *(f"iwiki-mcp/noise.md#R:{rank}" for rank in range(9)),
             target,
         ]
 
@@ -479,8 +735,8 @@ def test_selector_requires_confirmed_loss_recovery_in_final_top_eight(monkeypatc
     )
 
 
-@pytest.mark.parametrize("missing_rank", (22, 26))
-def test_selector_rejects_incomplete_confirmed_loss_evidence(
+@pytest.mark.parametrize("missing_rank", (13, 14))
+def test_selector_rejects_incomplete_hard_negative_evidence(
     monkeypatch, missing_rank,
 ):
     targets = {
@@ -495,12 +751,13 @@ def test_selector_rejects_incomplete_confirmed_loss_evidence(
             relevant={target: 3},
             intents={"api": [target]},
             k=8,
+            hard_negatives=(HardNegativeTarget(target, "semantic"),),
         )
         for case_id, target in targets.items()
     ]
     traces = []
     for case_id, target in targets.items():
-        rank = 22 if case_id == "case-a" else 26
+        rank = 13 if case_id == "case-a" else 14
         trace = _trace(k=8)
         trace["case_id"] = case_id
         trace["metrics_input"] = {
@@ -514,7 +771,7 @@ def test_selector_rejects_incomplete_confirmed_loss_evidence(
         ] if rank != missing_rank else [target]
         traces.extend(_all_modes(trace))
 
-    recovered_target = targets["case-b" if missing_rank == 22 else "case-a"]
+    recovered_target = targets["case-b" if missing_rank == 13 else "case-a"]
 
     def fake_replay(trace, weights):
         target = targets[trace["case_id"]]
@@ -534,11 +791,11 @@ def test_selector_rejects_incomplete_confirmed_loss_evidence(
     decision = select_fusion_weights(cases, traces)
 
     assert decision["status"] == "needs_work"
-    assert decision["reason"] == "confirmed_loss_evidence_incomplete"
+    assert decision["reason"] == "hard_negative_evidence_incomplete"
     assert decision["weights"] is None
     assert all(item["passed"] is False for item in decision["candidates"])
     assert all(
-        "confirmed_loss_evidence_incomplete" in item["reasons"]
+        "hard_negative_evidence_incomplete" in item["reasons"]
         for item in decision["candidates"]
     )
 
@@ -598,20 +855,30 @@ def test_fusion_selector_rejects_invalid_trace_k(invalid_k):
 
     assert decision["status"] == "needs_work"
     assert decision["reason"] == "evidence_invalid"
+    assert decision["hard_negatives"] == []
     assert all(item["passed"] is False for item in decision["candidates"])
     assert all("evidence_invalid" in item["reasons"] for item in decision["candidates"])
 
 
-def test_confirmed_loss_evidence_allows_same_identity_in_distinct_records(
+def test_hard_negative_evidence_allows_same_identity_in_distinct_records(
     monkeypatch,
 ):
     target = "iwiki-mcp/mcp-server.md#Tool surface:0"
-    cases = [_case(), BenchmarkCase(
+    cases = [BenchmarkCase(
+        case_id="case-a",
+        domain="iwiki-mcp",
+        query="needle",
+        relevant={target: 3},
+        intents={"api": [target]},
+        hard_negatives=(HardNegativeTarget(target, "hybrid"),),
+        k=2,
+    ), BenchmarkCase(
         case_id="case-b",
         domain="iwiki-mcp",
         query="other needle",
         relevant={target: 3},
         intents={"api": [target]},
+        hard_negatives=(HardNegativeTarget(target, "lexical"),),
         k=2,
     )]
     traces = _all_modes(_trace())
@@ -623,7 +890,7 @@ def test_confirmed_loss_evidence_allows_same_identity_in_distinct_records(
         "intents": {"api": [target]},
     }
     traces.extend(_all_modes(second))
-    for trace, rank in ((traces[0], 22), (traces[4], 26)):
+    for trace, rank in ((traces[0], 13), (traces[4], 14)):
         trace["stages"]["fusion"]["candidate_identities"] = [
             *(f"iwiki-mcp/noise.md#N:{item}" for item in range(rank - 1)),
             target,
@@ -638,6 +905,22 @@ def test_confirmed_loss_evidence_allows_same_identity_in_distinct_records(
     decision = select_fusion_weights(cases, traces)
 
     assert decision["status"] == "passed"
+    assert decision["hard_negatives"] == [
+        {
+            "case_id": "case-a",
+            "mode": "hybrid",
+            "identity": target,
+            "state": "active",
+            "baseline_rank": 13,
+        },
+        {
+            "case_id": "case-b",
+            "mode": "lexical",
+            "identity": target,
+            "state": "active",
+            "baseline_rank": 14,
+        },
+    ]
 
 
 def test_rerank_selector_requires_quality_and_latency_gates():

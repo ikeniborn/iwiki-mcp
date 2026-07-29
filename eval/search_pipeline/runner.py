@@ -22,8 +22,8 @@ from .metrics import mrr_at_k
 from .metrics import ndcg_at_k
 from .metrics import recall_at_k
 from .report import sanitize_evidence
-from .selection import _confirmed_loss_records
 from .selection import _fusion_gate_reasons
+from .selection import _hard_negative_evidence
 from .selection import _has_complete_case_mode_evidence
 from .selection import _loss_findings
 from .selection import _metrics
@@ -331,6 +331,14 @@ def _candidate_from_payload(payload: dict | None) -> FusionCandidate | None:
         return None
 
 
+def _has_malformed_live_trace(traces: list[dict]) -> bool:
+    return any(
+        not isinstance(trace.get("stages"), dict)
+        or not isinstance(trace.get("metrics_input"), dict)
+        for trace in traces
+    )
+
+
 def _live_fusion_gate(cases, baseline: dict, confirmation: dict) -> list[str]:
     case_list = list(cases)
     case_by_id = {case.case_id: case for case in case_list}
@@ -345,12 +353,33 @@ def _live_fusion_gate(cases, baseline: dict, confirmation: dict) -> list[str]:
     confirmation_complete = _has_complete_case_mode_evidence(
         case_list, confirmation_traces,
     )
+    baseline_hard_negative_evidence = _hard_negative_evidence(
+        case_list, baseline_traces,
+    )
+    confirmation_hard_negative_evidence = _hard_negative_evidence(
+        case_list, confirmation_traces,
+    )
+    hard_negatives = baseline_hard_negative_evidence["records"]
+    hard_negative_evidence_invalid = (
+        baseline_hard_negative_evidence["invalid"]
+        or confirmation_hard_negative_evidence["invalid"]
+    )
+    hard_negative_evidence_incomplete = (
+        baseline_hard_negative_evidence["incomplete"]
+    )
+    malformed_traces = _has_malformed_live_trace(
+        [*baseline_traces, *confirmation_traces],
+    )
     failed = any(
         trace.get("status", "passed") != "passed"
         for trace in [*baseline_traces, *confirmation_traces]
     )
+    if malformed_traces or hard_negative_evidence_invalid:
+        return ["hard_negative_evidence_invalid"]
     if not baseline_complete or not confirmation_complete or failed:
         return ["live_evidence_incomplete"]
+    if hard_negative_evidence_incomplete:
+        return ["hard_negative_evidence_incomplete"]
 
     baseline_rankings = [
         list(trace.get("metrics_input", {}).get("ranking", []))
@@ -374,10 +403,6 @@ def _live_fusion_gate(cases, baseline: dict, confirmation: dict) -> list[str]:
         )
         for trace, ranking in zip(confirmation_traces, confirmation_rankings)
     ]
-    confirmed_losses = set().union(*[
-        _confirmed_loss_records(case_by_id[trace["case_id"]], trace)
-        for trace in baseline_traces
-    ]) if baseline_traces else set()
     baseline_findings = set().union(*[
         _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
         for trace, ranking in zip(baseline_traces, baseline_rankings)
@@ -386,10 +411,6 @@ def _live_fusion_gate(cases, baseline: dict, confirmation: dict) -> list[str]:
         _loss_findings(case_by_id[trace["case_id"]], trace, ranking)
         for trace, ranking in zip(confirmation_traces, confirmation_rankings)
     ]) if confirmation_traces else set()
-    confirmed_loss_evidence_incomplete = (
-        not {22, 26}.issubset({record[2] for record in confirmed_losses})
-        or len(confirmed_losses) < 2
-    )
     return _fusion_gate_reasons(
         _per_mode(confirmation_records),
         _per_mode(baseline_records),
@@ -397,10 +418,11 @@ def _live_fusion_gate(cases, baseline: dict, confirmation: dict) -> list[str]:
         baseline_findings,
         confirmation_traces,
         confirmation_rankings,
-        confirmed_losses,
+        hard_negatives,
         case_mode_evidence_complete=True,
         replay_evidence_incomplete=False,
-        confirmed_loss_evidence_incomplete=confirmed_loss_evidence_incomplete,
+        hard_negative_evidence_invalid=hard_negative_evidence_invalid,
+        hard_negative_evidence_incomplete=hard_negative_evidence_incomplete,
     )
 
 
@@ -425,6 +447,7 @@ def run_bounded_fusion_experiment(
         rerank_enabled=False,
     )
     selection = select_fusion_candidate(case_list, baseline["traces"])
+    hard_negatives = selection.get("hard_negatives", [])
     safe_baseline = {
         **baseline,
         "traces": [_safe_pareto_trace(trace) for trace in baseline["traces"]],
@@ -446,6 +469,7 @@ def run_bounded_fusion_experiment(
             "status": "needs_work",
             "reason": selection.get("reason", "fusion_selection_failed"),
             "candidate": None,
+            "hard_negatives": hard_negatives,
         }
         return evidence
 
@@ -469,6 +493,7 @@ def run_bounded_fusion_experiment(
         "status": "validated_candidate" if not reasons else "needs_work",
         "reason": None if not reasons else reasons[0],
         "candidate": candidate.payload(),
+        "hard_negatives": hard_negatives,
     }
     return evidence
 
@@ -484,6 +509,7 @@ def run_bounded_fusion_replay(
     )
     trace_list = sanitize_evidence({"traces": list(traces)})["traces"]
     selection = select_fusion_candidate(case_list, trace_list)
+    hard_negatives = selection.get("hard_negatives", [])
     case_by_id = {case.case_id: case for case in case_list}
     summaries = [
         summarize_trace(case_by_id[trace["case_id"]], trace)
@@ -511,12 +537,14 @@ def run_bounded_fusion_replay(
             "status": "pending_live_confirmation",
             "reason": "replay_candidate_selected",
             "candidate": selected,
+            "hard_negatives": hard_negatives,
         }
     else:
         decision = {
             "status": "needs_work",
             "reason": selection.get("reason", "fusion_selection_failed"),
             "candidate": None,
+            "hard_negatives": hard_negatives,
         }
     return {
         "kind": "replay-bounded-fusion",
@@ -640,6 +668,7 @@ def run_pareto_experiment(
         evidence["decision"] = {
             "status": "needs_work",
             "reason": fusion_selection.get("reason", "fusion_selection_failed"),
+            "hard_negatives": fusion_selection.get("hard_negatives", []),
         }
         return evidence
 
@@ -689,7 +718,10 @@ def run_pareto_experiment(
         batch_evidence[str(batch)] = _batch_evidence(batch_run)
         all_findings.extend(measured_findings)
 
-    decision = select_rerank_batch(case_list, batch_runs)
+    decision = {
+        **select_rerank_batch(case_list, batch_runs),
+        "hard_negatives": fusion_selection.get("hard_negatives", []),
+    }
     evidence.update({
         "rerank_batches": batch_evidence,
         "decision": decision,
