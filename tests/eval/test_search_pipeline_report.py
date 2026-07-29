@@ -133,6 +133,37 @@ def _bounded_evidence():
     return evidence
 
 
+def _hard_negative_evidence():
+    evidence = _evidence()
+    evidence["fusion_selection"] = {
+        "hard_negatives": [
+            {
+                "case_id": "case-z",
+                "mode": "semantic",
+                "identity": "iwiki-mcp/z.md#Z:0",
+                "state": "active",
+                "baseline_rank": 13,
+            },
+            {
+                "case_id": "case-a",
+                "mode": "lexical",
+                "identity": "iwiki-mcp/invalid-<script>alert('x')</script>-before\\|after|line\nnext:0",
+                "state": "invalid",
+                "baseline_rank": None,
+            },
+            {
+                "case_id": "case-a",
+                "mode": "hybrid",
+                "identity": "iwiki-mcp/unavailable.md#Unavailable:0",
+                "state": "unavailable",
+                "baseline_rank": 1,
+                "source_path": "/private/SENTINEL_HARD_NEGATIVE_PATH",
+            },
+        ],
+    }
+    return evidence
+
+
 def test_render_markdown_report_includes_summary_and_escapes_table_pipes():
     markdown = render_markdown_report(_evidence())
 
@@ -166,6 +197,66 @@ def test_pareto_reports_render_selection_batches_and_recommendation_safely():
     assert "&lt;unsafe&gt;" in html
     assert "http://" not in html
     assert "https://" not in html
+
+
+def test_hard_negative_reports_render_sorted_active_unavailable_and_invalid_records(
+    tmp_path,
+):
+    evidence = _hard_negative_evidence()
+    markdown = render_markdown_report(evidence)
+    html = render_html_report(evidence)
+    paths = write_reports(evidence, tmp_path, stem="hard-negatives")
+    persisted = json.loads(paths["json"].read_text(encoding="utf-8"))
+
+    assert "## Hard-Negative Cases" in markdown
+    assert "| Case | Mode | Identity | State | Baseline rank |" in markdown
+    assert markdown.index("case-a | hybrid") < markdown.index("case-a | lexical")
+    assert markdown.index("case-a | lexical") < markdown.index("case-z | semantic")
+    assert "<script>alert('x')</script>" not in markdown
+    assert (
+        "invalid-&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;-before\\\\\\|after\\|line next:0 "
+        "| invalid | None"
+    ) in markdown
+    assert "unavailable | 1" in markdown
+    assert "active | 13" in markdown
+    assert "SENTINEL_HARD_NEGATIVE_PATH" not in markdown
+
+    assert "<h2>Hard-Negative Cases</h2>" in html
+    assert (
+        "<th>Case</th><th>Mode</th><th>Identity</th><th>State</th>"
+        "<th>Baseline rank</th>"
+    ) in html
+    assert (
+        "invalid-&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;-before\\|after|line\n"
+        "next:0"
+    ) in html
+    assert "<td>invalid</td><td>None</td>" in html
+    assert "SENTINEL_HARD_NEGATIVE_PATH" not in html
+
+    assert persisted["fusion_selection"]["hard_negatives"] == [
+        {
+            "baseline_rank": 1,
+            "case_id": "case-a",
+            "identity": "iwiki-mcp/unavailable.md#Unavailable:0",
+            "mode": "hybrid",
+            "source_path": "[redacted]",
+            "state": "unavailable",
+        },
+        {
+            "baseline_rank": None,
+            "case_id": "case-a",
+            "identity": "iwiki-mcp/invalid-<script>alert('x')</script>-before\\|after|line\nnext:0",
+            "mode": "lexical",
+            "state": "invalid",
+        },
+        {
+            "baseline_rank": 13,
+            "case_id": "case-z",
+            "identity": "iwiki-mcp/z.md#Z:0",
+            "mode": "semantic",
+            "state": "active",
+        },
+    ]
 
 
 def test_write_reports_outputs_deterministic_json_markdown_and_html(tmp_path):

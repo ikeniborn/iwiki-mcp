@@ -16,6 +16,18 @@ _URL_VALUE = re.compile(r"https?://[^\s'\"<]+")
 _ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_])/(?:[^\s/]+/)+[^\s/]+")
 
 
+def _hard_negative_rows(records) -> list[dict]:
+    if not isinstance(records, list):
+        return []
+    return sorted(
+        (record for record in records if isinstance(record, dict)),
+        key=lambda record: tuple(
+            str(record.get(field, ""))
+            for field in ("case_id", "mode", "identity")
+        ),
+    )
+
+
 def _sanitize_string(value: str) -> str:
     if _SENSITIVE_VALUE.search(value) or value.startswith("/"):
         return "[redacted]"
@@ -24,11 +36,16 @@ def _sanitize_string(value: str) -> str:
 
 def sanitize_evidence(value):
     if isinstance(value, dict):
-        return {
+        sanitized = {
             key: sanitize_evidence(nested)
             for key, nested in value.items()
             if not isinstance(key, str) or key.lower() not in _FORBIDDEN_KEYS
         }
+        if "hard_negatives" in sanitized:
+            sanitized["hard_negatives"] = _hard_negative_rows(
+                sanitized["hard_negatives"]
+            )
+        return sanitized
     if isinstance(value, list):
         return [sanitize_evidence(item) for item in value]
     if isinstance(value, tuple):
@@ -45,7 +62,7 @@ def _fmt(value) -> str:
 
 
 def _md_cell(value) -> str:
-    return _fmt(value).replace("|", "\\|").replace("\n", " ")
+    return _fmt(value).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
 
 
 def _candidate_rows(records: list[dict]) -> list[dict]:
@@ -164,6 +181,24 @@ def render_markdown_report(evidence: dict) -> str:
                 _md_cell(candidate.get("passed", False)),
                 _md_cell(", ".join(candidate.get("reasons", []))),
             ]) + " |")
+        if "hard_negatives" in fusion_selection:
+            lines.extend([
+                "",
+                "## Hard-Negative Cases",
+                "",
+                "| Case | Mode | Identity | State | Baseline rank |",
+                "| --- | --- | --- | --- | ---: |",
+            ])
+            for record in _hard_negative_rows(
+                fusion_selection.get("hard_negatives")
+            ):
+                lines.append("| " + " | ".join([
+                    _md_cell(html.escape(_fmt(record.get("case_id", "")))),
+                    _md_cell(html.escape(_fmt(record.get("mode", "")))),
+                    _md_cell(html.escape(_fmt(record.get("identity", "")))),
+                    _md_cell(html.escape(_fmt(record.get("state", "")))),
+                    _md_cell(html.escape(_fmt(record.get("baseline_rank")))),
+                ]) + " |")
     rerank_batches = evidence.get("rerank_batches")
     if rerank_batches:
         lines.extend([
@@ -210,6 +245,20 @@ def _bounded_html_section(heading: str, records: list[dict]) -> str:
     return (
         f"<h2>{heading}</h2><table><thead><tr><th>Candidate</th><th>Passed</th>"
         f"<th>Rejection reasons</th></tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
+def _hard_negative_html_section(records) -> str:
+    rows = "\n".join(
+        "<tr>" + "".join(_html_cell(record.get(field, "")) for field in (
+            "case_id", "mode", "identity", "state",
+        )) + _html_cell(record.get("baseline_rank")) + "</tr>"
+        for record in _hard_negative_rows(records)
+    )
+    return (
+        "<h2>Hard-Negative Cases</h2><table><thead><tr><th>Case</th>"
+        "<th>Mode</th><th>Identity</th><th>State</th><th>Baseline rank</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table>"
     )
 
 
@@ -282,6 +331,10 @@ def render_html_report(evidence: dict) -> str:
 <table><thead><tr><th>Weights</th><th>Passed</th><th>Rejection reasons</th></tr></thead>
 <tbody>{fusion_rows}</tbody></table>
 """
+        if "hard_negatives" in fusion_selection:
+            pareto_sections += _hard_negative_html_section(
+                fusion_selection.get("hard_negatives")
+            )
     if evidence.get("rerank_batches"):
         pareto_sections += f"""
 <h2>Rerank Batches</h2>
