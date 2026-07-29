@@ -82,6 +82,57 @@ def _pareto_evidence():
     return evidence
 
 
+def _bounded_evidence():
+    evidence = _evidence()
+    candidate = {
+        "family": "rrf_k",
+        "rrf_k": 20,
+        "direct_multiplier": 1.0,
+        "direct_quota": 0,
+        "fanout_cap": None,
+        "components": [],
+    }
+    record = {
+        "candidate": candidate,
+        "candidate_key": "candidate-<unsafe>",
+        "families": ["rrf_k"],
+        "metrics": {"aggregate": {"ndcg_at_k": 0.8, "mrr_at_k": 0.7}, "modes": {}},
+        "passed": False,
+        "reasons": ["no_passing_fusion_candidate", "<unsafe>"],
+    }
+    evidence.update({
+        "kind": "replay-bounded-fusion",
+        "query": "SENTINEL_QUERY",
+        "provider_url": "https://provider.example.invalid/v1",
+        "authorization": "SENTINEL_AUTHORIZATION",
+        "api_key": "SENTINEL_API_KEY",
+        "env_file": "/private/SENTINEL_ENV_FILE",
+        "base_path": "/private/SENTINEL_BASE_PATH",
+        "extra": {
+            "exception": "SENTINEL_EXCEPTION",
+            "url": "https://sentinel.example.invalid/path",
+            "path": "/private/SENTINEL_PATH",
+        },
+        "fusion_selection": {
+            "status": "needs_work",
+            "reason": "no_passing_fusion_candidate",
+            "candidate": None,
+            "baseline": {"metrics": {"aggregate": {"ndcg_at_k": 0.7}}},
+            "stage_a": [record],
+            "family_winners": [record],
+            "family_rejections": ["direct_quota"],
+            "stage_b": [record],
+        },
+        "live_confirmation": {
+            "status": "not_run",
+            "reason": "replay_only",
+            "query": "SENTINEL_NESTED_QUERY",
+        },
+        "decision": {"status": "needs_work", "reason": "no_passing_fusion_candidate"},
+    })
+    return evidence
+
+
 def test_render_markdown_report_includes_summary_and_escapes_table_pipes():
     markdown = render_markdown_report(_evidence())
 
@@ -132,3 +183,45 @@ def test_write_reports_outputs_deterministic_json_markdown_and_html(tmp_path):
         "# Search Pipeline Benchmark Report\n"
     )
     assert paths["html"].read_text(encoding="utf-8").startswith("<!doctype html>\n")
+
+
+def test_bounded_reports_render_selection_stages_and_remove_sensitive_values(tmp_path):
+    paths = write_reports(_bounded_evidence(), tmp_path, stem="bounded")
+    markdown = paths["markdown"].read_text(encoding="utf-8")
+    html = paths["html"].read_text(encoding="utf-8")
+    persisted = json.loads(paths["json"].read_text(encoding="utf-8"))
+
+    assert "Stage A Candidates" in markdown
+    assert "Family Winners" in markdown
+    assert "Stage B Pairs" in markdown
+    assert "Live Confirmation" in markdown
+    assert "Stage A Candidates" in html
+    assert "Family Winners" in html
+    assert "Stage B Pairs" in html
+    assert "Live Confirmation" in html
+    assert "no_passing_fusion_candidate" in html
+    assert "&lt;unsafe&gt;" in html
+    assert len(persisted["fusion_selection"]["stage_b"]) <= 6
+
+    forbidden_keys = {
+        "query", "provider_url", "authorization", "api_key", "env_file", "base_path",
+    }
+
+    def assert_safe(value):
+        if isinstance(value, dict):
+            assert not forbidden_keys.intersection(value)
+            for nested in value.values():
+                assert_safe(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_safe(nested)
+
+    assert_safe(persisted)
+    for value in (
+        "SENTINEL_QUERY", "SENTINEL_AUTHORIZATION", "SENTINEL_API_KEY",
+        "SENTINEL_ENV_FILE", "SENTINEL_BASE_PATH", "SENTINEL_EXCEPTION",
+        "SENTINEL_PATH", "http://", "https://",
+    ):
+        assert value not in paths["json"].read_text(encoding="utf-8")
+        assert value not in markdown
+        assert value not in html

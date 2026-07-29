@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -10,6 +11,114 @@ from eval.search_pipeline.metrics import identity
 from eval.search_pipeline.selection import FusionCandidate
 from iwiki_mcp.engine.config import Config
 from iwiki_mcp.indexer import index_domain
+
+
+def test_cli_replays_evidence_without_loading_provider_config(tmp_path, monkeypatch):
+    from eval.search_pipeline import __main__ as cli
+
+    evidence_path = tmp_path / "baseline.json"
+    evidence_path.write_text(
+        json.dumps({"baseline": {"traces": [{"case_id": "case-a"}]}}),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("provider configuration must not load during replay")
+
+    def fake_replay(domain, cases, traces):
+        calls.append((domain, cases, traces))
+        return {"kind": "replay-bounded-fusion", "decision": {"status": "needs_work"}}
+
+    monkeypatch.setattr(Config, "load", fail_if_called)
+    monkeypatch.setattr(cli, "run_bounded_fusion_replay", fake_replay)
+    monkeypatch.setattr(cli, "write_reports", lambda evidence, out: {})
+
+    assert cli.main([
+        "--out", str(tmp_path / "report"),
+        "--pareto",
+        "--replay-evidence", str(evidence_path),
+    ]) == 0
+    assert calls and calls[0][0] == "iwiki-mcp"
+    assert calls[0][2] == [{"case_id": "case-a"}]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["not json", json.dumps({"baseline": {}}), json.dumps({"traces": "invalid"})],
+)
+def test_cli_rejects_invalid_replay_evidence_before_provider_config(
+    tmp_path,
+    monkeypatch,
+    payload,
+):
+    from eval.search_pipeline import __main__ as cli
+
+    evidence_path = tmp_path / "baseline.json"
+    evidence_path.write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(
+        Config,
+        "load",
+        lambda: pytest.fail("provider configuration must not load during replay validation"),
+    )
+
+    assert cli.main([
+        "--out", str(tmp_path / "report"),
+        "--pareto",
+        "--replay-evidence", str(evidence_path),
+    ]) == 2
+
+
+def test_cli_rejects_replay_file_inside_output_directory(tmp_path):
+    from eval.search_pipeline import __main__ as cli
+
+    output = tmp_path / "report"
+    output.mkdir()
+    evidence_path = output / "baseline.json"
+    evidence_path.write_text(json.dumps({"traces": []}), encoding="utf-8")
+
+    assert cli.main([
+        "--out", str(output),
+        "--pareto",
+        "--replay-evidence", str(evidence_path),
+    ]) == 2
+
+
+def test_cli_rejects_replay_option_without_pareto(tmp_path):
+    from eval.search_pipeline import __main__ as cli
+
+    evidence_path = tmp_path / "baseline.json"
+    evidence_path.write_text(json.dumps({"traces": []}), encoding="utf-8")
+
+    assert cli.main([
+        "--out", str(tmp_path / "report"),
+        "--replay-evidence", str(evidence_path),
+    ]) == 2
+
+
+def test_cli_routes_live_pareto_to_bounded_fusion_without_rerank_batches(
+    tmp_path,
+    monkeypatch,
+):
+    from eval.search_pipeline import __main__ as cli
+
+    calls = []
+
+    def fake_bounded(cfg, domain, cases):
+        calls.append((cfg, domain, cases))
+        return {"kind": "live-bounded-fusion", "decision": {"status": "needs_work"}}
+
+    monkeypatch.setattr(Config, "load", lambda: {"safe": "config"})
+    monkeypatch.setattr(cli, "run_bounded_fusion_experiment", fake_bounded)
+    monkeypatch.setattr(
+        cli,
+        "run_live_traces",
+        lambda *args, **kwargs: pytest.fail("pareto must not use the legacy live runner"),
+    )
+    monkeypatch.setattr(cli, "write_reports", lambda evidence, out: {})
+
+    assert cli.main(["--out", str(tmp_path / "report"), "--pareto"]) == 0
+    assert calls and calls[0][1] == "iwiki-mcp"
 
 
 def _build_trace_fixture(tmp_path, monkeypatch, *, rerank_model=""):

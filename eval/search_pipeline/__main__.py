@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 from dataclasses import replace
+import json
+from pathlib import Path
 import sys
 from typing import Iterable
 
@@ -15,8 +17,9 @@ from .envfile import validate_env_file_path
 from .fixtures import BenchmarkCase
 from .fixtures import DEFAULT_LIVE_CASES
 from .report import write_reports
+from .runner import run_bounded_fusion_experiment
+from .runner import run_bounded_fusion_replay
 from .runner import run_live_traces
-from .runner import run_pareto_experiment
 
 
 _VALID_MODES = {"hybrid", "lexical", "semantic"}
@@ -66,7 +69,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pareto",
         action="store_true",
-        help="Run the fixed live Pareto fusion and rerank experiment.",
+        help="Run the bounded fusion experiment.",
+    )
+    parser.add_argument(
+        "--replay-evidence",
+        help="Replay bounded fusion selection from existing evidence JSON.",
     )
     return parser
 
@@ -109,6 +116,37 @@ def _mark_latency_ceiling(evidence: dict, latency_ceiling_ms: float | None) -> N
         )
 
 
+def _load_replay_traces(path: str, out_dir: str) -> list[dict] | None:
+    evidence_path = Path(path).absolute()
+    output_path = Path(out_dir).absolute()
+    try:
+        evidence_path.resolve().relative_to(output_path.resolve())
+    except ValueError:
+        pass
+    else:
+        print("error: replay evidence is inside output directory", file=sys.stderr)
+        return None
+
+    try:
+        with evidence_path.open(encoding="utf-8") as handle:
+            evidence = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        print("error: replay evidence must be readable JSON", file=sys.stderr)
+        return None
+
+    if not isinstance(evidence, dict):
+        print("error: replay evidence has invalid schema", file=sys.stderr)
+        return None
+    traces = evidence.get("traces")
+    if traces is None:
+        baseline = evidence.get("baseline")
+        traces = baseline.get("traces") if isinstance(baseline, dict) else None
+    if not isinstance(traces, list) or not all(isinstance(trace, dict) for trace in traces):
+        print("error: replay evidence has invalid schema", file=sys.stderr)
+        return None
+    return traces
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -122,6 +160,28 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.replay_evidence and not args.pareto:
+        print("error: --replay-evidence requires --pareto", file=sys.stderr)
+        return 2
+
+    if args.replay_evidence:
+        traces = _load_replay_traces(args.replay_evidence, args.out)
+        if traces is None:
+            return 2
+        cases = _with_k(DEFAULT_LIVE_CASES, args.k)
+        try:
+            evidence = run_bounded_fusion_replay(args.domain, cases, traces)
+            paths = write_reports(evidence, args.out)
+        except ValueError:
+            print("error: invalid replay benchmark evidence", file=sys.stderr)
+            return 2
+        except Exception:
+            print("error: replay benchmark failed unexpectedly", file=sys.stderr)
+            return 2
+        for label, path in sorted(paths.items()):
+            print(f"{label}: {path}")
+        return 0
 
     if args.env_file:
         validation = validate_env_file_path(args.env_file, args.out)
@@ -146,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             cases = _with_k(DEFAULT_LIVE_CASES, args.k)
             if args.pareto:
-                evidence = run_pareto_experiment(cfg, args.domain, cases)
+                evidence = run_bounded_fusion_experiment(cfg, args.domain, cases)
             else:
                 evidence = run_live_traces(
                     cfg,

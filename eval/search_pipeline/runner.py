@@ -21,14 +21,15 @@ from .metrics import intent_coverage_at_k
 from .metrics import mrr_at_k
 from .metrics import ndcg_at_k
 from .metrics import recall_at_k
-from .selection import RERANK_BATCHES
-from .selection import FusionCandidate
+from .report import sanitize_evidence
 from .selection import _confirmed_loss_records
 from .selection import _fusion_gate_reasons
 from .selection import _has_complete_case_mode_evidence
 from .selection import _loss_findings
 from .selection import _metrics
 from .selection import _per_mode
+from .selection import FusionCandidate
+from .selection import RERANK_BATCHES
 from .selection import select_fusion_candidate
 from .selection import select_fusion_weights
 from .selection import select_rerank_batch
@@ -470,6 +471,68 @@ def run_bounded_fusion_experiment(
         "candidate": candidate.payload(),
     }
     return evidence
+
+
+def run_bounded_fusion_replay(
+    domain: str,
+    cases: Iterable[BenchmarkCase],
+    traces: Iterable[dict],
+) -> dict:
+    case_list = sorted(
+        [case for case in cases if case.domain == domain],
+        key=lambda case: case.case_id,
+    )
+    trace_list = sanitize_evidence({"traces": list(traces)})["traces"]
+    selection = select_fusion_candidate(case_list, trace_list)
+    case_by_id = {case.case_id: case for case in case_list}
+    summaries = [
+        summarize_trace(case_by_id[trace["case_id"]], trace)
+        for trace in trace_list
+        if (
+            trace.get("status", "passed") == "passed"
+            and trace.get("case_id") in case_by_id
+            and isinstance(trace.get("k"), int)
+            and not isinstance(trace.get("k"), bool)
+            and trace["k"] > 0
+        )
+    ]
+    baseline = {
+        "kind": "replay-baseline",
+        "run_settings": {"rerank_enabled": False},
+        "cases": _safe_pareto_cases(case_list),
+        "summary": {"rollup": _rollup(summaries), "cases": summaries},
+        "traces": trace_list,
+        "findings": [],
+        "backlog": [],
+    }
+    selected = selection.get("candidate")
+    if selection.get("status") == "passed" and selected is not None:
+        decision = {
+            "status": "pending_live_confirmation",
+            "reason": "replay_candidate_selected",
+            "candidate": selected,
+        }
+    else:
+        decision = {
+            "status": "needs_work",
+            "reason": selection.get("reason", "fusion_selection_failed"),
+            "candidate": None,
+        }
+    return {
+        "kind": "replay-bounded-fusion",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "domain": domain,
+        "run_settings": {"rerank_enabled": False, "replay_only": True},
+        "cases": _safe_pareto_cases(case_list),
+        "baseline": baseline,
+        "fusion_selection": selection,
+        "live_confirmation": {"status": "not_run", "reason": "replay_only"},
+        "summary": baseline["summary"],
+        "traces": trace_list,
+        "findings": [],
+        "backlog": [],
+        "decision": decision,
+    }
 
 
 def _safe_pareto_trace(trace: dict) -> dict:

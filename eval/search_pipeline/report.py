@@ -3,6 +3,39 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+import re
+
+
+_FORBIDDEN_KEYS = {
+    "query", "provider_url", "authorization", "api_key", "env_file", "base_path",
+}
+_SENSITIVE_VALUE = re.compile(
+    r"(?i)(secret|api[_ -]?key|authorization|credential|password|sentinel)",
+)
+_URL_VALUE = re.compile(r"https?://[^\s'\"<]+")
+_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_])/(?:[^\s/]+/)+[^\s/]+")
+
+
+def _sanitize_string(value: str) -> str:
+    if _SENSITIVE_VALUE.search(value) or value.startswith("/"):
+        return "[redacted]"
+    return _ABSOLUTE_PATH.sub("[redacted-path]", _URL_VALUE.sub("[redacted-url]", value))
+
+
+def sanitize_evidence(value):
+    if isinstance(value, dict):
+        return {
+            key: sanitize_evidence(nested)
+            for key, nested in value.items()
+            if not isinstance(key, str) or key.lower() not in _FORBIDDEN_KEYS
+        }
+    if isinstance(value, list):
+        return [sanitize_evidence(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_evidence(item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_string(value)
+    return value
 
 
 def _fmt(value) -> str:
@@ -15,7 +48,44 @@ def _md_cell(value) -> str:
     return _fmt(value).replace("|", "\\|").replace("\n", " ")
 
 
+def _candidate_rows(records: list[dict]) -> list[dict]:
+    return sorted(
+        (record for record in records if isinstance(record, dict)),
+        key=lambda record: record.get(
+            "candidate_key",
+            json.dumps(record.get("candidate", {}), sort_keys=True),
+        ),
+    )
+
+
+def _append_bounded_markdown(lines: list[str], evidence: dict) -> None:
+    selection = evidence.get("fusion_selection", {})
+    if not isinstance(selection, dict) or "stage_a" not in selection:
+        return
+    for heading, key in (("Stage A Candidates", "stage_a"), ("Family Winners", "family_winners"),
+                         ("Stage B Pairs", "stage_b")):
+        lines.extend(["", f"## {heading}", "", "| Candidate | Passed | Rejection reasons |",
+                      "| --- | --- | --- |"])
+        for record in _candidate_rows(selection.get(key, [])):
+            lines.append("| " + " | ".join([
+                _md_cell(json.dumps(record.get("candidate", {}), sort_keys=True)),
+                _md_cell(record.get("passed", False)),
+                _md_cell(", ".join(record.get("reasons", []))),
+            ]) + " |")
+    lines.extend(["", "## Family Rejections", ""])
+    lines.append(
+        _md_cell(", ".join(sorted(selection.get("family_rejections", []))))
+        or "None"
+    )
+    lines.extend(["", "## Live Confirmation", ""])
+    lines.append(_md_cell(json.dumps(
+        evidence.get("live_confirmation", {"status": "not_run"}),
+        sort_keys=True,
+    )))
+
+
 def render_markdown_report(evidence: dict) -> str:
+    evidence = sanitize_evidence(evidence)
     rollup = evidence.get("summary", {}).get("rollup", {})
     summaries = evidence.get("summary", {}).get("cases", [])
     backlog = evidence.get("backlog", [])
@@ -117,6 +187,7 @@ def render_markdown_report(evidence: dict) -> str:
                 _md_cell(run.get("p50_rerank_ms", 0.0)),
                 _md_cell(run.get("p95_rerank_ms", 0.0)),
             ]) + " |")
+    _append_bounded_markdown(lines, evidence)
     if evidence.get("decision"):
         lines.extend(["", "## Recommendation", ""])
         lines.append(_md_cell(json.dumps(evidence["decision"], sort_keys=True)))
@@ -127,7 +198,23 @@ def _html_cell(value, tag: str = "td") -> str:
     return f"<{tag}>{html.escape(_fmt(value))}</{tag}>"
 
 
+def _bounded_html_section(heading: str, records: list[dict]) -> str:
+    rows = "\n".join(
+        "<tr>" + "".join(_html_cell(value) for value in (
+            json.dumps(record.get("candidate", {}), sort_keys=True),
+            record.get("passed", False),
+            ", ".join(record.get("reasons", [])),
+        )) + "</tr>"
+        for record in _candidate_rows(records)
+    )
+    return (
+        f"<h2>{heading}</h2><table><thead><tr><th>Candidate</th><th>Passed</th>"
+        f"<th>Rejection reasons</th></tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
 def render_html_report(evidence: dict) -> str:
+    evidence = sanitize_evidence(evidence)
     rollup = evidence.get("summary", {}).get("rollup", {})
     summaries = evidence.get("summary", {}).get("cases", [])
     backlog = evidence.get("backlog", [])
@@ -208,6 +295,28 @@ def render_html_report(evidence: dict) -> str:
             + html.escape(json.dumps(evidence["decision"], sort_keys=True))
             + "</pre>"
         )
+    if isinstance(fusion_selection, dict) and "stage_a" in fusion_selection:
+        pareto_sections += _bounded_html_section(
+            "Stage A Candidates", fusion_selection.get("stage_a", []),
+        )
+        pareto_sections += _bounded_html_section(
+            "Family Winners", fusion_selection.get("family_winners", []),
+        )
+        pareto_sections += _bounded_html_section(
+            "Stage B Pairs", fusion_selection.get("stage_b", []),
+        )
+        pareto_sections += (
+            "<h2>Family Rejections</h2><pre>"
+            + html.escape(json.dumps(
+                sorted(fusion_selection.get("family_rejections", [])),
+            ))
+            + "</pre><h2>Live Confirmation</h2><pre>"
+            + html.escape(json.dumps(
+                evidence.get("live_confirmation", {"status": "not_run"}),
+                sort_keys=True,
+            ))
+            + "</pre>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -261,7 +370,12 @@ def write_json_evidence(evidence: dict, path: str | Path) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(evidence, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        json.dumps(
+            sanitize_evidence(evidence),
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=True,
+        ) + "\n",
         encoding="utf-8",
     )
     return output
@@ -272,6 +386,7 @@ def write_reports(
     out_dir: str | Path,
     stem: str = "search-pipeline-benchmark",
 ) -> dict[str, Path]:
+    evidence = sanitize_evidence(evidence)
     output_dir = Path(out_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
