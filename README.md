@@ -213,6 +213,12 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 |---|---|---|
 | `IWIKI_CHAT_MODEL` | empty | Optional chat model name for server-side `type`/`tags` classification. Reuses `IWIKI_LLM_BASE_URL` and `IWIKI_LLM_KEY`. When unset, frontmatter defaults to `type="concept"` with no tags. |
 
+**Server lifecycle**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IWIKI_IDLE_TIMEOUT_SECONDS` | `1800` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0` disables the limit. Active tool calls are allowed to finish. A client that needs the server later must reconnect or start a new MCP process. |
+
 **Search tuning**
 
 | Variable | Default | Meaning |

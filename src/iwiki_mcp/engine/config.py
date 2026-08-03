@@ -46,6 +46,7 @@ class Config:
     chat_model: str = ""
     search_mode: str = "hybrid"
     rerank_model: str = ""
+    idle_timeout_seconds: int = 1800
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -75,6 +76,17 @@ class Config:
         if search_mode not in valid_modes:
             allowed = ", ".join(valid_modes)
             raise ConfigError(f"IWIKI_SEARCH_MODE must be one of: {allowed}.")
+        idle_timeout_var = "IWIKI_IDLE_TIMEOUT_SECONDS"
+        try:
+            idle_timeout_seconds = int(getenv(idle_timeout_var, "1800"))
+        except ValueError as exc:
+            raise ConfigError(
+                f"{idle_timeout_var} must be a non-negative integer."
+            ) from exc
+        if idle_timeout_seconds < 0:
+            raise ConfigError(
+                f"{idle_timeout_var} must be a non-negative integer."
+            )
         return Config(
             base_url=base_url,
             api_key=api_key,
@@ -94,4 +106,5 @@ class Config:
             chat_model=getenv("IWIKI_CHAT_MODEL", "").strip(),
             search_mode=search_mode,
             rerank_model=getenv("IWIKI_RERANK_MODEL", "").strip(),
+            idle_timeout_seconds=idle_timeout_seconds,
         )

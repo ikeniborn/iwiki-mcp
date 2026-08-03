@@ -254,6 +254,12 @@ request to the embeddings endpoint (`probe_embedding_endpoint`, 10 s timeout, no
 retries). A failure prints a redacted diagnostic to stderr and exits `1`.
 `iwiki-mcp --help` stays offline (no probe).
 
+After startup, the stdio transport exits after 1,800 seconds without an incoming
+MCP message. Set `IWIKI_IDLE_TIMEOUT_SECONDS=0` to retain the process without an
+idle limit. The timeout resets for every incoming message and waits for an active
+tool call to finish; a later tool call requires the client to reconnect or spawn
+a fresh server process.
+
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
 sequenceDiagram
@@ -670,7 +676,8 @@ Runtime config is entirely env-driven (`engine/config.py`, `Config.load()`); see
 (`IWIKI_EMBED_MODEL`, `IWIKI_EMBED_DIMENSIONS`), search tuning (`IWIKI_TOP_K`,
 `IWIKI_SCORE_THRESHOLD`, `IWIKI_SEARCH_MODE`, `IWIKI_SEED_*`, `IWIKI_GRAPH_DEPTH`),
 indexing (`IWIKI_CHUNK_SIZE`, `IWIKI_CHUNK_OVERLAP`), and optional
-`IWIKI_CHAT_MODEL` / `IWIKI_RERANK_MODEL`.
+`IWIKI_CHAT_MODEL` / `IWIKI_RERANK_MODEL`. `IWIKI_IDLE_TIMEOUT_SECONDS` controls
+the stdio idle shutdown and defaults to 1,800 seconds; `0` disables it.
 
 **External dependencies** (`pyproject.toml`):
 
