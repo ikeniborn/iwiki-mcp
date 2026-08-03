@@ -14,20 +14,103 @@ import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
+import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.stdio import stdio_server
 
 from . import base, ignore, indexer, okf, retrieval, sync
 from .engine import rerank
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
+from .engine.idle import IdleTracker
 from .engine.links import to_markdown_links
 from .engine.okf_artifacts import RESERVED_OKF
 from .engine.section import SectionError, replace_section
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
 
-mcp = FastMCP("iwiki")
+
+class _ActivityReceiveStream:
+    """Delegate a FastMCP input stream while observing received messages."""
+
+    def __init__(self, stream, tracker: IdleTracker) -> None:
+        self._stream = stream
+        self._tracker = tracker
+
+    async def receive(self):
+        message = await self._stream.receive()
+        self._tracker.touch()
+        return message
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await self.receive()
+        except anyio.EndOfStream as exc:
+            raise StopAsyncIteration from exc
+
+    async def __aenter__(self):
+        await self._stream.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return await self._stream.__aexit__(exc_type, exc_value, traceback)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+class IdleFastMCP(FastMCP):
+    """FastMCP stdio server with an optional inactivity shutdown."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._idle_timeout_seconds = 0
+        self._idle_tracker: IdleTracker | None = None
+        super().__init__(*args, **kwargs)
+
+    def set_idle_timeout(self, timeout_seconds: int) -> None:
+        self._idle_timeout_seconds = timeout_seconds
+
+    async def call_tool(self, name: str, arguments: dict):
+        tracker = self._idle_tracker
+        if tracker is None:
+            return await super().call_tool(name, arguments)
+        tracker.begin_call()
+        try:
+            return await super().call_tool(name, arguments)
+        finally:
+            tracker.end_call()
+
+    async def run_stdio_async(self) -> None:
+        if self._idle_timeout_seconds == 0:
+            await super().run_stdio_async()
+            return
+        tracker = IdleTracker()
+        self._idle_tracker = tracker
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                tracked_stream = _ActivityReceiveStream(read_stream, tracker)
+                async with anyio.create_task_group() as tasks:
+                    async def serve() -> None:
+                        await self._mcp_server.run(
+                            tracked_stream,
+                            write_stream,
+                            self._mcp_server.create_initialization_options(),
+                        )
+                        tasks.cancel_scope.cancel()
+
+                    tasks.start_soon(serve)
+                    await tracker.wait_until_idle(self._idle_timeout_seconds)
+                    print("iwiki-mcp: idle timeout expired; shutting down", file=sys.stderr)
+                    tasks.cancel_scope.cancel()
+        finally:
+            self._idle_tracker = None
+
+
+mcp = IdleFastMCP("iwiki")
 
 SOURCE_CONTENT_MAX_BYTES = 200_000
 
@@ -1229,6 +1312,7 @@ def main() -> None:
     except (ConfigError, EmbedError) as exc:
         _print_startup_failure(str(exc), cfg)
         raise SystemExit(1) from None
+    mcp.set_idle_timeout(cfg.idle_timeout_seconds)
     mcp.run()
 
 
