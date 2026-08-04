@@ -1,6 +1,6 @@
 ---
 review:
-  intent_hash: 05f54f3547167887
+  intent_hash: e4e7a277aeb29c1d
   last_run: 2026-08-04
   phases:
     structure: { status: passed }
@@ -69,9 +69,14 @@ vectors, ingest logs, and the local graph in one consistent observable state.
 
 - Markdown remains authoritative over SQLite, vectors, and ingest logs.
 - Never rewrite a domain outside the resolved write scope.
-- A rewrite operation is atomic across affected Markdown, `index.jsonl`,
-  `log.jsonl`, graph state, and Git commit preparation; failure restores the
-  pre-operation state.
+- Before a local transaction commit, a rewrite operation is atomic across
+  affected Markdown, `index.jsonl`, `log.jsonl`, graph preparation, and Git
+  commit preparation; any failure restores the pre-operation state and leaves
+  Git HEAD unchanged.
+- After a confirmed local commit, a graph-only failure keeps the canonical
+  commit, invalidates the affected graph state so stale rows cannot be trusted,
+  and uses repair or safe Markdown fallback instead of rolling back authored
+  data.
 - A successful operation leaves no broken affected cross-domain page target or
   anchor and no graph parity mismatch according to `wiki_lint`.
 - Keep existing `iwiki://` syntax, read-scope visibility rules, and
