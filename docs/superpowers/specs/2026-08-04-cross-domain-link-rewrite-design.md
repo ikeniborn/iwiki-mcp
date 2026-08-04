@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: b753546ee354b31e
+  spec_hash: 2837c9cfddbb10ac
   last_run: 2026-08-04
   phases:
     structure: { status: passed }
@@ -76,9 +76,12 @@ configuration before writing `.iwiki.toml`; a validation error leaves the
 file byte-identical. `wiki_status` and `wiki_bind` keep the legacy `write`
 field and add `write_scope`.
 
-All mutating tools must reject a target domain outside `write_scope`. This
-tightens enforcement to match the documented binding contract; legacy calls
-remain valid when they target the primary write domain.
+Every tool that modifies content or portable stores in an existing domain must
+reject a target outside `write_scope`. `wiki_create_domain` is the explicit
+bootstrap exception: it may create an empty domain outside the current scope,
+but it must not author pages or portable stores there. The caller can add the
+new domain to binding only after creation. Legacy calls remain valid when they
+target the primary write domain.
 
 ### 3.2 Structured rewrite primitives
 
@@ -340,9 +343,11 @@ The server shall persist, resolve, report, and enforce an explicit
 
 DoD: focused config/server tests prove legacy behavior, deterministic scope
 ordering, read-subset validation, byte-identical config on error, and target
-rejection outside write scope. Compatibility explicitly excludes the former
-partial enforcement that allowed some mutation handlers to target an unbound
-domain.
+rejection outside write scope for existing-domain mutations. They also prove
+that `wiki_create_domain` can bootstrap an empty unbound domain without
+creating portable stores. Compatibility explicitly excludes the former
+partial enforcement that allowed some existing-domain mutation handlers to
+target an unbound domain.
 
 ### R2 — Exact cross-domain rewrite
 
@@ -433,7 +438,8 @@ Existing URI syntax, single-write bindings, ordinary `wiki_update_page`,
 intra-domain move, retrieval scope, and related-search contracts shall remain
 compatible. The intentional exception is consistent write-scope enforcement:
 mutation handlers that previously accepted an explicitly unbound domain now
-return the documented scope error.
+return the documented scope error. `wiki_create_domain` retains its documented
+empty-domain bootstrap behavior outside that enforcement boundary.
 
 DoD: existing focused suites and the full pytest suite pass without an
 unexplained regression.
@@ -470,7 +476,8 @@ graph parity mismatch.
 ### Binding and server contracts
 
 - Legacy/new config round trips and MCP schema compatibility.
-- Write-scope enforcement on every affected mutating path.
+- Write-scope enforcement on every existing-domain mutation plus the explicit
+  empty-domain `wiki_create_domain` bootstrap exception.
 - Deterministic success and blocker result shapes.
 
 ### Coordinator and graph
