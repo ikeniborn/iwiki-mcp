@@ -1,9 +1,10 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from filelock import Timeout
 
-from iwiki_mcp.lock import base_lock
+from iwiki_mcp.lock import base_lock, mutation_lock
 
 
 def test_base_lock_creates_meta_dir_and_locks(tmp_path):
@@ -28,3 +29,18 @@ def test_base_lock_acquired_after_holder_releases(tmp_path):
     second = base_lock(base, timeout=1.0)
     with second:  # a fresh waiter acquires once the base is free
         assert second.is_locked
+
+
+def test_mutation_lock_is_reentrant_only_in_same_context(tmp_path):
+    base = str(tmp_path)
+
+    def competing_thread():
+        with pytest.raises(Timeout):
+            with base_lock(base, timeout=0.05):
+                pass
+
+    with mutation_lock(base):
+        with base_lock(base, timeout=0.05):
+            pass
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(competing_thread).result()

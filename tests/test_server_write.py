@@ -1,9 +1,53 @@
 import os
 import subprocess
 
+import pytest
+
 from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.graph_store import GraphStore
 from iwiki_mcp.graph import markdown_fingerprint
+
+
+@pytest.mark.parametrize(
+    ("handler", "args"),
+    [
+        ("wiki_write_page", ("alpha", "page", "# Page\n")),
+        ("wiki_update_page", ("alpha", "page", "Overview", "body")),
+        ("wiki_delete_page", ("alpha", "page")),
+        ("wiki_index", ("alpha",)),
+        ("wiki_create_domain", ("new-domain",)),
+        ("wiki_migrate_okf", ("alpha",)),
+        ("wiki_apply_okf", ("alpha", "page", "concept")),
+        ("wiki_export_okf", ("alpha",)),
+        ("wiki_sync", ()),
+    ],
+)
+def test_mutation_guard_blocks_every_handler_before_side_effects(
+    tmp_path, monkeypatch, handler, args
+):
+    from iwiki_mcp import cross_domain
+    from iwiki_mcp.base import Binding
+
+    binding = Binding(
+        str(tmp_path), ("alpha",), "alpha", str(tmp_path), ("alpha",)
+    )
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+
+    def stop(*_args, **_kwargs):
+        raise cross_domain.CrossDomainError("manual_recovery_required")
+
+    monkeypatch.setattr(cross_domain, "recover_pending_transactions", stop)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("freshness ran before recovery")
+        ),
+    )
+
+    result = getattr(server, handler)(*args)
+
+    assert result["code"] == "manual_recovery_required"
 
 
 def _seed(tmp_path, monkeypatch, with_domain=True):

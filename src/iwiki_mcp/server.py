@@ -18,7 +18,8 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
-from . import base, ignore, indexer, okf, retrieval, sync
+from . import base, cross_domain, ignore, indexer, okf, retrieval, sync
+from .lock import mutation_lock
 from .engine import rerank
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
@@ -146,6 +147,42 @@ def _safe(fn):
             }
         except Exception as e:
             return {"error": str(e), "hint": "unexpected error; see server logs"}
+
+    return wrap
+
+
+def _mutation_guard(fn):
+    @functools.wraps(fn)
+    def wrap(*args, **kwargs):
+        try:
+            bind = base.resolve_binding()
+            optional_domain = fn.__name__ in {
+                "wiki_index",
+                "wiki_migrate_okf",
+                "wiki_export_okf",
+            }
+            supplied_domain = args[0] if args else kwargs.get("domain")
+            if optional_domain and supplied_domain is None and bind.write is None:
+                return fn(*args, **kwargs)
+            with mutation_lock(bind.base):
+                cross_domain.recover_pending_transactions(
+                    bind.base,
+                    finalize_committed=lambda manifest: (
+                        cross_domain._recovery_graph_safe(bind.base, manifest)
+                    ),
+                )
+                return fn(*args, **kwargs)
+        except cross_domain.CrossDomainError as exc:
+            return {
+                "error": str(exc),
+                "code": exc.code,
+                "hint": "resolve the retained transaction journal before retrying",
+            }
+        except base.BaseError as exc:
+            return {
+                "error": str(exc),
+                "hint": "set IWIKI_BASE_DIR or run wiki_bind",
+            }
 
     return wrap
 
@@ -1396,6 +1433,18 @@ def wiki_export_okf(domain: str | None = None) -> dict:
 def wiki_sync() -> dict:
     bind = base.resolve_binding()
     return sync.sync(bind.base)
+
+
+# Every overlapping mutation recovers journals before any other side effect.
+wiki_write_page = _mutation_guard(wiki_write_page)
+wiki_update_page = _mutation_guard(wiki_update_page)
+wiki_delete_page = _mutation_guard(wiki_delete_page)
+wiki_index = _mutation_guard(wiki_index)
+wiki_create_domain = _mutation_guard(wiki_create_domain)
+wiki_migrate_okf = _mutation_guard(wiki_migrate_okf)
+wiki_apply_okf = _mutation_guard(wiki_apply_okf)
+wiki_export_okf = _mutation_guard(wiki_export_okf)
+wiki_sync = _mutation_guard(wiki_sync)
 
 
 # Thin MCP wrappers; implementation functions above stay unit-testable.

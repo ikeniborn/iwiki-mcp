@@ -81,7 +81,11 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
 
 
 def prepare_graph_mutation(
-    base: str, domain: str, *, whole_domain: bool = False
+    base: str,
+    domain: str,
+    *,
+    whole_domain: bool = False,
+    lock_held: bool = False,
 ) -> GraphMutation | None:
     """Establish completeness before an incremental derived-graph mutation."""
     from . import graph, sync
@@ -92,7 +96,19 @@ def prepare_graph_mutation(
     try:
         if whole_domain:
             return GraphMutation(base, domain, GraphStore(base), None, True)
-        provider = graph.scoped_graph(base, (domain,))
+        if lock_held:
+            store = GraphStore(base)
+            fingerprints = graph._load_fresh_domains(base, store, (domain,))
+            if fingerprints is None:
+                graph._rebuild_locked(base, (domain,), store)
+                fingerprints = graph._load_fresh_domains(base, store, (domain,))
+            provider = (
+                None
+                if fingerprints is None
+                else graph._provider(store, (domain,), fingerprints)
+            )
+        else:
+            provider = graph.scoped_graph(base, (domain,))
         if provider is None:
             return GraphMutation(base, domain, None, None, False)
         expected = dict(provider.expected_fingerprints)[domain]

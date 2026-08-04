@@ -11,6 +11,11 @@ import shutil
 import tempfile
 from typing import Callable, Iterable
 
+from . import base as wiki_base
+from . import graph, indexer, sync
+from .engine.config import Config
+from .engine.graph_store import GraphStore
+from .lock import mutation_lock
 from .sync import _head_revision, _run
 
 
@@ -38,6 +43,25 @@ class TransactionManifest:
     commit_head: str | None
     affected_domains: tuple[str, ...]
     files: tuple[FileSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class PlannedEdit:
+    domain: str
+    file: str
+    before_hash: str | None
+    after: bytes | None
+
+
+@dataclass(frozen=True)
+class MutationPlan:
+    operation: str
+    transaction_id: str
+    base_head: str | None
+    edits: tuple[PlannedEdit, ...]
+    affected_domains: tuple[str, ...]
+    rewritten_pages: tuple[str, ...]
+    rewritten_links: int
 
 
 def _transactions_root(base: str) -> Path:
@@ -133,9 +157,10 @@ def create_transaction(
     base_head: str | None,
     affected_domains: Iterable[str],
     files: Iterable[str],
+    transaction_id: str | None = None,
 ) -> TransactionManifest:
     """Snapshot every mutable path and persist a prepared journal."""
-    transaction_id = secrets.token_hex(16)
+    transaction_id = transaction_id or secrets.token_hex(16)
     transaction_root = _transactions_root(base)
     transaction_root.mkdir(parents=True, exist_ok=True)
     transaction_dir = _transaction_dir(base, transaction_id)
@@ -321,3 +346,177 @@ def recover_pending_transactions(
         if head != manifest.base_head:
             raise CrossDomainError("manual_recovery_required")
         _restore_transaction(base, manifest)
+
+
+def _recovery_graph_safe(base: str, manifest: TransactionManifest) -> bool:
+    store = GraphStore(base)
+    for domain in manifest.affected_domains:
+        try:
+            store.mark_domain_dirty(domain)
+        except Exception:
+            pass
+    return graph.incoming_candidates(
+        base, manifest.affected_domains, "recovery/probe"
+    ) is None
+
+
+def _validate_plan(base: str, binding, plan: MutationPlan) -> tuple[str, ...]:
+    if Path(base).resolve() != Path(binding.base).resolve():
+        raise CrossDomainError("mutation_failed")
+    domains = tuple(sorted(set(plan.affected_domains)))
+    if any(domain not in binding.read for domain in domains):
+        raise CrossDomainError("write_scope_blocked")
+    if any(domain not in binding.write_scope for domain in domains):
+        raise CrossDomainError("write_scope_blocked")
+    if _head_revision(base) != plan.base_head:
+        raise CrossDomainError("source_changed")
+    for edit in plan.edits:
+        if edit.domain not in domains:
+            raise CrossDomainError("mutation_failed")
+        path = _base_file(base, f"{edit.domain}/{_relative_file(edit.file)}")
+        if edit.before_hash is None:
+            if path.exists():
+                raise CrossDomainError("target_collision")
+        else:
+            try:
+                current = sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise CrossDomainError("source_changed") from exc
+            if current != edit.before_hash:
+                raise CrossDomainError("source_changed")
+    return domains
+
+
+def _affected_files(plan: MutationPlan, domains: tuple[str, ...]) -> tuple[str, ...]:
+    paths = {f"{edit.domain}/{_relative_file(edit.file)}" for edit in plan.edits}
+    for domain in domains:
+        paths.add(f"{domain}/index.jsonl")
+        paths.add(f"{domain}/log.jsonl")
+    return tuple(sorted(paths))
+
+
+def _apply_edit(base: str, edit: PlannedEdit) -> None:
+    path = _base_file(base, f"{edit.domain}/{_relative_file(edit.file)}")
+    if edit.after is None:
+        if path.exists():
+            path.unlink()
+            _fsync_directory(path.parent)
+        return
+    _atomic_write(path, edit.after)
+
+
+def execute_plan(base: str, binding, plan: MutationPlan) -> dict:
+    """Execute one immutable multi-domain mutation under a durable journal."""
+    domains = _validate_plan(base, binding, plan)
+    paths = _affected_files(plan, domains)
+    committed = False
+    manifest: TransactionManifest | None = None
+    graph_warning: str | None = None
+    with mutation_lock(base):
+        recover_pending_transactions(
+            base,
+            finalize_committed=lambda item: _recovery_graph_safe(base, item),
+        )
+        if not wiki_base.ensure_graph_store_excluded(base):
+            raise CrossDomainError("mutation_failed")
+        ignored = _run(
+            base,
+            "check-ignore",
+            "-q",
+            ".iwiki/transactions/probe/manifest.json",
+        )
+        if ignored.returncode != 0:
+            raise CrossDomainError("mutation_failed")
+        staged = _run(base, "diff", "--cached", "--name-only", "--", *paths)
+        if staged.returncode != 0 or staged.stdout.strip():
+            raise CrossDomainError("mutation_failed")
+        domains = _validate_plan(base, binding, plan)
+        mutations = tuple(
+            indexer.prepare_graph_mutation(base, domain, lock_held=True)
+            for domain in domains
+        )
+        try:
+            manifest = create_transaction(
+                base,
+                base_head=plan.base_head,
+                affected_domains=domains,
+                files=paths,
+                transaction_id=plan.transaction_id,
+            )
+            for edit in sorted(plan.edits, key=lambda item: (item.domain, item.file)):
+                _apply_edit(base, edit)
+            manifest = transition_transaction(base, manifest, "applied")
+            config = Config.load()
+            for domain in domains:
+                indexer.index_domain(config, base, domain)
+            message = (
+                f"iwiki: {plan.operation}\n\n"
+                f"Iwiki-Transaction: {plan.transaction_id}"
+            )
+            commit = sync._auto_commit_locked(base, message, paths)
+            if not commit.get("committed"):
+                raise RuntimeError("local commit failed")
+            committed = True
+            commit_head = _head_revision(base)
+            manifest = transition_transaction(
+                base, manifest, "committed", commit_head=commit_head
+            )
+            refresh_files = {
+                domain: tuple(
+                    sorted(
+                        edit.file
+                        for edit in plan.edits
+                        if edit.domain == domain and edit.after is not None
+                    )
+                )
+                for domain in domains
+            }
+            delete_files = {
+                domain: tuple(
+                    sorted(
+                        edit.file
+                        for edit in plan.edits
+                        if edit.domain == domain and edit.after is None
+                    )
+                )
+                for domain in domains
+            }
+            graph_warning = indexer.finalize_graph_batch(
+                tuple(mutation for mutation in mutations if mutation is not None),
+                refresh_files,
+                delete_files,
+            )
+            finalize_transaction(base, manifest)
+        except Exception as exc:
+            if committed:
+                raise CrossDomainError("manual_recovery_required") from exc
+            try:
+                recover_pending_transactions(
+                    base,
+                    finalize_committed=lambda item: _recovery_graph_safe(base, item),
+                )
+                _run(base, "reset", "-q", "HEAD", "--", *paths)
+            except Exception as recovery_error:
+                raise CrossDomainError("manual_recovery_required") from recovery_error
+            raise CrossDomainError("mutation_failed") from exc
+
+    pushed = sync.sync(base)
+    result = {
+        "transaction_id": plan.transaction_id,
+        "rewritten_pages": sorted(set(plan.rewritten_pages)),
+        "affected_domains": list(domains),
+        "rewritten_links": plan.rewritten_links,
+        "committed": True,
+        "pushed": bool(pushed.get("pushed")),
+        "sync_attempts": pushed.get("sync_attempts", 0),
+        "push_attempts": pushed.get("push_attempts", 0),
+    }
+    warning = pushed.get("warning") or pushed.get("error")
+    if warning:
+        result["warning"] = sync._sanitize_git_output(str(warning))
+    if graph_warning:
+        existing = result.get("warning")
+        result["warning"] = (
+            f"{existing}; {graph_warning}" if existing else graph_warning
+        )
+    return result
