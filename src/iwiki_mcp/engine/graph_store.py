@@ -519,6 +519,35 @@ class GraphStore:
             )
         return DomainSnapshot(domain, pages, anchors, edges)
 
+    def query_incoming_pages(
+        self,
+        domains: tuple[str, ...],
+        target_page_id: str,
+        target_anchor: str | None = None,
+    ) -> tuple[PageRecord, ...]:
+        """Return indexed source pages linking to one exact graph target."""
+        requested = tuple(sorted(set(domains)))
+        if not requested:
+            return ()
+        placeholders = ", ".join("?" for _ in requested)
+        anchor_sql = "" if target_anchor is None else "AND edges.target_anchor = ? "
+        parameters: tuple[str, ...] = (
+            target_page_id,
+            *((target_anchor,) if target_anchor is not None else ()),
+            *requested,
+        )
+        with self.read_snapshot() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT pages.page_id, pages.domain, pages.file, "
+                "pages.content_hash, pages.link_hash FROM edges "
+                "JOIN pages ON pages.page_id = edges.source_page_id "
+                "WHERE edges.target_page_id = ? AND edges.kind = 'cross' "
+                f"{anchor_sql}AND pages.domain IN ({placeholders}) "
+                "ORDER BY pages.domain, pages.file",
+                parameters,
+            )
+            return tuple(PageRecord(*row) for row in rows)
+
     @staticmethod
     def _configure(connection: sqlite3.Connection) -> None:
         connection.row_factory = sqlite3.Row

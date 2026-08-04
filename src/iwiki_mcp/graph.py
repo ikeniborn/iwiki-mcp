@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sqlite3
+import stat
 import tempfile
 from typing import Iterable
 
@@ -15,6 +16,7 @@ from filelock import Timeout
 
 from .base import domain_dir, list_domains
 from .engine import graph_store
+from .engine.links import parse_link_targets, slugify_heading
 from .engine.okf_artifacts import RESERVED_OKF
 from .lock import base_lock
 from .sync import _run, is_git_repo
@@ -36,6 +38,110 @@ class RevisionChange:
     new_revision: str
     domains: tuple[str, ...]
     complete: bool = True
+
+
+@dataclass(frozen=True)
+class IncomingCandidate:
+    domain: str
+    file: str
+
+
+@dataclass(frozen=True)
+class MarkdownCandidateSnapshot:
+    candidates: tuple[IncomingCandidate, ...]
+    expected_hashes: tuple[tuple[str, str, str], ...]
+
+
+class MarkdownSnapshotChanged(RuntimeError):
+    """Raised when a Markdown discovery snapshot changes during capture."""
+
+
+def _target_identity(target_page_id: str) -> tuple[str, str] | None:
+    domain, separator, page = target_page_id.partition("/")
+    if not separator or not domain or not page:
+        return None
+    return domain, page
+
+
+def _has_incoming_target(
+    content: str,
+    source_domain: str,
+    target_page_id: str,
+    target_anchor: str | None,
+) -> bool:
+    identity = _target_identity(target_page_id)
+    if identity is None:
+        return False
+    target_domain, target_page = identity
+    normalized_anchor = (
+        slugify_heading(target_anchor) if target_anchor is not None else None
+    )
+    return any(
+        target.kind == "cross"
+        and target.target_domain == target_domain
+        and target.target_page == target_page
+        and (
+            normalized_anchor is None
+            or target.target_anchor == normalized_anchor
+        )
+        for target in parse_link_targets(content, source_domain)
+    )
+
+
+def _read_scoped_markdown(
+    base: str, domain: str, file: str
+) -> bytes | None:
+    relative = PurePosixPath(file)
+    parts = relative.parts
+    if (
+        relative.is_absolute()
+        or not parts
+        or any(part in ("", ".", "..") for part in parts)
+        or not file.endswith(".md")
+        or file in RESERVED_OKF
+    ):
+        return None
+    try:
+        directory_flags = (
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
+        )
+        file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    except AttributeError:
+        return None
+    descriptors: list[int] = []
+    try:
+        current = os.open(domain_dir(base, domain), directory_flags)
+        descriptors.append(current)
+        for part in parts[:-1]:
+            current = os.open(part, directory_flags, dir_fd=current)
+            descriptors.append(current)
+        final = os.open(parts[-1], file_flags, dir_fd=current)
+        descriptors.append(final)
+        before = os.fstat(final)
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        payload = bytearray()
+        while block := os.read(final, 1024 * 1024):
+            payload.extend(block)
+        after = os.fstat(final)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            return None
+        return bytes(payload)
+    except (OSError, NotImplementedError):
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -270,6 +376,129 @@ def _load_fresh_domains(
 ) -> dict[str, str] | None:
     fingerprints, stale = _inspect_domains(base, store, domains)
     return None if stale else fingerprints
+
+
+def incoming_candidates(
+    base: str,
+    domains: tuple[str, ...],
+    target_page_id: str,
+    target_anchor: str | None = None,
+) -> tuple[IncomingCandidate, ...] | None:
+    """Return canonically verified incoming pages from a ready graph scope."""
+    requested = tuple(sorted(set(domains)))
+    store = graph_store.GraphStore(base)
+    if not requested or _target_identity(target_page_id) is None:
+        return ()
+    if not store.path.is_file():
+        return None
+    normalized_anchor = (
+        slugify_heading(target_anchor) if target_anchor is not None else None
+    )
+    try:
+        expected = _load_fresh_domains(base, store, requested)
+        if expected is None:
+            return None
+        indexed = store.query_incoming_pages(
+            requested, target_page_id, normalized_anchor
+        )
+        candidates: list[IncomingCandidate] = []
+        for page in indexed:
+            content_bytes = _read_scoped_markdown(base, page.domain, page.file)
+            if content_bytes is None:
+                return None
+            if sha256(content_bytes).hexdigest() != page.content_hash:
+                return None
+            content = content_bytes.decode("utf-8")
+            if _has_incoming_target(
+                content,
+                page.domain,
+                target_page_id,
+                normalized_anchor,
+            ):
+                candidates.append(IncomingCandidate(page.domain, page.file))
+        current = _load_fresh_domains(base, store, requested)
+        if current != expected:
+            return None
+        return tuple(candidates)
+    except (
+        graph_store.GraphStoreError,
+        GraphRuntimeError,
+        OSError,
+        UnicodeError,
+    ):
+        return None
+
+
+def _snapshot_markdown_files(root: Path) -> tuple[Path, ...]:
+    resolved_root = root.resolve()
+    files: list[Path] = []
+    for path in root.rglob("*.md"):
+        try:
+            relative = path.relative_to(root).as_posix()
+            path.resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
+        if path.is_file() and relative not in RESERVED_OKF:
+            files.append(path)
+    return tuple(sorted(files))
+
+
+def markdown_incoming_snapshot(
+    base: str,
+    domains: tuple[str, ...],
+    target_page_id: str,
+    target_anchor: str | None = None,
+) -> MarkdownCandidateSnapshot:
+    """Capture and immediately revalidate one scoped Markdown snapshot."""
+    requested = tuple(sorted(set(domains)))
+    try:
+        initial_fingerprints = {
+            domain: markdown_fingerprint(base, domain).value
+            for domain in requested
+        }
+    except (GraphRuntimeError, OSError) as exc:
+        raise GraphRuntimeError("Markdown scope is unavailable") from exc
+    expected: list[tuple[str, str, str]] = []
+    candidates: list[IncomingCandidate] = []
+    for domain in requested:
+        root = Path(domain_dir(base, domain))
+        if not root.is_dir():
+            raise GraphRuntimeError("Markdown scope is unavailable")
+        for path in _snapshot_markdown_files(root):
+            file = path.relative_to(root).as_posix()
+            try:
+                content_bytes = _read_scoped_markdown(base, domain, file)
+                if content_bytes is None:
+                    raise OSError("unsafe Markdown path")
+                content = content_bytes.decode("utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise GraphRuntimeError("Markdown scope is unavailable") from exc
+            content_hash = sha256(content_bytes).hexdigest()
+            expected.append((domain, file, content_hash))
+            if _has_incoming_target(
+                content, domain, target_page_id, target_anchor
+            ):
+                candidates.append(IncomingCandidate(domain, file))
+
+    for domain, file, content_hash in expected:
+        current = _read_scoped_markdown(base, domain, file)
+        if current is None:
+            raise MarkdownSnapshotChanged
+        current_hash = sha256(current).hexdigest()
+        if current_hash != content_hash:
+            raise MarkdownSnapshotChanged
+
+    try:
+        current_fingerprints = {
+            domain: markdown_fingerprint(base, domain).value
+            for domain in requested
+        }
+    except (GraphRuntimeError, OSError) as exc:
+        raise MarkdownSnapshotChanged from exc
+    if current_fingerprints != initial_fingerprints:
+        raise MarkdownSnapshotChanged
+
+    return MarkdownCandidateSnapshot(tuple(candidates), tuple(expected))
 
 
 def _is_busy_error(error: BaseException) -> bool:
