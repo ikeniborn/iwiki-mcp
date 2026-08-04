@@ -3,7 +3,7 @@ wiki-graph expansion into a candidate pool, then clean-section ranking inside it
 Ported for parity from obsidian-ai-wiki's page-similarity/query flow."""
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 
 from .store import Record, dequantize, cosine
@@ -78,14 +78,26 @@ def expand_graph(seed_files: list[str], domain_dir: str, depth: int,
     return pool
 
 
-def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
-                     depth: int, cap: int,
-                     markdown_by_file: Mapping[str, str] | None = None
-                     ) -> list[dict]:
+def rank_neighbor_pages(
+        seeds: list[tuple[str, str, int]],
+        neighbor_provider: Callable[[str], Iterable[str]],
+        depth: int,
+        cap: int,
+        allowed_pages: Collection[str] | None = None,
+        ) -> list[dict]:
+    """Rank an injected undirected page graph without resolving its storage.
+
+    ``allowed_pages`` is a scope boundary, not an output-only filter: an
+    out-of-scope neighbor never enters the frontier and therefore cannot expose
+    or make another page reachable. Facet filtering belongs to the caller and
+    must not remove in-scope bridge pages from this collection.
+    """
     rows: dict[str, dict] = {}
     discovery = 0
     for file, origin, seed_rank in sorted(
             seeds, key=lambda seed: (seed[2], seed[0], seed[1])):
+        if allowed_pages is not None and file not in allowed_pages:
+            continue
         row = rows.get(file)
         if row is None:
             rows[file] = {"file": file, "source": "seed", "seed_origins": [origin],
@@ -97,13 +109,18 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
             row["seed_rank"] = min(row["seed_rank"], seed_rank)
 
     seed_count = len(rows)
-    adjacency = _adjacency(domain_dir, markdown_by_file)
     frontier = list(rows)
     for distance in range(1, max(0, depth) + 1):
+        if cap > 0 and len(rows) - seed_count >= cap:
+            break
         next_frontier: list[str] = []
+        discovered: list[str] = []
         for file in frontier:
             parent = rows[file]
-            for neighbor in sorted(adjacency.get(file, ())):
+            for neighbor in sorted(set(neighbor_provider(file))):
+                if (allowed_pages is not None
+                        and neighbor not in allowed_pages):
+                    continue
                 row = rows.get(neighbor)
                 if row is None:
                     rows[neighbor] = {
@@ -116,10 +133,28 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
                     }
                     discovery += 1
                     next_frontier.append(neighbor)
+                    discovered.append(neighbor)
                 elif row["distance"] == distance:
                     row["seed_origins"] = sorted(
                         set(row["seed_origins"]) | set(parent["seed_origins"]))
                     row["seed_rank"] = min(row["seed_rank"], parent["seed_rank"])
+        if cap > 0:
+            previous_count = len(rows) - seed_count - len(discovered)
+            remaining = max(0, cap - previous_count)
+            if len(discovered) > remaining:
+                kept = {
+                    row["file"]
+                    for row in sorted(
+                        (rows[file] for file in discovered),
+                        key=lambda row: (
+                            row["seed_rank"], row["file"], row["discovery"]
+                        ),
+                    )[:remaining]
+                }
+                for file in discovered:
+                    if file not in kept:
+                        del rows[file]
+                next_frontier = [file for file in next_frontier if file in kept]
         frontier = next_frontier
 
     ranked = sorted(rows.values(), key=lambda row: (
@@ -129,6 +164,19 @@ def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
     if cap > 0:
         return ranked[:seed_count + cap]
     return ranked
+
+
+def rank_graph_pages(seeds: list[tuple[str, str, int]], domain_dir: str,
+                     depth: int, cap: int,
+                     markdown_by_file: Mapping[str, str] | None = None
+                     ) -> list[dict]:
+    adjacency = _adjacency(domain_dir, markdown_by_file)
+    return rank_neighbor_pages(
+        seeds,
+        lambda file: adjacency.get(file, ()),
+        depth,
+        cap,
+    )
 
 
 def rank_sections(query_vec: list[float], section_recs: list[Record],

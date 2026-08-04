@@ -1,4 +1,7 @@
-from iwiki_mcp import retrieval, indexer
+from pathlib import Path
+import subprocess
+
+from iwiki_mcp import graph as graph_runtime, retrieval, indexer
 from iwiki_mcp.engine.config import Config
 
 
@@ -50,6 +53,35 @@ def test_locate_target_exact_heading(tmp_path, monkeypatch):
     assert hit["domain"] == "d"
     assert hit["file"] == "p.md"
     assert isinstance(hit["score"], float)
+
+
+def test_locate_target_uses_ready_graph_without_markdown_walk(
+        tmp_path, monkeypatch):
+    cfg, base = _seed_two_level(tmp_path, monkeypatch, "d")
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    assert graph_runtime.scoped_graph(base, ["d"]) is not None
+    monkeypatch.setattr(retrieval, "embed_texts", _fake_embed)
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ready graph walked Markdown")
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ready graph read Markdown")
+        ),
+    )
+
+    hit = retrieval.locate_target(
+        cfg, base, "d", "purpose of retrieval", heading="Purpose"
+    )
+
+    assert hit["exists"] is True
+    assert hit["file"] == "p.md"
 
 
 def test_locate_target_miss_returns_exists_false(tmp_path, monkeypatch):

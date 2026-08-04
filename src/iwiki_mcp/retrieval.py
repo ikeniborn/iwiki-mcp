@@ -5,15 +5,19 @@ from dataclasses import dataclass
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
+from collections.abc import Callable, Iterable
 
 import numpy as np
 
+from . import graph
 from .base import domain_dir, index_path, migrate_store_location
 from .engine import fusion, hier
 from .engine.chunk import Chunk, chunk_markdown
 from .engine.config import Config
 from .engine.embed import embed_texts
 from .engine.grep import score_chunks, score_sections
+from .engine.links import parse_link_targets
+from .engine.okf_artifacts import RESERVED_OKF
 from .engine.store import VectorStore
 
 CANDIDATE_LIMIT = 32
@@ -30,6 +34,15 @@ class _MaterializedPage:
 
 
 PageCache = dict[tuple[str, str], _MaterializedPage | None]
+
+
+@dataclass
+class _DomainContext:
+    domain: str
+    sections_by_file: dict[str, list]
+    semantic_seeds: list[tuple[str, float]]
+    lexical_seeds: list[tuple[str, int]]
+    signals: dict[str, list[dict]]
 
 
 def _candidate_limit(top_k: int) -> int:
@@ -186,6 +199,91 @@ def _unique_sections(records) -> dict[tuple[str, str, int], object | None]:
     return unique
 
 
+def _qualified_page(domain: str, file: str) -> str | None:
+    if file in RESERVED_OKF or not file.endswith(".md"):
+        return None
+    return f"{domain}/{file[:-3]}"
+
+
+def _page_location(page_id: str) -> tuple[str, str] | None:
+    domain, separator, page = page_id.partition("/")
+    if not separator or not domain or not page:
+        return None
+    return domain, f"{page}.md"
+
+
+def _markdown_neighbor_provider(
+        base: str, domains: list[str], page_cache: PageCache
+        ) -> tuple[Callable[[str], Iterable[str]], frozenset[str]]:
+    """Build a scope-qualified undirected fallback graph from current Markdown."""
+    markdown: dict[str, str] = {}
+    for domain in sorted(set(domains)):
+        root = Path(domain_dir(base, domain))
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.md")):
+            try:
+                file = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            page_id = _qualified_page(domain, file)
+            if page_id is None:
+                continue
+            cached = page_cache.get((domain, file))
+            if (cached is not None
+                    and _stamp_domain_file(base, domain, file) == cached.stamp):
+                markdown[page_id] = cached.markdown
+                continue
+            read = _read_domain_file(base, domain, file)
+            if read is not None:
+                markdown[page_id] = read[1]
+
+    allowed_pages = frozenset(markdown)
+    adjacency: dict[str, set[str]] = {}
+    for source_page, content in sorted(markdown.items()):
+        source_domain = source_page.split("/", 1)[0]
+        for target in parse_link_targets(content, source_domain):
+            if target.is_reserved:
+                continue
+            target_page = f"{target.target_domain}/{target.target_page}"
+            if target_page not in allowed_pages:
+                continue
+            adjacency.setdefault(source_page, set()).add(target_page)
+            adjacency.setdefault(target_page, set()).add(source_page)
+
+    return lambda page_id: adjacency.get(page_id, ()), allowed_pages
+
+
+def _rank_scoped_graph(
+        base: str,
+        domains: list[str],
+        seeds: list[tuple[str, str, int]],
+        depth: int,
+        cap: int,
+        page_cache: PageCache,
+        ) -> list[dict]:
+    provider = graph.scoped_graph(base, domains)
+    if provider is not None:
+        try:
+            return hier.rank_neighbor_pages(
+                seeds, provider.neighbors, depth, cap
+            )
+        except graph.GraphRuntimeError:
+            # The ready snapshot invalidated mid-BFS. Restart from scratch so
+            # one result never mixes SQLite and Markdown graph generations.
+            pass
+    markdown_neighbors, allowed_pages = _markdown_neighbor_provider(
+        base, domains, page_cache
+    )
+    return hier.rank_neighbor_pages(
+        seeds,
+        markdown_neighbors,
+        depth,
+        cap,
+        allowed_pages=allowed_pages,
+    )
+
+
 def _internal_hit(domain, rec, source, rank_key, seed_origins=None) -> dict:
     return {
         "domain": domain,
@@ -205,7 +303,7 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                     query_vec: list[float] | None, mode: str, limit: int,
                     threshold: float, type: str | None,
                     tags: list | None, page_cache: PageCache
-                    ) -> dict[str, list[dict]]:
+                    ) -> _DomainContext:
     migrate_store_location(base, domain)
     loaded_records = VectorStore(index_path(base, domain)).load()
     loaded_sections = [rec for rec in loaded_records if rec.kind == "section"]
@@ -281,31 +379,9 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
     else:
         lexical_map = {}
 
-    graph_seeds = [
-        (file, "semantic", rank)
-        for rank, (file, _) in enumerate(semantic_seeds)
-    ] + [
-        (file, "lexical", rank)
-        for rank, (file, _) in enumerate(lexical_seeds)
-    ]
-    if graph_seeds:
-        graph_markdown = {
-            file: page.markdown
-            for (cached_domain, file), page in page_cache.items()
-            if cached_domain == domain and page is not None
-            and _stamp_domain_file(base, domain, file) == page.stamp
-        }
-        graph_pages = hier.rank_graph_pages(
-            graph_seeds, domain_dir(base, domain), cfg.graph_depth, cfg.bfs_top_k,
-            markdown_by_file=graph_markdown,
-        )
-    else:
-        graph_pages = []
-
     signals: dict[str, list[dict]] = {
         "semantic_page": [],
         "lexical_page": [],
-        "graph_page": [],
         "semantic_chunk": [],
         "lexical_section": [],
     }
@@ -320,14 +396,6 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
             rank_key = (page_rank, rec.ordinal, rec.chunk, rec.file)
             signals["lexical_page"].append(
                 _internal_hit(domain, rec, "seed", rank_key, ["lexical"])
-            )
-    for page_rank, page in enumerate(graph_pages):
-        for rec in sections_by_file.get(page["file"], []):
-            rank_key = (page_rank, rec.ordinal, rec.chunk, rec.file)
-            signals["graph_page"].append(
-                _internal_hit(
-                    domain, rec, page["source"], rank_key, page["seed_origins"]
-                )
             )
     for rec, score in semantic_chunks:
         signals["semantic_chunk"].append(
@@ -344,7 +412,13 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                 ["lexical"],
             )
         )
-    return {name: hits for name, hits in signals.items() if hits}
+    return _DomainContext(
+        domain=domain,
+        sections_by_file=sections_by_file,
+        semantic_seeds=semantic_seeds,
+        lexical_seeds=lexical_seeds,
+        signals={name: hits for name, hits in signals.items() if hits},
+    )
 
 
 def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: str,
@@ -364,14 +438,68 @@ def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: s
     if mode in ("semantic", "hybrid"):
         query_vec = list(np.asarray(embed_texts(cfg, [query])[0], dtype=np.float32))
     limit = _candidate_limit(top_k)
-    signals: dict[str, list[dict]] = {}
+    signals: dict[str, list[dict]] = {
+        "semantic_page": [],
+        "lexical_page": [],
+        "graph_page": [],
+        "semantic_chunk": [],
+        "lexical_section": [],
+    }
+    contexts: list[_DomainContext] = []
     for domain in domains:
-        domain_signals = _domain_signals(
+        context = _domain_signals(
             cfg, base, domain, query, query_vec, mode, limit, threshold, type, tags,
             page_cache,
         )
-        for name, hits in domain_signals.items():
-            signals.setdefault(name, []).extend(hits)
+        contexts.append(context)
+        for name, hits in context.signals.items():
+            signals[name].extend(hits)
+
+    graph_seeds: list[tuple[str, str, int]] = []
+    for context in contexts:
+        graph_seeds.extend(
+            (page_id, "semantic", rank)
+            for rank, (file, _) in enumerate(context.semantic_seeds)
+            if (page_id := _qualified_page(context.domain, file)) is not None
+        )
+        graph_seeds.extend(
+            (page_id, "lexical", rank)
+            for rank, (file, _) in enumerate(context.lexical_seeds)
+            if (page_id := _qualified_page(context.domain, file)) is not None
+        )
+    if graph_seeds:
+        contexts_by_domain = {context.domain: context for context in contexts}
+        graph_hits: list[dict] = []
+        graph_pages = _rank_scoped_graph(
+            base,
+            domains,
+            graph_seeds,
+            cfg.graph_depth,
+            cfg.bfs_top_k,
+            page_cache,
+        )
+        for page_rank, page in enumerate(graph_pages):
+            location = _page_location(page["file"])
+            if location is None:
+                continue
+            domain, file = location
+            context = contexts_by_domain.get(domain)
+            if context is None:
+                continue
+            for rec in context.sections_by_file.get(file, []):
+                rank_key = (
+                    page_rank, rec.ordinal, rec.chunk, domain, rec.file
+                )
+                graph_hits.append(
+                    _internal_hit(
+                        domain,
+                        rec,
+                        page["source"],
+                        rank_key,
+                        page["seed_origins"],
+                    )
+                )
+        signals["graph_page"] = graph_hits
     for hits in signals.values():
         hits.sort(key=lambda hit: (
             hit["rank_key"], hit["domain"], hit["file"], hit["ordinal"], hit["chunk"]
@@ -475,8 +603,24 @@ def locate_target(cfg: Config, base: str, domain: str, query: str,
     seeds = hier.seed_articles(qv, summ, cfg.seed_top_k, cfg.write_seed_threshold)
     if not seeds:
         return {"domain": domain, "exists": False}
-    pool = hier.expand_graph([f for f, _ in seeds], domain_dir(base, domain),
-                             cfg.graph_depth, cfg.bfs_top_k)
+    graph_seeds = [
+        (page_id, "semantic", rank)
+        for rank, (file, _) in enumerate(seeds)
+        if (page_id := _qualified_page(domain, file)) is not None
+    ]
+    ranked_pages = _rank_scoped_graph(
+        base,
+        [domain],
+        graph_seeds,
+        cfg.graph_depth,
+        cfg.bfs_top_k,
+        {},
+    )
+    pool = {}
+    for page in ranked_pages:
+        location = _page_location(page["file"])
+        if location is not None and location[0] == domain:
+            pool[location[1]] = page["source"]
     if heading is not None:
         want = heading.strip().lower()
         secs = [r for r in secs if r.heading.lower() == want]

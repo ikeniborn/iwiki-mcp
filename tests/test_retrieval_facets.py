@@ -47,3 +47,45 @@ def test_hybrid_facets_filter_every_signal_including_graph(tmp_path, monkeypatch
 
     assert hits
     assert {hit["file"] for hit in hits} == {"guide/allowed.md"}
+
+
+def test_graph_traverses_facet_blocked_bridge_without_emitting_it(
+        tmp_path, monkeypatch):
+    domain = tmp_path / "d"
+    domain.mkdir()
+    (domain / "a.md").write_text(
+        "---\ntype: guide\ntags: [safe]\ndescription: widget seed\n---\n"
+        "# A\n\n## A\nallowed content\n\n[Bridge](bridge.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "bridge.md").write_text(
+        "---\ntype: api\ntags: [unsafe]\ndescription: orthogonal bridge\n---\n"
+        "# Bridge\n\n## Bridge\nblocked content\n\n[Final](final.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "final.md").write_text(
+        "---\ntype: guide\ntags: [safe]\ndescription: orthogonal final\n---\n"
+        "# Final\n\n## Final\nreachable content\n",
+        encoding="utf-8",
+    )
+
+    def embed(cfg, texts):
+        return [
+            [1.0, 0.0]
+            if text.strip() == "widget" or "widget seed" in text
+            else [0.0, 1.0]
+            for text in texts
+        ]
+
+    monkeypatch.setattr(indexer, "embed_texts", embed)
+    indexer.index_domain(_cfg(), str(tmp_path), "d")
+    monkeypatch.setattr(retrieval, "embed_texts", embed)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(tmp_path), ["d"], "widget", 8, 0.5,
+        mode="semantic", type="guide", tags=["safe"],
+    )
+
+    assert "bridge.md" not in {hit["file"] for hit in hits}
+    final = next(hit for hit in hits if hit["file"] == "final.md")
+    assert final["source"] == "graph"

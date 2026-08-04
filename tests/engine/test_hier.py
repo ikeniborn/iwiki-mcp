@@ -73,6 +73,70 @@ def test_rank_graph_pages_merges_seed_origins_at_same_distance(tmp_path):
     assert c_row["seed_origins"] == ["lexical", "semantic"]
 
 
+def test_rank_neighbor_pages_filters_out_of_scope_nodes_from_frontier():
+    adjacency = {
+        "visible/a": ("hidden/b",),
+        "hidden/b": ("visible/a", "visible/c"),
+        "visible/c": ("hidden/b",),
+    }
+
+    ranked = hier.rank_neighbor_pages(
+        [("visible/a", "semantic", 0)],
+        lambda page_id: adjacency.get(page_id, ()),
+        depth=2,
+        cap=10,
+        allowed_pages={"visible/a", "visible/c"},
+    )
+
+    assert [row["file"] for row in ranked] == ["visible/a"]
+
+
+def test_rank_neighbor_pages_is_deterministic_and_globally_caps_neighbors():
+    adjacency = {
+        "alpha/a": ("beta/z", "beta/b"),
+        "beta/b": ("alpha/a", "beta/c"),
+        "beta/z": ("alpha/a",),
+        "beta/c": ("beta/b",),
+    }
+
+    ranked = hier.rank_neighbor_pages(
+        [("alpha/a", "semantic", 0)],
+        lambda page_id: reversed(adjacency.get(page_id, ())),
+        depth=2,
+        cap=2,
+        allowed_pages=set(adjacency),
+    )
+
+    assert [(row["file"], row["distance"]) for row in ranked] == [
+        ("alpha/a", 0),
+        ("beta/b", 1),
+        ("beta/z", 1),
+    ]
+
+
+def test_rank_neighbor_pages_stops_before_uncapped_frontier_fans_out():
+    leaves = tuple(f"visible/n{index:03d}" for index in range(250))
+    calls = []
+
+    def neighbors(page_id):
+        calls.append(page_id)
+        return leaves if page_id == "visible/seed" else ("visible/deeper",)
+
+    ranked = hier.rank_neighbor_pages(
+        [("visible/seed", "semantic", 0)],
+        neighbors,
+        depth=2,
+        cap=10,
+        allowed_pages={"visible/seed", "visible/deeper", *leaves},
+    )
+
+    assert calls == ["visible/seed"]
+    assert [row["file"] for row in ranked] == [
+        "visible/seed",
+        *leaves[:10],
+    ]
+
+
 def test_rank_sections_pool_filter_and_seed_tiebreak():
     secs = [_rec("a.md", "S1", "section", [1.0, 0.0], ordinal=0),
             _rec("b.md", "S2", "section", [1.0, 0.0], ordinal=0),

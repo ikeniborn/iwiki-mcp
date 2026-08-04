@@ -4,10 +4,11 @@ import multiprocessing
 import os
 from dataclasses import replace
 from pathlib import Path
+import subprocess
 
 import pytest
 
-from iwiki_mcp import base as wiki_base, indexer, retrieval
+from iwiki_mcp import base as wiki_base, graph as graph_runtime, indexer, retrieval
 from iwiki_mcp.engine import store
 from iwiki_mcp.engine.chunk import chunk_markdown
 from iwiki_mcp.engine.config import Config
@@ -47,6 +48,57 @@ def _seed(tmp_path, monkeypatch):
     return str(base)
 
 
+def _cross_domain_seed(tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    alpha = base / "alpha"
+    beta = base / "beta"
+    alpha.mkdir(parents=True)
+    beta.mkdir()
+    (alpha / "a.md").write_text(
+        "---\ndescription: alpha seed\n---\n# A\n\n"
+        "## Match\nalpha details\n\n[Bridge](iwiki://beta/bridge)\n",
+        encoding="utf-8",
+    )
+    (beta / "bridge.md").write_text(
+        "---\ndescription: orthogonal bridge\n---\n# Bridge\n\n"
+        "## Bridge\nbridge details\n\n[Leaf](leaf.md)\n",
+        encoding="utf-8",
+    )
+    (beta / "leaf.md").write_text(
+        "---\ndescription: orthogonal leaf\n---\n# Leaf\n\n"
+        "## Leaf\nleaf details\n",
+        encoding="utf-8",
+    )
+    (beta / "reverse.md").write_text(
+        "---\ndescription: orthogonal reverse\n---\n# Reverse\n\n"
+        "## Reverse\nreverse details\n\n[Seed](iwiki://alpha/a)\n",
+        encoding="utf-8",
+    )
+    (beta / "lexical.md").write_text(
+        "---\ndescription: orthogonal lexical\n---\n# Lexical\n\n"
+        "## Lexical\nlookup_token details\n",
+        encoding="utf-8",
+    )
+
+    def fake_embed(cfg, texts):
+        return [
+            [1.0, 0.0]
+            if (
+                text.strip().lower() == "alpha"
+                or "alpha seed" in text.lower()
+                or "alpha details" in text.lower()
+            )
+            else [0.0, 1.0]
+            for text in texts
+        ]
+
+    monkeypatch.setattr(indexer, "embed_texts", fake_embed)
+    indexer.index_domain(_cfg(), str(base), "alpha")
+    indexer.index_domain(_cfg(), str(base), "beta")
+    monkeypatch.setattr(retrieval, "embed_texts", fake_embed)
+    return str(base)
+
+
 def _long_lexical_page(tmp_path, monkeypatch):
     base = tmp_path / "wiki"
     domain = base / "d"
@@ -67,11 +119,11 @@ def _long_lexical_page(tmp_path, monkeypatch):
 def test_lexical_signal_targets_exact_current_chunk(tmp_path, monkeypatch):
     cfg, base = _long_lexical_page(tmp_path, monkeypatch)
 
-    signals = retrieval._domain_signals(
+    context = retrieval._domain_signals(
         cfg, base, "d", "needle", None, "lexical", 10, 0.0, None, None, {}
     )
 
-    direct = signals["lexical_section"]
+    direct = context.signals["lexical_section"]
     assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in direct] == [
         ("long.md", "Details", 1)
     ]
@@ -85,11 +137,11 @@ def test_lexical_signal_omits_stale_indexed_chunk(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    signals = retrieval._domain_signals(
+    context = retrieval._domain_signals(
         cfg, base, "d", "replacement", None, "lexical", 10, 0.0, None, None, {}
     )
 
-    assert signals.get("lexical_section", []) == []
+    assert context.signals.get("lexical_section", []) == []
 
 
 def test_lexical_collision_uses_all_loaded_sections(tmp_path, monkeypatch):
@@ -102,11 +154,11 @@ def test_lexical_collision_uses_all_loaded_sections(tmp_path, monkeypatch):
     )
     store.save_index(path, [*records, replace(section, tags=["other"])])
 
-    signals = retrieval._domain_signals(
+    context = retrieval._domain_signals(
         cfg, base, "d", "one", None, "lexical", 10, 0.0, None, ["wanted"], {}
     )
 
-    assert signals.get("lexical_section", []) == []
+    assert context.signals.get("lexical_section", []) == []
 
 
 def test_lexical_signal_distinguishes_repeated_heading_chunks(tmp_path, monkeypatch):
@@ -124,11 +176,11 @@ def test_lexical_signal_distinguishes_repeated_heading_chunks(tmp_path, monkeypa
     )
     indexer.index_domain(cfg, str(base), "d")
 
-    signals = retrieval._domain_signals(
+    context = retrieval._domain_signals(
         cfg, str(base), "d", "needle", None, "lexical", 10, 0.0, None, None, {}
     )
 
-    direct = signals["lexical_section"]
+    direct = context.signals["lexical_section"]
     assert [(hit["file"], hit["heading"], hit["chunk"]) for hit in direct] == [
         ("repeated.md", "Setup", 1)
     ]
@@ -297,11 +349,11 @@ def test_lexical_page_seed_uses_source_term_frequency_not_overlap(
     )
     indexer.index_domain(cfg, str(base), "d")
 
-    signals = retrieval._domain_signals(
+    context = retrieval._domain_signals(
         cfg, str(base), "d", "needle", None, "lexical", 10, 0.0, None, None, {}
     )
 
-    assert {hit["file"] for hit in signals["lexical_page"]} == {"twice.md"}
+    assert {hit["file"] for hit in context.signals["lexical_page"]} == {"twice.md"}
 
 
 @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
@@ -363,6 +415,176 @@ def test_lexical_graph_reuses_materialized_page_markdown(tmp_path, monkeypatch):
     assert graph["source"] == "graph"
     assert graph["hit"] == "lexical"
     assert reads == ["materialize"]
+
+
+def test_markdown_fallback_expands_cross_domain_forward_reverse_and_depth_two(
+        tmp_path, monkeypatch):
+    base = _cross_domain_seed(tmp_path, monkeypatch)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["alpha", "beta"], "alpha", 20, 0.5,
+        mode="semantic",
+    )
+
+    graph_files = {
+        (hit["domain"], hit["file"])
+        for hit in hits if hit["source"] == "graph"
+    }
+    assert graph_files == {
+        ("beta", "bridge.md"),
+        ("beta", "leaf.md"),
+        ("beta", "reverse.md"),
+    }
+
+
+def test_ready_graph_expansion_does_not_walk_or_read_markdown(
+        tmp_path, monkeypatch):
+    base = _cross_domain_seed(tmp_path, monkeypatch)
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    assert graph_runtime.scoped_graph(base, ["alpha", "beta"]) is not None
+
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ready graph walked Markdown")
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("ready graph read Markdown")
+        ),
+    )
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["alpha", "beta"], "alpha", 20, 0.5,
+        mode="semantic",
+    )
+
+    assert ("beta", "leaf.md") in {
+        (hit["domain"], hit["file"])
+        for hit in hits if hit["source"] == "graph"
+    }
+
+
+def test_hybrid_globally_combines_semantic_and_lexical_seeds(
+        tmp_path, monkeypatch):
+    base = _cross_domain_seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        retrieval, "embed_texts", lambda cfg, texts: [[1.0, 0.0]]
+    )
+
+    first = retrieval.prepare_read_candidates(
+        _cfg(), base, ["alpha", "beta"], "lookup_token", 20, 0.5,
+        mode="hybrid",
+    )
+    second = retrieval.prepare_read_candidates(
+        _cfg(), base, ["alpha", "beta"], "lookup_token", 20, 0.5,
+        mode="hybrid",
+    )
+
+    assert first == second
+    alpha = next(hit for hit in first if hit["domain"] == "alpha")
+    lexical = next(
+        hit for hit in first
+        if hit["domain"] == "beta" and hit["file"] == "lexical.md"
+    )
+    assert alpha["source"] == "seed"
+    assert lexical["source"] == "seed"
+    assert lexical["hit"] == "lexical"
+
+
+def test_unavailable_graph_provider_uses_cross_domain_markdown_fallback(
+        tmp_path, monkeypatch):
+    base = _cross_domain_seed(tmp_path, monkeypatch)
+    # T4 owns state/error classification (missing, dirty, rebuilding, busy,
+    # corrupt) and maps every safe fallback case to this one provider contract.
+    monkeypatch.setattr(
+        retrieval.graph, "scoped_graph", lambda *args, **kwargs: None
+    )
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["alpha", "beta"], "alpha", 20, 0.5,
+        mode="semantic",
+    )
+
+    assert ("beta", "leaf.md") in {
+        (hit["domain"], hit["file"])
+        for hit in hits if hit["source"] == "graph"
+    }
+
+
+def test_provider_invalidation_restarts_bfs_with_markdown_fallback(
+        tmp_path, monkeypatch):
+    base = _cross_domain_seed(tmp_path, monkeypatch)
+
+    class InvalidatingProvider:
+        calls = 0
+
+        def neighbors(self, page_id):
+            self.calls += 1
+            if self.calls == 1:
+                return ("beta/bridge",)
+            raise graph_runtime.GraphRuntimeError("snapshot changed")
+
+    provider = InvalidatingProvider()
+    monkeypatch.setattr(
+        retrieval.graph, "scoped_graph", lambda *args, **kwargs: provider
+    )
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), base, ["alpha", "beta"], "alpha", 20, 0.5,
+        mode="semantic",
+    )
+
+    assert provider.calls == 2
+    assert ("beta", "leaf.md") in {
+        (hit["domain"], hit["file"])
+        for hit in hits if hit["source"] == "graph"
+    }
+
+
+def test_out_of_scope_domain_never_becomes_graph_frontier(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    for domain in ("alpha", "hidden", "gamma"):
+        (base / domain).mkdir(parents=True, exist_ok=True)
+    (base / "alpha" / "a.md").write_text(
+        "---\ndescription: scope seed\n---\n# A\n\n## A\nseed body\n\n"
+        "[Hidden](iwiki://hidden/b)\n",
+        encoding="utf-8",
+    )
+    (base / "hidden" / "b.md").write_text(
+        "---\ndescription: hidden bridge\n---\n# B\n\n## B\nhidden body\n\n"
+        "[Gamma](iwiki://gamma/c)\n",
+        encoding="utf-8",
+    )
+    (base / "gamma" / "c.md").write_text(
+        "---\ndescription: orthogonal target\n---\n# C\n\n## C\ntarget body\n",
+        encoding="utf-8",
+    )
+
+    def embed(cfg, texts):
+        return [
+            [1.0, 0.0]
+            if text.strip() == "scope" or "scope seed" in text
+            else [0.0, 1.0]
+            for text in texts
+        ]
+
+    monkeypatch.setattr(indexer, "embed_texts", embed)
+    for domain in ("alpha", "hidden", "gamma"):
+        indexer.index_domain(_cfg(), str(base), domain)
+    monkeypatch.setattr(retrieval, "embed_texts", embed)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["alpha", "gamma"], "scope", 20, 0.5,
+        mode="semantic",
+    )
+
+    assert {hit["domain"] for hit in hits} == {"alpha"}
 
 
 def test_lexical_graph_falls_back_when_materialized_page_changes(
@@ -443,6 +665,48 @@ def test_hybrid_duplicate_hit_is_both(tmp_path, monkeypatch):
     duplicate = next(hit for hit in hits
                      if hit["file"] == "seed.md" and hit["heading"] == "Match")
     assert duplicate["hit"] == "both"
+
+
+def test_graph_signal_precedes_direct_section_signal_for_source_and_provenance(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    (domain / "seed.md").write_text(
+        "---\ndescription: alpha seed\n---\n# Seed\n\n"
+        "## Seed\nseed body\n\n[Graph](graph.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "graph.md").write_text(
+        "---\ndescription: beta graph\n---\n# Graph\n\n"
+        "## Graph\nneedle once\n",
+        encoding="utf-8",
+    )
+    (domain / "lexical.md").write_text(
+        "---\ndescription: beta lexical\n---\n# Lexical\n\n"
+        "## Lexical\nneedle needle\n",
+        encoding="utf-8",
+    )
+
+    def embed(cfg, texts):
+        return [
+            [1.0, 0.0]
+            if text.strip() == "needle" or "alpha seed" in text.lower()
+            else [0.0, 1.0]
+            for text in texts
+        ]
+
+    monkeypatch.setattr(indexer, "embed_texts", embed)
+    indexer.index_domain(_cfg(), str(base), "d")
+    monkeypatch.setattr(retrieval, "embed_texts", embed)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "needle", 10, 0.5, mode="hybrid"
+    )
+
+    target = next(hit for hit in hits if hit["file"] == "graph.md")
+    assert target["source"] == "graph"
+    assert target["hit"] == "both"
 
 
 def test_semantic_includes_global_section_outside_seed_graph(tmp_path, monkeypatch):
