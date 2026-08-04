@@ -364,7 +364,8 @@ def _validate_plan(base: str, binding, plan: MutationPlan) -> tuple[str, ...]:
     if Path(base).resolve() != Path(binding.base).resolve():
         raise CrossDomainError("mutation_failed")
     domains = tuple(sorted(set(plan.affected_domains)))
-    if any(domain not in binding.read for domain in domains):
+    visible = set(wiki_base.resolve_scope(binding, "project", None))
+    if any(domain not in visible for domain in domains):
         raise CrossDomainError("write_scope_blocked")
     if any(domain not in wiki_base.writable_domains(binding) for domain in domains):
         raise CrossDomainError("write_scope_blocked")
@@ -393,6 +394,18 @@ def _affected_files(plan: MutationPlan, domains: tuple[str, ...]) -> tuple[str, 
         paths.add(f"{domain}/index.jsonl")
         paths.add(f"{domain}/log.jsonl")
     return tuple(sorted(paths))
+
+
+def _committable_files(base: str, paths: Iterable[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    for relative in paths:
+        if _base_file(base, relative).exists():
+            result.append(relative)
+            continue
+        tracked = _run(base, "ls-files", "--error-unmatch", "--", relative)
+        if tracked.returncode == 0:
+            result.append(relative)
+    return tuple(result)
 
 
 def _apply_edit(base: str, edit: PlannedEdit) -> None:
@@ -456,7 +469,9 @@ def execute_plan(
                 f"iwiki: {plan.operation}\n\n"
                 f"Iwiki-Transaction: {plan.transaction_id}"
             )
-            commit = sync._auto_commit_locked(base, message, paths)
+            commit = sync._auto_commit_locked(
+                base, message, _committable_files(base, paths)
+            )
             if not commit.get("committed"):
                 raise RuntimeError("local commit failed")
             committed = True

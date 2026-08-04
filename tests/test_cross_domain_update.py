@@ -14,7 +14,13 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _setup(tmp_path, monkeypatch, *, write_scope=("target", "alpha", "beta")):
+def _setup(
+    tmp_path,
+    monkeypatch,
+    *,
+    write_scope=("target", "alpha", "beta"),
+    read_scope=("target", "alpha", "beta"),
+):
     wiki = tmp_path / "wiki"
     for domain in ("target", "alpha", "beta", "hidden"):
         (wiki / domain).mkdir(parents=True)
@@ -69,7 +75,7 @@ def _setup(tmp_path, monkeypatch, *, write_scope=("target", "alpha", "beta")):
     _git(wiki, "commit", "-q", "-m", "seed")
     binding = base.Binding(
         str(wiki),
-        ("target", "alpha", "beta"),
+        read_scope,
         "target",
         str(tmp_path),
         write_scope,
@@ -296,3 +302,32 @@ def test_heading_rename_rejects_empty_normalized_heading(tmp_path, monkeypatch):
 
     assert "empty normalized heading" in result["error"]
     assert _git(wiki, "rev-parse", "HEAD") == head
+
+
+def test_heading_rename_resolves_empty_read_as_all_domains(tmp_path, monkeypatch):
+    wiki = _setup(
+        tmp_path,
+        monkeypatch,
+        read_scope=(),
+        write_scope=("target", "alpha", "beta", "hidden"),
+    )
+
+    result = server.wiki_update_page(
+        "target",
+        "concept/x",
+        "Old Heading",
+        "New body.",
+        new_heading="New Heading",
+    )
+
+    assert "error" not in result
+    assert result["rewritten_pages"] == [
+        "alpha/a.md",
+        "beta/b.md",
+        "hidden/h.md",
+        "target/concept/x.md",
+        "target/relative.md",
+    ]
+    assert "#new-heading" in (
+        wiki / "hidden" / "h.md"
+    ).read_text(encoding="utf-8")

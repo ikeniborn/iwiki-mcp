@@ -355,7 +355,8 @@ appends a `delete` log op, reindexes, and rolls back by rewriting the file.
 ### Cross-domain rewrite coordinator
 
 `server` builds immutable page-move or heading-rename edits; `cross_domain` owns
-their shared execution. It discovers only the bound visible read set. Exact relative
+their shared execution. It discovers only the bound visible read set, resolved through
+`base.resolve_scope` so an empty `read` means every current domain. Exact relative
 links are candidates inside the target domain and exact `iwiki://` links are candidates
 across visible domains. Before any file is changed, every candidate domain must belong
 to `write_scope`; a visible read-only candidate returns `write_scope_blocked`. Hidden
@@ -363,8 +364,9 @@ domains are neither inspected nor reported, so they are never rewritten.
 
 The coordinator acquires `mutation_lock(base)` before recovery, exclusion setup, staged
 path validation, snapshotting, Markdown/index/log edits, and the local commit. It stages
-only explicit affected Markdown paths plus their domain-root `index.jsonl` and
-`log.jsonl`, creating one commit with the `Iwiki-Transaction: <id>` trailer. Push occurs
+only explicit affected Markdown paths plus existing or tracked domain-root `index.jsonl`
+and `log.jsonl`; never-created optional logs remain journaled as absent but are omitted
+from Git pathspecs. It creates one commit with the `Iwiki-Transaction: <id>` trailer. Push occurs
 after the lock and remains fail-soft. This separates canonical portable Markdown/JSONL
 from the derived SQLite graph: batch graph refresh happens after the local commit; a
 failure marks the affected graph state dirty, with fingerprint-checked Markdown fallback

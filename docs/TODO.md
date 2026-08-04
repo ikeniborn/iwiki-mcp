@@ -3,7 +3,7 @@
 | Topic | Status | Intent | Spec | Plan | Result | Opened | Closed | Notes |
 |-------|--------|--------|------|------|--------|--------|--------|-------|
 | mcp-idle-timeout | in-progress | ✓ | n/a | n/a | – | 2026-08-03 |  | approved intent; execute continuation selected |
-| cross-domain-link-rewrite | in-progress | ✓ | ✓ | ✓ | – | 2026-08-04 |  | intent/spec approved; T1-T10 plan revalidated after external review; awaiting approval |
+| cross-domain-link-rewrite | done | ✓ | ✓ | ✓ | OK | 2026-08-04 | 2026-08-04 | result OK: T1-T10/R1-R12 reconciled; 998 tests plus static/build checks passed; bound wiki current; two result-review bugs fixed |
 | concurrent-sync-and-iwikiignore | done | n/a | ✓ | ✓ | OK | 2026-06-30 | 2026-07-01 | check-result: OK — 6/6 задач, spec 10/10, 119 tests pass; 2 INFO (косметика) |
 | wiki-update-page | done | n/a | ✓ | ✓ | OK | 2026-07-01 | 2026-07-01 | check-result: OK — 6/6 tasks in diff, spec R1–R7 covered, 141 tests pass; final review READY TO MERGE |
 | delete-stale-wiki-page | done | n/a | ✓ | ✓ | OK | 2026-07-01 | 2026-07-01 | check-result: OK — 5/5 tasks DONE, R1–R14/SC1–3 covered, 133 tests pass; final review merge-ready (0 crit); wiki base updated |

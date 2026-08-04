@@ -13,7 +13,13 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _setup(tmp_path, monkeypatch, *, write_scope=("target", "alpha", "beta")):
+def _setup(
+    tmp_path,
+    monkeypatch,
+    *,
+    write_scope=("target", "alpha", "beta"),
+    read_scope=("target", "alpha", "beta"),
+):
     wiki = tmp_path / "wiki"
     for domain in ("target", "alpha", "beta", "hidden"):
         (wiki / domain).mkdir(parents=True)
@@ -60,7 +66,7 @@ def _setup(tmp_path, monkeypatch, *, write_scope=("target", "alpha", "beta")):
     _git(wiki, "commit", "-q", "-m", "seed")
     binding = base.Binding(
         str(wiki),
-        ("target", "alpha", "beta"),
+        read_scope,
         "target",
         str(tmp_path),
         write_scope,
@@ -85,6 +91,8 @@ def test_apply_okf_move_rewrites_visible_writable_domains_in_one_commit(
     tmp_path, monkeypatch
 ):
     wiki = _setup(tmp_path, monkeypatch)
+    unrelated = wiki / "operator-notes.md"
+    unrelated.write_text("local operator note\n", encoding="utf-8")
 
     result = server.wiki_apply_okf("target", "concept/x", type="architecture")
 
@@ -130,6 +138,8 @@ def test_apply_okf_move_rewrites_visible_writable_domains_in_one_commit(
         "target/index.jsonl",
         "target/relative.md",
     ]
+    assert unrelated.read_text(encoding="utf-8") == "local operator note\n"
+    assert "?? operator-notes.md" in _git(wiki, "status", "--short")
     visible = {
         domain: str(wiki / domain) for domain in ("target", "alpha", "beta")
     }
@@ -190,3 +200,46 @@ def test_apply_okf_move_without_referrers_affects_only_target(tmp_path, monkeypa
     assert result["rewritten_pages"] == []
     assert result["rewritten_links"] == 0
     assert result["affected_domains"] == ["target"]
+
+
+def test_apply_okf_move_allows_referrer_domain_without_ingest_log(
+    tmp_path, monkeypatch
+):
+    wiki = _setup(tmp_path, monkeypatch)
+    for domain in ("alpha", "beta"):
+        (wiki / domain / "log.jsonl").unlink()
+    _git(wiki, "add", "-A")
+    _git(wiki, "commit", "-q", "-m", "remove unused referrer logs")
+
+    result = server.wiki_apply_okf("target", "concept/x", type="architecture")
+
+    assert "error" not in result
+    assert result["rewritten_pages"] == [
+        "alpha/a.md",
+        "beta/b.md",
+        "target/relative.md",
+    ]
+    assert not (wiki / "alpha" / "log.jsonl").exists()
+    assert not (wiki / "beta" / "log.jsonl").exists()
+
+
+def test_apply_okf_move_resolves_empty_read_as_all_domains(tmp_path, monkeypatch):
+    wiki = _setup(
+        tmp_path,
+        monkeypatch,
+        read_scope=(),
+        write_scope=("target", "alpha", "beta", "hidden"),
+    )
+
+    result = server.wiki_apply_okf("target", "concept/x", type="architecture")
+
+    assert "error" not in result
+    assert result["rewritten_pages"] == [
+        "alpha/a.md",
+        "beta/b.md",
+        "hidden/h.md",
+        "target/relative.md",
+    ]
+    assert "iwiki://target/architecture/x" in (
+        wiki / "hidden" / "h.md"
+    ).read_text(encoding="utf-8")

@@ -895,13 +895,14 @@ def _apply_heading_rename(
             rewritten_pages.add(f"{domain}/{file}")
             rewritten_links += count
 
+        visible_domains = tuple(base.resolve_scope(bind, "project", None))
         candidates = graph.incoming_candidates(
-            bind.base, bind.read, target_page_id, old_anchor
+            bind.base, visible_domains, target_page_id, old_anchor
         )
         if candidates is None:
             try:
                 candidates = graph.markdown_incoming_snapshot(
-                    bind.base, bind.read, target_page_id, old_anchor
+                    bind.base, visible_domains, target_page_id, old_anchor
                 ).candidates
             except graph.MarkdownSnapshotChanged as exc:
                 raise cross_domain.CrossDomainError("source_changed") from exc
@@ -1620,11 +1621,14 @@ def _apply_okf_page_move(
     }
 
     target_page_id = f"{domain}/{current_identity}"
-    candidates = graph.incoming_candidates(bind.base, bind.read, target_page_id)
+    visible_domains = tuple(base.resolve_scope(bind, "project", None))
+    candidates = graph.incoming_candidates(
+        bind.base, visible_domains, target_page_id
+    )
     if candidates is None:
         try:
             candidates = graph.markdown_incoming_snapshot(
-                bind.base, bind.read, target_page_id
+                bind.base, visible_domains, target_page_id
             ).candidates
         except graph.MarkdownSnapshotChanged as exc:
             raise cross_domain.CrossDomainError("source_changed") from exc
