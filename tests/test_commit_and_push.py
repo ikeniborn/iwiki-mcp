@@ -132,3 +132,33 @@ def test_commit_and_push_surfaces_sync_error_as_warning(tmp_path, monkeypatch):
     assert out["push_attempts"] == 0
     assert "error" not in out
     assert "abort_output" not in out
+
+
+def test_commit_and_push_forwards_exact_path_list_and_stays_fail_soft(monkeypatch):
+    captured = {}
+
+    def commit(base, message, pathspec=None, timeout=15.0):
+        captured["pathspec"] = pathspec
+        return {"committed": True}
+
+    monkeypatch.setattr(sync, "auto_commit", commit)
+    monkeypatch.setattr(
+        sync,
+        "sync",
+        lambda _base: {
+            "pulled": True,
+            "pushed": False,
+            "warning": "offline",
+            "sync_attempts": 1,
+            "push_attempts": 1,
+        },
+    )
+
+    result = sync.commit_and_push(
+        "/base", "message", pathspec=["beta/b.md", "alpha/a.md"]
+    )
+
+    assert captured["pathspec"] == ["beta/b.md", "alpha/a.md"]
+    assert result["committed"] is True
+    assert result["pushed"] is False
+    assert result["warning"] == "offline"

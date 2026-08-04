@@ -453,6 +453,26 @@ class GraphStore:
         finalize: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
         """Atomically replace/delete pages and run final validation in one batch."""
+        with self.transaction() as connection:
+            self.refresh_pages_in_transaction(
+                connection,
+                domain,
+                pages,
+                delete_files=delete_files,
+            )
+            if finalize is not None:
+                finalize(connection)
+
+    @classmethod
+    def refresh_pages_in_transaction(
+        cls,
+        connection: sqlite3.Connection,
+        domain: str,
+        pages: Iterable[tuple[str, str]],
+        *,
+        delete_files: Iterable[str] = (),
+    ) -> None:
+        """Stage one domain refresh inside a caller-owned graph transaction."""
         deletions = set(delete_files)
         prepared = []
         for file, content in pages:
@@ -460,15 +480,12 @@ class GraphStore:
                 deletions.add(file)
                 continue
             prepared.append(_page_snapshot(domain, file, content))
-        with self.transaction() as connection:
-            connection.executemany(
-                "DELETE FROM pages WHERE domain = ? AND file = ?",
-                ((domain, file) for file in sorted(deletions)),
-            )
-            for page, anchors, edges in prepared:
-                self._replace_page_rows(connection, page, anchors, edges)
-            if finalize is not None:
-                finalize(connection)
+        connection.executemany(
+            "DELETE FROM pages WHERE domain = ? AND file = ?",
+            ((domain, file) for file in sorted(deletions)),
+        )
+        for page, anchors, edges in prepared:
+            cls._replace_page_rows(connection, page, anchors, edges)
 
     def refresh_page(self, domain: str, file: str, content: str) -> None:
         """Atomically replace one page and all of its derived graph rows."""

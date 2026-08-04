@@ -16,6 +16,7 @@ from .lock import base_lock
 
 
 _GRAPH_REFRESH_WARNING = "graph refresh failed; Markdown fallback will be used"
+Pathspec = str | tuple[str, ...] | list[str] | None
 
 
 def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -76,24 +77,57 @@ def is_git_repo(base: str) -> bool:
         return False
 
 
-def auto_commit(base: str, message: str, pathspec: str | None = None,
-                timeout: float = 15.0) -> dict:
+def _normalized_pathspec(pathspec: Pathspec) -> tuple[str, ...] | None:
+    if pathspec is None or pathspec == "":
+        return None
+    values = (pathspec,) if isinstance(pathspec, str) else tuple(pathspec)
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _auto_commit_locked(
+    base: str, message: str, pathspec: Pathspec = None
+) -> dict:
+    """Commit one exact path set while the caller already owns ``base_lock``."""
     if not is_git_repo(base):
         return {"committed": False, "warning": "base is not a git repo; not committing"}
-    scope = ("--", pathspec) if pathspec else ()
+    paths = _normalized_pathspec(pathspec)
+    if paths == ():
+        return {"committed": False, "warning": "nothing to commit"}
+    scope = ("--", *paths) if paths is not None else ()
+    try:
+        add = _run(base, "add", *(scope if paths is not None else ("-A",)))
+        if add.returncode != 0:
+            return {"committed": False, "warning": add.stderr.strip()}
+        status = _run(base, "status", "--porcelain", *scope)
+        if status.returncode != 0:
+            return {"committed": False, "warning": status.stderr.strip()}
+        if not status.stdout.strip():
+            return {"committed": False, "warning": "nothing to commit"}
+        commit_scope = scope if paths is not None else ()
+        result = _run(base, "commit", "-m", message, *commit_scope)
+        return {
+            "committed": result.returncode == 0,
+            **(
+                {}
+                if result.returncode == 0
+                else {"warning": result.stderr.strip()}
+            ),
+        }
+    except Exception as e:
+        return {"committed": False, "warning": str(e)}
+
+
+def auto_commit(
+    base: str,
+    message: str,
+    pathspec: Pathspec = None,
+    timeout: float = 15.0,
+) -> dict:
+    if not is_git_repo(base):
+        return {"committed": False, "warning": "base is not a git repo; not committing"}
     try:
         with base_lock(base, timeout):
-            add = _run(base, "add", *(("--", pathspec) if pathspec else ("-A",)))
-            if add.returncode != 0:
-                return {"committed": False, "warning": add.stderr.strip()}
-            status = _run(base, "status", "--porcelain", *scope)
-            if status.returncode != 0:
-                return {"committed": False, "warning": status.stderr.strip()}
-            if not status.stdout.strip():
-                return {"committed": False, "warning": "nothing to commit"}
-            r = _run(base, "commit", "-m", message)
-            return {"committed": r.returncode == 0,
-                    **({} if r.returncode == 0 else {"warning": r.stderr.strip()})}
+            return _auto_commit_locked(base, message, pathspec)
     except Timeout:
         return {"committed": False, "warning": "base busy: lock timeout"}
     except Exception as e:
@@ -356,7 +390,7 @@ def ensure_fresh(
 def commit_and_push(
     base: str,
     message: str,
-    pathspec: str | None = None,
+    pathspec: Pathspec = None,
     *,
     _after_commit: Callable[[], str | None] | None = None,
 ) -> dict:

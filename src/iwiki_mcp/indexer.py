@@ -276,6 +276,133 @@ def finalize_graph_mutation(mutation: GraphMutation | None) -> str | None:
         return _graph_failed(mutation)
 
 
+def _invalidate_graph_batch(mutations: tuple[GraphMutation, ...]) -> bool:
+    from . import graph
+
+    stores = [mutation.store for mutation in mutations if mutation.store is not None]
+    if stores:
+        try:
+            with stores[0].transaction() as connection:
+                now = _dt.datetime.now(_dt.timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                )
+                connection.executemany(
+                    "INSERT INTO domains VALUES (?, NULL, '', 'dirty', ?) "
+                    "ON CONFLICT(domain) DO UPDATE SET state = 'dirty'",
+                    ((mutation.domain, now) for mutation in mutations),
+                )
+        except Exception:
+            pass
+    unavailable = True
+    for mutation in mutations:
+        mutation.available = False
+        mutation.staged_fingerprint = None
+        if mutation.store is None:
+            continue
+        try:
+            current = graph.markdown_fingerprint(
+                mutation.base, mutation.domain
+            ).value
+            with mutation.store.read_snapshot() as connection:
+                row = connection.execute(
+                    "SELECT markdown_fingerprint, state FROM domains "
+                    "WHERE domain = ?",
+                    (mutation.domain,),
+                ).fetchone()
+            if row is not None and tuple(row) == (current, "ready"):
+                unavailable = False
+        except Exception:
+            continue
+    return unavailable
+
+
+def finalize_graph_batch(
+    mutations: tuple[GraphMutation, ...],
+    refresh_files: dict[str, tuple[str, ...]],
+    delete_files: dict[str, tuple[str, ...]],
+) -> str | None:
+    """Refresh and publish all affected domain graphs in one transaction."""
+    if not mutations:
+        return None
+    usable = all(
+        mutation.available and mutation.store is not None
+        for mutation in mutations
+    )
+    bases = {mutation.base for mutation in mutations}
+    paths = {
+        str(mutation.store.path)
+        for mutation in mutations
+        if mutation.store is not None
+    }
+    if not usable or len(bases) != 1 or len(paths) != 1:
+        if _invalidate_graph_batch(mutations):
+            return GRAPH_FALLBACK_WARNING
+        raise RuntimeError("cannot invalidate graph batch")
+
+    from . import graph
+    from .engine.graph_store import GraphStore
+
+    fingerprints = {}
+    prepared = {}
+    try:
+        for mutation in mutations:
+            fingerprints[mutation.domain] = graph.markdown_fingerprint(
+                mutation.base, mutation.domain
+            )
+            root = Path(mutation.base) / mutation.domain
+            prepared[mutation.domain] = tuple(
+                (file, (root / file).read_text(encoding="utf-8"))
+                for file in refresh_files.get(mutation.domain, ())
+            )
+        store = mutations[0].store
+        with store.transaction() as connection:
+            for mutation in mutations:
+                row = connection.execute(
+                    "SELECT markdown_fingerprint, state FROM domains "
+                    "WHERE domain = ?",
+                    (mutation.domain,),
+                ).fetchone()
+                expected = mutation.expected_fingerprint
+                if row is None or row[1] != "ready" or (
+                    expected is not None
+                    and row[0] not in {expected, fingerprints[mutation.domain].value}
+                ):
+                    raise RuntimeError("domain graph changed before batch")
+                GraphStore.refresh_pages_in_transaction(
+                    connection,
+                    mutation.domain,
+                    prepared[mutation.domain],
+                    delete_files=delete_files.get(mutation.domain, ()),
+                )
+            for mutation in mutations:
+                rechecked = graph.markdown_fingerprint(
+                    mutation.base, mutation.domain
+                )
+                if (
+                    rechecked != fingerprints[mutation.domain]
+                    or not _graph_content_parity(mutation, connection)
+                ):
+                    raise RuntimeError("graph batch changed during finalize")
+                connection.execute(
+                    "UPDATE domains SET indexed_commit = ?, "
+                    "markdown_fingerprint = ?, state = 'ready', indexed_at = ? "
+                    "WHERE domain = ?",
+                    (
+                        rechecked.indexed_commit,
+                        rechecked.value,
+                        _dt.datetime.now(_dt.timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        mutation.domain,
+                    ),
+                )
+        return None
+    except Exception:
+        if _invalidate_graph_batch(mutations):
+            return GRAPH_FALLBACK_WARNING
+        raise RuntimeError("cannot invalidate graph batch")
+
+
 def append_log(base: str, domain: str, op: str, source: str, page: str,
                src_hash: str | None) -> None:
     path = log_path(base, domain)

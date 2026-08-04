@@ -37,6 +37,65 @@ def test_auto_commit_pathspec_excludes_sibling_domain(tmp_path):
     assert "beta/b.md" in porcelain
 
 
+def test_auto_commit_exact_paths_preserves_unrelated_staged_file(tmp_path):
+    _init_repo(tmp_path)
+    for name in ("alpha/a.md", "beta/b.md", "notes.md"):
+        path = tmp_path / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("old")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed")
+    for name in ("alpha/a.md", "beta/b.md", "notes.md"):
+        (tmp_path / name).write_text("new")
+    _git(tmp_path, "add", "notes.md")
+
+    result = sync.auto_commit(
+        str(tmp_path),
+        "rewrite links\n\nIwiki-Transaction: tx-123",
+        pathspec=["beta/b.md", "alpha/a.md", "beta/b.md"],
+    )
+
+    assert result["committed"] is True
+    committed = subprocess.run(
+        ["git", "show", "--name-only", "--pretty=format:", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    message = subprocess.run(
+        ["git", "log", "-1", "--format=%B"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert committed == ["alpha/a.md", "beta/b.md"]
+    assert staged == ["notes.md"]
+    assert "Iwiki-Transaction: tx-123" in message
+
+
+def test_locked_auto_commit_does_not_reacquire_base_lock(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    (tmp_path / "page.md").write_text("content")
+
+    def fail_lock(*_args, **_kwargs):
+        raise AssertionError("nested base lock")
+
+    monkeypatch.setattr(sync, "base_lock", fail_lock)
+
+    assert sync._auto_commit_locked(
+        str(tmp_path), "message", pathspec=("page.md",)
+    )["committed"] is True
+
+
 def test_sync_push_retry_on_non_fast_forward(tmp_path):
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(remote)],
