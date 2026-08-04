@@ -159,7 +159,7 @@ Use one base across projects. Bind each project to the domains it should read fr
 
 ## Graph cache and links
 
-The graph cache stores directed page links and heading anchors in SQLite, but search walks it as a bounded undirected neighbourhood inside the visible read scope. It never mixes code search with wiki dependencies. After clone, pull, corruption, or a fingerprint mismatch, the server rebuilds the affected local cache from Markdown without embedding calls; while unavailable it safely falls back to Markdown traversal. A graph-refresh failure never discards the committed Markdown, `index.jsonl`, or `log.jsonl` mutation and returns a sanitized fallback warning instead.
+The graph cache stores directed page links and heading anchors in SQLite, but search walks it as a bounded undirected neighbourhood inside the visible read scope. It never mixes code search with wiki dependencies. After clone, pull, corruption, or a fingerprint mismatch, the server rebuilds the affected local cache from Markdown without embedding calls; while unavailable it safely falls back to Markdown traversal. A graph-refresh failure never discards the committed Markdown, `index.jsonl`, or `log.jsonl` mutation: affected domains are marked `dirty` and a fingerprint-checked Markdown fallback remains authoritative until local repair succeeds.
 
 Use relative Markdown links within one domain: `[Auth](architecture/auth.md#flow)`. For a page in another visible domain use the canonical URI: `[Routing](iwiki://frontend/concept/routing#flow)`. Root `index.md` and `log.md` are generated OKF artifacts, never graph pages or traversal targets; `wiki_lint` reports an authored link to either as `reserved_target`.
 
@@ -171,18 +171,19 @@ The server resolves project binding from `.iwiki.toml` in the project root. The 
 # .iwiki.toml
 read = ["backend", "frontend"]
 write = "backend"
+write_scope = ["backend", "frontend"]
 # base = "/home/user/wiki"
 ```
 
-`read` controls the default project search scope. To read from **every** domain in the base, set `read = []` or omit the line entirely — an empty or absent `read` falls back to all domains. `read = ["all"]` is **not** a wildcard; it is treated as a literal domain named `all`. `write` is the default target for tools that need one, such as `wiki_index` without a `domain` argument. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
+`read` controls the default project search scope. To read from **every** domain in the base, set `read = []` or omit the line entirely — an empty or absent `read` falls back to all domains. `read = ["all"]` is **not** a wildcard; it is treated as a literal domain named `all`. `write` is the primary target for tools that need one, such as `wiki_index` without a `domain` argument. `write_scope` is the explicit set of domains mutating tools may change; it must contain `write` and be a subset of `read`. Omitting it preserves scalar `write` compatibility: only the primary domain is writable. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
 
 You can also bind from the MCP tool surface:
 
 ```text
-wiki_bind(read=["backend", "frontend"], write="backend")
+wiki_bind(read=["backend", "frontend"], write="backend", write_scope=["backend", "frontend"])
 ```
 
-`wiki_bind` validates that every provided read and write domain already exists. For an existing non-empty `read`, the tool preserves configured domains and may only append the current project domain. `write` must match the current project domain, derived from the project directory name. Create missing domains with `wiki_create_domain` as an explicit manual setup step before binding.
+`wiki_bind` validates that every provided read and write-scope domain already exists. For an existing non-empty `read`, the tool preserves configured domains and may only append the current project domain. `write` must match the current project domain, derived from the project directory name. `wiki_create_domain` may bootstrap an empty missing domain outside the current write scope; it creates no page, index, or log. Bind that domain before writing to it.
 
 ## Teach the agent to use iwiki
 
@@ -266,7 +267,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain; its `{"vector": [], "graph": []}` shape and domain-local fallback stay unchanged. |
 | `wiki_write_page` | Validate and write a new page, index the domain, commit and push. |
-| `wiki_update_page` | Replace the body of one `##` section of an existing page, reindex the changed section, commit and push. |
+| `wiki_update_page` | Replace one existing `##` body. With `new_heading`, rename that heading and atomically rewrite exact visible incoming links when their domains are writable. |
 | `wiki_delete_page` | Delete one page by domain and slug: remove the file, append a `delete` log op, reindex the domain, commit and push. Rolls back on failure. |
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
@@ -276,11 +277,15 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |
 | `wiki_migrate_okf` | Backfill OKF frontmatter and normalize type-directory layout, autonomously with a chat model or as a review plan without one. |
-| `wiki_apply_okf` | Apply reviewed OKF metadata and layout decisions. |
+| `wiki_apply_okf` | Apply reviewed OKF metadata and layout decisions; a type-directory move atomically rewrites exact visible incoming links. |
 | `wiki_export_okf` | Run the deterministic in-place OKF conformance sweep and regenerate root `index.md` / `log.md`. |
 | `wiki_sync` | Run `git pull --rebase` and `git push` in the base. |
 
-`wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None)` — it replaces only the named `##` section and leaves the rest of the page intact. For a full-page rewrite, read the current page first with `wiki_read_page`, confirm the intended replacement with the user, and then handle the edit deliberately outside the v1 overwrite path.
+`wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None, new_heading=None)` — it replaces only the named `##` section and leaves the rest of the page intact. `new_heading` is optional: without it this is the ordinary single-domain update; with it, the server rewrites exact incoming relative links in the page domain and exact `iwiki://` links from visible read domains. `wiki_apply_okf` applies the same transaction only when a type change moves a page.
+
+The cross-domain operation starts only when every discovered visible referrer is in `write_scope`; a visible read-only referrer blocks before any Markdown changes. Hidden domains are not inspected or reported, and are never rewritten. Results include `transaction_id`, `rewritten_pages`, `affected_domains`, and `rewritten_links` in addition to normal write fields.
+
+Each cross-domain operation holds the base mutation lock, stages only affected Markdown plus domain-root `index.jsonl` / `log.jsonl`, and creates one local commit carrying `Iwiki-Transaction: <id>`. Its fsynced local journal is `.iwiki/transactions/<id>` and advances `prepared` → `applied` → `committed` → `finalized`. A pre-commit interruption restores snapshots; a post-commit interruption repairs/marks the derived graph and finalizes the journal before another overlapping mutation. Ambiguous recovery returns `manual_recovery_required`. Push remains fail-soft: a local commit and authoritative portable files are retained if publication fails.
 
 `wiki_lint` reports `missing_source` pages whose ingest source has disappeared. Remove such a stale page explicitly with `wiki_delete_page` after confirming with the user; `wiki_sync` then propagates the deletion to the remote like any other commit.
 
