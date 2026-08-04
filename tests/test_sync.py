@@ -186,9 +186,73 @@ def _script_sync(monkeypatch, results):
     monkeypatch.setattr(sync, "is_git_repo", lambda base: True)
     monkeypatch.setattr(sync, "_has_remote", lambda base: True)
     monkeypatch.setattr(sync, "_has_rebase_state", lambda base: False)
+    monkeypatch.setattr(sync, "_head_revision", lambda base: None, raising=False)
     monkeypatch.setattr(sync, "_run", lambda *args, **kwargs: next(script))
     monkeypatch.setattr(sync.time, "sleep", sleeps.append)
     return sleeps
+
+
+def test_sync_refreshes_revision_change_inside_existing_lock_without_public_data(
+    monkeypatch, tmp_path
+):
+    import iwiki_mcp.graph as graph
+
+    _script_sync(monkeypatch, [_completed(), _completed()])
+    revisions = iter(["old", "new"])
+    monkeypatch.setattr(sync, "_head_revision", lambda base: next(revisions))
+    held = False
+
+    class Lock:
+        def __enter__(self):
+            nonlocal held
+            held = True
+
+        def __exit__(self, *_args):
+            nonlocal held
+            held = False
+
+    monkeypatch.setattr(sync, "base_lock", lambda *_args, **_kwargs: Lock())
+
+    change = graph.RevisionChange("old", "new", ("alpha",))
+
+    def refresh(base, old, new, *, lock_held):
+        assert held is True
+        assert (old, new, lock_held) == ("old", "new", True)
+        return change
+
+    monkeypatch.setattr(graph, "refresh_revision_change", refresh)
+    collected = []
+
+    result = sync.sync(str(tmp_path), _change_collector=collected.append)
+
+    assert result == {
+        "pulled": True,
+        "pushed": True,
+        "sync_attempts": 1,
+        "push_attempts": 1,
+    }
+    assert collected == [change]
+    assert all(not key.startswith("_") for key in result)
+
+
+def test_sync_preserves_pull_and_sanitizes_graph_refresh_failure(monkeypatch, tmp_path):
+    import iwiki_mcp.graph as graph
+
+    _script_sync(monkeypatch, [_completed(), _completed()])
+    revisions = iter(["old", "new"])
+    monkeypatch.setattr(sync, "_head_revision", lambda base: next(revisions))
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError(f"failed at {tmp_path}/private/domain.md")
+
+    monkeypatch.setattr(graph, "refresh_revision_change", fail_refresh)
+
+    result = sync.sync(str(tmp_path))
+
+    assert result["pulled"] is True
+    assert result["pushed"] is True
+    assert result["warning"] == "graph refresh failed; Markdown fallback will be used"
+    assert str(tmp_path) not in repr(result)
 
 
 def test_sync_first_attempt_success_reports_attempt_counts(monkeypatch, tmp_path):

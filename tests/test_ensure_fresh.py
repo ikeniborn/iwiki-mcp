@@ -61,6 +61,51 @@ def test_ensure_fresh_updated_fast_forwards(tmp_path):
     assert "neighbor" in _log(base)  # ff pulled the neighbor commit in
 
 
+def test_ensure_fresh_refreshes_changed_domain_without_public_revision_data(
+    tmp_path,
+):
+    remote, base = _setup(tmp_path)
+    nb = tmp_path / "domain-neighbor"
+    subprocess.run(["git", "clone", "-q", str(remote), str(nb)], check=True)
+    _git(nb, "config", "user.email", "n@n")
+    _git(nb, "config", "user.name", "n")
+    (nb / "alpha").mkdir()
+    (nb / "alpha" / "a.md").write_text("# A\n")
+    _git(nb, "add", "-A")
+    _git(nb, "commit", "-q", "-m", "domain")
+    _git(nb, "push", "-q", "origin", "main")
+    collected = []
+
+    result = sync.ensure_fresh(str(base), _change_collector=collected.append)
+
+    assert result == {"state": "updated"}
+    assert [change.domains for change in collected] == [("alpha",)]
+    assert all(not key.startswith("_") for key in result)
+
+
+def test_ensure_fresh_keeps_fast_forward_when_graph_refresh_fails(
+    tmp_path, monkeypatch
+):
+    import iwiki_mcp.graph as graph
+
+    remote, base = _setup(tmp_path)
+    _neighbor_push(remote, tmp_path)
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError(f"failed at {tmp_path}/private/domain.md")
+
+    monkeypatch.setattr(graph, "refresh_revision_change", fail_refresh)
+
+    result = sync.ensure_fresh(str(base))
+
+    assert result == {
+        "state": "updated",
+        "warning": "graph refresh failed; Markdown fallback will be used",
+    }
+    assert "neighbor" in _log(base)
+    assert str(tmp_path) not in repr(result)
+
+
 def test_ensure_fresh_updated_ignores_untracked(tmp_path):
     remote, base = _setup(tmp_path)
     _neighbor_push(remote, tmp_path)

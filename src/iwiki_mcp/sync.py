@@ -8,10 +8,14 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Callable
 
 from filelock import Timeout
 
 from .lock import base_lock
+
+
+_GRAPH_REFRESH_WARNING = "graph refresh failed; Markdown fallback will be used"
 
 
 def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -20,6 +24,46 @@ def _run(base: str, *args: str, timeout: float = 30.0) -> subprocess.CompletedPr
     return subprocess.run(["git", "-C", base, *args], capture_output=True,
                           text=True, timeout=timeout, stdin=subprocess.DEVNULL,
                           env=env)
+
+
+def _head_revision(base: str) -> str | None:
+    result = _run(base, "rev-parse", "--verify", "HEAD")
+    if result.returncode != 0:
+        return None
+    revision = result.stdout.strip()
+    return revision or None
+
+
+def _refresh_pulled_graph(
+    base: str,
+    old_revision: str | None,
+    new_revision: str | None,
+    change_collector: Callable[[object], None] | None,
+) -> str | None:
+    if not old_revision or not new_revision or old_revision == new_revision:
+        return None
+    try:
+        from .graph import refresh_revision_change
+
+        change = refresh_revision_change(
+            base, old_revision, new_revision, lock_held=True
+        )
+    except Exception:
+        return _GRAPH_REFRESH_WARNING
+    if change_collector is not None:
+        try:
+            change_collector(change)
+        except Exception:
+            pass
+    return None
+
+
+def _add_graph_warning(result: dict, warning: str | None) -> dict:
+    if warning is None:
+        return result
+    existing = result.get("warning")
+    result["warning"] = f"{existing}; {warning}" if existing else warning
+    return result
 
 
 def is_git_repo(base: str) -> bool:
@@ -130,13 +174,20 @@ def _is_non_ff(r: subprocess.CompletedProcess) -> bool:
     return _classify_remote_failure(r.stderr + r.stdout) == "non_fast_forward"
 
 
-def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
+def sync(
+    base: str,
+    timeout: float = 15.0,
+    push_retries: int = 3,
+    *,
+    _change_collector: Callable[[object], None] | None = None,
+) -> dict:
     if not is_git_repo(base):
         return {"pulled": False, "pushed": False, "error": "base is not a git repo",
                 "sync_attempts": 0, "push_attempts": 0}
     sync_attempts = 0
     push_attempts = 0
     pulled = False
+    graph_warning: str | None = None
     try:
         with base_lock(base, timeout):
             if not _has_remote(base):
@@ -148,6 +199,7 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                            "transport_unavailable"}
             for attempt in range(max_attempts):
                 sync_attempts = attempt + 1
+                old_revision = _head_revision(base)
                 pull = _run(base, "pull", "--rebase")
                 if pull.returncode != 0:
                     if _has_rebase_state(base):
@@ -181,24 +233,39 @@ def sync(base: str, timeout: float = 15.0, push_retries: int = 3) -> dict:
                             "sync_attempts": sync_attempts,
                             "push_attempts": push_attempts}
                 pulled = True
+                new_revision = _head_revision(base)
+                refresh_warning = _refresh_pulled_graph(
+                    base, old_revision, new_revision, _change_collector
+                )
+                if refresh_warning is not None:
+                    graph_warning = refresh_warning
                 push_attempts += 1
                 push = _run(base, "push")
                 if push.returncode == 0:
-                    return {"pulled": True, "pushed": True,
-                            "sync_attempts": sync_attempts,
-                            "push_attempts": push_attempts}
+                    return _add_graph_warning(
+                        {"pulled": True, "pushed": True,
+                         "sync_attempts": sync_attempts,
+                         "push_attempts": push_attempts},
+                        graph_warning,
+                    )
                 failure_class = _classify_remote_failure(push.stderr + push.stdout)
                 if failure_class in recoverable and attempt < max_attempts - 1:
                     time.sleep(0.25)
                     continue
-                return {"pulled": True, "pushed": False,
-                        "warning": _output(push),
-                        "failure_class": failure_class,
-                        "sync_attempts": sync_attempts,
-                        "push_attempts": push_attempts}
-            return {"pulled": True, "pushed": False,
-                    "warning": "push retries exhausted",
-                    "sync_attempts": 0, "push_attempts": 0}
+                return _add_graph_warning(
+                    {"pulled": True, "pushed": False,
+                     "warning": _output(push),
+                     "failure_class": failure_class,
+                     "sync_attempts": sync_attempts,
+                     "push_attempts": push_attempts},
+                    graph_warning,
+                )
+            return _add_graph_warning(
+                {"pulled": True, "pushed": False,
+                 "warning": "push retries exhausted",
+                 "sync_attempts": 0, "push_attempts": 0},
+                graph_warning,
+            )
     except Timeout:
         return {"pulled": False, "pushed": False,
                 "warning": "base busy: lock timeout",
@@ -237,7 +304,12 @@ def _tree_clean(base: str) -> bool:
     return True
 
 
-def ensure_fresh(base: str, timeout: float = 15.0) -> dict:
+def ensure_fresh(
+    base: str,
+    timeout: float = 15.0,
+    *,
+    _change_collector: Callable[[object], None] | None = None,
+) -> dict:
     """Bring the base up to date with its remote BEFORE a local mutation.
 
     Fetches, then fast-forwards when the base is cleanly behind its upstream.
@@ -265,10 +337,14 @@ def ensure_fresh(base: str, timeout: float = 15.0) -> dict:
             if not _tree_clean(base):
                 return {"state": "dirty",
                         "warning": "local changes present; skipped fast-forward"}
+            old_revision = _head_revision(base)
             ff = _run(base, "merge", "--ff-only", "@{upstream}")
             if ff.returncode != 0:
                 return {"state": "offline", "warning": _output(ff)}
-            return {"state": "updated"}
+            graph_warning = _refresh_pulled_graph(
+                base, old_revision, _head_revision(base), _change_collector
+            )
+            return _add_graph_warning({"state": "updated"}, graph_warning)
     except Timeout:
         return {"state": "offline", "warning": "base busy: lock timeout"}
     except Exception as e:
