@@ -39,8 +39,8 @@ flowchart TB
     Client["MCP client<br/>(Claude Code / Codex)"]
     Client -->|"stdio JSON-RPC"| Top
 
-    Top["Top layer — MCP-aware<br/>server · base · indexer · retrieval<br/>okf · sync · ignore · lock · resources"]
-    Engine["engine/ core — framework-free<br/>chunk · embed · store · fusion · hier · grep<br/>rerank · search · related · classify · section<br/>frontmatter · links · validate · lint · config"]
+    Top["Top layer — MCP-aware<br/>server · base · graph · indexer · retrieval<br/>okf · sync · ignore · lock · resources"]
+    Engine["engine/ core — framework-free<br/>chunk · embed · store · graph_store · fusion · hier · grep<br/>rerank · search · related · classify · section<br/>frontmatter · links · validate · lint · config"]
 
     Top --> Engine
     Top -->|"read/write pages, index, log"| fs["Filesystem<br/>base / domains"]
@@ -57,11 +57,12 @@ flowchart TB
 ```
 
 **Top-layer modules:** `server` (tool surface + guards), `base` (binding + path
-resolve), `indexer` (ingest + index), `retrieval` (multi-signal query), `okf`
+resolve), `graph` (freshness, rebuild, and scoped graph provider), `indexer`
+(ingest + index), `retrieval` (multi-signal query), `okf`
 (frontmatter assembly), `sync` (git ops), `ignore` (`.iwikiignore` gate), `lock`
 (cross-process lock), `resources` (authoring rules).
 
-**Engine modules:** `chunk`, `embed`, `store`, `fusion`, `hier`, `grep`, `rerank`,
+**Engine modules:** `chunk`, `embed`, `store`, `graph_store`, `fusion`, `hier`, `grep`, `rerank`,
 `search`, `related`, `classify`, `section`, `frontmatter`, `links`, `validate`,
 `lint`, `config`.
 
@@ -70,32 +71,35 @@ resolve), `indexer` (ingest + index), `retrieval` (multi-signal query), `okf`
 | Concern | Top layer | Engine core |
 | --- | --- | --- |
 | Knows about MCP / `FastMCP` | yes (`server.py`) | no |
-| Reaches git | `sync.py` (write mutations) + `okf.py` (`git log` for timestamps) | no |
+| Reaches git | `sync.py`, `graph.py` (freshness), and `okf.py` (`git log` for timestamps) | `graph_store.py` delegates only local-cache exclusion to `base.ensure_graph_store_excluded` |
 | Reaches the network | `okf.py`→`classify`, indexer/retrieval→`embed`, `server`→`rerank` | only `embed`/`classify`/`rerank` |
 | Path-traversal guards | `server._validate_domain` / `_slug_parts` / `_page_path` / `_contains`, `okf._is_safe_type_segment`, `retrieval._domain_file_parts` (all top-layer) | — |
 | Config-free / stdlib-only | — | `validate`, `lint`, `links`, `frontmatter`, `okf_artifacts`, `section`, `grep` |
 
 ## Module dependencies
 
-Import direction is top → engine; the engine never imports the top layer. (A
-`from .base import ...` inside `okf`/`indexer`/`retrieval` is not an exception —
-those three are top-layer modules, not `engine/`.) The graph is split into three
-views. Note the deliberate constant duplication: `OVERVIEW_HEADING`, `LEAD_MAX`,
+Import direction is top → engine except for one narrow cache-bootstrap edge:
+`engine.graph_store` calls `base.ensure_graph_store_excluded` before opening the
+derived database. It does not import MCP, retrieval, indexing, or sync behaviour.
+(`okf`/`indexer`/`retrieval` importing `base` remains top-layer composition.) The
+graph is split into three views. Note the deliberate constant duplication:
+`OVERVIEW_HEADING`, `LEAD_MAX`,
 and the `_H2` regex are copied across `chunk.py`, `validate.py`, `lint.py`,
 `section.py`, and `okf.py` so the config-free modules never import `chunk`/`embed`
 (keeping `httpx`, pulled in via `embed`, out of them).
 
 ### Top-layer composition
 
-`server` drives the orchestration modules; `indexer`, `retrieval`, and `okf` share
-`base` for path/binding resolution.
+`server` drives the orchestration modules; `graph`, `indexer`, `retrieval`, and
+`okf` share `base` for path/binding resolution.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
 flowchart TB
-    server["server"] --> base["base"] & indexer["indexer"] & retrieval["retrieval"] & okf["okf"] & sync["sync"] & ignore["ignore"]
+    server["server"] --> base["base"] & graph["graph"] & indexer["indexer"] & retrieval["retrieval"] & okf["okf"] & sync["sync"] & ignore["ignore"]
+    graph --> base & sync & graph_store["engine.graph_store"]
     indexer --> base
-    retrieval --> base
+    retrieval --> base & graph
     okf --> base
 
     classDef hot fill:#f38ba8,color:#1e1e2e,stroke:#d20f39
@@ -128,9 +132,10 @@ flowchart TB
     chunk["chunk"] --> fm
     hier["hier"] --> store["store"] & links & okf_art
     related["related"] --> store & links
+    graph_store["graph_store"] --> links & okf_art & base_exclude["base.ensure_graph_store_excluded"]
 
     classDef core fill:#94e2d5,color:#1e1e2e,stroke:#179299
-    class fm,store,links core
+    class fm,store,links,graph_store core
 ```
 
 `frontmatter`, `store`, and `links` (highlighted) are the most-depended-on engine

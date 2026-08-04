@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
@@ -162,6 +163,27 @@ def _read_domain_file(base: str, domain: str,
         os.close(fd)
 
 
+def _hash_domain_file(base: str, domain: str, file: str) -> str | None:
+    fd = _open_domain_file(base, domain, file)
+    if fd is None:
+        return None
+    try:
+        before = _file_stamp(fd)
+        if before is None:
+            return None
+        digest = sha256()
+        while block := os.read(fd, 1024 * 1024):
+            digest.update(block)
+        after = _file_stamp(fd)
+        if after is None or after != before:
+            return None
+        return digest.hexdigest()
+    except (OSError, NotImplementedError):
+        return None
+    finally:
+        os.close(fd)
+
+
 def _materialize_page(cfg: Config, base: str, domain: str, file: str,
                       cache: PageCache) -> _MaterializedPage | None:
     key = domain, file
@@ -214,9 +236,14 @@ def _page_location(page_id: str) -> tuple[str, str] | None:
 
 def _markdown_neighbor_provider(
         base: str, domains: list[str], page_cache: PageCache
-        ) -> tuple[Callable[[str], Iterable[str]], frozenset[str]]:
+        ) -> tuple[
+            Callable[[str], Iterable[str]],
+            frozenset[str],
+            dict[str, str],
+        ]:
     """Build a scope-qualified undirected fallback graph from current Markdown."""
     markdown: dict[str, str] = {}
+    snapshot: dict[str, str] = {}
     for domain in sorted(set(domains)):
         root = Path(domain_dir(base, domain))
         if not root.is_dir():
@@ -233,10 +260,16 @@ def _markdown_neighbor_provider(
             if (cached is not None
                     and _stamp_domain_file(base, domain, file) == cached.stamp):
                 markdown[page_id] = cached.markdown
+                snapshot[page_id] = sha256(
+                    cached.markdown.encode("utf-8")
+                ).hexdigest()
                 continue
             read = _read_domain_file(base, domain, file)
             if read is not None:
                 markdown[page_id] = read[1]
+                snapshot[page_id] = sha256(
+                    read[1].encode("utf-8")
+                ).hexdigest()
 
     allowed_pages = frozenset(markdown)
     adjacency: dict[str, set[str]] = {}
@@ -251,7 +284,28 @@ def _markdown_neighbor_provider(
             adjacency.setdefault(source_page, set()).add(target_page)
             adjacency.setdefault(target_page, set()).add(source_page)
 
-    return lambda page_id: adjacency.get(page_id, ()), allowed_pages
+    return lambda page_id: adjacency.get(page_id, ()), allowed_pages, snapshot
+
+
+def _markdown_scope_hashes(
+        base: str, domains: list[str]) -> dict[str, str]:
+    current: dict[str, str] = {}
+    for domain in sorted(set(domains)):
+        root = Path(domain_dir(base, domain))
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.md")):
+            try:
+                file = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            page_id = _qualified_page(domain, file)
+            if page_id is None:
+                continue
+            content_hash = _hash_domain_file(base, domain, file)
+            if content_hash is not None:
+                current[page_id] = content_hash
+    return current
 
 
 def _rank_scoped_graph(
@@ -265,23 +319,30 @@ def _rank_scoped_graph(
     provider = graph.scoped_graph(base, domains)
     if provider is not None:
         try:
-            return hier.rank_neighbor_pages(
+            ranked = hier.rank_neighbor_pages(
                 seeds, provider.neighbors, depth, cap
             )
+            provider.ensure_current()
+            return ranked
         except graph.GraphRuntimeError:
             # The ready snapshot invalidated mid-BFS. Restart from scratch so
             # one result never mixes SQLite and Markdown graph generations.
             pass
-    markdown_neighbors, allowed_pages = _markdown_neighbor_provider(
-        base, domains, page_cache
-    )
-    return hier.rank_neighbor_pages(
-        seeds,
-        markdown_neighbors,
-        depth,
-        cap,
-        allowed_pages=allowed_pages,
-    )
+    for _attempt in range(2):
+        markdown_neighbors, allowed_pages, snapshot = _markdown_neighbor_provider(
+            base, domains, page_cache
+        )
+        ranked = hier.rank_neighbor_pages(
+            seeds,
+            markdown_neighbors,
+            depth,
+            cap,
+            allowed_pages=allowed_pages,
+        )
+        if snapshot == _markdown_scope_hashes(base, domains):
+            return ranked
+        page_cache.clear()
+    raise graph.GraphRuntimeError("wiki graph changed during request; retry")
 
 
 def _internal_hit(domain, rec, source, rank_key, seed_origins=None) -> dict:

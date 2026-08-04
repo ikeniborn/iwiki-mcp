@@ -94,6 +94,43 @@ class ScopedGraph:
         except graph_store.GraphStoreError as exc:
             raise GraphRuntimeError("graph scope is unavailable") from exc
 
+    def ensure_current(self) -> None:
+        """Reject a snapshot when Markdown changed during graph traversal."""
+        expected = dict(self.expected_fingerprints)
+        try:
+            changed = [
+                domain
+                for domain in self.domains
+                if markdown_fingerprint(str(self.store.base), domain).value
+                != expected[domain]
+            ]
+            if changed:
+                for domain in changed:
+                    try:
+                        self.store.mark_domain_dirty(domain)
+                    except graph_store.GraphStoreError:
+                        pass
+                raise GraphRuntimeError("graph scope is unavailable")
+            with self.store.read_snapshot() as connection:
+                placeholders = ", ".join("?" for _ in self.domains)
+                metadata = {
+                    row[0]: (row[1], row[2])
+                    for row in connection.execute(
+                        "SELECT domain, markdown_fingerprint, state FROM domains "
+                        f"WHERE domain IN ({placeholders})",
+                        self.domains,
+                    )
+                }
+            if any(
+                metadata.get(domain) != (expected[domain], "ready")
+                for domain in self.domains
+            ):
+                raise GraphRuntimeError("graph scope is unavailable")
+        except GraphRuntimeError:
+            raise
+        except (graph_store.GraphStoreError, OSError) as exc:
+            raise GraphRuntimeError("graph scope is unavailable") from exc
+
 
 def _is_graph_markdown(path: str, domain: str) -> bool:
     prefix = f"{domain}/"

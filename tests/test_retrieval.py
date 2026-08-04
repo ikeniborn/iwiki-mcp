@@ -546,6 +546,120 @@ def test_provider_invalidation_restarts_bfs_with_markdown_fallback(
     }
 
 
+def test_markdown_change_during_sqlite_bfs_restarts_with_fallback(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    seed = domain / "seed.md"
+    seed.write_text(
+        "# Seed\n\n## Match\nrefresh_token\n\n[Old](old.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "old.md").write_text(
+        "# Old\n\n## Details\nold details\n", encoding="utf-8"
+    )
+    (domain / "new.md").write_text(
+        "# New\n\n## Details\nnew details\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        indexer, "embed_texts", lambda cfg, texts: [[1.0, 0.0] for _ in texts]
+    )
+    indexer.index_domain(_cfg(), str(base), "d")
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    real_neighbors = graph_runtime.ScopedGraph.neighbors
+    mutated = False
+
+    def mutate_after_first_hop(provider, page_id):
+        nonlocal mutated
+        neighbors = real_neighbors(provider, page_id)
+        if not mutated:
+            mutated = True
+            seed.write_text(
+                "# Seed\n\n## Match\nrefresh_token\n\n[New](new.md)\n",
+                encoding="utf-8",
+            )
+        return neighbors
+
+    monkeypatch.setattr(
+        graph_runtime.ScopedGraph, "neighbors", mutate_after_first_hop
+    )
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "refresh_token", 10, 0.0, mode="lexical"
+    )
+
+    graph_files = {hit["file"] for hit in hits if hit["source"] == "graph"}
+    assert "new.md" in graph_files
+    assert "old.md" not in graph_files
+
+
+def test_markdown_change_during_fallback_retries_complete_snapshot(
+        tmp_path, monkeypatch):
+    base = tmp_path / "wiki"
+    domain = base / "d"
+    domain.mkdir(parents=True)
+    seed = domain / "seed.md"
+    seed.write_text(
+        "---\ndescription: alpha seed\n---\n# Seed\n\n"
+        "## Match\nseed body\n\n[Old](old.md)\n",
+        encoding="utf-8",
+    )
+    (domain / "old.md").write_text(
+        "---\ndescription: orthogonal old\n---\n# Old\n\n"
+        "## Details\nold details\n",
+        encoding="utf-8",
+    )
+    (domain / "new.md").write_text(
+        "---\ndescription: orthogonal new\n---\n# New\n\n"
+        "## Details\nnew details\n",
+        encoding="utf-8",
+    )
+
+    def embed(_cfg, texts):
+        return [
+            [1.0, 0.0]
+            if text.strip().lower() == "alpha" or "alpha seed" in text.lower()
+            else [0.0, 1.0]
+            for text in texts
+        ]
+
+    monkeypatch.setattr(indexer, "embed_texts", embed)
+    indexer.index_domain(_cfg(), str(base), "d")
+    monkeypatch.setattr(retrieval, "embed_texts", embed)
+    monkeypatch.setattr(retrieval.graph, "scoped_graph", lambda *_args: None)
+    real_read = retrieval._read_domain_file
+    original_stat = seed.stat()
+    seed_reads = 0
+
+    def mutate_after_seed_read(base_dir, domain_name, file):
+        nonlocal seed_reads
+        result = real_read(base_dir, domain_name, file)
+        if file == "seed.md":
+            seed_reads += 1
+        if file == "seed.md" and seed_reads == 1:
+            seed.write_text(
+                "---\ndescription: alpha seed\n---\n# Seed\n\n"
+                "## Match\nseed body\n\n[New](new.md)\n",
+                encoding="utf-8",
+            )
+            os.utime(
+                seed,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+        return result
+
+    monkeypatch.setattr(retrieval, "_read_domain_file", mutate_after_seed_read)
+
+    hits = retrieval.prepare_read_candidates(
+        _cfg(), str(base), ["d"], "alpha", 10, 0.5, mode="semantic"
+    )
+
+    graph_files = {hit["file"] for hit in hits if hit["source"] == "graph"}
+    assert "new.md" in graph_files
+    assert "old.md" not in graph_files
+
+
 def test_out_of_scope_domain_never_becomes_graph_frontier(
         tmp_path, monkeypatch):
     base = tmp_path / "wiki"
@@ -877,7 +991,7 @@ def test_hydration_reuses_prepared_materialization(tmp_path, monkeypatch):
     assert target["text"] == "## Details\nneedle five six"
     assert read_calls == 1
     assert chunk_calls == 1
-    assert final_opens == 3
+    assert final_opens == 4  # one exact-read validates the fallback snapshot
 
 
 def test_hydration_omits_cached_page_changed_after_preparation(tmp_path, monkeypatch):
