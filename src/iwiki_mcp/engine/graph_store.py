@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Callable, Iterator, Literal
+from typing import Callable, Iterable, Iterator, Literal
 
 from iwiki_mcp.base import ensure_graph_store_excluded
 from iwiki_mcp.engine.links import parse_heading_anchors, parse_link_targets
@@ -396,60 +396,87 @@ class GraphStore:
                 (domain, self._now()),
             )
 
+    @staticmethod
+    def _replace_page_rows(
+        connection: sqlite3.Connection,
+        page: PageRecord,
+        anchors: tuple[AnchorRecord, ...],
+        edges: tuple[EdgeRecord, ...],
+    ) -> None:
+        connection.execute(
+            "INSERT INTO pages VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(page_id) DO UPDATE SET "
+            "domain = excluded.domain, file = excluded.file, "
+            "content_hash = excluded.content_hash, "
+            "link_hash = excluded.link_hash",
+            (
+                page.page_id,
+                page.domain,
+                page.file,
+                page.content_hash,
+                page.link_hash,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM anchors WHERE page_id = ?", (page.page_id,)
+        )
+        connection.execute(
+            "DELETE FROM edges WHERE source_page_id = ?", (page.page_id,)
+        )
+        connection.executemany(
+            "INSERT INTO anchors VALUES (?, ?, ?)",
+            (
+                (anchor.page_id, anchor.anchor, anchor.heading)
+                for anchor in anchors
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO edges VALUES (?, ?, ?, ?, ?)",
+            (
+                (
+                    edge.source_page_id,
+                    edge.target_page_id,
+                    edge.target_anchor,
+                    edge.kind,
+                    edge.raw_target,
+                )
+                for edge in edges
+            ),
+        )
+
+    def refresh_pages(
+        self,
+        domain: str,
+        pages: Iterable[tuple[str, str]],
+        *,
+        delete_files: Iterable[str] = (),
+        finalize: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> None:
+        """Atomically replace/delete pages and run final validation in one batch."""
+        deletions = set(delete_files)
+        prepared = []
+        for file, content in pages:
+            if file in RESERVED_OKF:
+                deletions.add(file)
+                continue
+            prepared.append(_page_snapshot(domain, file, content))
+        with self.transaction() as connection:
+            connection.executemany(
+                "DELETE FROM pages WHERE domain = ? AND file = ?",
+                ((domain, file) for file in sorted(deletions)),
+            )
+            for page, anchors, edges in prepared:
+                self._replace_page_rows(connection, page, anchors, edges)
+            if finalize is not None:
+                finalize(connection)
+
     def refresh_page(self, domain: str, file: str, content: str) -> None:
         """Atomically replace one page and all of its derived graph rows."""
-        if file in RESERVED_OKF:
-            self.delete_page(domain, file)
-            return
-        page, anchors, edges = _page_snapshot(domain, file, content)
-        with self.transaction() as connection:
-            connection.execute(
-                "INSERT INTO pages VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(page_id) DO UPDATE SET "
-                "domain = excluded.domain, file = excluded.file, "
-                "content_hash = excluded.content_hash, "
-                "link_hash = excluded.link_hash",
-                (
-                    page.page_id,
-                    page.domain,
-                    page.file,
-                    page.content_hash,
-                    page.link_hash,
-                ),
-            )
-            connection.execute(
-                "DELETE FROM anchors WHERE page_id = ?", (page.page_id,)
-            )
-            connection.execute(
-                "DELETE FROM edges WHERE source_page_id = ?", (page.page_id,)
-            )
-            connection.executemany(
-                "INSERT INTO anchors VALUES (?, ?, ?)",
-                (
-                    (anchor.page_id, anchor.anchor, anchor.heading)
-                    for anchor in anchors
-                ),
-            )
-            connection.executemany(
-                "INSERT INTO edges VALUES (?, ?, ?, ?, ?)",
-                (
-                    (
-                        edge.source_page_id,
-                        edge.target_page_id,
-                        edge.target_anchor,
-                        edge.kind,
-                        edge.raw_target,
-                    )
-                    for edge in edges
-                ),
-            )
+        self.refresh_pages(domain, ((file, content),))
 
     def delete_page(self, domain: str, file: str) -> None:
         """Delete a page and its cascaded anchors/outgoing edges."""
-        with self.transaction() as connection:
-            connection.execute(
-                "DELETE FROM pages WHERE domain = ? AND file = ?", (domain, file)
-            )
+        self.refresh_pages(domain, (), delete_files=(file,))
 
     def load_ready_domain(self, domain: str) -> DomainSnapshot:
         """Load a domain snapshot only when its committed state is ready."""

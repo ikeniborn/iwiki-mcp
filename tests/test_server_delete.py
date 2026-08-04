@@ -1,6 +1,8 @@
 import os
+import subprocess
 
 from iwiki_mcp import base, indexer, server
+from iwiki_mcp.engine.graph_store import GraphStore
 
 
 def _seed(tmp_path, monkeypatch):
@@ -25,6 +27,23 @@ def _write():
     )
 
 
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    )
+
+
+def _init_git_base(base_dir):
+    _git(base_dir, "init", "-q")
+    _git(base_dir, "config", "user.email", "t@t")
+    _git(base_dir, "config", "user.name", "t")
+    (base_dir / "backend" / "seed.md").write_text(
+        "# Seed\n\n## Notes\nseed\n", encoding="utf-8"
+    )
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "seed")
+
+
 def test_delete_removes_file_log_and_index_records(tmp_path, monkeypatch):
     b = _seed(tmp_path, monkeypatch)
     _write()
@@ -37,6 +56,18 @@ def test_delete_removes_file_log_and_index_records(tmp_path, monkeypatch):
     ip = base.index_path(b, "backend")
     index_text = open(ip, encoding="utf-8").read() if os.path.exists(ip) else ""
     assert "auth.md" not in index_text
+
+
+def test_delete_page_removes_graph_page_and_keeps_domain_ready(tmp_path, monkeypatch):
+    b = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+    _write()
+
+    out = server.wiki_delete_page("backend", "concept/auth")
+
+    assert out["deleted"] == "backend/concept/auth.md"
+    snapshot = GraphStore(b).load_ready_domain("backend")
+    assert {page.file for page in snapshot.pages} == {"seed.md"}
 
 
 def test_delete_last_page_leaves_empty_index(tmp_path, monkeypatch):

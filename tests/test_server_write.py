@@ -1,6 +1,9 @@
 import os
+import subprocess
 
 from iwiki_mcp import base, indexer, server
+from iwiki_mcp.engine.graph_store import GraphStore
+from iwiki_mcp.graph import markdown_fingerprint
 
 
 def _seed(tmp_path, monkeypatch, with_domain=True):
@@ -20,6 +23,22 @@ def _seed(tmp_path, monkeypatch, with_domain=True):
     return str(b), str(proj)
 
 
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    )
+
+
+def _init_git_base(base_dir):
+    _git(base_dir, "init", "-q")
+    _git(base_dir, "config", "user.email", "t@t")
+    _git(base_dir, "config", "user.name", "t")
+    seed = base_dir / "backend" / "seed.md"
+    seed.write_text("# Seed\n\n## Notes\nseed\n", encoding="utf-8")
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "seed")
+
+
 def test_write_page_indexes_and_logs(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
@@ -28,6 +47,68 @@ def test_write_page_indexes_and_logs(tmp_path, monkeypatch):
     assert out["indexed_chunks"] >= 1
     assert os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))
     assert os.path.isfile(os.path.join(b, "backend", "log.jsonl"))
+
+
+def test_write_page_refreshes_complete_graph_and_finalizes_commit_fingerprint(
+    tmp_path, monkeypatch
+):
+    b, _ = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+
+    out = server.wiki_write_page(
+        "backend", "auth", "# Auth\n\n## Flow\nSee [Seed](../../seed.md).\n"
+    )
+
+    assert out["page"] == "backend/concept/auth.md"
+    snapshot = GraphStore(b).load_ready_domain("backend")
+    assert {page.file for page in snapshot.pages} == {
+        "seed.md", "concept/auth.md",
+    }
+    with GraphStore(b).read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT indexed_commit, markdown_fingerprint, state "
+            "FROM domains WHERE domain = 'backend'"
+        ).fetchone()
+    expected = markdown_fingerprint(b, "backend")
+    assert tuple(row) == (expected.indexed_commit, expected.value, "ready")
+
+
+def test_write_graph_failure_keeps_canonical_commit_and_recovers_on_next_use(
+    tmp_path, monkeypatch
+):
+    import iwiki_mcp.graph as graph
+    from iwiki_mcp.engine import graph_store as graph_store_module
+
+    b, _ = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+    current_store = graph_store_module.GraphStore
+    real_refresh = current_store.refresh_pages
+
+    def fail_refresh(self, domain, pages, *, delete_files=(), **kwargs):
+        raise RuntimeError(f"failed at {tmp_path}/private/page.md")
+
+    monkeypatch.setattr(current_store, "refresh_pages", fail_refresh)
+
+    out = server.wiki_write_page(
+        "backend", "auth", "# Auth\n\n## Flow\nupdated\n"
+    )
+
+    assert out["page"] == "backend/concept/auth.md"
+    assert out["committed"] is True
+    assert indexer.GRAPH_FALLBACK_WARNING in out["warning"]
+    assert str(tmp_path) not in repr(out)
+    with current_store(b).read_snapshot() as connection:
+        state = connection.execute(
+            "SELECT state FROM domains WHERE domain = 'backend'"
+        ).fetchone()[0]
+    assert state == "dirty"
+
+    monkeypatch.setattr(current_store, "refresh_pages", real_refresh)
+    provider = graph.scoped_graph(b, ("backend",))
+    assert provider is not None
+    assert "concept/auth.md" in {
+        page.file for page in current_store(b).load_ready_domain("backend").pages
+    }
 
 
 def test_write_rejects_deep_heading(tmp_path, monkeypatch):
@@ -203,6 +284,69 @@ def test_index_commits_and_reports_push(tmp_path, monkeypatch):
     assert "committed" in out and "pushed" in out
 
 
+def test_index_rebuilds_whole_domain_graph(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+    (tmp_path / "wiki" / "backend" / "other.md").write_text(
+        "# Other\n\n## Links\n[Seed](seed.md)\n", encoding="utf-8"
+    )
+
+    out = server.wiki_index("backend")
+
+    assert out["domain"] == "backend"
+    snapshot = GraphStore(b).load_ready_domain("backend")
+    assert {page.file for page in snapshot.pages} == {"seed.md", "other.md"}
+
+
+def test_index_rebuilds_missing_graph_when_nothing_needs_git_commit(
+    tmp_path, monkeypatch
+):
+    b, _ = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+    server.wiki_index("backend")
+    graph_path = GraphStore(b).path
+    graph_path.unlink()
+
+    out = server.wiki_index("backend")
+
+    assert out["committed"] is False
+    assert "nothing to commit" in out["warning"]
+    assert {page.file for page in GraphStore(b).load_ready_domain("backend").pages} == {
+        "seed.md"
+    }
+
+
+def test_push_failure_keeps_graph_aligned_with_local_commit(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+    monkeypatch.setattr(
+        server.sync,
+        "sync",
+        lambda base: {
+            "pulled": True,
+            "pushed": False,
+            "warning": "push rejected",
+            "sync_attempts": 1,
+            "push_attempts": 1,
+        },
+    )
+
+    out = server.wiki_write_page(
+        "backend", "auth", "# Auth\n\n## Flow\nbody\n"
+    )
+
+    assert out["committed"] is True
+    assert out["pushed"] is False
+    assert "push rejected" in out["warning"]
+    expected = markdown_fingerprint(b, "backend")
+    with GraphStore(b).read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT indexed_commit, markdown_fingerprint, state "
+            "FROM domains WHERE domain = 'backend'"
+        ).fetchone()
+    assert tuple(row) == (expected.indexed_commit, expected.value, "ready")
+
+
 def test_write_normalizes_wikilinks_to_markdown(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     md = "# Auth\n## Overview\nsummary\n## Flow\nsee [[core#Token Store]] here\n"
@@ -279,5 +423,8 @@ def test_write_page_surfaces_safe_push_failure_metadata(tmp_path, monkeypatch):
         "failure_class": "push_rejected",
         "conflict": False,
         "hint": "run wiki_sync",
-        "warning": "commit saved locally; push failed",
+        "warning": (
+            "commit saved locally; push failed; "
+            "type not given and IWIKI_CHAT_MODEL unset; defaulted to concept"
+        ),
     }

@@ -1,8 +1,12 @@
 import json
+import subprocess
+
+import pytest
 
 from iwiki_mcp import base, indexer
 from iwiki_mcp.engine import store
 from iwiki_mcp.engine.config import Config
+from iwiki_mcp.engine.graph_store import GraphStore
 
 
 def _cfg(dimensions=2):
@@ -174,3 +178,183 @@ def test_append_log_writes_record(tmp_path):
     line = open(base.log_path(str(b), "backend")).read().strip()
     rec = __import__("json").loads(line)
     assert rec["op"] == "ingest" and rec["page"] == "auth.md" and rec["src_hash"] == "abc123"
+
+
+def test_vector_store_save_replaces_jsonl_atomically(tmp_path, monkeypatch):
+    path = tmp_path / "backend" / "index.jsonl"
+    original = store.Record(
+        id="old", file="old.md", heading="Old", chunk=0,
+        hash="old", dim=2, scale=1.0, q=[1, 0],
+    )
+    store.save_index(str(path), [original])
+    before = path.read_bytes()
+    fresh = [
+        store.Record(
+            id=f"new-{index}", file="new.md", heading="New", chunk=index,
+            hash=f"new-{index}", dim=2, scale=1.0, q=[0, 1],
+        )
+        for index in range(2)
+    ]
+    real_dumps = store.json.dumps
+    calls = 0
+
+    def fail_second_record(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("serialization failed")
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(store.json, "dumps", fail_second_record)
+
+    with pytest.raises(RuntimeError, match="serialization failed"):
+        store.save_index(str(path), fresh)
+
+    assert path.read_bytes() == before
+    assert list(path.parent.glob(".index.jsonl.*.tmp")) == []
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    )
+
+
+def _graph_base(tmp_path):
+    base_dir = tmp_path / "wiki"
+    domain = base_dir / "backend"
+    domain.mkdir(parents=True)
+    (domain / "a.md").write_text("# A\n\n## Body\na\n", encoding="utf-8")
+    (domain / "b.md").write_text("# B\n\n## Body\nb\n", encoding="utf-8")
+    _git(base_dir, "init", "-q")
+    _git(base_dir, "config", "user.email", "t@t")
+    _git(base_dir, "config", "user.name", "t")
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "seed")
+    return base_dir, domain
+
+
+def test_incremental_graph_refuses_partial_domain_after_preflight(tmp_path):
+    base_dir, domain = _graph_base(tmp_path)
+    mutation = indexer.prepare_graph_mutation(str(base_dir), "backend")
+    graph_store = GraphStore(base_dir)
+    graph_store.delete_page("backend", "b.md")
+    graph_store.mark_domain_dirty("backend")
+    (domain / "a.md").write_text("# A\n\n## Body\nchanged\n", encoding="utf-8")
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "change")
+
+    warning = indexer.stage_graph_pages(mutation, refresh_files=("a.md",))
+
+    assert warning == indexer.GRAPH_FALLBACK_WARNING
+    with graph_store.read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT state FROM domains WHERE domain = 'backend'"
+        ).fetchone()
+        files = {
+            value[0]
+            for value in connection.execute(
+                "SELECT file FROM pages WHERE domain = 'backend'"
+            )
+        }
+    assert row[0] == "dirty"
+    assert files == {"a.md"}
+
+
+def test_incremental_graph_refuses_unlisted_committed_markdown(tmp_path):
+    base_dir, domain = _graph_base(tmp_path)
+    mutation = indexer.prepare_graph_mutation(str(base_dir), "backend")
+    (domain / "a.md").write_text("# A\n\n## Body\nchanged\n", encoding="utf-8")
+    (domain / "extra.md").write_text(
+        "# Extra\n\n## Body\nextra\n", encoding="utf-8"
+    )
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "change")
+
+    warning = indexer.stage_graph_pages(mutation, refresh_files=("a.md",))
+
+    assert warning == indexer.GRAPH_FALLBACK_WARNING
+    with GraphStore(base_dir).read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT state FROM domains WHERE domain = 'backend'"
+        ).fetchone()
+    assert row[0] == "dirty"
+
+
+def test_incremental_graph_rolls_back_all_rows_when_second_refresh_fails(tmp_path):
+    base_dir, domain = _graph_base(tmp_path)
+    mutation = indexer.prepare_graph_mutation(str(base_dir), "backend")
+    graph_store = GraphStore(base_dir)
+    with graph_store.read_snapshot() as connection:
+        before = {
+            row[0]: row[1]
+            for row in connection.execute(
+                "SELECT file, content_hash FROM pages WHERE domain = 'backend'"
+            )
+        }
+    with graph_store.transaction() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_second_refresh "
+            "BEFORE INSERT ON pages WHEN NEW.file = 'b.md' "
+            "BEGIN SELECT RAISE(ABORT, 'second refresh failed'); END"
+        )
+    (domain / "a.md").write_text("# A\n\n## Body\nchanged a\n", encoding="utf-8")
+    (domain / "b.md").write_text("# B\n\n## Body\nchanged b\n", encoding="utf-8")
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "change")
+
+    warning = indexer.stage_graph_pages(
+        mutation, refresh_files=("a.md", "b.md")
+    )
+
+    assert warning == indexer.GRAPH_FALLBACK_WARNING
+    with graph_store.read_snapshot() as connection:
+        after = {
+            row[0]: row[1]
+            for row in connection.execute(
+                "SELECT file, content_hash FROM pages WHERE domain = 'backend'"
+            )
+        }
+        state = connection.execute(
+            "SELECT state FROM domains WHERE domain = 'backend'"
+        ).fetchone()[0]
+    assert after == before
+    assert state == "dirty"
+
+
+def test_incremental_graph_rolls_back_rows_when_post_batch_parity_fails(
+    tmp_path, monkeypatch
+):
+    base_dir, domain = _graph_base(tmp_path)
+    mutation = indexer.prepare_graph_mutation(str(base_dir), "backend")
+    graph_store = GraphStore(base_dir)
+    with graph_store.read_snapshot() as connection:
+        before = {
+            row[0]: row[1]
+            for row in connection.execute(
+                "SELECT file, content_hash FROM pages WHERE domain = 'backend'"
+            )
+        }
+    (domain / "a.md").write_text("# A\n\n## Body\nchanged a\n", encoding="utf-8")
+    (domain / "b.md").write_text("# B\n\n## Body\nchanged b\n", encoding="utf-8")
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "change")
+    monkeypatch.setattr(indexer, "_graph_content_parity", lambda *args: False)
+
+    warning = indexer.stage_graph_pages(
+        mutation, refresh_files=("a.md", "b.md")
+    )
+
+    assert warning == indexer.GRAPH_FALLBACK_WARNING
+    with graph_store.read_snapshot() as connection:
+        after = {
+            row[0]: row[1]
+            for row in connection.execute(
+                "SELECT file, content_hash FROM pages WHERE domain = 'backend'"
+            )
+        }
+        state = connection.execute(
+            "SELECT state FROM domains WHERE domain = 'backend'"
+        ).fetchone()[0]
+    assert after == before
+    assert state == "dirty"

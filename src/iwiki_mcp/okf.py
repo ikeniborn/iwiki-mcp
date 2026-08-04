@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .engine import classify, frontmatter as fm
@@ -15,6 +16,12 @@ from .engine.store import VectorStore
 from . import base as _base
 
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)   # keep in sync with chunk._H2
+
+
+@dataclass(frozen=True)
+class MoveChange:
+    refresh_files: tuple[str, ...]
+    delete_files: tuple[str, ...]
 
 
 def git_last_commit_date(base_dir: str, path: str) -> str | None:
@@ -179,7 +186,7 @@ def _rekey_log(base_dir, domain, old_identity: str, new_identity: str) -> None:
             fh.write("\n".join(out) + "\n")
 
 
-def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
+def move_page(base_dir, domain, old_identity: str, new_identity: str) -> MoveChange:
     """Rename <domain>/<old_identity>.md to <new_identity>.md and rewrite every
     intra-domain link old_identity -> new_identity across the domain's pages.
     No-op when old == new. The rename is authoritative; link rewrite is best-effort.
@@ -191,7 +198,7 @@ def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
     here too)."""
     from .engine.links import rewrite_link_targets
     if old_identity == new_identity:
-        return
+        return MoveChange((), ())
     dom = Path(base_dir) / domain
     old_p = dom / f"{old_identity}.md"
     new_p = dom / f"{new_identity}.md"
@@ -203,6 +210,7 @@ def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
     new_p.parent.mkdir(parents=True, exist_ok=True)
     os.replace(old_p, new_p)
     mapping = {old_identity: new_identity}
+    changed = {f"{new_identity}.md"}
     for slug in _page_slugs(dom):
         p = dom / f"{slug}.md"
         try:
@@ -212,7 +220,12 @@ def move_page(base_dir, domain, old_identity: str, new_identity: str) -> None:
         new_text = rewrite_link_targets(text, mapping)
         if new_text != text:
             p.write_text(new_text, encoding="utf-8")
+            changed.add(f"{slug}.md")
     _rekey_log(base_dir, domain, old_identity, new_identity)
+    return MoveChange(
+        tuple(sorted(changed)),
+        (f"{old_identity}.md",),
+    )
 
 
 def migrate_layout(base_dir, domain) -> dict:

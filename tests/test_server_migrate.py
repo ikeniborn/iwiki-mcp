@@ -4,6 +4,7 @@ import subprocess
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
 from iwiki_mcp.engine import frontmatter as fm
+from iwiki_mcp.engine.graph_store import GraphStore
 
 
 def _bind(tmp_path):
@@ -96,6 +97,8 @@ def test_migrate_plan_mode_commits_layout_move(tmp_path, monkeypatch):
         capture_output=True, text=True, check=True,
     )
     assert status.stdout.strip() == ""
+    snapshot = GraphStore(tmp_path).load_ready_domain("d")
+    assert {page.file for page in snapshot.pages} == {"guide/a.md"}
 
 
 def test_apply_okf_writes_frontmatter(tmp_path, monkeypatch):

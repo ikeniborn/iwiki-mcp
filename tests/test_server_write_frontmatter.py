@@ -108,14 +108,15 @@ def test_write_missing_description_warns(tmp_path, monkeypatch):
     assert "warning" in res and "description" in res["warning"]
 
 
-def test_commit_warning_wins_over_freshness_and_frontmatter_warnings(
+def test_commit_warning_composes_with_freshness_and_frontmatter_warnings(
     tmp_path, monkeypatch
 ):
+    graph_warning = "graph refresh failed; Markdown fallback will be used"
     _patch(monkeypatch, tmp_path)
     monkeypatch.setattr(
         server.sync,
         "ensure_fresh",
-        lambda base: {"state": "clean", "warning": "freshness warning"},
+        lambda base: {"state": "clean", "warning": graph_warning},
     )
     monkeypatch.setattr(
         server.sync,
@@ -123,7 +124,7 @@ def test_commit_warning_wins_over_freshness_and_frontmatter_warnings(
         lambda *args, **kwargs: {
             "committed": True,
             "pushed": False,
-            "warning": "push warning",
+            "warning": f"push warning; {graph_warning}",
         },
     )
 
@@ -131,10 +132,14 @@ def test_commit_warning_wins_over_freshness_and_frontmatter_warnings(
         "d", "alice", "# Alice\n\n## Role\nwork.\n", type="person"
     )
 
-    assert res["warning"] == "push warning"
+    assert res["warning"] == (
+        f"push warning; {graph_warning}; "
+        "no description given and no ## Overview to derive from"
+    )
+    assert res["warning"].count(graph_warning) == 1
 
 
-def test_freshness_warning_wins_over_frontmatter_warning(tmp_path, monkeypatch):
+def test_freshness_warning_composes_with_frontmatter_warning(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     monkeypatch.setattr(
         server.sync,
@@ -146,4 +151,7 @@ def test_freshness_warning_wins_over_frontmatter_warning(tmp_path, monkeypatch):
         "d", "alice", "# Alice\n\n## Role\nwork.\n", type="person"
     )
 
-    assert res["warning"] == "freshness warning"
+    assert res["warning"] == (
+        "freshness warning; "
+        "no description given and no ## Overview to derive from"
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
 from dataclasses import dataclass, asdict, field
 
 
@@ -60,10 +61,28 @@ def load_index(path: str) -> list[Record]:
 
 
 def save_index(path: str, recs: list[Record]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        for r in recs:
-            fh.write(json.dumps(asdict(r), ensure_ascii=False) + "\n")
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(asdict(r), ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def index_bytes(path: str) -> int:

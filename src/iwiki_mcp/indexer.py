@@ -6,6 +6,7 @@ import datetime as _dt
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from .base import index_path, log_path, migrate_store_location
@@ -16,6 +17,19 @@ from .engine.embed import embed_texts
 from .engine.store import SCHEMA_VERSION, VectorStore, index_bytes, make_record
 
 CAP_BYTES = 8 * 1024 * 1024
+GRAPH_FALLBACK_WARNING = "graph refresh failed; Markdown fallback will be used"
+
+
+@dataclass
+class GraphMutation:
+    """State carried across canonical mutation, Git commit, and graph finalize."""
+
+    base: str
+    domain: str
+    store: object | None
+    expected_fingerprint: str | None
+    available: bool
+    staged_fingerprint: str | None = None
 
 
 def src_hash(path: str) -> str | None:
@@ -64,6 +78,202 @@ def index_domain(cfg: Config, base: str, domain: str) -> dict:
     size = index_bytes(idx)
     return {"indexed_chunks": len(fresh), "reused": reused,
             "embedded": len(to_embed), "bytes": size, "over_cap": size > CAP_BYTES}
+
+
+def prepare_graph_mutation(
+    base: str, domain: str, *, whole_domain: bool = False
+) -> GraphMutation | None:
+    """Establish completeness before an incremental derived-graph mutation."""
+    from . import graph, sync
+    from .engine.graph_store import GraphStore
+
+    if not sync.is_git_repo(base):
+        return None
+    try:
+        if whole_domain:
+            return GraphMutation(base, domain, GraphStore(base), None, True)
+        provider = graph.scoped_graph(base, (domain,))
+        if provider is None:
+            return GraphMutation(base, domain, None, None, False)
+        expected = dict(provider.expected_fingerprints)[domain]
+        return GraphMutation(base, domain, provider.store, expected, True)
+    except Exception:
+        return GraphMutation(base, domain, None, None, False)
+
+
+def _write_staged_graph_fingerprint(
+    mutation: GraphMutation, fingerprint, connection
+) -> None:
+    mutation.staged_fingerprint = fingerprint.value
+    connection.execute(
+        "UPDATE domains SET indexed_commit = ?, markdown_fingerprint = ?, "
+        "state = 'dirty', indexed_at = ? WHERE domain = ?",
+        (
+            fingerprint.indexed_commit,
+            fingerprint.value,
+            _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            mutation.domain,
+        ),
+    )
+
+
+def _set_staged_graph_fingerprint(mutation: GraphMutation, fingerprint) -> None:
+    with mutation.store.transaction() as connection:
+        _write_staged_graph_fingerprint(mutation, fingerprint, connection)
+
+
+def _graph_failed(mutation: GraphMutation) -> str:
+    mutation.available = False
+    mutation.staged_fingerprint = None
+    if mutation.store is not None:
+        try:
+            mutation.store.mark_domain_dirty(mutation.domain)
+        except Exception:
+            pass
+    return GRAPH_FALLBACK_WARNING
+
+
+def _graph_content_parity(mutation: GraphMutation, connection) -> bool:
+    root = Path(mutation.base) / mutation.domain
+    markdown = {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*.md"))
+        if path.is_file()
+        and path.relative_to(root).as_posix() not in RESERVED_OKF
+    }
+    indexed = {
+        row[0]: row[1]
+        for row in connection.execute(
+            "SELECT file, content_hash FROM pages WHERE domain = ?",
+            (mutation.domain,),
+        )
+    }
+    return indexed == markdown
+
+
+def _finalize_incremental_batch(mutation: GraphMutation, expected_fingerprint):
+    from . import graph
+
+    def finalize(connection) -> None:
+        rechecked = graph.markdown_fingerprint(mutation.base, mutation.domain)
+        if rechecked != expected_fingerprint or not _graph_content_parity(
+            mutation, connection
+        ):
+            raise RuntimeError("graph batch changed during refresh")
+        _write_staged_graph_fingerprint(mutation, rechecked, connection)
+
+    return finalize
+
+
+def stage_graph_pages(
+    mutation: GraphMutation | None,
+    *,
+    refresh_files: tuple[str, ...] = (),
+    delete_files: tuple[str, ...] = (),
+) -> str | None:
+    """Refresh only affected pages, keeping the domain untrusted until finalize."""
+    if mutation is None:
+        return None
+    if not mutation.available or mutation.store is None:
+        return GRAPH_FALLBACK_WARNING
+    from . import graph
+
+    try:
+        current = graph.markdown_fingerprint(mutation.base, mutation.domain)
+        with mutation.store.read_snapshot() as connection:
+            row = connection.execute(
+                "SELECT markdown_fingerprint, state FROM domains WHERE domain = ?",
+                (mutation.domain,),
+            ).fetchone()
+        metadata = None if row is None else tuple(row)
+        if metadata not in {
+            (mutation.expected_fingerprint, "ready"),
+            (current.value, "ready"),
+        }:
+            return _graph_failed(mutation)
+        mutation.store.mark_domain_dirty(mutation.domain)
+        root = Path(mutation.base) / mutation.domain
+        pages = tuple(
+            (file, (root / file).read_text(encoding="utf-8"))
+            for file in refresh_files
+        )
+        mutation.store.refresh_pages(
+            mutation.domain,
+            pages,
+            delete_files=delete_files,
+            finalize=_finalize_incremental_batch(mutation, current),
+        )
+        return None
+    except Exception:
+        return _graph_failed(mutation)
+
+
+def stage_graph_rebuild(mutation: GraphMutation | None) -> str | None:
+    """Rebuild a whole domain, then leave it dirty until the Git phase ends."""
+    if mutation is None:
+        return None
+    if not mutation.available or mutation.store is None:
+        return GRAPH_FALLBACK_WARNING
+    from . import graph
+
+    try:
+        mutation.store.mark_domain_dirty(mutation.domain)
+        provider = graph.scoped_graph(mutation.base, (mutation.domain,))
+        if provider is None:
+            return _graph_failed(mutation)
+        mutation.store = provider.store
+        fingerprint = graph.markdown_fingerprint(mutation.base, mutation.domain)
+        mutation.store.mark_domain_dirty(mutation.domain)
+        _set_staged_graph_fingerprint(mutation, fingerprint)
+        return None
+    except Exception:
+        return _graph_failed(mutation)
+
+
+def finalize_graph_mutation(mutation: GraphMutation | None) -> str | None:
+    """Publish a staged graph using metadata only after the local Git phase."""
+    if mutation is None:
+        return None
+    if (
+        not mutation.available
+        or mutation.store is None
+        or mutation.staged_fingerprint is None
+    ):
+        return GRAPH_FALLBACK_WARNING
+    from . import graph
+
+    try:
+        fingerprint = graph.markdown_fingerprint(mutation.base, mutation.domain)
+        with mutation.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT markdown_fingerprint, state FROM domains WHERE domain = ?",
+                (mutation.domain,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("domain graph is unavailable")
+            if tuple(row) == (fingerprint.value, "ready"):
+                return None
+            if tuple(row) != (mutation.staged_fingerprint, "dirty"):
+                raise RuntimeError("domain graph changed during mutation")
+            rechecked = graph.markdown_fingerprint(mutation.base, mutation.domain)
+            if rechecked != fingerprint:
+                raise RuntimeError("Markdown changed during graph finalize")
+            connection.execute(
+                "UPDATE domains SET indexed_commit = ?, markdown_fingerprint = ?, "
+                "state = 'ready', "
+                "indexed_at = ? WHERE domain = ?",
+                (
+                    rechecked.indexed_commit,
+                    rechecked.value,
+                    _dt.datetime.now(_dt.timezone.utc).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    mutation.domain,
+                ),
+            )
+        return None
+    except Exception:
+        return _graph_failed(mutation)
 
 
 def append_log(base: str, domain: str, op: str, source: str, page: str,

@@ -1,7 +1,10 @@
 import json
 import os
+import hashlib
+import subprocess
 
 from iwiki_mcp import base, indexer, server
+from iwiki_mcp.engine.graph_store import GraphStore
 
 
 def _seed(tmp_path, monkeypatch):
@@ -27,6 +30,23 @@ def _write(md, source=None):
 BASE_MD = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
 
 
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    )
+
+
+def _init_git_base(base_dir):
+    _git(base_dir, "init", "-q")
+    _git(base_dir, "config", "user.email", "t@t")
+    _git(base_dir, "config", "user.name", "t")
+    (base_dir / "backend" / "seed.md").write_text(
+        "# Seed\n\n## Notes\nseed\n", encoding="utf-8"
+    )
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "seed")
+
+
 def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     b, _ = _seed(tmp_path, monkeypatch)
     _write(BASE_MD)
@@ -38,6 +58,24 @@ def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "refreshed flow text" in content
     assert "login then token" not in content
+
+
+def test_update_page_refreshes_only_changed_graph_page(tmp_path, monkeypatch):
+    b, _ = _seed(tmp_path, monkeypatch)
+    _init_git_base(tmp_path / "wiki")
+    _write(BASE_MD)
+    store = GraphStore(b)
+    before = {page.file: page.content_hash for page in store.load_ready_domain("backend").pages}
+
+    out = server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "updated graph body"
+    )
+
+    assert "error" not in out
+    after = {page.file: page.content_hash for page in store.load_ready_domain("backend").pages}
+    content = (tmp_path / "wiki" / "backend" / "concept" / "auth.md").read_bytes()
+    assert after["concept/auth.md"] == hashlib.sha256(content).hexdigest()
+    assert after["seed.md"] == before["seed.md"]
 
 
 def test_update_page_not_found(tmp_path, monkeypatch):

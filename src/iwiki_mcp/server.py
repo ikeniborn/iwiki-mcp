@@ -495,9 +495,47 @@ def _fresh_warn(fresh: dict) -> dict:
     return {"warning": w} if w else {}
 
 
+def _compose_warnings(*warnings: str | None) -> str | None:
+    parts: list[str] = []
+    for warning in warnings:
+        if not warning:
+            continue
+        for part in warning.split("; "):
+            if part and part not in parts:
+                parts.append(part)
+    return "; ".join(parts) or None
+
+
+def _after_commit_graph(
+    mutation,
+    *,
+    refresh_files: tuple[str, ...] = (),
+    delete_files: tuple[str, ...] = (),
+    rebuild: bool = False,
+):
+    if mutation is None:
+        return None
+
+    def update_graph() -> str | None:
+        if rebuild:
+            warning = indexer.stage_graph_rebuild(mutation)
+        else:
+            warning = indexer.stage_graph_pages(
+                mutation,
+                refresh_files=refresh_files,
+                delete_files=delete_files,
+            )
+        if warning is not None:
+            return warning
+        return indexer.finalize_graph_mutation(mutation)
+
+    return update_graph
+
+
 def _write_sync_result(
     commit: dict, freshness_warning: str | None = None,
     frontmatter_warning: str | None = None,
+    graph_warning: str | None = None,
 ) -> dict:
     result = {
         "committed": commit.get("committed", False),
@@ -508,7 +546,9 @@ def _write_sync_result(
     ):
         if key in commit:
             result[key] = commit[key]
-    warning = commit.get("warning") or freshness_warning or frontmatter_warning
+    warning = _compose_warnings(
+        commit.get("warning"), freshness_warning, frontmatter_warning, graph_warning
+    )
     if warning:
         result["warning"] = warning
     return result
@@ -595,6 +635,7 @@ def wiki_write_page(
     log_source = source or ""
     log_src_hash = indexer.src_hash(source) if source else None
     log_appended = False
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -621,7 +662,10 @@ def wiki_write_page(
         raise
     page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(bind.base, f"iwiki: ingest {page_rel}",
-                                  pathspec=valid_domain)
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation, refresh_files=(page_file,)
+                                  ))
     result = {
         "page": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
@@ -700,6 +744,7 @@ def wiki_update_page(
     if source and os.path.exists(log_file):
         with open(log_file, "rb") as fh:
             log_before = fh.read()
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_md)
@@ -716,7 +761,10 @@ def wiki_update_page(
         raise
     page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(bind.base, f"iwiki: update {page_rel}",
-                                  pathspec=valid_domain)
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation, refresh_files=(page_file,)
+                                  ))
     result = {
         "page": page_rel,
         "heading": heading.lstrip("#").strip(),
@@ -755,6 +803,7 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         content = fh.read()
     log_appended = False
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
     os.remove(path)
     try:
         indexer.append_log(bind.base, valid_domain, "delete", "", page_file, None)
@@ -769,14 +818,15 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
         raise
     page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(bind.base, f"iwiki: delete {page_rel}",
-                                  pathspec=valid_domain)
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation, delete_files=(page_file,)
+                                  ))
     result = {
         "deleted": page_rel,
         "indexed_chunks": stats["indexed_chunks"],
         "bytes": stats["bytes"],
-        "committed": commit.get("committed", False),
-        "pushed": commit.get("pushed", False),
-        **_fresh_warn(fresh),
+        **_write_sync_result(commit, fresh.get("warning")),
     }
     return result
 
@@ -801,13 +851,20 @@ def wiki_index(domain: str | None = None) -> dict:
             "hint": "create it with wiki_create_domain",
         }
     cfg = Config.load()
+    graph_mutation = indexer.prepare_graph_mutation(
+        bind.base, valid_domain, whole_domain=True
+    )
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: reindex {valid_domain}",
-                                  pathspec=valid_domain)
-    return {"domain": valid_domain, **stats,
-            "committed": commit.get("committed", False),
-            "pushed": commit.get("pushed", False),
-            **_fresh_warn(fresh)}
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation, rebuild=True
+                                  ))
+    return {
+        "domain": valid_domain,
+        **stats,
+        **_write_sync_result(commit, fresh.get("warning")),
+    }
 
 
 @_safe
@@ -1042,6 +1099,9 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
                 "hint": "create it with wiki_create_domain"}
     base.migrate_store_location(bind.base, target)
     cfg = Config.load()
+    graph_mutation = indexer.prepare_graph_mutation(
+        bind.base, target, whole_domain=True
+    )
     if cfg.chat_model:
         migrated, skipped, warnings = [], [], []
         vocab = okf.domain_tag_vocab(bind.base, target)
@@ -1067,14 +1127,16 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
         layout = okf.migrate_layout(bind.base, target)
         stats = indexer.index_domain(cfg, bind.base, target)
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
-                                      pathspec=target)
+                                      pathspec=target,
+                                      _after_commit=_after_commit_graph(
+                                          graph_mutation, rebuild=True
+                                      ))
         result = {"domain": target, "mode": "autonomous", "migrated": migrated,
                   "skipped": skipped, "warnings": warnings, "moved": layout["moved"],
                   "layout_collisions": layout.get("collisions", []),
                   "layout_skipped_unsafe": layout.get("skipped_unsafe", []),
                   "indexed_chunks": stats["indexed_chunks"],
-                  "committed": commit.get("committed", False),
-                  "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+                  **_write_sync_result(commit, fresh.get("warning"))}
         return result
     # plan mode: no LLM writes (frontmatter adoption is only proposed as
     # candidates); the deterministic <type>/<slug> layout move + store
@@ -1083,9 +1145,15 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     indexer.index_domain(cfg, bind.base, target)   # store reflects moved paths
     if layout["moved"]:
         commit = sync.commit_and_push(bind.base, f"iwiki: migrate okf {target}",
-                                      pathspec=target)
+                                      pathspec=target,
+                                      _after_commit=_after_commit_graph(
+                                          graph_mutation, rebuild=True
+                                      ))
+        graph_warning = None
     else:
         commit = {"committed": False, "pushed": False}
+        callback = _after_commit_graph(graph_mutation, rebuild=True)
+        graph_warning = callback() if callback is not None else None
     vocab = okf.domain_tag_vocab(bind.base, target)
     candidates = []
     for slug, page_file, body, has_fm in _unmigrated_pages(dom_path):
@@ -1112,9 +1180,9 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
                            "and tags (reuse tag_vocab first), then call "
                            "wiki_apply_okf(domain, slug, type, tags).",
                            "Run wiki_lint to confirm no missing_frontmatter remains."],
-            "committed": commit.get("committed", False),
-            "pushed": commit.get("pushed", False),
-            **_fresh_warn(fresh)}
+            **_write_sync_result(
+                commit, fresh.get("warning"), graph_warning=graph_warning
+            )}
 
 
 @_safe
@@ -1139,6 +1207,8 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         return {"error": f"page '{valid_domain}/{current_identity}' not found",
                 "hint": "list pages with wiki_list_pages"}
     new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    move_change = okf.MoveChange((), ())
     if current_identity != new_identity:
         new_path = _page_path(bind.base, valid_domain, new_identity)
         if os.path.exists(new_path):
@@ -1149,7 +1219,9 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         # the NEW path but does not move the file back — acceptable, the page
         # keeps valid structure at its new identity and the next index run
         # reconciles it.
-        okf.move_page(bind.base, valid_domain, current_identity, new_identity)
+        move_change = okf.move_page(
+            bind.base, valid_domain, current_identity, new_identity
+        )
     identity = new_identity
     page_file = identity + ".md"
     path = _page_path(bind.base, valid_domain, identity)
@@ -1166,7 +1238,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         or okf.latest_source(bind.base, valid_domain, page_file)
     )
     cfg = Config.load()
-    fm_block, _ = okf.build_frontmatter(
+    fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, slug, body,
         source=resolved, explicit_type=type, explicit_tags=apply_tags,
         explicit_description=apply_desc, explicit_status=apply_status,
@@ -1183,13 +1255,20 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
             fh.write(original)
         raise
     page_rel = f"{valid_domain}/{page_file}"
+    refresh_files = tuple(sorted({*move_change.refresh_files, page_file}))
     commit = sync.commit_and_push(bind.base, f"iwiki: apply okf {page_rel}",
-                                  pathspec=valid_domain)
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation,
+                                      refresh_files=refresh_files,
+                                      delete_files=move_change.delete_files,
+                                  ))
     meta, _ = _fm.split(fm_block + body)
     result = {"page": page_rel, "type": meta.get("type"), "tags": meta.get("tags", []),
               "indexed_chunks": stats["indexed_chunks"],
-              "committed": commit.get("committed", False),
-              "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+              **_write_sync_result(
+                  commit, fresh.get("warning"), fm_warning
+              )}
     return result
 
 
@@ -1210,11 +1289,17 @@ def wiki_export_okf(domain: str | None = None) -> dict:
                 "hint": "create it with wiki_create_domain"}
     cfg = Config.load()
     base.migrate_store_location(bind.base, valid_domain)
+    graph_mutation = indexer.prepare_graph_mutation(
+        bind.base, valid_domain, whole_domain=True
+    )
     swept = okf.batch_sweep(cfg, bind.base, valid_domain)
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: export okf {valid_domain}",
-                                  pathspec=valid_domain)
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation, rebuild=True
+                                  ))
     from .engine.lint import lint
     report = lint(str(dom_path), project_dir=bind.project_dir)
     result = {
@@ -1225,14 +1310,12 @@ def wiki_export_okf(domain: str | None = None) -> dict:
         "still_missing_frontmatter": report.get("missing_frontmatter", []),
         "still_legacy_wikilink": report.get("legacy_wikilink", []),
         "indexed_chunks": stats["indexed_chunks"],
-        "committed": commit.get("committed", False),
-        "pushed": commit.get("pushed", False),
+        **_write_sync_result(commit, fresh.get("warning")),
         "next_steps": ["Run wiki_migrate_okf for better type/tags than the "
                        "deterministic 'concept' default on newly added frontmatter."],
-        **_fresh_warn(fresh),
     }
     if art_warn:
-        result.setdefault("warning", art_warn)
+        result["warning"] = _compose_warnings(result.get("warning"), art_warn)
     return result
 
 

@@ -1,8 +1,10 @@
 import json
 import os
+import subprocess
 
 from iwiki_mcp import base, indexer, okf, server
 from iwiki_mcp.engine.lint import lint
+from iwiki_mcp.engine.graph_store import GraphStore
 
 
 def _bind(tmp_path, monkeypatch, dom):
@@ -18,6 +20,23 @@ def _bind(tmp_path, monkeypatch, dom):
     monkeypatch.setattr(indexer, "embed_texts", lambda cfg, t: [[1.0, 0.0] for _ in t])
 
 
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    )
+
+
+def _init_git_base(base_dir, domain):
+    _git(base_dir, "init", "-q")
+    _git(base_dir, "config", "user.email", "t@t")
+    _git(base_dir, "config", "user.name", "t")
+    (base_dir / domain / "seed.md").write_text(
+        "# Seed\n\n## Body\nseed\n", encoding="utf-8"
+    )
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "seed")
+
+
 def test_apply_moves_page_on_type_change(tmp_path, monkeypatch):
     _bind(tmp_path, monkeypatch, "d")
     server.wiki_write_page("d", "x", "# X\n\n## Purpose\n\nBody.\n", type="concept")
@@ -29,6 +48,31 @@ def test_apply_moves_page_on_type_change(tmp_path, monkeypatch):
     assert not (tmp_path / "d" / "concept" / "x.md").exists()
     y = (tmp_path / "d" / "guide" / "y.md").read_text()
     assert "(architecture/x.md)" in y      # inbound link rewritten
+
+
+def test_apply_move_refreshes_target_and_rewritten_link_graph_pages(
+    tmp_path, monkeypatch
+):
+    _bind(tmp_path, monkeypatch, "d")
+    _init_git_base(tmp_path, "d")
+    server.wiki_write_page(
+        "d", "x", "# X\n\n## Purpose\nBody.\n", type="concept"
+    )
+    server.wiki_write_page(
+        "d", "y", "# Y\n\n## Purpose\nSee [X](concept/x.md).\n", type="guide"
+    )
+
+    result = server.wiki_apply_okf("d", "concept/x", type="architecture")
+
+    assert result["page"] == "d/architecture/x.md"
+    snapshot = GraphStore(tmp_path).load_ready_domain("d")
+    assert "concept/x.md" not in {page.file for page in snapshot.pages}
+    assert "architecture/x.md" in {page.file for page in snapshot.pages}
+    assert any(
+        edge.source_page_id == "d/guide/y"
+        and edge.target_page_id == "d/architecture/x"
+        for edge in snapshot.edges
+    )
 
 
 def test_apply_is_noop_move_when_type_unchanged(tmp_path, monkeypatch):
@@ -91,11 +135,27 @@ def test_move_page_rekeys_ingest_log(tmp_path, monkeypatch):
         "date": "2020-01-01", "src_hash": "abc",
     }) + "\n", encoding="utf-8")
 
-    okf.move_page(str(tmp_path), "d", "a", "guide/a")
+    change = okf.move_page(str(tmp_path), "d", "a", "guide/a")
 
     recs = [json.loads(ln) for ln in (dom / "log.jsonl").read_text().splitlines() if ln.strip()]
     assert any(r["page"] == "guide/a.md" for r in recs)
     assert not any(r["page"] == "a.md" for r in recs)
+    assert change.refresh_files == ("guide/a.md",)
+    assert change.delete_files == ("a.md",)
+
+
+def test_move_page_reports_every_rewritten_link_source(tmp_path, monkeypatch):
+    _bind(tmp_path, monkeypatch, "d")
+    dom = tmp_path / "d"
+    (dom / "a.md").write_text("# A\n\n## Body\ntext\n", encoding="utf-8")
+    (dom / "b.md").write_text(
+        "# B\n\n## Link\n[A](a.md)\n", encoding="utf-8"
+    )
+
+    change = okf.move_page(str(tmp_path), "d", "a", "guide/a")
+
+    assert change.refresh_files == ("b.md", "guide/a.md")
+    assert change.delete_files == ("a.md",)
 
 
 def test_apply_okf_move_rekeys_log_and_lint_still_flags_stale(tmp_path, monkeypatch):

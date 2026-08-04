@@ -255,6 +255,33 @@ def test_sync_preserves_pull_and_sanitizes_graph_refresh_failure(monkeypatch, tm
     assert str(tmp_path) not in repr(result)
 
 
+def test_commit_callback_and_pull_refresh_compose_one_graph_warning(monkeypatch):
+    warning = "graph refresh failed; Markdown fallback will be used"
+    monkeypatch.setattr(
+        sync,
+        "auto_commit",
+        lambda *args, **kwargs: {"committed": True},
+    )
+    monkeypatch.setattr(
+        sync,
+        "sync",
+        lambda base: {
+            "pulled": True,
+            "pushed": False,
+            "warning": f"push failed; {warning}",
+            "sync_attempts": 1,
+            "push_attempts": 1,
+        },
+    )
+
+    result = sync.commit_and_push(
+        "/base", "message", _after_commit=lambda: warning
+    )
+
+    assert result["warning"] == f"push failed; {warning}"
+    assert result["warning"].count(warning) == 1
+
+
 def test_sync_first_attempt_success_reports_attempt_counts(monkeypatch, tmp_path):
     sleeps = _script_sync(monkeypatch, [_completed(), _completed()])
 

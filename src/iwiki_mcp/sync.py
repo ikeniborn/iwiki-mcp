@@ -62,6 +62,8 @@ def _add_graph_warning(result: dict, warning: str | None) -> dict:
     if warning is None:
         return result
     existing = result.get("warning")
+    if existing and warning in existing:
+        return result
     result["warning"] = f"{existing}; {warning}" if existing else warning
     return result
 
@@ -351,7 +353,13 @@ def ensure_fresh(
         return {"state": "offline", "warning": str(e)}
 
 
-def commit_and_push(base: str, message: str, pathspec: str | None = None) -> dict:
+def commit_and_push(
+    base: str,
+    message: str,
+    pathspec: str | None = None,
+    *,
+    _after_commit: Callable[[], str | None] | None = None,
+) -> dict:
     """Auto-commit, then push via ``sync`` when the commit landed.
 
     Fail-soft: when nothing is committed, ``sync`` is not attempted. When the commit
@@ -365,7 +373,23 @@ def commit_and_push(base: str, message: str, pathspec: str | None = None) -> dic
                "sync_attempts": 0, "push_attempts": 0}
         if commit.get("warning"):
             out["warning"] = commit["warning"]
+        if (
+            _after_commit is not None
+            and commit.get("warning") == "nothing to commit"
+        ):
+            try:
+                if _after_commit() is not None:
+                    _add_graph_warning(out, _GRAPH_REFRESH_WARNING)
+            except Exception:
+                _add_graph_warning(out, _GRAPH_REFRESH_WARNING)
         return out
+    graph_warning: str | None = None
+    if _after_commit is not None:
+        try:
+            if _after_commit() is not None:
+                graph_warning = _GRAPH_REFRESH_WARNING
+        except Exception:
+            graph_warning = _GRAPH_REFRESH_WARNING
     result = sync(base)
     out = {
         "committed": True,
@@ -381,4 +405,5 @@ def commit_and_push(base: str, message: str, pathspec: str | None = None) -> dic
     warn = result.get("warning") or result.get("error")
     if warn:
         out["warning"] = _sanitize_git_output(str(warn))
+    _add_graph_warning(out, graph_warning)
     return out

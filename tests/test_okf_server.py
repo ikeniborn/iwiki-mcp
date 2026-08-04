@@ -1,8 +1,10 @@
 import os
 import subprocess
+import hashlib
 
 from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.store import VectorStore
+from iwiki_mcp.engine.graph_store import GraphStore
 
 
 def _git_init(base_dir):
@@ -155,3 +157,9 @@ def test_reserved_files_land_in_the_same_commit(tmp_path, monkeypatch):
     files = _committed_files(b)
     assert "backend/index.md" in files
     assert "backend/log.md" in files
+    snapshot = GraphStore(b).load_ready_domain("backend")
+    pages = {page.file: page.content_hash for page in snapshot.pages}
+    auth = os.path.join(b, "backend", "concept", "auth.md")
+    assert pages == {
+        "concept/auth.md": hashlib.sha256(open(auth, "rb").read()).hexdigest()
+    }
