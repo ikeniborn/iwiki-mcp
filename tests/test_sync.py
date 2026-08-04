@@ -188,7 +188,7 @@ def _script_sync(monkeypatch, results):
     monkeypatch.setattr(sync, "_has_rebase_state", lambda base: False)
     monkeypatch.setattr(sync, "_head_revision", lambda base: None, raising=False)
     monkeypatch.setattr(sync, "_run", lambda *args, **kwargs: next(script))
-    monkeypatch.setattr(sync.time, "sleep", sleeps.append)
+    monkeypatch.setattr(sync, "_sleep", sleeps.append)
     return sleeps
 
 

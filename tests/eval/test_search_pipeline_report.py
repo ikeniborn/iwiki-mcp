@@ -147,7 +147,10 @@ def _hard_negative_evidence():
             {
                 "case_id": "case-a",
                 "mode": "lexical",
-                "identity": "iwiki-mcp/invalid-<script>alert('x')</script>-before\\|after|line\nnext:0",
+                "identity": (
+                    "iwiki-mcp/invalid-<script>alert('x')</script>-"
+                    "before\\|after|line\nnext:0"
+                ),
                 "state": "invalid",
                 "baseline_rank": None,
             },
@@ -214,7 +217,8 @@ def test_hard_negative_reports_render_sorted_active_unavailable_and_invalid_reco
     assert markdown.index("case-a | lexical") < markdown.index("case-z | semantic")
     assert "<script>alert('x')</script>" not in markdown
     assert (
-        "invalid-&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;-before\\\\\\|after\\|line next:0 "
+        "invalid-&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;-"
+        "before\\\\\\|after\\|line next:0 "
         "| invalid | None"
     ) in markdown
     assert "unavailable | 1" in markdown

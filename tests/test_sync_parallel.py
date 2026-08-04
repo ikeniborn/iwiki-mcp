@@ -76,7 +76,7 @@ def test_sync_aborts_true_rebase_conflict_without_retry_or_commit_loss(
     _git(repo_a, "push", "-q")
     local_commit = _commit(repo_b, "shared.md", "from b\n", "commit b")
     sleeps = []
-    monkeypatch.setattr(sync.time, "sleep", sleeps.append)
+    monkeypatch.setattr(sync, "_sleep", sleeps.append)
 
     result = sync.sync(str(repo_b))
 

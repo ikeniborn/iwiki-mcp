@@ -138,7 +138,6 @@ def test_analyze_trace_reports_missing_relevant_identity_from_chunks():
 
 
 def test_analyze_trace_reports_missing_relevant_identity_from_index():
-    identity = "eval/guide/auth.md#Rotation:0"
     case = _case()
     trace = _missing_trace_with_index({
         "indexed": False,

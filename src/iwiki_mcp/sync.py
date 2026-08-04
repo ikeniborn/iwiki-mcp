@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import time
+from time import sleep as _sleep
 from pathlib import Path
 from typing import Callable
 
@@ -227,7 +227,7 @@ def sync(
                     failure_class = _classify_remote_failure(
                         pull.stderr + pull.stdout)
                     if failure_class in recoverable and attempt < max_attempts - 1:
-                        time.sleep(0.25)
+                        _sleep(0.25)
                         continue
                     return {"pulled": False, "pushed": False,
                             "error": _output(pull),
@@ -252,7 +252,7 @@ def sync(
                     )
                 failure_class = _classify_remote_failure(push.stderr + push.stdout)
                 if failure_class in recoverable and attempt < max_attempts - 1:
-                    time.sleep(0.25)
+                    _sleep(0.25)
                     continue
                 return _add_graph_warning(
                     {"pulled": True, "pushed": False,
