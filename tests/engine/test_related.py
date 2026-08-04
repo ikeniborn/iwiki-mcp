@@ -70,3 +70,14 @@ def test_graph_neighbours_identical_for_markdown_and_legacy(tmp_path, monkeypatc
 
     assert set(_graph_neighbours("leg_a.md", depth=2)) == {"leg_b", "leg_c"}
     assert set(_graph_neighbours("md_a.md", depth=2)) == {"md_b", "md_c"}
+
+
+def test_graph_ignores_structured_cross_domain_links(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text(
+        "[other](iwiki://other/page.md)\n[local](local.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "local.md").write_text("## Local\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert _graph_neighbours("a.md", depth=1) == ["local"]

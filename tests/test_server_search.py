@@ -79,6 +79,27 @@ def test_related_graph_fallback_reads_domain_relative_files(tmp_path, monkeypatc
     assert "other" in out["graph"]
 
 
+def test_related_remains_domain_local_for_structured_cross_domain_links(
+    tmp_path, monkeypatch
+):
+    b = _seed(tmp_path, monkeypatch)
+    backend = tmp_path / "wiki" / "backend"
+    (backend / "auth.md").write_text(
+        "# Auth\n## Overview\no\n## Token\n"
+        "see [Other](iwiki://other/page.md#Token)\n",
+        encoding="utf-8",
+    )
+    indexer.index_domain(
+        __import__("iwiki_mcp.engine.config", fromlist=["Config"]).Config.load(),
+        b,
+        "backend",
+    )
+
+    out = server.wiki_related("backend", "auth.md#Token")
+
+    assert out == {"vector": [], "graph": []}
+
+
 def test_related_rejects_hidden_domain(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     out = server.wiki_related(".secret", "hidden.md#Token")
