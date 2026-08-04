@@ -12,6 +12,11 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
 - **After changing functionality:** use `wiki_write_page` for a new page,
   `wiki_update_page` for one existing `##` section, and `wiki_delete_page` only
   when the documented source was removed. Run `wiki_lint` after the write.
+- **Links and cache:** use relative `<type>/<slug>.md#heading` links inside one domain;
+  use `iwiki://<domain>/<page-id>#<anchor>` only across domains. Do not link to root
+  `index.md` / `log.md`: they are generated, not graph pages. `.iwiki/graph.sqlite3`
+  is a local rebuildable cache excluded from Git; keep domain `index.jsonl` and
+  `log.jsonl` portable and let the server rebuild the graph after clone or pull.
 - **Periodically / at end of session:** call `wiki_sync` to pull/push the base.
 - Editing an existing page is section-scoped through `wiki_update_page`;
   `wiki_write_page` still refuses to overwrite a page.

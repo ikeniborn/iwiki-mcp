@@ -20,6 +20,7 @@ def test_description_is_separate_summary_vector_not_prefix():
 
 def test_links_use_type_slug_path_and_export_only_artifacts():
     assert "(<type>/<slug>.md#heading)" in AUTHORING_RULES
+    assert "iwiki://<domain>/<page-id>#<anchor>" in AUTHORING_RULES
     assert "export-only" in AUTHORING_RULES
 
 
@@ -36,6 +37,8 @@ def test_agent_snippets_use_supported_existing_page_update_path():
     for relative in ("templates/AGENTS.md.snippet", "templates/CLAUDE.md.snippet"):
         text = (root / relative).read_text(encoding="utf-8")
         assert "wiki_update_page" in text
+        assert "iwiki://<domain>/<page-id>#<anchor>" in text
+        assert ".iwiki/graph.sqlite3" in text
         assert "Do not imply the tool can update existing pages directly" not in text
 
 

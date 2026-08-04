@@ -134,10 +134,13 @@ Codex does not set the server `cwd` to your project, so pass `iwiki-mcp --projec
 
 `IWIKI_BASE_DIR` points at the shared wiki base. The base is intended to be a git repository, so writes can be committed and synced between machines or projects.
 
-Each domain is a subdirectory under the base. A page's identity is its domain-relative `<type>/<slug>` path: `wiki_write_page` places the file under a directory named for its (resolved) frontmatter `type`, and that same `<type>/<slug>` value — without the `.md` suffix — is what `wiki_list_pages` returns and what `wiki_read_page` / `wiki_update_page` / `wiki_delete_page` expect as `slug`. Each domain's vector store (`index.jsonl`) and ingest log (`log.jsonl`) live at the domain root; a legacy `.iwiki/index.jsonl` / `.iwiki/log.jsonl` domain is migrated to the root automatically the first time any tool touches it. (The base itself keeps a separate `.iwiki/lock` at its own root for the cross-process git lock — unrelated to per-domain storage.)
+Each domain is a subdirectory under the base. A page's identity is its domain-relative `<type>/<slug>` path: `wiki_write_page` places the file under a directory named for its (resolved) frontmatter `type`, and that same `<type>/<slug>` value — without the `.md` suffix — is what `wiki_list_pages` returns and what `wiki_read_page` / `wiki_update_page` / `wiki_delete_page` expect as `slug`. Each domain's portable vector store (`index.jsonl`) and ingest log (`log.jsonl`) live at the domain root; a legacy `.iwiki/index.jsonl` / `.iwiki/log.jsonl` domain is migrated to the root automatically the first time any tool touches it. The base-local `.iwiki/graph.sqlite3` is a separate rebuildable SQLite cache, excluded from Git alongside its WAL/SHM files. The base also keeps `.iwiki/lock` for the cross-process git lock.
 
 ```text
 /home/user/wiki/
+  .iwiki/
+    graph.sqlite3        # local derived cache, not committed
+    lock
   backend/
     architecture/
       auth.md
@@ -153,6 +156,12 @@ Each domain is a subdirectory under the base. A page's identity is its domain-re
 ```
 
 Use one base across projects. Bind each project to the domains it should read from and the domain it should write to.
+
+## Graph cache and links
+
+The graph cache stores directed page links and heading anchors in SQLite, but search walks it as a bounded undirected neighbourhood inside the visible read scope. It never mixes code search with wiki dependencies. After clone, pull, corruption, or a fingerprint mismatch, the server rebuilds the affected local cache from Markdown without embedding calls; while unavailable it safely falls back to Markdown traversal. A graph-refresh failure never discards the committed Markdown, `index.jsonl`, or `log.jsonl` mutation and returns a sanitized fallback warning instead.
+
+Use relative Markdown links within one domain: `[Auth](architecture/auth.md#flow)`. For a page in another visible domain use the canonical URI: `[Routing](iwiki://frontend/concept/routing#flow)`. Root `index.md` and `log.md` are generated OKF artifacts, never graph pages or traversal targets; `wiki_lint` reports an authored link to either as `reserved_target`.
 
 ## Bind a project
 
@@ -255,7 +264,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch, while provider `top_n` is limited to requested final `k`; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. |
 | `wiki_read_page` | Read one Markdown page by domain and slug. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
-| `wiki_related` | Return related sections for a section id within one domain. |
+| `wiki_related` | Return related sections for a section id within one domain; its `{"vector": [], "graph": []}` shape and domain-local fallback stay unchanged. |
 | `wiki_write_page` | Validate and write a new page, index the domain, commit and push. |
 | `wiki_update_page` | Replace the body of one `##` section of an existing page, reindex the changed section, commit and push. |
 | `wiki_delete_page` | Delete one page by domain and slug: remove the file, append a `delete` log op, reindex the domain, commit and push. Rolls back on failure. |
@@ -264,7 +273,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
 | `wiki_bind` | Write or update `.iwiki.toml` for the current project after validating domains. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
-| `wiki_lint` | Report domain health: broken links, orphans, stale pages, `missing_source` (pages whose ingest source no longer exists on disk — deletion candidates), and section gaps. |
+| `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |
 | `wiki_migrate_okf` | Backfill OKF frontmatter and normalize type-directory layout, autonomously with a chat model or as a review plan without one. |
 | `wiki_apply_okf` | Apply reviewed OKF metadata and layout decisions. |
@@ -392,6 +401,7 @@ wiki_search(query="how does auth work?")
 
 ## Limitations (v1)
 
-- Wiki links are intra-domain: use `[Heading](<type>/<slug>.md#heading)` — the page's domain-relative `<type>/<slug>` identity — within the same domain.
+- Within one domain use `[Heading](<type>/<slug>.md#heading)`; across domains use `iwiki://<domain>/<page-id>#<anchor>`.
+- `.iwiki/graph.sqlite3` is a local derived cache, not a portable vector/log replacement and not a code-dependency graph.
 - Vector search uses numpy brute force, not an external vector database.
 - Staleness checks are project-local and depend on available source paths and ingest logs.

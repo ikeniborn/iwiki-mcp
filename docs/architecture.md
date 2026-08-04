@@ -141,16 +141,19 @@ SQLite/sqlite-vec swap (callers depend only on `load`/`save`/`query`).
 
 The base is a git repo. Each non-`.`-prefixed subdirectory is a domain. Pages live
 at `<type>/<slug>.md` (the frontmatter `type` doubles as the directory). Per-domain
-`index.jsonl` and `log.jsonl` sit at the domain root; a legacy `.iwiki/` subdir is
-migrated to the root on first touch (`base.migrate_store_location`). The base keeps
-a single `.iwiki/lock` at its own root for the cross-process git lock — it is never
-a domain.
+`index.jsonl` and `log.jsonl` sit at the domain root and remain the portable vector
+and provenance interchange; a legacy `.iwiki/` subdir is migrated to the root on
+first touch (`base.migrate_store_location`). The base-local `.iwiki/graph.sqlite3`
+is a Git-excluded, rebuildable SQLite cache for Markdown page links and anchors;
+its WAL/SHM files are local too. The base keeps `.iwiki/lock` for the cross-process
+Git lock — none of these files is a domain.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
 flowchart TB
     subgraph baserepo["IWIKI_BASE_DIR (git repo)"]
         meta[".iwiki/lock<br/>(cross-process git lock)"]
+        graphdb[".iwiki/graph.sqlite3<br/>(local derived link/anchor cache)"]
         subgraph d1["domain: backend/"]
             b_arch["architecture/auth.md"]
             b_guide["guide/onboarding.md"]
@@ -625,14 +628,18 @@ leading `.`) is left in place under `layout_skipped_unsafe`.
 
 ## Health checks (`lint`)
 
-`lint.py` is config-free and never embeds — a pure deterministic report used by
-`wiki_lint` and `wiki_remediation_plan`. An absent/empty domain is a clean
-`{"wiki_present": false}` no-op.
+`lint.py` is config-free and never embeds — a deterministic Markdown-authoritative
+report used by `wiki_lint` and `wiki_remediation_plan`. It separately reads SQLite
+parity without creating, repairing, or rebuilding the cache: a quiescent WAL cache
+is inspected from an isolated temporary snapshot, while a changing snapshot reports
+sanitized `busy`. An absent/empty legacy direct lint call is a clean
+`{"wiki_present": false}` no-op; explicit server-domain lint still reports graph
+parity so stale rows are visible.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
 flowchart LR
-    L["lint(wiki_dir)"] --> B["broken links<br/>(parse_links vs files/anchors)"]
+    L["lint(wiki_dir)"] --> B["broken links<br/>(structured links vs visible pages/anchors)"]
     L --> O["orphans<br/>(unreferenced pages)"]
     L --> S["stale<br/>(src_hash / mtime vs log)"]
     L --> MS["missing_source<br/>(ingest source gone)"]
@@ -640,11 +647,13 @@ flowchart LR
     L --> SEC["sections<br/>(validate_page findings)"]
     L --> MF["missing_frontmatter"]
     L --> TD["tag_drift<br/>(near-duplicate tags)"]
+    L --> RT["reserved_target / unavailable_domain"]
+    L --> GP["read-only graph parity<br/>(state · fingerprint · pages · edges · anchors)"]
 
     classDef actionable fill:#f38ba8,color:#1e1e2e,stroke:#d20f39
     classDef other fill:#f9e2af,color:#1e1e2e,stroke:#df8e1d
     class B,MS actionable
-    class O,S,LW,SEC,MF,TD other
+    class O,S,LW,SEC,MF,TD,RT,GP other
 ```
 
 Every `lint` finding is report-only — none blocks a write (that is `validate_page`'s
