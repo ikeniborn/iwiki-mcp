@@ -366,7 +366,7 @@ def _validate_plan(base: str, binding, plan: MutationPlan) -> tuple[str, ...]:
     domains = tuple(sorted(set(plan.affected_domains)))
     if any(domain not in binding.read for domain in domains):
         raise CrossDomainError("write_scope_blocked")
-    if any(domain not in binding.write_scope for domain in domains):
+    if any(domain not in wiki_base.writable_domains(binding) for domain in domains):
         raise CrossDomainError("write_scope_blocked")
     if _head_revision(base) != plan.base_head:
         raise CrossDomainError("source_changed")
@@ -466,7 +466,10 @@ def execute_plan(base: str, binding, plan: MutationPlan) -> dict:
                     sorted(
                         edit.file
                         for edit in plan.edits
-                        if edit.domain == domain and edit.after is not None
+                        if edit.domain == domain
+                        and edit.after is not None
+                        and edit.file.endswith(".md")
+                        and edit.file not in indexer.RESERVED_OKF
                     )
                 )
                 for domain in domains
@@ -476,7 +479,10 @@ def execute_plan(base: str, binding, plan: MutationPlan) -> dict:
                     sorted(
                         edit.file
                         for edit in plan.edits
-                        if edit.domain == domain and edit.after is None
+                        if edit.domain == domain
+                        and edit.after is None
+                        and edit.file.endswith(".md")
+                        and edit.file not in indexer.RESERVED_OKF
                     )
                 )
                 for domain in domains

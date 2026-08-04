@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import functools
+from hashlib import sha256
 import json
 import os
 import re
+import secrets
 import sys
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
@@ -18,16 +21,17 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
-from . import base, cross_domain, ignore, indexer, okf, retrieval, sync
+from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from .lock import mutation_lock
 from .engine import rerank
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
 from .engine.idle import IdleTracker
-from .engine.links import to_markdown_links
+from .engine.links import CrossDomainRewrite, rewrite_cross_domain_links, to_markdown_links
 from .engine.okf_artifacts import RESERVED_OKF
 from .engine.section import SectionError, replace_section
+from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
 
@@ -132,6 +136,34 @@ _UPDATE_REMEDIATION_TOOLS = [
 
 _DELETE_REMEDIATION_TOOLS = ["wiki_delete_page", "wiki_lint"]
 
+_MUTATION_BINDING: ContextVar[base.Binding | None] = ContextVar(
+    "iwiki_mutation_binding", default=None
+)
+
+
+def _resolved_binding() -> base.Binding:
+    return _MUTATION_BINDING.get() or base.resolve_binding()
+
+
+def _creation_binding() -> base.Binding:
+    """Resolve enough base context to bootstrap a configured missing domain."""
+    project_dir = base.resolve_project_dir()
+    config = base.load_project_config(project_dir)
+    raw_base = config.get("base") or os.environ.get("IWIKI_BASE_DIR", "")
+    wiki_base = str(raw_base).strip()
+    if not wiki_base:
+        raise base.BaseError(
+            "no wiki base configured: set IWIKI_BASE_DIR or add `base` to .iwiki.toml"
+        )
+    write = str(config.get("write") or "").strip() or None
+    return base.Binding(
+        os.path.abspath(os.path.expanduser(wiki_base)),
+        base._as_str_tuple(config.get("read")),
+        write,
+        project_dir,
+        (),
+    )
+
 
 def _safe(fn):
     @functools.wraps(fn)
@@ -145,6 +177,19 @@ def _safe(fn):
                 "error": f"HALT: {e}",
                 "hint": "set IWIKI_LLM_BASE_URL / IWIKI_LLM_KEY",
             }
+        except cross_domain.CrossDomainError as e:
+            hint = {
+                "write_scope_blocked": "add every visible referrer domain to write_scope",
+                "target_collision": "delete or rename the colliding page first",
+                "source_changed": "retry the complete operation against current Markdown",
+                "manual_recovery_required": (
+                    "resolve the retained transaction journal before retrying"
+                ),
+            }.get(e.code, "the mutation was rolled back; retry after checking wiki state")
+            result = {"error": str(e), "code": e.code, "hint": hint}
+            if e.code == "mutation_failed":
+                result["rolled_back"] = True
+            return result
         except Exception as e:
             return {"error": str(e), "hint": "unexpected error; see server logs"}
 
@@ -155,7 +200,12 @@ def _mutation_guard(fn):
     @functools.wraps(fn)
     def wrap(*args, **kwargs):
         try:
-            bind = base.resolve_binding()
+            try:
+                bind = base.resolve_binding()
+            except base.BaseError:
+                if fn.__name__ != "wiki_create_domain":
+                    raise
+                bind = _creation_binding()
             optional_domain = fn.__name__ in {
                 "wiki_index",
                 "wiki_migrate_okf",
@@ -163,7 +213,11 @@ def _mutation_guard(fn):
             }
             supplied_domain = args[0] if args else kwargs.get("domain")
             if optional_domain and supplied_domain is None and bind.write is None:
-                return fn(*args, **kwargs)
+                token = _MUTATION_BINDING.set(bind)
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _MUTATION_BINDING.reset(token)
             with mutation_lock(bind.base):
                 cross_domain.recover_pending_transactions(
                     bind.base,
@@ -171,7 +225,11 @@ def _mutation_guard(fn):
                         cross_domain._recovery_graph_safe(bind.base, manifest)
                     ),
                 )
-                return fn(*args, **kwargs)
+                token = _MUTATION_BINDING.set(bind)
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _MUTATION_BINDING.reset(token)
         except cross_domain.CrossDomainError as exc:
             return {
                 "error": str(exc),
@@ -607,7 +665,7 @@ def wiki_write_page(
     type: str | None = None, tags: list[str] | None = None,
     description: str | None = None, status: str | None = None,
 ) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
@@ -730,7 +788,7 @@ def wiki_update_page(
     domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
     description: str | None = None, status: str | None = None,
 ) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
@@ -831,7 +889,7 @@ def wiki_update_page(
 
 @_safe
 def wiki_delete_page(domain: str, slug: str) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
@@ -886,7 +944,7 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
 
 @_safe
 def wiki_index(domain: str | None = None) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     target = domain or bind.write
     if not target:
         return {
@@ -924,7 +982,7 @@ def wiki_index(domain: str | None = None) -> dict:
 
 @_safe
 def wiki_create_domain(name: str) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     valid_domain = _validate_domain(name)
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
@@ -1188,7 +1246,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     layout move is applied regardless of mode. Note: even in plan mode this
     layout move is itself a write -- the domain is always reindexed, and
     committed only when something actually moved."""
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     target = domain or bind.write
     if not target:
         return {"error": "no domain given and no write-target bound",
@@ -1291,10 +1349,145 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
             )}
 
 
+def _apply_okf_page_move(
+    bind: base.Binding,
+    domain: str,
+    slug: str,
+    type: str,
+    tags: list[str] | None,
+    current_identity: str,
+    new_identity: str,
+    fresh: dict,
+) -> dict:
+    """Prepare and execute one type-changing page move transaction."""
+    prepared = okf.prepare_page_move(
+        bind.base, domain, current_identity, new_identity
+    )
+    current_file = f"{current_identity}.md"
+    new_file = f"{new_identity}.md"
+    current_path = _page_path(bind.base, domain, current_identity)
+    original = Path(current_path).read_text(encoding="utf-8")
+    existing_meta, _ = _fm.split(original)
+    target_edit = next(
+        edit
+        for edit in prepared.edits
+        if edit.domain == domain and edit.file == new_file
+    )
+    _, rewritten_body = _fm.split(target_edit.after.decode("utf-8"))
+    apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
+    resolved = existing_meta.get("resource") or okf.latest_source(
+        bind.base, domain, current_file
+    )
+    cfg = Config.load()
+    fm_block, fm_warning = okf.build_frontmatter(
+        cfg,
+        bind.base,
+        domain,
+        slug,
+        rewritten_body,
+        source=resolved,
+        explicit_type=type,
+        explicit_tags=apply_tags,
+        explicit_description=existing_meta.get("description"),
+        explicit_status=existing_meta.get("status"),
+        timestamp_path=f"{domain}/{current_file}",
+    )
+
+    edits = {(edit.domain, edit.file): edit for edit in prepared.edits}
+    edits[(domain, new_file)] = cross_domain.PlannedEdit(
+        domain, new_file, None, (fm_block + rewritten_body).encode("utf-8")
+    )
+    rewritten_pages = {
+        f"{edit.domain}/{edit.file}"
+        for edit in prepared.edits
+        if edit.after is not None
+        and edit.file.endswith(".md")
+        and edit.file != new_file
+    }
+
+    target_page_id = f"{domain}/{current_identity}"
+    candidates = graph.incoming_candidates(bind.base, bind.read, target_page_id)
+    if candidates is None:
+        try:
+            candidates = graph.markdown_incoming_snapshot(
+                bind.base, bind.read, target_page_id
+            ).candidates
+        except graph.MarkdownSnapshotChanged as exc:
+            raise cross_domain.CrossDomainError("source_changed") from exc
+        except graph.GraphRuntimeError as exc:
+            raise cross_domain.CrossDomainError("mutation_failed") from exc
+    candidates = tuple(sorted(set(candidates), key=lambda item: (item.domain, item.file)))
+    writable = set(base.writable_domains(bind))
+    if any(candidate.domain not in writable for candidate in candidates):
+        raise cross_domain.CrossDomainError("write_scope_blocked")
+
+    rewrite = CrossDomainRewrite(domain, current_identity, new_identity)
+    rewritten_links = 0
+    for candidate in candidates:
+        source = graph._read_scoped_markdown(
+            bind.base, candidate.domain, candidate.file
+        )
+        if source is None:
+            raise cross_domain.CrossDomainError("source_changed")
+        source_key = (candidate.domain, candidate.file)
+        destination_key = (
+            (domain, new_file)
+            if source_key == (domain, current_file)
+            else source_key
+        )
+        existing_edit = edits.get(destination_key)
+        content = existing_edit.after if existing_edit is not None else source
+        if content is None:
+            raise cross_domain.CrossDomainError("source_changed")
+        rewritten, count = rewrite_cross_domain_links(
+            content.decode("utf-8"), candidate.domain, rewrite
+        )
+        if not count:
+            continue
+        before_hash = (
+            existing_edit.before_hash
+            if existing_edit is not None
+            else sha256(source).hexdigest()
+        )
+        edits[destination_key] = cross_domain.PlannedEdit(
+            destination_key[0], destination_key[1], before_hash, rewritten.encode("utf-8")
+        )
+        rewritten_pages.add(f"{destination_key[0]}/{destination_key[1]}")
+        rewritten_links += count
+
+    affected_domains = tuple(sorted({edit.domain for edit in edits.values()}))
+    plan = cross_domain.MutationPlan(
+        operation=f"move {domain}/{current_identity} to {domain}/{new_identity}",
+        transaction_id=secrets.token_hex(16),
+        base_head=sync._head_revision(bind.base),
+        edits=tuple(sorted(edits.values(), key=lambda edit: (edit.domain, edit.file))),
+        affected_domains=affected_domains,
+        rewritten_pages=tuple(sorted(rewritten_pages)),
+        rewritten_links=rewritten_links,
+    )
+    evidence = cross_domain.execute_plan(bind.base, bind, plan)
+    meta, _ = _fm.split(fm_block + rewritten_body)
+    result = {
+        "page": f"{domain}/{new_file}",
+        "type": meta.get("type"),
+        "tags": meta.get("tags", []),
+        "indexed_chunks": len(VectorStore(base.index_path(bind.base, domain)).load()),
+        **evidence,
+    }
+    warning = _compose_warnings(
+        result.get("warning"), fresh.get("warning"), fm_warning
+    )
+    if warning:
+        result["warning"] = warning
+    else:
+        result.pop("warning", None)
+    return result
+
+
 @_safe
 def wiki_apply_okf(domain: str, slug: str, type: str,
                    tags: list[str] | None = None) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
@@ -1315,21 +1508,27 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         return {"error": f"page '{valid_domain}/{current_identity}' not found",
                 "hint": "list pages with wiki_list_pages"}
     new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
-    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
     move_change = okf.MoveChange((), ())
     if current_identity != new_identity:
         new_path = _page_path(bind.base, valid_domain, new_identity)
         if os.path.exists(new_path):
             return {"error": f"page '{valid_domain}/{new_identity}' exists",
                     "hint": "delete or rename the colliding page first"}
-        # move_page's link rewrite is best-effort; if a later step (frontmatter
-        # write, index) fails below, the rollback restores the original bytes at
-        # the NEW path but does not move the file back — acceptable, the page
-        # keeps valid structure at its new identity and the next index run
-        # reconciles it.
+        if sync.is_git_repo(bind.base):
+            return _apply_okf_page_move(
+                bind,
+                valid_domain,
+                slug,
+                type,
+                tags,
+                current_identity,
+                new_identity,
+                fresh,
+            )
         move_change = okf.move_page(
             bind.base, valid_domain, current_identity, new_identity
         )
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
     identity = new_identity
     page_file = identity + ".md"
     path = _page_path(bind.base, valid_domain, identity)
@@ -1340,9 +1539,6 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     apply_status = existing_meta.get("status")
     resolved = (
         existing_meta.get("resource")
-        # move_page re-keys the log to the NEW identity as part of the move
-        # above, so the ingest record (if any) is now found under page_file,
-        # not the pre-move current_identity.
         or okf.latest_source(bind.base, valid_domain, page_file)
     )
     cfg = Config.load()
@@ -1382,7 +1578,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
 
 @_safe
 def wiki_export_okf(domain: str | None = None) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     target = domain or bind.write
     if not target:
         return {"error": "no domain given and no write-target bound",
@@ -1431,7 +1627,7 @@ def wiki_export_okf(domain: str | None = None) -> dict:
 
 @_safe
 def wiki_sync() -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     return sync.sync(bind.base)
 
 
