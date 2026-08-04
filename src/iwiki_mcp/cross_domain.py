@@ -405,13 +405,16 @@ def _apply_edit(base: str, edit: PlannedEdit) -> None:
     _atomic_write(path, edit.after)
 
 
-def execute_plan(base: str, binding, plan: MutationPlan) -> dict:
+def execute_plan(
+    base: str, binding, plan: MutationPlan, *, _include_index_stats: bool = False
+) -> dict:
     """Execute one immutable multi-domain mutation under a durable journal."""
     domains = _validate_plan(base, binding, plan)
     paths = _affected_files(plan, domains)
     committed = False
     manifest: TransactionManifest | None = None
     graph_warning: str | None = None
+    index_stats: dict[str, dict] = {}
     with mutation_lock(base):
         recover_pending_transactions(
             base,
@@ -448,7 +451,7 @@ def execute_plan(base: str, binding, plan: MutationPlan) -> dict:
             manifest = transition_transaction(base, manifest, "applied")
             config = Config.load()
             for domain in domains:
-                indexer.index_domain(config, base, domain)
+                index_stats[domain] = indexer.index_domain(config, base, domain)
             message = (
                 f"iwiki: {plan.operation}\n\n"
                 f"Iwiki-Transaction: {plan.transaction_id}"
@@ -525,4 +528,6 @@ def execute_plan(base: str, binding, plan: MutationPlan) -> dict:
         result["warning"] = (
             f"{existing}; {graph_warning}" if existing else graph_warning
         )
+    if _include_index_stats:
+        result["_index_stats"] = index_stats
     return result

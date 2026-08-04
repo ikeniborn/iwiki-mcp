@@ -28,7 +28,14 @@ from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
 from .engine.idle import IdleTracker
-from .engine.links import CrossDomainRewrite, rewrite_cross_domain_links, to_markdown_links
+from .engine.links import (
+    CrossDomainRewrite,
+    parse_link_targets,
+    rewrite_cross_domain_links,
+    rewrite_relative_anchors,
+    slugify_heading,
+    to_markdown_links,
+)
 from .engine.okf_artifacts import RESERVED_OKF
 from .engine.section import SectionError, replace_section
 from .engine.store import VectorStore
@@ -180,6 +187,7 @@ def _safe(fn):
         except cross_domain.CrossDomainError as e:
             hint = {
                 "write_scope_blocked": "add every visible referrer domain to write_scope",
+                "heading_collision": "choose a heading with a unique anchor",
                 "target_collision": "delete or rename the colliding page first",
                 "source_changed": "retry the complete operation against current Markdown",
                 "manual_recovery_required": (
@@ -783,10 +791,200 @@ def wiki_write_page(
     return result
 
 
+def _planned_ingest_log_edit(
+    base_dir: str, domain: str, source: str, page_file: str
+) -> cross_domain.PlannedEdit:
+    path = Path(base.log_path(base_dir, domain))
+    existed = path.is_file()
+    before = path.read_bytes() if existed else b""
+    kept: list[str] = []
+    for line in before.decode("utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except ValueError:
+            kept.append(stripped)
+            continue
+        if record.get("op") == "ingest" and record.get("page") == page_file:
+            continue
+        kept.append(stripped)
+    record = {
+        "op": "ingest",
+        "source": source,
+        "page": page_file,
+        "date": _dt.date.today().isoformat(),
+        "src_hash": indexer.src_hash(source),
+    }
+    kept.append(json.dumps(record, ensure_ascii=False))
+    after = ("\n".join(kept) + "\n").encode("utf-8")
+    return cross_domain.PlannedEdit(
+        domain,
+        "log.jsonl",
+        sha256(before).hexdigest() if existed else None,
+        after,
+    )
+
+
+def _apply_heading_rename(
+    bind: base.Binding,
+    domain: str,
+    slug: str,
+    heading: str,
+    new_heading: str,
+    new_md: str,
+    original_full: str,
+    source: str | None,
+    fresh: dict,
+) -> dict:
+    """Execute a Git-backed heading rename and every exact anchor rewrite."""
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    target_page_id = f"{domain}/{page_file[:-3]}"
+    old_anchor = slugify_heading(heading)
+    new_anchor = slugify_heading(new_heading)
+    target_bytes = original_full.encode("utf-8")
+    edits: dict[tuple[str, str], cross_domain.PlannedEdit] = {
+        (domain, page_file): cross_domain.PlannedEdit(
+            domain,
+            page_file,
+            sha256(target_bytes).hexdigest(),
+            new_md.encode("utf-8"),
+        )
+    }
+    rewritten_pages: set[str] = set()
+    rewritten_links = 0
+
+    if old_anchor != new_anchor:
+        domain_root = Path(base.domain_dir(bind.base, domain))
+        for page_slug in okf._page_slugs(domain_root):
+            file = f"{page_slug}.md"
+            source_bytes = graph._read_scoped_markdown(bind.base, domain, file)
+            if source_bytes is None:
+                raise cross_domain.CrossDomainError("source_changed")
+            targets_page = file == page_file or any(
+                target.kind == "intra"
+                and target.target_page == page_file[:-3]
+                and target.target_anchor == old_anchor
+                for target in parse_link_targets(source_bytes.decode("utf-8"), domain)
+            )
+            if not targets_page:
+                continue
+            key = (domain, file)
+            existing = edits.get(key)
+            content = existing.after if existing is not None else source_bytes
+            rewritten, count = rewrite_relative_anchors(
+                content.decode("utf-8"),
+                old_anchor,
+                new_anchor,
+                target_page=page_file[:-3],
+                source_page=page_slug,
+            )
+            if not count:
+                continue
+            edits[key] = cross_domain.PlannedEdit(
+                domain,
+                file,
+                (
+                    existing.before_hash
+                    if existing is not None
+                    else sha256(source_bytes).hexdigest()
+                ),
+                rewritten.encode("utf-8"),
+            )
+            rewritten_pages.add(f"{domain}/{file}")
+            rewritten_links += count
+
+        candidates = graph.incoming_candidates(
+            bind.base, bind.read, target_page_id, old_anchor
+        )
+        if candidates is None:
+            try:
+                candidates = graph.markdown_incoming_snapshot(
+                    bind.base, bind.read, target_page_id, old_anchor
+                ).candidates
+            except graph.MarkdownSnapshotChanged as exc:
+                raise cross_domain.CrossDomainError("source_changed") from exc
+            except graph.GraphRuntimeError as exc:
+                raise cross_domain.CrossDomainError("mutation_failed") from exc
+        candidates = tuple(
+            sorted(set(candidates), key=lambda item: (item.domain, item.file))
+        )
+        writable = set(base.writable_domains(bind))
+        if any(candidate.domain not in writable for candidate in candidates):
+            raise cross_domain.CrossDomainError("write_scope_blocked")
+        rewrite = CrossDomainRewrite(
+            domain,
+            page_file[:-3],
+            page_file[:-3],
+            old_anchor,
+            new_anchor,
+        )
+        for candidate in candidates:
+            source_bytes = graph._read_scoped_markdown(
+                bind.base, candidate.domain, candidate.file
+            )
+            if source_bytes is None:
+                raise cross_domain.CrossDomainError("source_changed")
+            key = (candidate.domain, candidate.file)
+            existing = edits.get(key)
+            content = existing.after if existing is not None else source_bytes
+            rewritten, count = rewrite_cross_domain_links(
+                content.decode("utf-8"), candidate.domain, rewrite
+            )
+            if not count:
+                continue
+            edits[key] = cross_domain.PlannedEdit(
+                candidate.domain,
+                candidate.file,
+                (
+                    existing.before_hash
+                    if existing is not None
+                    else sha256(source_bytes).hexdigest()
+                ),
+                rewritten.encode("utf-8"),
+            )
+            rewritten_pages.add(f"{candidate.domain}/{candidate.file}")
+            rewritten_links += count
+
+    if source is not None:
+        log_edit = _planned_ingest_log_edit(
+            bind.base, domain, source, page_file
+        )
+        edits[(domain, log_edit.file)] = log_edit
+    affected_domains = tuple(sorted({edit.domain for edit in edits.values()}))
+    plan = cross_domain.MutationPlan(
+        operation=f"rename heading in {domain}/{page_file}",
+        transaction_id=secrets.token_hex(16),
+        base_head=sync._head_revision(bind.base),
+        edits=tuple(sorted(edits.values(), key=lambda edit: (edit.domain, edit.file))),
+        affected_domains=affected_domains,
+        rewritten_pages=tuple(sorted(rewritten_pages)),
+        rewritten_links=rewritten_links,
+    )
+    evidence = cross_domain.execute_plan(
+        bind.base, bind, plan, _include_index_stats=True
+    )
+    index_stats = evidence.pop("_index_stats")[domain]
+    result = {
+        "page": f"{domain}/{page_file}",
+        "heading": heading.lstrip("#").strip(),
+        **index_stats,
+        **evidence,
+    }
+    warning = _compose_warnings(result.get("warning"), fresh.get("warning"))
+    if warning:
+        result["warning"] = warning
+    else:
+        result.pop("warning", None)
+    return result
+
+
 @_safe
 def wiki_update_page(
     domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
     description: str | None = None, status: str | None = None,
+    new_heading: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -828,8 +1026,12 @@ def wiki_update_page(
     meta, original_body = _fm.split(original_full)
     new_body = to_markdown_links(new_body)
     try:
-        new_body = replace_section(original_body, heading, new_body)
+        new_body = replace_section(
+            original_body, heading, new_body, new_heading=new_heading
+        )
     except SectionError as e:
+        if new_heading is not None and "collides with another anchor" in str(e):
+            raise cross_domain.CrossDomainError("heading_collision", str(e))
         return {"error": str(e), "hint": "check the heading with wiki_read_page"}
     blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
     if blocking:
@@ -848,6 +1050,18 @@ def wiki_update_page(
         new_md = _fm.render(meta) + new_body
     else:
         new_md = new_body
+    if new_heading is not None and sync.is_git_repo(bind.base):
+        return _apply_heading_rename(
+            bind,
+            valid_domain,
+            slug,
+            heading,
+            new_heading,
+            new_md,
+            original_full,
+            source,
+            fresh,
+        )
     log_file = base.log_path(bind.base, valid_domain)
     log_before = None
     if source and os.path.exists(log_file):

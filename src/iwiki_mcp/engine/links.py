@@ -563,9 +563,14 @@ def rewrite_cross_domain_links(
 
 
 def rewrite_relative_anchors(
-    content: str, old_anchor: str, new_anchor: str
+    content: str,
+    old_anchor: str,
+    new_anchor: str,
+    *,
+    target_page: str | None = None,
+    source_page: str | None = None,
 ) -> tuple[str, int]:
-    """Rewrite matching relative Markdown fragments, preserving link text/code."""
+    """Rewrite matching relative fragments, optionally scoped to one page."""
     old = slugify_heading(old_anchor)
     new = slugify_heading(new_anchor)
     if not old or not new or old == new:
@@ -580,6 +585,13 @@ def rewrite_relative_anchors(
             return None
         if slugify_heading(unquote(parsed.fragment)) != old:
             return None
+        if target_page is not None:
+            if parsed.path:
+                page = _page_id(parsed.path, strip_dot_slash=True)
+                if page != target_page:
+                    return None
+            elif source_page != target_page:
+                return None
         return f"{parsed.path}#{new}"
 
     return _rewrite_markdown_targets(content, replace)

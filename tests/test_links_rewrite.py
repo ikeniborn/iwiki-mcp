@@ -38,6 +38,25 @@ def test_rewrite_relative_anchors_rewrites_only_matching_markdown_href():
     assert count == 2
 
 
+def test_rewrite_relative_anchors_can_scope_to_exact_page_identity():
+    body = (
+        "[target](concept/x.md#Old) [other](other.md#Old) "
+        "[self](#Old)\n"
+    )
+    out, count = rewrite_relative_anchors(
+        body,
+        "Old",
+        "New",
+        target_page="concept/x",
+        source_page="concept/x",
+    )
+    assert out == (
+        "[target](concept/x.md#new) [other](other.md#Old) "
+        "[self](#new)\n"
+    )
+    assert count == 2
+
+
 def test_rewrite_link_targets_markdown_and_legacy():
     body = "See [A](alpha.md#s) and [[alpha#S]] and `alpha.md`.\n"
     out = rewrite_link_targets(body, {"alpha": "concept/alpha"})

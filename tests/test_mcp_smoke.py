@@ -125,6 +125,9 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 bind_schema = tools["wiki_bind"].inputSchema
                 assert "write_scope" in bind_schema["properties"]
                 assert "write_scope" not in bind_schema.get("required", [])
+                update_schema = tools["wiki_update_page"].inputSchema
+                assert "new_heading" in update_schema["properties"]
+                assert "new_heading" not in update_schema.get("required", [])
                 res = await session.call_tool("wiki_status", {})
                 assert not res.isError
                 assert res.content

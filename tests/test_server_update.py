@@ -1,6 +1,7 @@
 import json
 import os
 import hashlib
+import inspect
 import subprocess
 
 from iwiki_mcp import base, indexer, server
@@ -58,6 +59,23 @@ def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "refreshed flow text" in content
     assert "login then token" not in content
+    assert "transaction_id" not in out
+    assert "rewritten_pages" not in out
+
+
+def test_update_public_signature_adds_trailing_optional_new_heading():
+    signature = inspect.signature(server.wiki_update_page)
+    assert list(signature.parameters) == [
+        "domain",
+        "slug",
+        "heading",
+        "new_body",
+        "source",
+        "description",
+        "status",
+        "new_heading",
+    ]
+    assert signature.parameters["new_heading"].default is None
 
 
 def test_update_page_refreshes_only_changed_graph_page(tmp_path, monkeypatch):
