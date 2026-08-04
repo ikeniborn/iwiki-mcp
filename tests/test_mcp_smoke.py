@@ -89,6 +89,9 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
 
     base = tmp_path / "wiki"
     (base / "backend").mkdir(parents=True)
+    (base / "backend" / "page.md").write_text(
+        "# Page\n\n## Body\ntext\n", encoding="utf-8"
+    )
     proj = tmp_path / "proj"
     proj.mkdir()
     env = dict(os.environ)
@@ -122,6 +125,13 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 res = await session.call_tool("wiki_status", {})
                 assert not res.isError
                 assert res.content
+                lint_result = await session.call_tool(
+                    "wiki_lint", {"domain": "backend"}
+                )
+                assert not lint_result.isError
+                lint_payload = json.loads(lint_result.content[0].text)
+                assert lint_payload["reports"]["backend"]["graph"]["state"] == "missing"
+                assert not (base / ".iwiki" / "graph.sqlite3").exists()
 
         assert requests == [
             {

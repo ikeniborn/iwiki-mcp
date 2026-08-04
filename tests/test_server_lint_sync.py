@@ -23,6 +23,56 @@ def test_lint_one_domain(tmp_path, monkeypatch):
     assert "backend" in out["domains"]
 
 
+def test_lint_resolves_only_visible_cross_domain_targets_without_migration(
+    tmp_path, monkeypatch
+):
+    wiki_base = tmp_path / "wiki"
+    for domain in ("alpha", "beta", "hidden"):
+        (wiki_base / domain).mkdir(parents=True)
+    (wiki_base / "alpha" / "a.md").write_text(
+        "# A\n\n## Links\n"
+        "[Present](iwiki://beta/present#ok)\n"
+        "[Missing](iwiki://beta/missing)\n"
+        "[Hidden](iwiki://hidden/secret)\n",
+        encoding="utf-8",
+    )
+    (wiki_base / "beta" / "present.md").write_text(
+        "# Present\n\n## OK\nbody\n", encoding="utf-8"
+    )
+    (wiki_base / "hidden" / "secret.md").write_text(
+        "# Secret\n\n## Body\nhidden\n", encoding="utf-8"
+    )
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".iwiki.toml").write_text(
+        'read = ["alpha", "beta"]\nwrite = "alpha"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", str(wiki_base))
+    monkeypatch.setenv("IWIKI_PROJECT_DIR", str(project))
+    monkeypatch.setattr(
+        server.base,
+        "migrate_store_location",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("lint must not migrate stores")
+        ),
+    )
+
+    out = server.wiki_lint()
+
+    assert out["domains"] == ["alpha", "beta"]
+    alpha = out["reports"]["alpha"]
+    assert alpha["broken"] == [{
+        "page": str(wiki_base / "alpha" / "a.md"),
+        "ref": "iwiki://beta/missing",
+    }]
+    assert alpha["unavailable_domain"] == [{
+        "page": str(wiki_base / "alpha" / "a.md"),
+        "ref": "iwiki://hidden/secret",
+        "domain": "hidden",
+    }]
+    assert "secret.md" not in repr(alpha["unavailable_domain"])
+
+
 def test_sync_no_repo(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     out = server.wiki_sync()

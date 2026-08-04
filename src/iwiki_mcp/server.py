@@ -940,12 +940,18 @@ def wiki_lint(domain: str | None = None) -> dict:
 
     bind = base.resolve_binding()
     targets = [domain] if domain else base.resolve_scope(bind, "project", None)
+    valid_targets = [_validate_domain(target) for target in targets]
+    visible_domains = {
+        target: str(_domain_path(bind.base, target)) for target in valid_targets
+    }
     reports = {}
-    for target in targets:
-        valid_domain = _validate_domain(target)
-        base.migrate_store_location(bind.base, valid_domain)
-        reports[valid_domain] = lint(
-            str(_domain_path(bind.base, valid_domain)), project_dir=bind.project_dir
+    for target in valid_targets:
+        reports[target] = lint(
+            visible_domains[target],
+            project_dir=bind.project_dir,
+            domain=target,
+            base_dir=bind.base,
+            visible_domains=visible_domains,
         )
     return {"domains": list(reports.keys()), "reports": reports}
 

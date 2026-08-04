@@ -1,6 +1,14 @@
 import hashlib
+import importlib
 import json
 import os
+import shutil
+import sqlite3
+import subprocess
+from datetime import datetime, timezone
+
+from iwiki_mcp.engine.graph_store import GraphStore, SCHEMA_VERSION
+from iwiki_mcp.graph import markdown_fingerprint
 from iwiki_mcp.engine.lint import lint
 
 
@@ -248,6 +256,413 @@ def test_broken_markdown_anchor_flagged(tmp_path):
         "b.md": "## The Section\nbody\n",
     })
     assert any(b["ref"] == "b#no-such" for b in lint(wd)["broken"])
+
+
+def test_reserved_target_is_reported_separately_and_never_broken(tmp_path):
+    wd = _wiki(tmp_path, {
+        "a.md": "# A\n\n## Links\n[Index](index.md) and [[log]].\n",
+        "index.md": "# Generated index\n",
+        "log.md": "# Generated log\n",
+    })
+
+    out = lint(wd)
+
+    page = os.path.normpath(os.path.join(wd, "a.md"))
+    assert out["broken"] == []
+    assert out["reserved_target"] == [
+        {"page": page, "ref": "index"},
+        {"page": page, "ref": "log"},
+    ]
+
+
+def test_lint_missing_graph_is_read_only_and_reports_remediation(tmp_path):
+    base_dir = tmp_path / "base"
+    domain_dir = base_dir / "docs"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "a.md").write_text("# A\n\n## Body\ntext\n", encoding="utf-8")
+    graph_path = base_dir / ".iwiki" / "graph.sqlite3"
+
+    out = lint(
+        str(domain_dir), domain="docs", base_dir=str(base_dir)
+    )
+
+    assert not graph_path.exists()
+    assert out["graph"] == {
+        "available": False,
+        "schema_version": None,
+        "state": "missing",
+        "fingerprint_match": None,
+        "missing_pages": [],
+        "extra_pages": [],
+        "missing_edges": [],
+        "extra_edges": [],
+        "anchor_mismatches": [],
+        "reason": "graph database is missing",
+        "hint": "run wiki_index('docs')",
+    }
+
+
+def _git(cwd, *args):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+    )
+
+
+def _ready_graph(tmp_path):
+    base_dir = tmp_path / "base"
+    domain_dir = base_dir / "docs"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "a.md").write_text(
+        "# A\n\n## Links\n[B](b.md#details)\n", encoding="utf-8"
+    )
+    (domain_dir / "b.md").write_text(
+        "# B\n\n### Details\nbody\n", encoding="utf-8"
+    )
+    (domain_dir / "c.md").write_text(
+        "# C\n\n## Body\nbody\n", encoding="utf-8"
+    )
+    _git(base_dir, "init", "-q")
+    _git(base_dir, "config", "user.email", "t@t")
+    _git(base_dir, "config", "user.name", "t")
+    _git(base_dir, "add", "-A")
+    _git(base_dir, "commit", "-q", "-m", "seed")
+    fingerprint = markdown_fingerprint(str(base_dir), "docs")
+    store = GraphStore(base_dir)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint=fingerprint.value,
+        fingerprint_provider=lambda: markdown_fingerprint(
+            str(base_dir), "docs"
+        ).value,
+        indexed_commit=fingerprint.indexed_commit,
+        indexed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return base_dir, domain_dir, store
+
+
+def test_lint_reports_exact_ready_graph_parity_without_graph_writes(
+    tmp_path, monkeypatch
+):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    before = store.path.read_bytes()
+
+    def fail_write(*args, **kwargs):
+        raise AssertionError("lint must not mutate graph")
+
+    monkeypatch.setattr(GraphStore, "connect", fail_write)
+    monkeypatch.setattr(GraphStore, "rebuild_domain", fail_write)
+    monkeypatch.setattr(GraphStore, "refresh_pages", fail_write)
+    monkeypatch.setattr(GraphStore, "mark_domain_dirty", fail_write)
+
+    out = lint(
+        str(domain_dir), domain="docs", base_dir=str(base_dir)
+    )
+
+    assert out["broken"] == []
+    assert out["graph"] == {
+        "available": True,
+        "schema_version": SCHEMA_VERSION,
+        "state": "ready",
+        "fingerprint_match": True,
+        "missing_pages": [],
+        "extra_pages": [],
+        "missing_edges": [],
+        "extra_edges": [],
+        "anchor_mismatches": [],
+    }
+    assert store.path.read_bytes() == before
+
+
+def test_lint_does_not_create_sqlite_sidecars_for_ready_graph(
+    tmp_path, monkeypatch
+):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    sidecars = [
+        store.path.with_name(store.path.name + suffix)
+        for suffix in ("-wal", "-shm")
+    ]
+    for sidecar in sidecars:
+        assert not sidecar.exists()
+    lint_module = importlib.import_module("iwiki_mcp.engine.lint")
+    real_connect = sqlite3.connect
+    observed_sidecars = []
+
+    def observing_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        observed_sidecars.extend(path.name for path in sidecars if path.exists())
+        return connection
+
+    monkeypatch.setattr(lint_module.sqlite3, "connect", observing_connect)
+
+    report = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+
+    assert report["graph"]["state"] == "ready"
+    assert observed_sidecars == []
+    assert all(not path.exists() for path in sidecars)
+
+
+def test_lint_reads_quiescent_nonempty_wal_without_mutating_originals(tmp_path):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    writer = sqlite3.connect(store.path)
+    writer.execute("PRAGMA wal_autocheckpoint = 0")
+    writer.execute(
+        "UPDATE domains SET state = 'dirty' WHERE domain = 'docs'"
+    )
+    writer.commit()
+    wal_path = store.path.with_name(store.path.name + "-wal")
+    assert wal_path.stat().st_size > 0
+    before = {
+        path.name: path.read_bytes()
+        for path in store.path.parent.iterdir()
+        if path.name.startswith(store.path.name)
+    }
+    try:
+        report = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+        after = {
+            path.name: path.read_bytes()
+            for path in store.path.parent.iterdir()
+            if path.name.startswith(store.path.name)
+        }
+    finally:
+        writer.close()
+
+    assert report["graph"]["available"] is True
+    assert report["graph"]["state"] == "dirty"
+    assert after == before
+
+
+def test_lint_rejects_nonempty_wal_that_changes_during_snapshot(
+    tmp_path, monkeypatch
+):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    writer = sqlite3.connect(store.path)
+    writer.execute("PRAGMA wal_autocheckpoint = 0")
+    writer.execute(
+        "UPDATE domains SET state = 'dirty' WHERE domain = 'docs'"
+    )
+    writer.commit()
+    wal_path = store.path.with_name(store.path.name + "-wal")
+    assert wal_path.stat().st_size > 0
+    lint_module = importlib.import_module("iwiki_mcp.engine.lint")
+    monkeypatch.setattr(lint_module, "shutil", shutil, raising=False)
+    real_copyfile = shutil.copyfile
+    raced = False
+
+    def racing_copyfile(source, target):
+        nonlocal raced
+        result = real_copyfile(source, target)
+        if not raced and os.fspath(source) == os.fspath(wal_path):
+            raced = True
+            writer.execute(
+                "UPDATE domains SET indexed_at = 'raced' WHERE domain = 'docs'"
+            )
+            writer.commit()
+        return result
+
+    monkeypatch.setattr(lint_module.shutil, "copyfile", racing_copyfile)
+    try:
+        report = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    finally:
+        writer.close()
+
+    assert raced is True
+    assert report["graph"]["available"] is False
+    assert report["graph"]["state"] == "busy"
+    assert report["graph"]["reason"] == "graph database is busy"
+
+
+def test_explicit_empty_domain_reports_graph_extras_but_legacy_call_is_noop(
+    tmp_path,
+):
+    base_dir = tmp_path / "base"
+    domain_dir = base_dir / "docs"
+    domain_dir.mkdir(parents=True)
+    store = GraphStore(base_dir)
+    connection = store.connect()
+    try:
+        connection.execute(
+            "INSERT INTO domains VALUES (?, NULL, ?, 'ready', ?)",
+            ("docs", "stale", datetime.now(timezone.utc).isoformat()),
+        )
+        connection.execute(
+            "INSERT INTO pages VALUES "
+            "('docs/extra', 'docs', 'extra.md', 'content', 'links')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert lint(str(domain_dir)) == {"wiki_present": False}
+
+    report = lint(
+        str(domain_dir), domain="docs", base_dir=str(base_dir)
+    )
+
+    assert _ordinary_findings(report) == {
+        "wiki_present": True,
+        "pages": 0,
+        "broken": [],
+        "orphans": [],
+        "stale": [],
+        "missing_source": [],
+        "legacy_wikilink": [],
+        "sections": [],
+        "missing_frontmatter": [],
+        "tag_drift": [],
+        "reserved_target": [],
+        "unavailable_domain": [],
+    }
+    assert [
+        page["page_id"] for page in report["graph"]["extra_pages"]
+    ] == ["docs/extra"]
+
+
+def _ordinary_findings(report):
+    return {key: value for key, value in report.items() if key != "graph"}
+
+
+def test_lint_ordinary_findings_ignore_every_graph_availability_state(tmp_path):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    ready = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    ordinary = _ordinary_findings(ready)
+
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE domains SET state = 'dirty' WHERE domain = 'docs'"
+        )
+    dirty = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    assert _ordinary_findings(dirty) == ordinary
+    assert dirty["graph"]["state"] == "dirty"
+    assert dirty["graph"]["hint"] == "run wiki_index('docs')"
+
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE domains SET state = 'rebuilding' WHERE domain = 'docs'"
+        )
+    rebuilding = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    assert _ordinary_findings(rebuilding) == ordinary
+    assert rebuilding["graph"]["state"] == "rebuilding"
+
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA user_version = 999")
+    incompatible = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    assert _ordinary_findings(incompatible) == ordinary
+    assert incompatible["graph"]["state"] == "incompatible"
+    assert incompatible["graph"]["reason"] == "graph schema is incompatible"
+    assert str(tmp_path) not in repr(incompatible["graph"])
+
+    store.path.unlink()
+    missing = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    assert _ordinary_findings(missing) == ordinary
+    assert missing["graph"]["state"] == "missing"
+
+    store.path.write_bytes(b"not a sqlite database")
+    corrupt = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    assert _ordinary_findings(corrupt) == ordinary
+    assert corrupt["graph"]["state"] == "corrupt"
+    assert corrupt["graph"]["reason"] == "graph database is corrupt"
+    assert str(tmp_path) not in repr(corrupt["graph"])
+
+
+def test_lint_busy_graph_preserves_markdown_findings_and_sanitizes_reason(tmp_path):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    ordinary = _ordinary_findings(
+        lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    )
+    locker = sqlite3.connect(store.path)
+    locker.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    locker.execute("PRAGMA journal_mode = DELETE")
+    locker.execute("BEGIN EXCLUSIVE")
+    try:
+        report = lint(str(domain_dir), domain="docs", base_dir=str(base_dir))
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert _ordinary_findings(report) == ordinary
+    assert report["graph"]["state"] == "busy"
+    assert report["graph"]["reason"] == "graph database is busy"
+    assert str(tmp_path) not in repr(report["graph"])
+
+
+def test_lint_reports_exact_page_edge_anchor_and_fingerprint_drift(tmp_path):
+    base_dir, domain_dir, store = _ready_graph(tmp_path)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE pages SET content_hash = 'bad' WHERE page_id = 'docs/a'"
+        )
+        connection.execute("DELETE FROM pages WHERE page_id = 'docs/c'")
+        connection.execute("DELETE FROM anchors WHERE page_id = 'docs/c'")
+        connection.execute(
+            "INSERT INTO pages VALUES "
+            "('docs/extra', 'docs', 'extra.md', 'extra-content', 'extra-links')"
+        )
+        connection.execute(
+            "DELETE FROM edges WHERE source_page_id = 'docs/a'"
+        )
+        connection.execute(
+            "INSERT INTO edges VALUES "
+            "('docs/a', 'docs/ghost', '', 'intra', 'ghost.md')"
+        )
+        connection.execute(
+            "INSERT INTO edges VALUES "
+            "('docs/orphan', 'docs/b', '', 'intra', 'b.md')"
+        )
+        connection.execute(
+            "DELETE FROM anchors WHERE page_id = 'docs/b' AND anchor = 'details'"
+        )
+        connection.execute(
+            "INSERT INTO anchors VALUES ('docs/b', 'extra', 'Extra')"
+        )
+        connection.execute(
+            "INSERT INTO anchors VALUES ('docs/orphan', 'orphan', 'Orphan')"
+        )
+        connection.execute(
+            "UPDATE domains SET markdown_fingerprint = 'stale' "
+            "WHERE domain = 'docs'"
+        )
+
+    graph = lint(
+        str(domain_dir), domain="docs", base_dir=str(base_dir)
+    )["graph"]
+
+    assert graph["available"] is True
+    assert graph["state"] == "ready"
+    assert graph["fingerprint_match"] is False
+    assert [page["page_id"] for page in graph["missing_pages"]] == [
+        "docs/a", "docs/c"
+    ]
+    assert [page["page_id"] for page in graph["extra_pages"]] == [
+        "docs/a", "docs/extra"
+    ]
+    assert [edge["target_page_id"] for edge in graph["missing_edges"]] == [
+        "docs/b"
+    ]
+    assert [edge["target_page_id"] for edge in graph["extra_edges"]] == [
+        "docs/ghost", "docs/b"
+    ]
+    assert graph["anchor_mismatches"] == [
+        {
+            "page_id": "docs/b",
+            "missing": [{"anchor": "details", "heading": "Details"}],
+            "extra": [{"anchor": "extra", "heading": "Extra"}],
+        },
+        {
+            "page_id": "docs/c",
+            "missing": [
+                {"anchor": "body", "heading": "Body"},
+                {"anchor": "c", "heading": "C"},
+            ],
+            "extra": [],
+        },
+        {
+            "page_id": "docs/orphan",
+            "missing": [],
+            "extra": [{"anchor": "orphan", "heading": "Orphan"}],
+        },
+    ]
+    assert graph["hint"] == "run wiki_index('docs')"
 
 
 def test_legacy_wikilink_lists_only_unmigrated_pages(tmp_path):
