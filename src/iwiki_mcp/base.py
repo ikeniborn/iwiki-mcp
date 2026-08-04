@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -116,6 +117,40 @@ def index_path(base: str, domain: str) -> str:
 
 def log_path(base: str, domain: str) -> str:
     return os.path.join(domain_dir(base, domain), "log.jsonl")
+
+
+def ensure_graph_store_excluded(base: str) -> bool:
+    """Best-effort exclusion of the base-local graph cache from Git."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=base,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        raw_path = result.stdout.strip()
+        if not raw_path:
+            return False
+        exclude_path = raw_path
+        if not os.path.isabs(exclude_path):
+            exclude_path = os.path.join(base, exclude_path)
+        os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
+        try:
+            with open(exclude_path, encoding="utf-8") as fh:
+                existing = fh.read()
+        except FileNotFoundError:
+            existing = ""
+        pattern = "/.iwiki/"
+        if pattern in existing.splitlines():
+            return True
+        with open(exclude_path, "a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write(pattern + "\n")
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def migrate_store_location(base: str, domain: str) -> None:

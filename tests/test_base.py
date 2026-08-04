@@ -1,3 +1,6 @@
+import subprocess
+from pathlib import Path
+
 import pytest
 from iwiki_mcp import base
 
@@ -178,3 +181,106 @@ def test_merge_read_scope_rejects_new_non_current_domain():
 
     assert merged == ("foreign",)
     assert error == "read scope is protected"
+
+
+def _git(*args, cwd):
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_ensure_graph_store_excluded_writes_root_pattern_to_git_exclude(tmp_path):
+    repo = tmp_path / "wiki"
+    repo.mkdir()
+    _git("init", cwd=repo)
+
+    assert base.ensure_graph_store_excluded(str(repo)) is True
+
+    exclude_path = _git(
+        "rev-parse", "--git-path", "info/exclude", cwd=repo
+    ).stdout.strip()
+    exclude_path = repo / exclude_path
+    exclude_lines = exclude_path.read_text(encoding="utf-8").splitlines()
+    assert exclude_lines[-1] == "/.iwiki/"
+    assert exclude_lines.count("/.iwiki/") == 1
+    assert not (repo / ".gitignore").exists()
+
+
+def test_ensure_graph_store_excluded_is_idempotent(tmp_path):
+    repo = tmp_path / "wiki"
+    repo.mkdir()
+    _git("init", cwd=repo)
+
+    assert base.ensure_graph_store_excluded(str(repo)) is True
+    assert base.ensure_graph_store_excluded(str(repo)) is True
+
+    exclude_path = _git(
+        "rev-parse", "--git-path", "info/exclude", cwd=repo
+    ).stdout.strip()
+    assert (repo / exclude_path).read_text(encoding="utf-8").splitlines().count(
+        "/.iwiki/"
+    ) == 1
+
+
+def test_ensure_graph_store_excluded_fails_soft_outside_git(tmp_path):
+    base_dir = tmp_path / "plain"
+    base_dir.mkdir()
+
+    assert base.ensure_graph_store_excluded(str(base_dir)) is False
+    assert list(base_dir.iterdir()) == []
+
+
+def test_ensure_graph_store_excluded_uses_linked_worktree_git_path(tmp_path):
+    repo = tmp_path / "wiki"
+    linked = tmp_path / "wiki-linked"
+    repo.mkdir()
+    _git("init", cwd=repo)
+    (repo / "README.md").write_text("wiki\n", encoding="utf-8")
+    _git("add", "README.md", cwd=repo)
+    _git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "initial",
+        cwd=repo,
+    )
+    _git("worktree", "add", "-b", "linked", str(linked), cwd=repo)
+
+    assert base.ensure_graph_store_excluded(str(linked)) is True
+
+    exclude_output = _git(
+        "rev-parse", "--git-path", "info/exclude", cwd=linked
+    ).stdout.strip()
+    exclude_path = Path(exclude_output)
+    if not exclude_path.is_absolute():
+        exclude_path = linked / exclude_path
+    assert "/.iwiki/" in exclude_path.read_text(encoding="utf-8").splitlines()
+    assert not (linked / ".gitignore").exists()
+
+
+def test_root_graph_exclude_does_not_match_domain_iwiki_directory(tmp_path):
+    repo = tmp_path / "wiki"
+    repo.mkdir()
+    _git("init", cwd=repo)
+    base.ensure_graph_store_excluded(str(repo))
+    (repo / ".iwiki").mkdir()
+    (repo / ".iwiki" / "graph.sqlite3").touch()
+    (repo / "domain" / ".iwiki").mkdir(parents=True)
+    (repo / "domain" / ".iwiki" / "index.jsonl").touch()
+
+    root_match = subprocess.run(
+        ["git", "check-ignore", ".iwiki/graph.sqlite3"], cwd=repo
+    )
+    nested_match = subprocess.run(
+        ["git", "check-ignore", "domain/.iwiki/index.jsonl"], cwd=repo
+    )
+
+    assert root_match.returncode == 0
+    assert nested_match.returncode == 1
