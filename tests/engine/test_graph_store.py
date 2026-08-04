@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+from hashlib import sha256
+import builtins
+from contextlib import contextmanager
+import importlib
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +59,790 @@ def _open_store(tmp_path: Path):
     store = _graph_store_type()(tmp_path)
     connection = store.connect()
     return store, connection
+
+
+def test_build_domain_snapshot_is_sorted_immutable_and_normalized(tmp_path):
+    from iwiki_mcp.engine.graph_store import build_domain_snapshot
+
+    domain_dir = tmp_path / "docs"
+    (domain_dir / "concept").mkdir(parents=True)
+    (domain_dir / "zeta.md").write_text("# Zeta\n", encoding="utf-8")
+    source = (
+        "# Source\n"
+        "## Deep Heading\n"
+        "[Zulu](zeta.md#Zeta)\n"
+        "[[zeta#Zeta]]\n"
+        "[Remote](iwiki://other/concept/page#Remote%20Heading)\n"
+    )
+    (domain_dir / "concept" / "source.md").write_text(source, encoding="utf-8")
+
+    snapshot = build_domain_snapshot("docs", domain_dir)
+
+    assert snapshot.domain == "docs"
+    assert [page.file for page in snapshot.pages] == [
+        "concept/source.md",
+        "zeta.md",
+    ]
+    source_page = snapshot.pages[0]
+    assert source_page.page_id == "docs/concept/source"
+    assert source_page.content_hash == sha256(source.encode()).hexdigest()
+    assert [(anchor.page_id, anchor.anchor, anchor.heading) for anchor in snapshot.anchors] == [
+        ("docs/concept/source", "source", "Source"),
+        ("docs/concept/source", "deep-heading", "Deep Heading"),
+        ("docs/zeta", "zeta", "Zeta"),
+    ]
+    assert [
+        (
+            edge.source_page_id,
+            edge.target_page_id,
+            edge.target_anchor,
+            edge.kind,
+            edge.raw_target,
+        )
+        for edge in snapshot.edges
+    ] == [
+        ("docs/concept/source", "docs/zeta", "zeta", "intra", "zeta#Zeta"),
+        (
+            "docs/concept/source",
+            "other/concept/page",
+            "remote-heading",
+            "cross",
+            "iwiki://other/concept/page#Remote%20Heading",
+        ),
+    ]
+    with pytest.raises(FrozenInstanceError):
+        source_page.file = "changed.md"
+
+
+def test_snapshot_excludes_reserved_pages_sources_and_targets(tmp_path):
+    from iwiki_mcp.engine.graph_store import build_domain_snapshot
+
+    domain_dir = tmp_path / "docs"
+    (domain_dir / "nested").mkdir(parents=True)
+    (domain_dir / "index.md").write_text(
+        "# Generated\n[Authored](nested/authored.md)\n", encoding="utf-8"
+    )
+    (domain_dir / "log.md").write_text("# Generated Log\n", encoding="utf-8")
+    (domain_dir / "nested" / "authored.md").write_text(
+        "# Authored\n[Index](index.md)\n[Log](log.md)\n[Nested](index.md#Index)\n",
+        encoding="utf-8",
+    )
+
+    snapshot = build_domain_snapshot("docs", domain_dir)
+
+    assert [page.page_id for page in snapshot.pages] == ["docs/nested/authored"]
+    assert snapshot.edges == ()
+
+
+def test_reserved_root_index_cannot_bridge_two_authored_pages(tmp_path):
+    from iwiki_mcp.engine.graph_store import build_domain_snapshot
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "a.md").write_text(
+        "# A\n[Index](index.md)\n", encoding="utf-8"
+    )
+    (domain_dir / "index.md").write_text(
+        "# Index\n[B](b.md)\n", encoding="utf-8"
+    )
+    (domain_dir / "b.md").write_text("# B\n", encoding="utf-8")
+
+    snapshot = build_domain_snapshot("docs", domain_dir)
+
+    assert [page.page_id for page in snapshot.pages] == ["docs/a", "docs/b"]
+    assert snapshot.edges == ()
+
+
+def test_rebuild_stores_all_h1_through_h6_anchors(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphStore
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    headings = "\n".join(
+        f"{'#' * level} Heading {level}" for level in range(1, 7)
+    )
+    (domain_dir / "page.md").write_text(f"{headings}\n", encoding="utf-8")
+
+    store = GraphStore(tmp_path)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="headings",
+        fingerprint_provider=lambda: "headings",
+        indexed_at="2026-08-04T12:00:00Z",
+    )
+    snapshot = store.load_ready_domain("docs")
+
+    assert [
+        (anchor.anchor, anchor.heading) for anchor in snapshot.anchors
+    ] == [(f"heading-{level}", f"Heading {level}") for level in range(1, 7)]
+
+
+def test_build_domain_snapshot_rechecks_directory_after_enumeration(
+    tmp_path, monkeypatch
+):
+    from iwiki_mcp.engine.graph_store import build_domain_snapshot
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    original_rglob = Path.rglob
+
+    def delete_empty_domain_after_scan(path, pattern):
+        files = list(original_rglob(path, pattern))
+        path.rmdir()
+        return iter(files)
+
+    monkeypatch.setattr(Path, "rglob", delete_empty_domain_after_scan)
+
+    with pytest.raises(OSError, match="^domain directory is unavailable$"):
+        build_domain_snapshot("docs", domain_dir)
+
+
+def test_link_hash_depends_on_sorted_normalized_edges_not_authored_order(tmp_path):
+    from iwiki_mcp.engine.graph_store import build_domain_snapshot
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    page = domain_dir / "source.md"
+    page.write_text(
+        "[B](target.md#Heading)\n[[target#Heading]]\n[Other](other.md)\n",
+        encoding="utf-8",
+    )
+    first = build_domain_snapshot("docs", domain_dir).pages[0]
+    page.write_text(
+        "[Other](other.md)\n[[target#Heading]]\n[B](target.md#Heading)\n",
+        encoding="utf-8",
+    )
+    second_snapshot = build_domain_snapshot("docs", domain_dir)
+    second = second_snapshot.pages[0]
+
+    assert first.content_hash != second.content_hash
+    assert first.link_hash == second.link_hash
+    assert [edge.raw_target for edge in second_snapshot.edges] == [
+        "other.md",
+        "target#Heading",
+    ]
+
+
+def test_link_hash_excludes_equivalent_authored_raw_target_syntax(tmp_path):
+    from iwiki_mcp.engine.graph_store import build_domain_snapshot
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    page = domain_dir / "source.md"
+    page.write_text("[Target](target.md#Heading)\n", encoding="utf-8")
+    markdown_snapshot = build_domain_snapshot("docs", domain_dir)
+    page.write_text("[[target#Heading]]\n", encoding="utf-8")
+    wikilink_snapshot = build_domain_snapshot("docs", domain_dir)
+
+    markdown_edge = markdown_snapshot.edges[0]
+    wikilink_edge = wikilink_snapshot.edges[0]
+    assert (
+        markdown_edge.source_page_id,
+        markdown_edge.target_page_id,
+        markdown_edge.target_anchor,
+        markdown_edge.kind,
+    ) == (
+        wikilink_edge.source_page_id,
+        wikilink_edge.target_page_id,
+        wikilink_edge.target_anchor,
+        wikilink_edge.kind,
+    )
+    assert markdown_edge.raw_target != wikilink_edge.raw_target
+    assert markdown_snapshot.pages[0].link_hash == wikilink_snapshot.pages[0].link_hash
+
+
+def _graph_rows(store):
+    with store.read_snapshot() as connection:
+        return {
+            table: [
+                tuple(row)
+                for row in connection.execute(
+                    f"SELECT * FROM {table} ORDER BY {order}"
+                )
+            ]
+            for table, order in (
+                ("pages", "page_id"),
+                ("anchors", "page_id, anchor"),
+                (
+                    "edges",
+                    "source_page_id, target_page_id, target_anchor",
+                ),
+            )
+        }
+
+
+def test_incremental_refresh_matches_full_rebuild_after_create_delete_and_move(
+    tmp_path,
+):
+    from iwiki_mcp.engine.graph_store import GraphStore
+
+    domain_dir = tmp_path / "wiki" / "docs"
+    domain_dir.mkdir(parents=True)
+    initial_source = (
+        "# Source\n"
+        "[Target](target.md#Heading)\n"
+        "[[target#Heading]]\n"
+        "[Old](old.md)\n"
+        "[Removed](removed.md)\n"
+    )
+    (domain_dir / "source.md").write_text(initial_source, encoding="utf-8")
+    (domain_dir / "target.md").write_text("# Heading\n", encoding="utf-8")
+    (domain_dir / "old.md").write_text("# Old\n", encoding="utf-8")
+    (domain_dir / "removed.md").write_text("# Removed\n", encoding="utf-8")
+    incremental = GraphStore(tmp_path / "incremental")
+    incremental.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="initial",
+        fingerprint_provider=lambda: "initial",
+        indexed_commit="commit-1",
+        indexed_at="2026-08-04T10:00:00Z",
+    )
+
+    final_source = (
+        "# Source Changed\n"
+        "[[target#Heading]]\n"
+        "[Target](target.md#Heading)\n"
+        "[New](new.md)\n"
+    )
+    (domain_dir / "source.md").write_text(final_source, encoding="utf-8")
+    incremental.refresh_page("docs", "source.md", final_source)
+    (domain_dir / "created.md").write_text("# Created\n", encoding="utf-8")
+    incremental.refresh_page("docs", "created.md", "# Created\n")
+    (domain_dir / "target.md").write_text("# Heading Changed\n", encoding="utf-8")
+    incremental.refresh_page("docs", "target.md", "# Heading Changed\n")
+    (domain_dir / "target.md").unlink()
+    incremental.delete_page("docs", "target.md")
+    (domain_dir / "removed.md").unlink()
+    incremental.delete_page("docs", "removed.md")
+    (domain_dir / "old.md").rename(domain_dir / "new.md")
+    incremental.delete_page("docs", "old.md")
+    incremental.refresh_page("docs", "new.md", "# Old\n")
+
+    rebuilt = GraphStore(tmp_path / "rebuilt")
+    rebuilt.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="final",
+        fingerprint_provider=lambda: "final",
+        indexed_commit="commit-2",
+        indexed_at="2026-08-04T11:00:00Z",
+    )
+
+    assert _graph_rows(incremental) == _graph_rows(rebuilt)
+    rows = _graph_rows(incremental)
+    assert {row[0] for row in rows["pages"]} == {
+        "docs/created",
+        "docs/new",
+        "docs/source",
+    }
+    assert (
+        "docs/source",
+        "docs/target",
+        "heading",
+        "intra",
+        "target#Heading",
+    ) in rows["edges"]
+
+
+def test_refresh_page_rolls_back_page_anchors_and_edges_together(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphStore, GraphStoreError
+
+    store = GraphStore(tmp_path)
+    store.refresh_page("docs", "page.md", "# Before\n[Good](good.md)\n")
+    before = _graph_rows(store)
+    connection = store.connect()
+    connection.execute(
+        "CREATE TRIGGER reject_bad_edge BEFORE INSERT ON edges "
+        "WHEN NEW.target_page_id = 'docs/bad' "
+        "BEGIN SELECT RAISE(ABORT, 'private rejection'); END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(GraphStoreError, match="^graph transaction failed$"):
+        store.refresh_page("docs", "page.md", "# After\n[Bad](bad.md)\n")
+
+    assert _graph_rows(store) == before
+
+
+def test_rebuild_commits_rebuilding_before_read_and_ready_with_watermark(
+    tmp_path, monkeypatch
+):
+    from iwiki_mcp.engine import graph_store
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "page.md").write_text("# Page\n", encoding="utf-8")
+    store = graph_store.GraphStore(tmp_path)
+    store.mark_domain_dirty("docs")
+    with store.read_snapshot() as connection:
+        assert connection.execute(
+            "SELECT state FROM domains WHERE domain = 'docs'"
+        ).fetchone()[0] == "dirty"
+
+    original_build = graph_store.build_domain_snapshot
+
+    def observe_rebuilding(domain, path):
+        with store.read_snapshot() as connection:
+            assert connection.execute(
+                "SELECT state FROM domains WHERE domain = ?", (domain,)
+            ).fetchone()[0] == "rebuilding"
+        return original_build(domain, path)
+
+    monkeypatch.setattr(graph_store, "build_domain_snapshot", observe_rebuilding)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="fingerprint-2",
+        fingerprint_provider=lambda: "fingerprint-2",
+        indexed_commit="commit-2",
+        indexed_at="2026-08-04T12:00:00Z",
+    )
+
+    with store.read_snapshot() as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT indexed_commit, markdown_fingerprint, state, indexed_at "
+                "FROM domains WHERE domain = 'docs'"
+            ).fetchone()
+        ) == (
+            "commit-2",
+            "fingerprint-2",
+            "ready",
+            "2026-08-04T12:00:00Z",
+        )
+        assert connection.execute("SELECT page_id FROM pages").fetchone()[0] == (
+            "docs/page"
+        )
+
+
+def test_rebuild_fingerprint_mismatch_preserves_old_rows_and_commits_dirty(
+    tmp_path,
+):
+    from iwiki_mcp.engine.graph_store import GraphStore, GraphStoreError
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    page = domain_dir / "page.md"
+    page.write_text("# Old\n", encoding="utf-8")
+    store = GraphStore(tmp_path)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="old",
+        fingerprint_provider=lambda: "old",
+        indexed_at="2026-08-04T10:00:00Z",
+    )
+    old_rows = _graph_rows(store)
+    page.write_text("# New\n", encoding="utf-8")
+
+    def changed_fingerprint():
+        (domain_dir / "late.md").write_text("# Late\n", encoding="utf-8")
+        return "changed-after-read"
+
+    with pytest.raises(GraphStoreError, match="^cannot rebuild domain graph$") as exc:
+        store.rebuild_domain(
+            "docs",
+            domain_dir,
+            markdown_fingerprint="expected-before-read",
+            fingerprint_provider=changed_fingerprint,
+            indexed_at="2026-08-04T11:00:00Z",
+        )
+
+    assert "changed-after-read" not in str(exc.value)
+    assert _graph_rows(store) == old_rows
+    with store.read_snapshot() as connection:
+        assert connection.execute(
+            "SELECT state FROM domains WHERE domain = 'docs'"
+        ).fetchone()[0] == "dirty"
+
+
+def test_rebuild_checks_fingerprint_after_build_inside_final_transaction(
+    tmp_path, monkeypatch
+):
+    from iwiki_mcp.engine import graph_store
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "page.md").write_text("# Page\n", encoding="utf-8")
+    store = graph_store.GraphStore(tmp_path)
+    events = []
+    active_connections = []
+    original_build = graph_store.build_domain_snapshot
+    original_transaction = store.transaction
+
+    def observed_build(domain, path):
+        events.append("build")
+        return original_build(domain, path)
+
+    @contextmanager
+    def observed_transaction():
+        with original_transaction() as connection:
+            events.append("transaction")
+            active_connections.append(connection)
+            try:
+                yield connection
+            finally:
+                active_connections.pop()
+
+    def current_fingerprint():
+        events.append("provider")
+        assert active_connections
+        assert active_connections[-1].in_transaction
+        return "expected"
+
+    monkeypatch.setattr(graph_store, "build_domain_snapshot", observed_build)
+    monkeypatch.setattr(store, "transaction", observed_transaction)
+
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="expected",
+        fingerprint_provider=current_fingerprint,
+        indexed_at="2026-08-04T11:00:00Z",
+    )
+
+    assert events == ["transaction", "build", "transaction", "provider"]
+
+
+def test_rebuild_fingerprint_provider_failure_preserves_rows_and_commits_dirty(
+    tmp_path,
+):
+    from iwiki_mcp.engine.graph_store import GraphStore, GraphStoreError
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    page = domain_dir / "page.md"
+    page.write_text("# Old\n", encoding="utf-8")
+    store = GraphStore(tmp_path)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="old",
+        fingerprint_provider=lambda: "old",
+        indexed_at="2026-08-04T10:00:00Z",
+    )
+    old_rows = _graph_rows(store)
+    page.write_text("# New\n", encoding="utf-8")
+    private_error = OSError("private fingerprint failure")
+
+    def fail_fingerprint():
+        raise private_error
+
+    with pytest.raises(GraphStoreError, match="^cannot rebuild domain graph$") as exc:
+        store.rebuild_domain(
+            "docs",
+            domain_dir,
+            markdown_fingerprint="new",
+            fingerprint_provider=fail_fingerprint,
+            indexed_at="2026-08-04T11:00:00Z",
+        )
+
+    assert exc.value.__cause__ is private_error
+    assert "private" not in str(exc.value)
+    assert _graph_rows(store) == old_rows
+    with store.read_snapshot() as connection:
+        assert connection.execute(
+            "SELECT state FROM domains WHERE domain = 'docs'"
+        ).fetchone()[0] == "dirty"
+
+
+def test_rebuild_restarts_preexisting_rebuilding_domain(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphStore
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "page.md").write_text("# Page\n", encoding="utf-8")
+    store = GraphStore(tmp_path)
+    with store.transaction() as connection:
+        connection.execute(
+            "INSERT INTO domains VALUES (?, ?, ?, ?, ?)",
+            ("docs", None, "old", "rebuilding", "2026-08-04T00:00:00Z"),
+        )
+
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="new",
+        fingerprint_provider=lambda: "new",
+        indexed_at="2026-08-04T12:00:00Z",
+    )
+
+    with store.read_snapshot() as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT markdown_fingerprint, state FROM domains WHERE domain = 'docs'"
+            ).fetchone()
+        ) == ("new", "ready")
+
+
+def test_rebuild_parse_failure_commits_dirty_and_sanitizes_error(
+    tmp_path, monkeypatch
+):
+    from iwiki_mcp.engine import graph_store
+
+    store = graph_store.GraphStore(tmp_path)
+    private_error = OSError("/private/wiki/page.md failed")
+
+    def fail_build(domain, path):
+        raise private_error
+
+    monkeypatch.setattr(graph_store, "build_domain_snapshot", fail_build)
+
+    with pytest.raises(
+        graph_store.GraphStoreError, match="^cannot rebuild domain graph$"
+    ) as exc:
+        store.rebuild_domain(
+            "docs",
+            tmp_path / "missing-private-domain",
+            markdown_fingerprint="new",
+            fingerprint_provider=lambda: "new",
+            indexed_commit=None,
+            indexed_at="2026-08-04T12:00:00Z",
+        )
+
+    assert exc.value.__cause__ is private_error
+    assert "private" not in str(exc.value)
+    with store.read_snapshot() as connection:
+        assert connection.execute(
+            "SELECT state FROM domains WHERE domain = 'docs'"
+        ).fetchone()[0] == "dirty"
+
+
+@pytest.mark.parametrize("replacement", ["missing", "file"])
+def test_rebuild_invalid_domain_preserves_old_rows_and_commits_dirty(
+    tmp_path, replacement
+):
+    from iwiki_mcp.engine.graph_store import GraphStore, GraphStoreError
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    page = domain_dir / "old.md"
+    page.write_text("# Old\n", encoding="utf-8")
+    store = GraphStore(tmp_path)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="old",
+        fingerprint_provider=lambda: "old",
+        indexed_at="2026-08-04T10:00:00Z",
+    )
+    old_rows = _graph_rows(store)
+    page.unlink()
+    domain_dir.rmdir()
+    if replacement == "file":
+        domain_dir.write_text("not a domain", encoding="utf-8")
+
+    with pytest.raises(GraphStoreError, match="^cannot rebuild domain graph$"):
+        store.rebuild_domain(
+            "docs",
+            domain_dir,
+            markdown_fingerprint="invalid",
+            fingerprint_provider=lambda: "invalid",
+            indexed_at="2026-08-04T11:00:00Z",
+        )
+
+    assert _graph_rows(store) == old_rows
+    with store.read_snapshot() as connection:
+        assert connection.execute(
+            "SELECT state FROM domains WHERE domain = 'docs'"
+        ).fetchone()[0] == "dirty"
+
+
+def test_rebuild_accepts_existing_empty_domain_directory(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphStore
+
+    domain_dir = tmp_path / "empty"
+    domain_dir.mkdir()
+    store = GraphStore(tmp_path)
+
+    store.rebuild_domain(
+        "empty",
+        domain_dir,
+        markdown_fingerprint="empty",
+        fingerprint_provider=lambda: "empty",
+        indexed_at="2026-08-04T11:00:00Z",
+    )
+
+    snapshot = store.load_ready_domain("empty")
+    assert snapshot.pages == ()
+    assert snapshot.anchors == ()
+    assert snapshot.edges == ()
+
+
+def test_rebuild_store_failure_rolls_back_rows_then_commits_dirty(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphStore, GraphStoreError
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "page.md").write_text("# Page\n", encoding="utf-8")
+    store = GraphStore(tmp_path)
+    connection = store.connect()
+    connection.execute(
+        "CREATE TRIGGER reject_page BEFORE INSERT ON pages "
+        "BEGIN SELECT RAISE(ABORT, 'private rejection'); END"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        GraphStoreError, match="^cannot rebuild domain graph$"
+    ) as exc:
+        store.rebuild_domain(
+            "docs",
+            domain_dir,
+            markdown_fingerprint="new",
+            fingerprint_provider=lambda: "new",
+            indexed_commit=None,
+            indexed_at="2026-08-04T12:00:00Z",
+        )
+
+    assert isinstance(exc.value.__cause__, sqlite3.DatabaseError)
+    assert "private rejection" not in str(exc.value)
+    with store.read_snapshot() as connection:
+        assert connection.execute("SELECT count(*) FROM pages").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT state FROM domains WHERE domain = 'docs'"
+        ).fetchone()[0] == "dirty"
+
+
+@pytest.mark.parametrize("state", ["dirty", "rebuilding"])
+def test_load_ready_domain_rejects_unavailable_states(tmp_path, state):
+    from iwiki_mcp.engine.graph_store import GraphDomainUnavailable, GraphStore
+
+    store = GraphStore(tmp_path)
+    with store.transaction() as connection:
+        connection.execute(
+            "INSERT INTO domains VALUES (?, ?, ?, ?, ?)",
+            ("docs", None, "old", state, "2026-08-04T00:00:00Z"),
+        )
+
+    with pytest.raises(GraphDomainUnavailable) as exc:
+        store.load_ready_domain("docs")
+
+    assert exc.value.state == state
+
+
+def test_load_ready_domain_rejects_missing_and_returns_only_ready_domain(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphDomainUnavailable, GraphStore
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "page.md").write_text(
+        "# Page\n[Cross](iwiki://other/target)\n", encoding="utf-8"
+    )
+    store = GraphStore(tmp_path)
+    with pytest.raises(GraphDomainUnavailable) as exc:
+        store.load_ready_domain("docs")
+    assert exc.value.state == "missing"
+
+    store.rebuild_domain(
+        "docs",
+        docs_dir,
+        markdown_fingerprint="ready",
+        fingerprint_provider=lambda: "ready",
+        indexed_commit=None,
+        indexed_at="2026-08-04T12:00:00Z",
+    )
+
+    snapshot = store.load_ready_domain("docs")
+    assert [page.page_id for page in snapshot.pages] == ["docs/page"]
+    assert [edge.target_page_id for edge in snapshot.edges] == ["other/target"]
+
+
+def test_wal_reader_keeps_old_ready_snapshot_during_public_rebuild(
+    tmp_path, monkeypatch
+):
+    from iwiki_mcp.engine.graph_store import GraphDomainUnavailable, GraphStore
+
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "old.md").write_text("# Old\n", encoding="utf-8")
+    store = GraphStore(tmp_path)
+    store.rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="old",
+        fingerprint_provider=lambda: "old",
+        indexed_commit=None,
+        indexed_at="2026-08-04T10:00:00Z",
+    )
+    (domain_dir / "old.md").unlink()
+    (domain_dir / "new.md").write_text("# New\n", encoding="utf-8")
+    replacement_started = threading.Event()
+    allow_commit = threading.Event()
+    original_insert_snapshot = GraphStore._insert_snapshot
+
+    def paused_insert_snapshot(connection, snapshot):
+        original_insert_snapshot(connection, snapshot)
+        replacement_started.set()
+        assert allow_commit.wait(timeout=5)
+
+    monkeypatch.setattr(
+        GraphStore, "_insert_snapshot", staticmethod(paused_insert_snapshot)
+    )
+
+    with store.read_snapshot() as old_reader:
+        assert old_reader.execute("SELECT page_id FROM pages").fetchone()[0] == (
+            "docs/old"
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            rebuild = executor.submit(
+                store.rebuild_domain,
+                "docs",
+                domain_dir,
+                markdown_fingerprint="new",
+                fingerprint_provider=lambda: "new",
+                indexed_at="2026-08-04T11:00:00Z",
+            )
+            try:
+                assert replacement_started.wait(timeout=5)
+                assert old_reader.execute(
+                    "SELECT page_id FROM pages"
+                ).fetchone()[0] == "docs/old"
+                with pytest.raises(GraphDomainUnavailable) as exc:
+                    store.load_ready_domain("docs")
+                assert exc.value.state == "rebuilding"
+            finally:
+                allow_commit.set()
+            rebuild.result(timeout=5)
+        assert old_reader.execute("SELECT page_id FROM pages").fetchone()[0] == (
+            "docs/old"
+        )
+
+    assert store.load_ready_domain("docs").pages[0].page_id == "docs/new"
+
+
+def test_graph_rebuild_does_not_import_embedding_modules(tmp_path, monkeypatch):
+    from iwiki_mcp.engine import graph_store
+
+    imported_embedding_modules = []
+    original_import = builtins.__import__
+
+    def guard_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if "embed" in name:
+            imported_embedding_modules.append(name)
+            raise AssertionError(f"embedding import during graph rebuild: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guard_import)
+    reloaded = importlib.reload(graph_store)
+    domain_dir = tmp_path / "docs"
+    domain_dir.mkdir()
+    (domain_dir / "page.md").write_text("# Page\n", encoding="utf-8")
+
+    reloaded.GraphStore(tmp_path).rebuild_domain(
+        "docs",
+        domain_dir,
+        markdown_fingerprint="ready",
+        fingerprint_provider=lambda: "ready",
+        indexed_commit=None,
+        indexed_at="2026-08-04T12:00:00Z",
+    )
+
+    assert imported_embedding_modules == []
 
 
 def test_graph_store_uses_base_local_graph_path_and_creates_directory(tmp_path):

@@ -4,10 +4,16 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from hashlib import sha256
+import json
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator, Literal
 
 from iwiki_mcp.base import ensure_graph_store_excluded
+from iwiki_mcp.engine.links import parse_heading_anchors, parse_link_targets
+from iwiki_mcp.engine.okf_artifacts import RESERVED_OKF
 
 
 SCHEMA_VERSION = 1
@@ -22,6 +28,124 @@ class GraphStoreError(RuntimeError):
 
 class GraphSchemaError(GraphStoreError):
     """Raised when the graph schema cannot be used by this version."""
+
+
+class GraphDomainUnavailable(GraphStoreError):
+    """Raised when a domain graph has no ready snapshot."""
+
+    def __init__(self, domain: str, state: str) -> None:
+        super().__init__("domain graph is unavailable")
+        self.domain = domain
+        self.state = state
+
+
+@dataclass(frozen=True)
+class PageRecord:
+    page_id: str
+    domain: str
+    file: str
+    content_hash: str
+    link_hash: str
+
+
+@dataclass(frozen=True)
+class AnchorRecord:
+    page_id: str
+    anchor: str
+    heading: str
+
+
+@dataclass(frozen=True)
+class EdgeRecord:
+    source_page_id: str
+    target_page_id: str
+    target_anchor: str
+    kind: Literal["intra", "cross"]
+    raw_target: str
+
+
+@dataclass(frozen=True)
+class DomainSnapshot:
+    domain: str
+    pages: tuple[PageRecord, ...]
+    anchors: tuple[AnchorRecord, ...]
+    edges: tuple[EdgeRecord, ...]
+
+
+def _page_snapshot(domain: str, file: str, content: str) -> tuple[
+    PageRecord, tuple[AnchorRecord, ...], tuple[EdgeRecord, ...]
+]:
+    page_id = f"{domain}/{file[:-3]}"
+    anchors = tuple(
+        AnchorRecord(page_id, anchor.anchor, anchor.heading)
+        for anchor in parse_heading_anchors(content)
+    )
+    edges = tuple(
+        sorted(
+            (
+                EdgeRecord(
+                    page_id,
+                    f"{target.target_domain}/{target.target_page}",
+                    target.target_anchor,
+                    target.kind,
+                    target.raw_target,
+                )
+                for target in parse_link_targets(content, domain)
+                if not target.is_reserved
+            ),
+            key=lambda edge: (
+                edge.target_page_id,
+                edge.target_anchor,
+                edge.raw_target,
+            ),
+        )
+    )
+    normalized_links = [
+        (
+            edge.target_page_id,
+            edge.target_anchor,
+            edge.kind,
+        )
+        for edge in edges
+    ]
+    link_hash = sha256(
+        json.dumps(normalized_links, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    page = PageRecord(
+        page_id=page_id,
+        domain=domain,
+        file=file,
+        content_hash=sha256(content.encode("utf-8")).hexdigest(),
+        link_hash=link_hash,
+    )
+    return page, anchors, edges
+
+
+def build_domain_snapshot(domain: str, domain_dir: str | Path) -> DomainSnapshot:
+    """Parse one domain into a deterministic, embedding-free graph snapshot."""
+    root = Path(domain_dir)
+    if not root.is_dir():
+        raise OSError("domain directory is unavailable")
+    pages: list[PageRecord] = []
+    anchors: list[AnchorRecord] = []
+    edges: list[EdgeRecord] = []
+    files = sorted(
+        path
+        for path in root.rglob("*.md")
+        if path.is_file() and path.relative_to(root).as_posix() not in RESERVED_OKF
+    )
+    if not root.is_dir():
+        raise OSError("domain directory is unavailable")
+    for path in files:
+        file = path.relative_to(root).as_posix()
+        content = path.read_bytes().decode("utf-8")
+        page, page_anchors, page_edges = _page_snapshot(domain, file, content)
+        pages.append(page)
+        anchors.extend(page_anchors)
+        edges.extend(page_edges)
+    if not root.is_dir():
+        raise OSError("domain directory is unavailable")
+    return DomainSnapshot(domain, tuple(pages), tuple(anchors), tuple(edges))
 
 
 _SCHEMA_V1 = """
@@ -162,6 +286,211 @@ class GraphStore:
             raise
         except (OSError, sqlite3.DatabaseError) as exc:
             raise GraphStoreError("cannot open graph store") from exc
+
+    @staticmethod
+    def _insert_snapshot(
+        connection: sqlite3.Connection, snapshot: DomainSnapshot
+    ) -> None:
+        connection.executemany(
+            "INSERT INTO pages VALUES (?, ?, ?, ?, ?)",
+            (
+                (
+                    page.page_id,
+                    page.domain,
+                    page.file,
+                    page.content_hash,
+                    page.link_hash,
+                )
+                for page in snapshot.pages
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO anchors VALUES (?, ?, ?)",
+            (
+                (anchor.page_id, anchor.anchor, anchor.heading)
+                for anchor in snapshot.anchors
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO edges VALUES (?, ?, ?, ?, ?)",
+            (
+                (
+                    edge.source_page_id,
+                    edge.target_page_id,
+                    edge.target_anchor,
+                    edge.kind,
+                    edge.raw_target,
+                )
+                for edge in snapshot.edges
+            ),
+        )
+
+    def rebuild_domain(
+        self,
+        domain: str,
+        domain_dir: str | Path,
+        *,
+        markdown_fingerprint: str,
+        fingerprint_provider: Callable[[], str],
+        indexed_commit: str | None = None,
+        indexed_at: str,
+    ) -> None:
+        """Replace one domain while the caller holds the base lock.
+
+        Fingerprint resolution belongs to the caller. The supplied provider is
+        rechecked inside the final write transaction before rows are replaced.
+        """
+        try:
+            self._mark_domain_rebuilding(domain)
+            snapshot = build_domain_snapshot(domain, domain_dir)
+            with self.transaction() as connection:
+                if fingerprint_provider() != markdown_fingerprint:
+                    raise GraphStoreError("markdown fingerprint changed")
+                connection.execute(
+                    "DELETE FROM pages WHERE domain = ?", (domain,)
+                )
+                self._insert_snapshot(connection, snapshot)
+                connection.execute(
+                    "INSERT INTO domains VALUES (?, ?, ?, 'ready', ?) "
+                    "ON CONFLICT(domain) DO UPDATE SET "
+                    "indexed_commit = excluded.indexed_commit, "
+                    "markdown_fingerprint = excluded.markdown_fingerprint, "
+                    "state = excluded.state, indexed_at = excluded.indexed_at",
+                    (
+                        domain,
+                        indexed_commit,
+                        markdown_fingerprint,
+                        indexed_at,
+                    ),
+                )
+        except Exception as exc:
+            try:
+                self.mark_domain_dirty(domain)
+            except Exception:
+                pass
+            cause = (
+                exc.__cause__
+                if isinstance(exc, GraphStoreError) and exc.__cause__ is not None
+                else exc
+            )
+            raise GraphStoreError("cannot rebuild domain graph") from cause
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def mark_domain_dirty(self, domain: str) -> None:
+        """Commit a short dirty transition without acquiring the base lock."""
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT INTO domains VALUES (?, NULL, '', 'dirty', ?) "
+                "ON CONFLICT(domain) DO UPDATE SET state = excluded.state",
+                (domain, self._now()),
+            )
+
+    def _mark_domain_rebuilding(self, domain: str) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT INTO domains VALUES (?, NULL, '', 'rebuilding', ?) "
+                "ON CONFLICT(domain) DO UPDATE SET state = excluded.state",
+                (domain, self._now()),
+            )
+
+    def refresh_page(self, domain: str, file: str, content: str) -> None:
+        """Atomically replace one page and all of its derived graph rows."""
+        if file in RESERVED_OKF:
+            self.delete_page(domain, file)
+            return
+        page, anchors, edges = _page_snapshot(domain, file, content)
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT INTO pages VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(page_id) DO UPDATE SET "
+                "domain = excluded.domain, file = excluded.file, "
+                "content_hash = excluded.content_hash, "
+                "link_hash = excluded.link_hash",
+                (
+                    page.page_id,
+                    page.domain,
+                    page.file,
+                    page.content_hash,
+                    page.link_hash,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM anchors WHERE page_id = ?", (page.page_id,)
+            )
+            connection.execute(
+                "DELETE FROM edges WHERE source_page_id = ?", (page.page_id,)
+            )
+            connection.executemany(
+                "INSERT INTO anchors VALUES (?, ?, ?)",
+                (
+                    (anchor.page_id, anchor.anchor, anchor.heading)
+                    for anchor in anchors
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO edges VALUES (?, ?, ?, ?, ?)",
+                (
+                    (
+                        edge.source_page_id,
+                        edge.target_page_id,
+                        edge.target_anchor,
+                        edge.kind,
+                        edge.raw_target,
+                    )
+                    for edge in edges
+                ),
+            )
+
+    def delete_page(self, domain: str, file: str) -> None:
+        """Delete a page and its cascaded anchors/outgoing edges."""
+        with self.transaction() as connection:
+            connection.execute(
+                "DELETE FROM pages WHERE domain = ? AND file = ?", (domain, file)
+            )
+
+    def load_ready_domain(self, domain: str) -> DomainSnapshot:
+        """Load a domain snapshot only when its committed state is ready."""
+        with self.read_snapshot() as connection:
+            state_row = connection.execute(
+                "SELECT state FROM domains WHERE domain = ?", (domain,)
+            ).fetchone()
+            state = "missing" if state_row is None else state_row[0]
+            if state != "ready":
+                raise GraphDomainUnavailable(domain, state)
+            pages = tuple(
+                PageRecord(*row)
+                for row in connection.execute(
+                    "SELECT page_id, domain, file, content_hash, link_hash "
+                    "FROM pages WHERE domain = ? ORDER BY file",
+                    (domain,),
+                )
+            )
+            anchors = tuple(
+                AnchorRecord(*row)
+                for row in connection.execute(
+                    "SELECT anchors.page_id, anchors.anchor, anchors.heading "
+                    "FROM anchors JOIN pages ON pages.page_id = anchors.page_id "
+                    "WHERE pages.domain = ? ORDER BY pages.file, anchors.rowid",
+                    (domain,),
+                )
+            )
+            edges = tuple(
+                EdgeRecord(*row)
+                for row in connection.execute(
+                    "SELECT edges.source_page_id, edges.target_page_id, "
+                    "edges.target_anchor, edges.kind, edges.raw_target "
+                    "FROM edges JOIN pages "
+                    "ON pages.page_id = edges.source_page_id "
+                    "WHERE pages.domain = ? "
+                    "ORDER BY pages.file, edges.target_page_id, "
+                    "edges.target_anchor",
+                    (domain,),
+                )
+            )
+        return DomainSnapshot(domain, pages, anchors, edges)
 
     @staticmethod
     def _configure(connection: sqlite3.Connection) -> None:
