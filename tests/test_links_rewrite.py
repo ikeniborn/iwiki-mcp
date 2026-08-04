@@ -1,4 +1,41 @@
-from iwiki_mcp.engine.links import rewrite_link_targets
+from iwiki_mcp.engine.links import (
+    CrossDomainRewrite,
+    rewrite_cross_domain_links,
+    rewrite_link_targets,
+    rewrite_relative_anchors,
+)
+
+
+def test_rewrite_cross_domain_link_matches_normalized_target_and_preserves_md():
+    body = "[Auth](iwiki://backend/concept/auth.md#Login-Flow)\n"
+    out, count = rewrite_cross_domain_links(
+        body,
+        "frontend",
+        CrossDomainRewrite("backend", "concept/auth", "concept/login", "login flow", "Sign In"),
+    )
+    assert out == "[Auth](iwiki://backend/concept/login.md#sign-in)\n"
+    assert count == 1
+
+
+def test_rewrite_cross_domain_link_ignores_code_images_and_mismatches():
+    body = (
+        "`[code](iwiki://backend/concept/auth)`\n"
+        "![image](iwiki://backend/concept/auth)\n"
+        "[other](iwiki://other/concept/auth)\n"
+        "[real](iwiki://backend/concept/auth#keep)\n"
+    )
+    out, count = rewrite_cross_domain_links(
+        body, "frontend", CrossDomainRewrite("backend", "concept/auth", "concept/login", "missing")
+    )
+    assert out == body
+    assert count == 0
+
+
+def test_rewrite_relative_anchors_rewrites_only_matching_markdown_href():
+    body = "[one](#Old-Heading) [two](guide.md#old-heading) `[#Old Heading](#Old Heading)`\n"
+    out, count = rewrite_relative_anchors(body, "old heading", "New Heading")
+    assert out == "[one](#new-heading) [two](guide.md#new-heading) `[#Old Heading](#Old Heading)`\n"
+    assert count == 2
 
 
 def test_rewrite_link_targets_markdown_and_legacy():

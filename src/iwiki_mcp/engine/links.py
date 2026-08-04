@@ -44,6 +44,15 @@ class HeadingAnchor:
     heading: str
 
 
+@dataclass(frozen=True)
+class CrossDomainRewrite:
+    target_domain: str
+    old_page: str
+    new_page: str
+    old_anchor: str | None = None
+    new_anchor: str | None = None
+
+
 def slugify_heading(s: str) -> str:
     """Heading text -> GitHub-style anchor slug (github-slugger algorithm).
     Lowercase; drop every character that is not a word char, whitespace, or
@@ -497,3 +506,80 @@ def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
         return masks[i] if i < len(masks) else m.group(0)
 
     return re.sub(r"\x00(\d+)\x00", _restore, out)
+
+
+def _rewrite_markdown_targets(body: str, rewrite) -> tuple[str, int]:
+    masked, masks = _mask_code(body)
+    count = 0
+
+    def replace(match: re.Match) -> str:
+        nonlocal count
+        if match.group(1):
+            return match.group(0)
+        replacement = rewrite(match.group(2))
+        if replacement is None:
+            return match.group(0)
+        count += 1
+        start = match.start(2) - match.start()
+        end = match.end(2) - match.start()
+        return match.group(0)[:start] + replacement + match.group(0)[end:]
+
+    out = _MD_LINK.sub(replace, masked)
+
+    def restore(match: re.Match) -> str:
+        index = int(match.group(1))
+        return masks[index] if index < len(masks) else match.group(0)
+
+    return re.sub(r"\x00(\d+)\x00", restore, out), count
+
+
+def rewrite_cross_domain_links(
+    content: str, source_domain: str, rewrite: CrossDomainRewrite
+) -> tuple[str, int]:
+    """Rewrite exact parsed ``iwiki://`` hrefs while preserving link text/code."""
+    if not _valid_domain(source_domain):
+        return content, 0
+    old_anchor = slugify_heading(rewrite.old_anchor) if rewrite.old_anchor else None
+
+    def replace(raw_target: str) -> str | None:
+        target = _structured_cross_target(raw_target, source_domain)
+        if target is None or target.target_domain != rewrite.target_domain:
+            return None
+        if target.target_page != rewrite.old_page:
+            return None
+        if old_anchor is not None and target.target_anchor != old_anchor:
+            return None
+        parsed = urlsplit(raw_target)
+        suffix = ".md" if parsed.path.endswith(".md") else ""
+        anchor = (
+            slugify_heading(rewrite.new_anchor)
+            if rewrite.new_anchor is not None else parsed.fragment
+        )
+        return f"iwiki://{rewrite.target_domain}/{rewrite.new_page}{suffix}" + (
+            f"#{anchor}" if anchor else ""
+        )
+
+    return _rewrite_markdown_targets(content, replace)
+
+
+def rewrite_relative_anchors(
+    content: str, old_anchor: str, new_anchor: str
+) -> tuple[str, int]:
+    """Rewrite matching relative Markdown fragments, preserving link text/code."""
+    old = slugify_heading(old_anchor)
+    new = slugify_heading(new_anchor)
+    if not old or not new or old == new:
+        return content, 0
+
+    def replace(raw_target: str) -> str | None:
+        try:
+            parsed = urlsplit(raw_target)
+        except ValueError:
+            return None
+        if parsed.scheme or parsed.netloc or parsed.query or not parsed.fragment:
+            return None
+        if slugify_heading(unquote(parsed.fragment)) != old:
+            return None
+        return f"{parsed.path}#{new}"
+
+    return _rewrite_markdown_targets(content, replace)
