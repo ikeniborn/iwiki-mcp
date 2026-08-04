@@ -22,3 +22,8 @@ def test_rewrite_link_targets_preserves_text_equal_to_target():
     body = "[alpha.md](alpha.md)\n"
     out = rewrite_link_targets(body, {"alpha": "concept/alpha"})
     assert out == "[alpha.md](concept/alpha.md)\n"
+
+
+def test_rewrite_link_targets_leaves_cross_domain_uri_untouched():
+    body = "[Auth](iwiki://backend/concept/auth.md#flow)\n"
+    assert rewrite_link_targets(body, {"concept/auth": "concept/login"}) == body
