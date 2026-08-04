@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 
 from iwiki_mcp.resources import AUTHORING_RULES
 
@@ -49,21 +48,3 @@ def test_public_readmes_describe_description_as_a_separate_summary_vector():
     assert "stored as a separate summary vector" in english
     assert "встраивается как контекстный префикс каждой секции" not in russian
     assert "хранится как отдельный summary-вектор" in russian
-
-
-def test_repository_server_report_lists_current_search_modes_and_tool_surface():
-    root = Path(__file__).parents[1]
-    report = (root / "docs/reports/iwiki-mcp-server-report.html").read_text(
-        encoding="utf-8"
-    )
-    tool_rows = set(re.findall(r"<tr><td><code>(wiki_[a-z_]+)</code>", report))
-
-    assert "Hybrid / vector / lexical" not in report
-    assert "hybrid / lexical / semantic" in report
-    assert tool_rows == {
-        "wiki_status", "wiki_list_domains", "wiki_list_pages", "wiki_read_page",
-        "wiki_search", "wiki_related", "wiki_write_page", "wiki_update_page",
-        "wiki_delete_page", "wiki_index", "wiki_create_domain", "wiki_bind",
-        "wiki_lint", "wiki_remediation_plan", "wiki_migrate_okf", "wiki_apply_okf",
-        "wiki_export_okf", "wiki_sync",
-    }

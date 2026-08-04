@@ -275,7 +275,7 @@ def trace_query(
     start = perf_counter()
     signals: dict[str, list[dict]] = {}
     with _without_store_migration():
-        domain_signals = retrieval._domain_signals(
+        domain_context = retrieval._domain_signals(
             cfg,
             base,
             domain,
@@ -288,7 +288,7 @@ def trace_query(
             None,
             page_cache,
         )
-    for name, hits in domain_signals.items():
+    for name, hits in domain_context.signals.items():
         signals.setdefault(name, []).extend(dict(hit) for hit in hits)
     for hits in signals.values():
         hits.sort(key=lambda hit: (
