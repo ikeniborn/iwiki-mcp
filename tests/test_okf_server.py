@@ -91,6 +91,28 @@ def test_write_allows_type_dir_index_slug(tmp_path, monkeypatch):
     assert os.path.isfile(os.path.join(b, "backend", "concept", "index.md"))
 
 
+def test_apply_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    other = tmp_path / "wiki" / "other"
+    other.mkdir()
+    (other / "page.md").write_text("# Page\n\n## Body\ntext\n", encoding="utf-8")
+    (tmp_path / "proj" / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_apply_okf("other", "page", "guide")
+
+    assert "outside bound write scope" in out["error"]
+    assert (other / "page.md").is_file()
+
+
 def test_write_reserved_slug_guard_ignores_type_dir_collision(tmp_path, monkeypatch):
     # On a domain where wiki_export_okf has already run, index.md/log.md exist
     # at the domain root. A type-dir write of the same tail ("concept/index")

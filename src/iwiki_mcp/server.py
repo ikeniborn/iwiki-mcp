@@ -182,6 +182,15 @@ def _domain_path(b: str, domain: str) -> Path:
     return dom
 
 
+def _existing_domain_write_guard(
+    binding: base.Binding, domain: str
+) -> tuple[Path, dict | None]:
+    dom_path = _domain_path(binding.base, domain)
+    if not dom_path.is_dir():
+        return dom_path, None
+    return dom_path, base.write_scope_error(binding, domain)
+
+
 def _slug_parts(slug: str) -> tuple[str, ...]:
     if not slug:
         raise ValueError("invalid page slug: empty")
@@ -293,6 +302,7 @@ def wiki_status() -> dict:
         "base": bind.base,
         "read": list(bind.read),
         "write": bind.write,
+        "write_scope": list(base.writable_domains(bind)),
         "project_dir": bind.project_dir,
         "domains": base.list_domains(bind.base),
     }
@@ -562,10 +572,12 @@ def wiki_write_page(
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {
             "error": f"domain '{valid_domain}' not found",
@@ -683,10 +695,12 @@ def wiki_update_page(
 ) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {
             "error": f"domain '{valid_domain}' not found",
@@ -782,10 +796,12 @@ def wiki_update_page(
 def wiki_delete_page(domain: str, slug: str) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {
             "error": f"domain '{valid_domain}' not found",
@@ -841,10 +857,12 @@ def wiki_index(domain: str | None = None) -> dict:
             "hint": "pass domain= or set write in .iwiki.toml via wiki_bind",
         }
     valid_domain = _validate_domain(target)
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {
             "error": f"domain '{valid_domain}' not found",
@@ -886,11 +904,18 @@ def wiki_create_domain(name: str) -> dict:
 
 
 @_safe
-def wiki_bind(read: list[str] | None = None, write: str | None = None) -> dict:
+def wiki_bind(
+    read: list[str] | None = None,
+    write: str | None = None,
+    write_scope: list[str] | None = None,
+) -> dict:
     bind = base.resolve_binding()
     current_domain = _validate_domain(base.current_project_domain(bind.project_dir))
     valid_read = None if read is None else [_validate_domain(d) for d in read]
     valid_write = None if write is None else _validate_domain(write)
+    valid_write_scope = (
+        None if write_scope is None else [_validate_domain(d) for d in write_scope]
+    )
     merged_read = None
     if valid_read is not None:
         merged, read_error = base.merge_read_scope(
@@ -928,10 +953,46 @@ def wiki_bind(read: list[str] | None = None, write: str | None = None) -> dict:
             "error": "write domain must match current project domain",
             "hint": f"use write='{current_domain}' for this project",
         }
-    base.write_project_config(bind.project_dir, read=merged_read, write=valid_write)
+    candidate_read = tuple(merged_read) if merged_read is not None else bind.read
+    candidate_write = valid_write if valid_write is not None else bind.write
+    config = base.load_project_config(bind.project_dir)
+    if valid_write_scope is not None:
+        scope_value = valid_write_scope
+        scope_explicit = True
+    elif "write_scope" in config:
+        scope_value = bind.write_scope
+        scope_explicit = True
+    else:
+        scope_value = None
+        scope_explicit = False
+    try:
+        base._resolved_write_scope(
+            bind.base,
+            candidate_read,
+            candidate_write,
+            scope_value,
+            explicit=scope_explicit,
+        )
+    except base.BaseError as exc:
+        return {
+            "error": str(exc),
+            "hint": "write_scope must contain the primary write domain and be a "
+                    "subset of existing read domains",
+        }
+    base.write_project_config(
+        bind.project_dir,
+        read=merged_read,
+        write=valid_write,
+        write_scope=valid_write_scope,
+    )
     ignore.ensure_iwikiignore(bind.project_dir)
     new = base.resolve_binding()
-    return {"read": list(new.read), "write": new.write, "project_dir": new.project_dir}
+    return {
+        "read": list(new.read),
+        "write": new.write,
+        "write_scope": list(base.writable_domains(new)),
+        "project_dir": new.project_dir,
+    }
 
 
 @_safe
@@ -1096,10 +1157,12 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
         return {"error": "no domain given and no write-target bound",
                 "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
     target = _validate_domain(target)
+    dom_path, scope_error = _existing_domain_write_guard(bind, target)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, target)
     if not dom_path.is_dir():
         return {"error": f"domain '{target}' not found",
                 "hint": "create it with wiki_create_domain"}
@@ -1196,10 +1259,12 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
                    tags: list[str] | None = None) -> dict:
     bind = base.resolve_binding()
     valid_domain = _validate_domain(domain)
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}
@@ -1286,10 +1351,12 @@ def wiki_export_okf(domain: str | None = None) -> dict:
         return {"error": "no domain given and no write-target bound",
                 "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
     valid_domain = _validate_domain(target)
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
-    dom_path = _domain_path(bind.base, valid_domain)
     if not dom_path.is_dir():
         return {"error": f"domain '{valid_domain}' not found",
                 "hint": "create it with wiki_create_domain"}

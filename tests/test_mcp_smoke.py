@@ -122,9 +122,14 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 assert _enum_values(search_schema["properties"]["mode"]) == {
                     "hybrid", "lexical", "semantic",
                 }
+                bind_schema = tools["wiki_bind"].inputSchema
+                assert "write_scope" in bind_schema["properties"]
+                assert "write_scope" not in bind_schema.get("required", [])
                 res = await session.call_tool("wiki_status", {})
                 assert not res.isError
                 assert res.content
+                status_payload = json.loads(res.content[0].text)
+                assert status_payload["write_scope"] == []
                 lint_result = await session.call_tool(
                     "wiki_lint", {"domain": "backend"}
                 )

@@ -22,6 +22,7 @@ class Binding:
     read: tuple[str, ...]
     write: str | None
     project_dir: str
+    write_scope: tuple[str, ...] = ()
 
 
 def resolve_project_dir(explicit: str | None = None) -> str:
@@ -52,6 +53,52 @@ def _as_str_tuple(value: Any) -> tuple[str, ...]:
     except TypeError:
         item = str(value).strip()
         return (item,) if item else ()
+
+
+def _unique_str_tuple(value: Any) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in _as_str_tuple(value):
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return tuple(result)
+
+
+def _resolved_write_scope(
+    wiki_base: str,
+    read: tuple[str, ...],
+    write: str | None,
+    value: Any,
+    *,
+    explicit: bool,
+) -> tuple[str, ...]:
+    scope = _unique_str_tuple(value) if explicit else ((write,) if write else ())
+    if scope and write is None:
+        raise BaseError("write_scope requires a primary write domain")
+    if write is not None and write not in scope:
+        raise BaseError("primary write domain must belong to write_scope")
+    for domain in scope:
+        if not domain_exists(wiki_base, domain):
+            raise BaseError(f"write_scope domain '{domain}' not found")
+        if read and domain not in read:
+            raise BaseError(f"write_scope domain '{domain}' is outside read scope")
+    return scope
+
+
+def writable_domains(binding: Binding) -> tuple[str, ...]:
+    if binding.write_scope:
+        return _unique_str_tuple(binding.write_scope)
+    return (binding.write,) if binding.write else ()
+
+
+def write_scope_error(binding: Binding, domain: str) -> dict | None:
+    if domain in writable_domains(binding):
+        return None
+    return {
+        "error": f"domain '{domain}' is outside bound write scope",
+        "hint": "add the domain to write_scope via wiki_bind before mutating it",
+    }
 
 
 def current_project_domain(project_dir: str) -> str:
@@ -95,11 +142,21 @@ def resolve_binding(project_dir: str | None = None) -> Binding:
     if write is not None:
         write = str(write).strip() or None
 
+    read = _as_str_tuple(cfg.get("read"))
+    write_scope = _resolved_write_scope(
+        wiki_base,
+        read,
+        write,
+        cfg.get("write_scope"),
+        explicit="write_scope" in cfg,
+    )
+
     return Binding(
         base=wiki_base,
-        read=_as_str_tuple(cfg.get("read")),
+        read=read,
         write=write,
         project_dir=resolved_project_dir,
+        write_scope=write_scope,
     )
 
 
@@ -175,7 +232,14 @@ def migrate_store_location(base: str, domain: str) -> None:
 
 
 def domain_exists(base: str, domain: str) -> bool:
-    return not domain.startswith(".") and os.path.isdir(domain_dir(base, domain))
+    return (
+        bool(domain)
+        and not domain.startswith(".")
+        and "/" not in domain
+        and "\\" not in domain
+        and not os.path.isabs(domain)
+        and os.path.isdir(domain_dir(base, domain))
+    )
 
 
 def list_domains(base: str) -> list[str]:
@@ -216,6 +280,10 @@ def _core_config_lines(config: dict[str, Any]) -> list[str]:
         lines.append(f"read = {_toml_string_list(_as_str_tuple(config.get('read')))}")
     if "write" in config and config["write"] is not None:
         lines.append(f"write = {_toml_string(str(config['write']))}")
+    if "write_scope" in config:
+        lines.append(
+            f"write_scope = {_toml_string_list(_unique_str_tuple(config.get('write_scope')))}"
+        )
     return lines
 
 
@@ -251,7 +319,7 @@ def _preserved_top_level_lines(lines: list[str]) -> list[str]:
     while i < len(lines):
         line = lines[i]
         key = _top_level_key(line)
-        if key not in {"base", "read", "write"}:
+        if key not in {"base", "read", "write", "write_scope"}:
             preserved.append(line)
             i += 1
             continue
@@ -290,6 +358,7 @@ def write_project_config(
     project_dir: str,
     read: list[str] | tuple[str, ...] | None = None,
     write: str | None = None,
+    write_scope: list[str] | tuple[str, ...] | None = None,
 ) -> None:
     resolved_project_dir = resolve_project_dir(project_dir)
     os.makedirs(resolved_project_dir, exist_ok=True)
@@ -298,6 +367,8 @@ def write_project_config(
         config["read"] = list(_as_str_tuple(read))
     if write is not None:
         config["write"] = write
+    if write_scope is not None:
+        config["write_scope"] = list(_unique_str_tuple(write_scope))
 
     config_path = os.path.join(resolved_project_dir, ".iwiki.toml")
     _write_preserving_unknown_config(config_path, config)

@@ -89,6 +89,29 @@ def test_delete_unknown_domain_errors(tmp_path, monkeypatch):
     assert "error" in out
 
 
+def test_delete_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    other = tmp_path / "wiki" / "other"
+    other.mkdir()
+    page = other / "page.md"
+    page.write_text("# Page\n\n## Body\nold\n", encoding="utf-8")
+    (tmp_path / "proj" / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_delete_page("other", "page")
+
+    assert "outside bound write scope" in out["error"]
+    assert page.is_file()
+
+
 def test_delete_rolls_back_on_index_failure(tmp_path, monkeypatch):
     b = _seed(tmp_path, monkeypatch)
     _write()

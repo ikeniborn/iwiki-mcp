@@ -84,6 +84,29 @@ def test_update_page_not_found(tmp_path, monkeypatch):
     assert "error" in out and "not found" in out["error"]
 
 
+def test_update_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    other = tmp_path / "wiki" / "other"
+    other.mkdir()
+    page = other / "page.md"
+    page.write_text("# Page\n\n## Body\nold\n", encoding="utf-8")
+    (tmp_path / "proj" / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_update_page("other", "page", "Body", "new")
+
+    assert "outside bound write scope" in out["error"]
+    assert page.read_text(encoding="utf-8").endswith("old\n")
+
+
 def test_update_missing_heading(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     _write(BASE_MD)
