@@ -33,6 +33,7 @@ class PreparedMove:
     edits: tuple[PlannedEdit, ...]
     refresh_files: tuple[str, ...]
     delete_files: tuple[str, ...]
+    rewritten_links: int
 
 
 def git_last_commit_date(base_dir: str, path: str) -> str | None:
@@ -196,10 +197,10 @@ def prepare_page_move(
     base_dir: str, domain: str, old_identity: str, new_identity: str
 ) -> PreparedMove:
     """Build a byte-exact page move without changing the filesystem."""
-    from .engine.links import rewrite_link_targets
+    from .engine.links import rewrite_link_targets_with_count
 
     if old_identity == new_identity:
-        return PreparedMove(old_identity, new_identity, (), (), ())
+        return PreparedMove(old_identity, new_identity, (), (), (), 0)
     dom = Path(base_dir) / domain
     old_path = dom / f"{old_identity}.md"
     new_path = dom / f"{new_identity}.md"
@@ -216,10 +217,15 @@ def prepare_page_move(
         PlannedEdit(domain, f"{old_identity}.md", sha256(old_content).hexdigest(), None)
     ]
     changed_markdown = {f"{new_identity}.md"}
+    rewritten_links = 0
     for slug in _page_slugs(dom):
         path = dom / f"{slug}.md"
         content = path.read_bytes()
-        rewritten = rewrite_link_targets(content.decode("utf-8"), mapping).encode("utf-8")
+        rewritten_text, count = rewrite_link_targets_with_count(
+            content.decode("utf-8"), mapping
+        )
+        rewritten = rewritten_text.encode("utf-8")
+        rewritten_links += count
         destination = f"{new_identity}.md" if slug == old_identity else f"{slug}.md"
         if slug == old_identity:
             edits.append(PlannedEdit(domain, destination, None, rewritten))
@@ -251,6 +257,7 @@ def prepare_page_move(
         tuple(edits),
         tuple(sorted(changed_markdown)),
         (f"{old_identity}.md",),
+        rewritten_links,
     )
 
 

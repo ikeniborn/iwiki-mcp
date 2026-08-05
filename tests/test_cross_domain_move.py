@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from iwiki_mcp import base, indexer, server, sync
+from iwiki_mcp import base, graph, indexer, server, sync
 from iwiki_mcp.engine.lint import lint
 
 
@@ -103,7 +103,7 @@ def test_apply_okf_move_rewrites_visible_writable_domains_in_one_commit(
         "target/relative.md",
     ]
     assert result["affected_domains"] == ["alpha", "beta", "target"]
-    assert result["rewritten_links"] == 4
+    assert result["rewritten_links"] == 5
     assert len(result["transaction_id"]) == 32
     assert not (wiki / "target" / "concept" / "x.md").exists()
     moved = (wiki / "target" / "architecture" / "x.md").read_text()
@@ -161,6 +161,19 @@ def test_apply_okf_move_rewrites_visible_writable_domains_in_one_commit(
             "anchor_mismatches",
         ):
             assert report["graph"][key] == []
+
+
+def test_apply_okf_move_counts_relative_links_with_ready_graph(
+    tmp_path, monkeypatch
+):
+    wiki = _setup(tmp_path, monkeypatch)
+    assert graph.scoped_graph(
+        str(wiki), ("target", "alpha", "beta")
+    ) is not None
+
+    result = server.wiki_apply_okf("target", "concept/x", type="architecture")
+
+    assert result["rewritten_links"] == 5
 
 
 def test_apply_okf_move_rejects_visible_read_only_referrer(tmp_path, monkeypatch):

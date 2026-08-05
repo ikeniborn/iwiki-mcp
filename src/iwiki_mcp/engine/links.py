@@ -467,11 +467,20 @@ def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
     """Rewrite markdown ([t](slug.md#a)) and legacy ([[slug#H|a]]) link targets
     whose slug is a key of `mapping` to its mapped slug, leaving code and text
     untouched. Idempotent when nothing matches."""
+    return rewrite_link_targets_with_count(body, mapping)[0]
+
+
+def rewrite_link_targets_with_count(
+    body: str, mapping: dict[str, str]
+) -> tuple[str, int]:
+    """Rewrite relative targets and return the number of changed links."""
     if not mapping:
-        return body
+        return body, 0
     masked, masks = _mask_code(body)
+    count = 0
 
     def _md(m: re.Match) -> str:
+        nonlocal count
         if m.group(1):                      # image
             return m.group(0)
         target = m.group(2)
@@ -479,6 +488,7 @@ def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
         clean = path[2:] if path.startswith("./") else path
         slug = clean[:-3] if clean.endswith(".md") else clean
         if slug in mapping:
+            count += 1
             # Replace exactly the captured target span, not a naive substring
             # replace: when the link text equals the target ([alpha.md](alpha.md))
             # `.replace(target, ...)` (with or without count=1) touches the wrong
@@ -490,11 +500,13 @@ def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
         return m.group(0)
 
     def _legacy(m: re.Match) -> str:
+        nonlocal count
         inner = m.group(1)
         slug, sep, rest = inner.partition("#")
         s = slug.strip()
         base = s[:-3] if s.endswith(".md") else s
         if base in mapping:
+            count += 1
             return m.group(0).replace(inner, f"{mapping[base]}{sep}{rest}", 1)
         return m.group(0)
 
@@ -505,7 +517,7 @@ def rewrite_link_targets(body: str, mapping: dict[str, str]) -> str:
         i = int(m.group(1))
         return masks[i] if i < len(masks) else m.group(0)
 
-    return re.sub(r"\x00(\d+)\x00", _restore, out)
+    return re.sub(r"\x00(\d+)\x00", _restore, out), count
 
 
 def _rewrite_markdown_targets(body: str, rewrite) -> tuple[str, int]:

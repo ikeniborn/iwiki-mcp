@@ -189,6 +189,7 @@ def test_prepare_page_move_is_pure_and_includes_log_rekey(tmp_path, monkeypatch)
     assert prepared.new_identity == "guide/a"
     assert prepared.refresh_files == ("b.md", "guide/a.md")
     assert prepared.delete_files == ("a.md",)
+    assert prepared.rewritten_links == 1
     edits = {(edit.domain, edit.file): edit for edit in prepared.edits}
     assert edits[("d", "a.md")].before_hash == sha256(before["a.md"]).hexdigest()
     assert edits[("d", "a.md")].after is None
