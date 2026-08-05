@@ -3,6 +3,7 @@
 | Topic | Status | Intent | Spec | Plan | Result | Opened | Closed | Notes |
 |-------|--------|--------|------|------|--------|--------|--------|-------|
 | mcp-idle-timeout | in-progress | ✓ | n/a | n/a | – | 2026-08-03 |  | approved intent; execute continuation selected |
+| cross-domain-link-rewrite | done | ✓ | ✓ | ✓ | OK | 2026-08-04 | 2026-08-04 | result OK: T1-T10/R1-R12 reconciled; 998 tests plus static/build checks passed; bound wiki current; two result-review bugs fixed |
 | concurrent-sync-and-iwikiignore | done | n/a | ✓ | ✓ | OK | 2026-06-30 | 2026-07-01 | check-result: OK — 6/6 задач, spec 10/10, 119 tests pass; 2 INFO (косметика) |
 | wiki-update-page | done | n/a | ✓ | ✓ | OK | 2026-07-01 | 2026-07-01 | check-result: OK — 6/6 tasks in diff, spec R1–R7 covered, 141 tests pass; final review READY TO MERGE |
 | delete-stale-wiki-page | done | n/a | ✓ | ✓ | OK | 2026-07-01 | 2026-07-01 | check-result: OK — 5/5 tasks DONE, R1–R14/SC1–3 covered, 133 tests pass; final review merge-ready (0 crit); wiki base updated |
@@ -20,4 +21,4 @@
 | configurable-search-mode-api | done | ✓ | ✓ | ✓ | OK | 2026-07-15 | 2026-07-16 | check-chain result re-audit: OK — R13 docs/wiki gaps fixed with RED→GREEN regressions, unrelated binding removed, 11/11 tasks and R1–R14 covered, 505 tests pass, v0.7.1, wiki current; live connector restart required to expose new schema. |
 | lexical-retrieval-chunk-scoring | done | ✓ | ✓ | ✓ | OK | 2026-07-18 | 2026-07-20 | check-chain result: OK — Tasks 1–7 DONE, R1–R11 and acceptance covered, 536 tests + 81 focused pass, flake8/compileall/CLI/diff clean, six bound domains reindexed, wiki current, final review merge-ready |
 | search-pipeline-benchmark | done | ✓ | ✓ | ✓ | OK | 2026-07-28 | 2026-07-29 | result OK — Tasks 1–4 DONE; H1–H6 covered; focused 204+55 reported pass; full suite only pre-existing missing report failure; replay cmp OK; live decision needs_work:no_passing_fusion_candidate with two active hard-negative contracts; production unchanged; wiki updated, lint stale pages unrelated. |
-| sqlite-graph-index | in-progress | ✓ | ✓ | ✓ | – | 2026-08-04 |  | result needs_work: code verified at cdbd7c0 (913 tests); bound iwiki update/lint blocked by MCP Transport closed |
+| sqlite-graph-index | done | ✓ | ✓ | ✓ | OK | 2026-08-04 | 2026-08-04 | result OK: T1–T10 and R1–R15 reconciled; 913 tests plus static/build checks passed; bound wiki updated, graph ready with exact Markdown parity; unrelated later origin/master timeout commit f3cfadb excluded from graph scope; plan_hash c1d8812080f241be |

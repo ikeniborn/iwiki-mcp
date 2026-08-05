@@ -1,6 +1,7 @@
 import json
 import os
 import hashlib
+import inspect
 import subprocess
 
 from iwiki_mcp import base, indexer, server
@@ -58,6 +59,23 @@ def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     content = open(os.path.join(b, "backend", "concept", "auth.md"), encoding="utf-8").read()
     assert "refreshed flow text" in content
     assert "login then token" not in content
+    assert "transaction_id" not in out
+    assert "rewritten_pages" not in out
+
+
+def test_update_public_signature_adds_trailing_optional_new_heading():
+    signature = inspect.signature(server.wiki_update_page)
+    assert list(signature.parameters) == [
+        "domain",
+        "slug",
+        "heading",
+        "new_body",
+        "source",
+        "description",
+        "status",
+        "new_heading",
+    ]
+    assert signature.parameters["new_heading"].default is None
 
 
 def test_update_page_refreshes_only_changed_graph_page(tmp_path, monkeypatch):
@@ -82,6 +100,29 @@ def test_update_page_not_found(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     out = server.wiki_update_page("backend", "nope", "Flow", "x")
     assert "error" in out and "not found" in out["error"]
+
+
+def test_update_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    other = tmp_path / "wiki" / "other"
+    other.mkdir()
+    page = other / "page.md"
+    page.write_text("# Page\n\n## Body\nold\n", encoding="utf-8")
+    (tmp_path / "proj" / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_update_page("other", "page", "Body", "new")
+
+    assert "outside bound write scope" in out["error"]
+    assert page.read_text(encoding="utf-8").endswith("old\n")
 
 
 def test_update_missing_heading(tmp_path, monkeypatch):

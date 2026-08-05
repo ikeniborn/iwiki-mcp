@@ -1,9 +1,53 @@
 import os
 import subprocess
 
+import pytest
+
 from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.graph_store import GraphStore
 from iwiki_mcp.graph import markdown_fingerprint
+
+
+@pytest.mark.parametrize(
+    ("handler", "args"),
+    [
+        ("wiki_write_page", ("alpha", "page", "# Page\n")),
+        ("wiki_update_page", ("alpha", "page", "Overview", "body")),
+        ("wiki_delete_page", ("alpha", "page")),
+        ("wiki_index", ("alpha",)),
+        ("wiki_create_domain", ("new-domain",)),
+        ("wiki_migrate_okf", ("alpha",)),
+        ("wiki_apply_okf", ("alpha", "page", "concept")),
+        ("wiki_export_okf", ("alpha",)),
+        ("wiki_sync", ()),
+    ],
+)
+def test_mutation_guard_blocks_every_handler_before_side_effects(
+    tmp_path, monkeypatch, handler, args
+):
+    from iwiki_mcp import cross_domain
+    from iwiki_mcp.base import Binding
+
+    binding = Binding(
+        str(tmp_path), ("alpha",), "alpha", str(tmp_path), ("alpha",)
+    )
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+
+    def stop(*_args, **_kwargs):
+        raise cross_domain.CrossDomainError("manual_recovery_required")
+
+    monkeypatch.setattr(cross_domain, "recover_pending_transactions", stop)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("freshness ran before recovery")
+        ),
+    )
+
+    result = getattr(server, handler)(*args)
+
+    assert result["code"] == "manual_recovery_required"
 
 
 def _seed(tmp_path, monkeypatch, with_domain=True):
@@ -126,10 +170,10 @@ def test_write_refuses_overwrite_without_force(tmp_path, monkeypatch):
 
 
 def test_create_domain(tmp_path, monkeypatch):
-    b, _ = _seed(tmp_path, monkeypatch, with_domain=False)
-    out = server.wiki_create_domain("backend")
-    assert out["created"] == "backend"
-    assert os.path.isdir(os.path.join(b, "backend"))
+    b, _ = _seed(tmp_path, monkeypatch)
+    out = server.wiki_create_domain("new-domain")
+    assert out["created"] == "new-domain"
+    assert os.path.isdir(os.path.join(b, "new-domain"))
 
 
 def test_bind_writes_config_for_current_project_domain(tmp_path, monkeypatch):
@@ -142,6 +186,57 @@ def test_bind_writes_config_for_current_project_domain(tmp_path, monkeypatch):
     text = open(os.path.join(proj, ".iwiki.toml")).read()
     assert 'read = ["backend", "proj"]' in text
     assert 'write = "proj"' in text
+
+
+def test_bind_persists_deterministic_write_scope_and_status(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj"))
+
+    out = server.wiki_bind(
+        read=["backend", "proj"],
+        write="proj",
+        write_scope=["proj", "backend", "proj"],
+    )
+
+    assert out["write"] == "proj"
+    assert out["write_scope"] == ["proj", "backend"]
+    assert server.wiki_status()["write_scope"] == ["proj", "backend"]
+    text = open(os.path.join(proj, ".iwiki.toml"), encoding="utf-8").read()
+    assert 'write_scope = ["proj", "backend"]' in text
+
+
+def test_bind_invalid_write_scope_leaves_config_byte_identical(tmp_path, monkeypatch):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+    before = open(config_path, "rb").read()
+
+    out = server.wiki_bind(
+        read=["backend", "proj"], write="proj", write_scope=["backend"]
+    )
+
+    assert "primary write domain" in out["error"]
+    assert open(config_path, "rb").read() == before
+
+
+def test_write_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "other"))
+    open(os.path.join(proj, ".iwiki.toml"), "w", encoding="utf-8").write(
+        'read = ["backend", "other"]\nwrite = "backend"\n'
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_write_page("other", "page", "# Page\n\n## Body\ntext\n")
+
+    assert "outside bound write scope" in out["error"]
+    assert list((tmp_path / "wiki" / "other").iterdir()) == []
 
 
 def test_bind_rejects_missing_domain_without_writing(tmp_path, monkeypatch):

@@ -79,6 +79,31 @@ def test_sync_no_repo(tmp_path, monkeypatch):
     assert "error" in out or "warning" in out
 
 
+def test_index_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    b = tmp_path / "wiki"
+    (b / "backend").mkdir(parents=True)
+    (b / "other").mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
+    monkeypatch.setenv("IWIKI_PROJECT_DIR", str(proj))
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_index("other")
+
+    assert "outside bound write scope" in out["error"]
+    assert not (b / "other" / "index.jsonl").exists()
+
+
 def _seed_remediation(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     domain = b / "backend"

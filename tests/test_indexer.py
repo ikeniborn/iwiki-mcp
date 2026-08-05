@@ -214,6 +214,10 @@ def test_vector_store_save_replaces_jsonl_atomically(tmp_path, monkeypatch):
     assert list(path.parent.glob(".index.jsonl.*.tmp")) == []
 
 
+def test_finalize_graph_batch_empty_input_is_noop():
+    assert indexer.finalize_graph_batch((), {}, {}) is None
+
+
 def _git(cwd, *args):
     subprocess.run(
         ["git", *args], cwd=cwd, check=True, capture_output=True, text=True,

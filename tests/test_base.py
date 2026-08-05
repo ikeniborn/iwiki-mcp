@@ -24,6 +24,80 @@ def test_resolve_from_env(tmp_path, monkeypatch):
     assert bind.base == b
     assert bind.read == ("backend",)
     assert bind.write == "backend"
+    assert bind.write_scope == ("backend",)
+
+
+def test_manual_binding_fixture_keeps_scalar_write_compatibility():
+    bind = base.Binding(
+        base="/wiki",
+        read=("backend",),
+        write="backend",
+        project_dir="/project",
+    )
+
+    assert bind.write_scope == ()
+    assert base.writable_domains(bind) == ("backend",)
+    assert base.write_scope_error(bind, "backend") is None
+    assert "outside bound write scope" in base.write_scope_error(bind, "other")["error"]
+
+
+def test_resolve_binding_deduplicates_explicit_write_scope(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "backend", "shared")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend", "shared"]\n'
+        'write = "backend"\n'
+        'write_scope = ["backend", "shared", "backend"]\n'
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    bind = base.resolve_binding(str(proj))
+
+    assert bind.write_scope == ("backend", "shared")
+
+
+@pytest.mark.parametrize(
+    ("write_scope", "message"),
+    [
+        ('["shared"]', "primary write domain"),
+        ('["backend", "hidden"]', "read scope"),
+        ('["backend", "missing"]', "not found"),
+    ],
+)
+def test_resolve_binding_rejects_invalid_write_scope(
+    tmp_path, monkeypatch, write_scope, message
+):
+    b = _mkbase(tmp_path, "backend", "shared", "hidden")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend", "shared"]\n'
+        'write = "backend"\n'
+        f"write_scope = {write_scope}\n"
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    with pytest.raises(base.BaseError, match=message):
+        base.resolve_binding(str(proj))
+
+
+def test_resolve_binding_rejects_absolute_write_scope_domain(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "backend")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        f'base = "{b}"\n'
+        f'read = ["{outside}"]\n'
+        f'write = "{outside}"\n'
+        f'write_scope = ["{outside}"]\n'
+    )
+    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
+
+    with pytest.raises(base.BaseError, match="not found"):
+        base.resolve_binding(str(proj))
 
 
 def test_missing_base_raises(tmp_path, monkeypatch):
@@ -60,10 +134,13 @@ def test_write_project_config_roundtrip(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setenv("IWIKI_BASE_DIR", b)
-    base.write_project_config(str(proj), read=["x"], write="x")
+    base.write_project_config(
+        str(proj), read=["x"], write="x", write_scope=["x", "x"]
+    )
     bind = base.resolve_binding(str(proj))
     assert bind.write == "x"
     assert bind.read == ("x",)
+    assert bind.write_scope == ("x",)
 
 
 def test_write_project_config_preserves_fields_on_partial_updates(tmp_path, monkeypatch):
@@ -72,13 +149,13 @@ def test_write_project_config_preserves_fields_on_partial_updates(tmp_path, monk
     proj.mkdir()
     monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
     (proj / ".iwiki.toml").write_text(
-        f'base = "{b}"\nread = ["a"]\nwrite = "a"\n'
+        f'base = "{b}"\nread = ["a", "b"]\nwrite = "a"\n'
     )
 
     base.write_project_config(str(proj), write="b")
     bind = base.resolve_binding(str(proj))
     assert bind.base == b
-    assert bind.read == ("a",)
+    assert bind.read == ("a", "b")
     assert bind.write == "b"
 
     base.write_project_config(str(proj), read=["b"])

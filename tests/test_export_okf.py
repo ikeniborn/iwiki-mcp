@@ -35,6 +35,29 @@ def test_export_okf_sweep_adds_frontmatter_and_converts_links(tmp_path, monkeypa
     assert os.path.isfile(os.path.join(dom, "log.md"))
 
 
+def test_export_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    other = tmp_path / "wiki" / "other"
+    other.mkdir()
+    page = other / "page.md"
+    page.write_text("# Page\n\n## Body\ntext\n", encoding="utf-8")
+    (tmp_path / "proj" / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_export_okf("other")
+
+    assert "outside bound write scope" in out["error"]
+    assert page.read_text(encoding="utf-8").startswith("# Page")
+
+
 def test_export_okf_idempotent(tmp_path, monkeypatch):
     b = _seed(tmp_path, monkeypatch)
     dom = os.path.join(b, "backend")

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+from hashlib import sha256
 
 from iwiki_mcp import base, indexer, okf, server
 from iwiki_mcp.engine.lint import lint
@@ -156,6 +157,45 @@ def test_move_page_reports_every_rewritten_link_source(tmp_path, monkeypatch):
 
     assert change.refresh_files == ("b.md", "guide/a.md")
     assert change.delete_files == ("a.md",)
+
+
+def test_prepare_page_move_is_pure_and_includes_log_rekey(tmp_path, monkeypatch):
+    _bind(tmp_path, monkeypatch, "d")
+    dom = tmp_path / "d"
+    (dom / "a.md").write_text("# A\n\n## Body\ntext\n", encoding="utf-8")
+    (dom / "b.md").write_text(
+        "# B\n\n## Link\n[A](a.md#Body)\n", encoding="utf-8"
+    )
+    (dom / "log.jsonl").write_text(
+        json.dumps({"op": "ingest", "page": "a.md", "source": "/src/a.py"})
+        + "\n",
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(dom).as_posix(): path.read_bytes()
+        for path in dom.rglob("*")
+        if path.is_file()
+    }
+
+    prepared = okf.prepare_page_move(str(tmp_path), "d", "a", "guide/a")
+
+    after = {
+        path.relative_to(dom).as_posix(): path.read_bytes()
+        for path in dom.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert prepared.old_identity == "a"
+    assert prepared.new_identity == "guide/a"
+    assert prepared.refresh_files == ("b.md", "guide/a.md")
+    assert prepared.delete_files == ("a.md",)
+    edits = {(edit.domain, edit.file): edit for edit in prepared.edits}
+    assert edits[("d", "a.md")].before_hash == sha256(before["a.md"]).hexdigest()
+    assert edits[("d", "a.md")].after is None
+    assert edits[("d", "guide/a.md")].before_hash is None
+    assert edits[("d", "guide/a.md")].after == before["a.md"]
+    assert b"guide/a.md#Body" in edits[("d", "b.md")].after
+    assert b'"page": "guide/a.md"' in edits[("d", "log.jsonl")].after
 
 
 def test_apply_okf_move_rekeys_log_and_lint_still_flags_stale(tmp_path, monkeypatch):

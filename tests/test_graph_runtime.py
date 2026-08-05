@@ -249,6 +249,14 @@ def test_scoped_provider_rejects_domain_marked_dirty_after_creation(tmp_path):
         provider.neighbors("alpha/concept/a")
 
 
+def test_incoming_candidates_rejects_fingerprint_changed_after_graph_build(tmp_path):
+    base = _repo(tmp_path)
+    assert graph.scoped_graph(str(base), ["alpha"]) is not None
+    (base / "alpha" / "concept" / "a.md").write_text("# Changed\n")
+
+    assert graph.incoming_candidates(str(base), ("alpha",), "alpha/target") is None
+
+
 def test_ready_scoped_graph_does_not_acquire_base_lock(tmp_path, monkeypatch):
     base = _repo(tmp_path)
     assert graph.scoped_graph(str(base), ["alpha"]) is not None

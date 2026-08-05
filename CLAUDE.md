@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `iwiki-mcp` is a **stdio MCP server** (not a daemon — it lives for the spawning client session). It fronts a shared, git-synced wiki *base* split into *domains*. Coding agents author Markdown pages; the server validates structure, persists, embeds, indexes, and runs hybrid (vector + lexical) search across the domains a project is bound to.
 
-User-facing setup (install, MCP registration in Claude Code / Codex, env reference, base/domain/binding model) lives in `README.md`. Self-documenting wiki pages are under `docs/wiki/` (`architecture.md` is the entry point).
+User-facing setup (install, MCP registration in Claude Code / Codex, env reference, base/domain/binding model) lives in `README.md`. Repository architecture is documented in `docs/architecture.md`; the self-documenting wiki is maintained through the bound iwiki MCP domain.
 
 ## Commands
 
@@ -30,7 +30,7 @@ Two layers under `src/iwiki_mcp/`:
 - **Top layer** (MCP-aware): `server.py` (tool surface), `base.py` (binding + path resolution), `indexer.py` (ingest/index), `retrieval.py` (query), `sync.py` (git), `resources.py` (authoring rules).
 - **`engine/` core** (framework-free, unit-testable without the MCP runtime): `config`, `chunk`, `embed`, `store`, `search`, `grep`, `related`, `links`, `validate`, `lint`.
 
-On-disk model: a *base* dir is a git repo; each immediate subdir is a *domain* holding `*.md` pages plus `.iwiki/index.jsonl` (embedding store) and `.iwiki/log.jsonl` (ingest log). A project's `.iwiki.toml` binds `read = [...]` domains and one `write` domain (`base.resolve_binding`).
+On-disk model: a *base* dir is a git repo; each immediate subdir is a *domain* holding `*.md` pages plus root `index.jsonl` (embedding store) and `log.jsonl` (ingest log). The base-local `.iwiki/` holds only derived graph/cache, lock, and transaction state. A project's `.iwiki.toml` binds `read = [...]`, primary `write`, and optional `write_scope` domains (`base.resolve_binding`).
 
 ## Conventions that aren't obvious from a single file
 
@@ -47,7 +47,7 @@ On-disk model: a *base* dir is a git repo; each immediate subdir is a *domain* h
 
 ## Docs upkeep
 
-This repo has a `docs/wiki/`. After changes that alter functionality, architecture, or behavior, update the affected page via the iwiki skills (`iwiki:iwiki-ingest <source>`, then `/iwiki-lint`) before responding. Skip only for typo/comment/formatting changes.
+After changes that alter functionality, architecture, or behavior, update the affected bound-wiki page with the iwiki MCP tools, then run `wiki_lint` before responding. Skip only for typo/comment/formatting changes.
 
 ## Versioning
 

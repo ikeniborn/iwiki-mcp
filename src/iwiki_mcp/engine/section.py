@@ -5,21 +5,26 @@ from __future__ import annotations
 
 import re
 
+from .links import slugify_heading
+
 # Keep in sync with chunk._H2 / validate._H2 / lint._H2.
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
+_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.MULTILINE)
 
 
 class SectionError(ValueError):
     """Raised when the target ``##`` section cannot be uniquely located."""
 
 
-def replace_section(content: str, heading: str, new_body: str) -> str:
+def replace_section(
+    content: str, heading: str, new_body: str, *, new_heading: str | None = None
+) -> str:
     """Return ``content`` with the body of the ``## <heading>`` section replaced.
 
     ``heading`` is matched by its text (leading ``#``/whitespace stripped). The
-    replaced span runs from the end of the heading line to the next ``##`` (or EOF);
-    the heading line itself is preserved. Raises ``SectionError`` if the heading is
-    missing or appears more than once.
+    replaced span runs from the end of the heading line to the next ``##`` (or EOF).
+    ``new_heading`` optionally renames the section and must not collide with any
+    heading anchor. Raises ``SectionError`` if the heading is missing or ambiguous.
     """
     target = heading.lstrip("#").strip()
     if not target:
@@ -35,6 +40,25 @@ def replace_section(content: str, heading: str, new_body: str) -> str:
             f"section '## {target}' is ambiguous ({len(matches)} matches)"
         )
     idx = matches[0]
+    replacement_heading = target if new_heading is None else new_heading.strip()
+    replacement_anchor = slugify_heading(replacement_heading)
+    if not replacement_anchor:
+        raise SectionError("empty normalized heading")
+    for candidate in _HEADING.finditer(content):
+        candidate_anchor = slugify_heading(candidate.group(1).strip())
+        if (
+            candidate.start() != heads[idx].start()
+            and candidate_anchor == replacement_anchor
+        ):
+            raise SectionError(
+                f"section heading '{replacement_heading}' collides with another anchor"
+            )
     body_start = heads[idx].end()
     body_end = heads[idx + 1].start() if idx + 1 < len(heads) else len(content)
-    return content[:body_start] + "\n" + new_body.strip("\n") + "\n\n" + content[body_end:]
+    heading_start = heads[idx].start(1)
+    heading_end = heads[idx].end(1)
+    renamed = content[:heading_start] + replacement_heading + content[heading_end:]
+    shift = len(replacement_heading) - (heading_end - heading_start)
+    body_start += shift
+    body_end += shift
+    return renamed[:body_start] + "\n" + new_body.strip("\n") + "\n\n" + renamed[body_end:]

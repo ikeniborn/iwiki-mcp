@@ -41,6 +41,29 @@ def test_migrate_plan_mode_lists_candidates(tmp_path, monkeypatch):
     assert (tmp_path / "d" / "a.md").read_text(encoding="utf-8").startswith("# A")  # no write
 
 
+def test_migrate_rejects_existing_domain_outside_scope_before_freshness(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "other").mkdir()
+    bind = server.base.Binding(
+        base=str(tmp_path),
+        read=("d", "other"),
+        write="d",
+        project_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: bind)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    out = server.wiki_migrate_okf("other")
+
+    assert "outside bound write scope" in out["error"]
+
+
 def test_migrate_plan_mode_skips_commit_when_nothing_moved(tmp_path, monkeypatch):
     # Untyped flat pages give migrate_layout nothing to move; plan mode must not
     # call commit_and_push in that case (shape parity: committed/pushed still False).

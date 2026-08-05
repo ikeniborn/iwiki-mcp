@@ -48,3 +48,26 @@ def test_replace_section_empty_heading_raises():
 def test_replace_section_rejects_h2_in_body():
     with pytest.raises(SectionError):
         replace_section(PAGE, "Flow", "## Injected\nx")
+
+
+def test_replace_section_renames_heading_and_replaces_body():
+    out = replace_section(PAGE, "Flow", "new", new_heading="New Flow")
+    assert "## New Flow\nnew" in out
+    assert "## Flow" not in out
+
+
+@pytest.mark.parametrize("new_heading", ["", "!!!"])
+def test_replace_section_rejects_empty_normalized_new_heading(new_heading):
+    with pytest.raises(SectionError, match="empty normalized heading"):
+        replace_section(PAGE, "Flow", "new", new_heading=new_heading)
+
+
+def test_replace_section_rejects_new_heading_anchor_collision():
+    with pytest.raises(SectionError, match="collides"):
+        replace_section(PAGE, "Flow", "new", new_heading="Notes!")
+
+
+def test_replace_section_rejects_anchor_collision_with_any_heading_level():
+    content = "# Auth\n## Flow\nold\n### Notes!\nkeep\n"
+    with pytest.raises(SectionError, match="collides"):
+        replace_section(content, "Flow", "new", new_heading="Notes")

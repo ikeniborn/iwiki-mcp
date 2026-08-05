@@ -453,6 +453,26 @@ class GraphStore:
         finalize: Callable[[sqlite3.Connection], None] | None = None,
     ) -> None:
         """Atomically replace/delete pages and run final validation in one batch."""
+        with self.transaction() as connection:
+            self.refresh_pages_in_transaction(
+                connection,
+                domain,
+                pages,
+                delete_files=delete_files,
+            )
+            if finalize is not None:
+                finalize(connection)
+
+    @classmethod
+    def refresh_pages_in_transaction(
+        cls,
+        connection: sqlite3.Connection,
+        domain: str,
+        pages: Iterable[tuple[str, str]],
+        *,
+        delete_files: Iterable[str] = (),
+    ) -> None:
+        """Stage one domain refresh inside a caller-owned graph transaction."""
         deletions = set(delete_files)
         prepared = []
         for file, content in pages:
@@ -460,15 +480,12 @@ class GraphStore:
                 deletions.add(file)
                 continue
             prepared.append(_page_snapshot(domain, file, content))
-        with self.transaction() as connection:
-            connection.executemany(
-                "DELETE FROM pages WHERE domain = ? AND file = ?",
-                ((domain, file) for file in sorted(deletions)),
-            )
-            for page, anchors, edges in prepared:
-                self._replace_page_rows(connection, page, anchors, edges)
-            if finalize is not None:
-                finalize(connection)
+        connection.executemany(
+            "DELETE FROM pages WHERE domain = ? AND file = ?",
+            ((domain, file) for file in sorted(deletions)),
+        )
+        for page, anchors, edges in prepared:
+            cls._replace_page_rows(connection, page, anchors, edges)
 
     def refresh_page(self, domain: str, file: str, content: str) -> None:
         """Atomically replace one page and all of its derived graph rows."""
@@ -518,6 +535,35 @@ class GraphStore:
                 )
             )
         return DomainSnapshot(domain, pages, anchors, edges)
+
+    def query_incoming_pages(
+        self,
+        domains: tuple[str, ...],
+        target_page_id: str,
+        target_anchor: str | None = None,
+    ) -> tuple[PageRecord, ...]:
+        """Return indexed source pages linking to one exact graph target."""
+        requested = tuple(sorted(set(domains)))
+        if not requested:
+            return ()
+        placeholders = ", ".join("?" for _ in requested)
+        anchor_sql = "" if target_anchor is None else "AND edges.target_anchor = ? "
+        parameters: tuple[str, ...] = (
+            target_page_id,
+            *((target_anchor,) if target_anchor is not None else ()),
+            *requested,
+        )
+        with self.read_snapshot() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT pages.page_id, pages.domain, pages.file, "
+                "pages.content_hash, pages.link_hash FROM edges "
+                "JOIN pages ON pages.page_id = edges.source_page_id "
+                "WHERE edges.target_page_id = ? AND edges.kind = 'cross' "
+                f"{anchor_sql}AND pages.domain IN ({placeholders}) "
+                "ORDER BY pages.domain, pages.file",
+                parameters,
+            )
+            return tuple(PageRecord(*row) for row in rows)
 
     @staticmethod
     def _configure(connection: sqlite3.Connection) -> None:

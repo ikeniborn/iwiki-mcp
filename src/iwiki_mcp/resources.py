@@ -19,6 +19,9 @@ AUTHORING_RULES: str = """\
 - Cross-link within the same domain with `[Heading](<type>/<slug>.md#heading)`.
   Cross domains only with `[Heading](iwiki://<domain>/<page-id>#<anchor>)`.
   Never link to `index.md` or `log.md`: generated artifacts are not graph pages.
+- `wiki_update_page(..., new_heading=...)` and a moving `wiki_apply_okf` rewrite exact
+  incoming links automatically only when all visible referrers are writable. A visible
+  read-only referrer blocks before mutation; hidden domains are not inspected or rewritten.
 - Write accurate English prose grounded in the real source; do not invent.
 
 ## Search and maintenance tools
@@ -29,8 +32,9 @@ AUTHORING_RULES: str = """\
 - `IWIKI_RERANK_MODEL` optionally reranks the fused candidate pool through the shared
   LiteLLM URL and key. Provider failures are fail-soft and return sanitized metadata.
 - Use `wiki_write_page` for a new page, `wiki_update_page` for one existing `##`
-  section, and `wiki_delete_page` only when a source was removed. Run `wiki_lint`
-  after changes; use `wiki_remediation_plan` to inspect grouped repair actions.
+  section (or its `new_heading` rename), and `wiki_delete_page` only when a source was
+  removed. Run `wiki_lint` after changes; use `wiki_remediation_plan` to inspect grouped
+  repair actions.
 
 ## OKF frontmatter
 

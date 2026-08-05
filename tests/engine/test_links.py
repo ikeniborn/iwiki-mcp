@@ -4,8 +4,10 @@ import pytest
 
 from iwiki_mcp.engine import links as links_module
 from iwiki_mcp.engine.links import (
+    CrossDomainRewrite,
     has_legacy_wikilink,
     parse_links,
+    rewrite_cross_domain_links,
     slugify_heading,
     to_markdown_links,
 )
@@ -59,6 +61,15 @@ def test_slugify_is_deterministic_and_idempotent():
     once = slugify_heading("Claude Binary Detection")
     assert once == "claude-binary-detection"
     assert slugify_heading(once) == once
+
+
+def test_cross_domain_rewrite_rejects_invalid_source_domain():
+    rewrite = CrossDomainRewrite(
+        target_domain="backend", old_page="auth", new_page="login"
+    )
+    content = "[Auth](iwiki://backend/auth)"
+
+    assert rewrite_cross_domain_links(content, "../backend", rewrite) == (content, 0)
 
 
 def test_markdown_link_with_anchor_parsed():

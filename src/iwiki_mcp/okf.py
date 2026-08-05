@@ -8,18 +8,29 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .engine import classify, frontmatter as fm
 from .engine import okf_artifacts as _oa
 from .engine.store import VectorStore
 from . import base as _base
+from .cross_domain import PlannedEdit
 
 _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)   # keep in sync with chunk._H2
 
 
 @dataclass(frozen=True)
 class MoveChange:
+    refresh_files: tuple[str, ...]
+    delete_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PreparedMove:
+    old_identity: str
+    new_identity: str
+    edits: tuple[PlannedEdit, ...]
     refresh_files: tuple[str, ...]
     delete_files: tuple[str, ...]
 
@@ -154,19 +165,16 @@ def _is_safe_type_segment(t: str) -> bool:
     return True
 
 
-def _rekey_log(base_dir, domain, old_identity: str, new_identity: str) -> None:
-    """Re-key <domain>/log.jsonl records for a moved page: any record whose
-    `page` equals old_identity + '.md' is rewritten to new_identity + '.md', so
-    lint's stale/missing_source checks (keyed off the log) keep finding the
-    page after a layout move. Best-effort: a missing/unreadable log is a no-op;
-    non-JSON lines pass through unchanged."""
-    path = _base.log_path(base_dir, domain)
+def _rekey_log_content(
+    content: bytes, old_identity: str, new_identity: str
+) -> bytes | None:
+    """Return re-keyed log bytes, or None when no record matches."""
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeError:
+        return None
     old_page = f"{old_identity}.md"
     new_page = f"{new_identity}.md"
-    try:
-        lines = open(path, encoding="utf-8").read().splitlines()
-    except OSError:
-        return
     out, changed = [], False
     for line in lines:
         s = line.strip()
@@ -181,9 +189,69 @@ def _rekey_log(base_dir, domain, old_identity: str, new_identity: str) -> None:
             rec["page"] = new_page
             changed = True
         out.append(json.dumps(rec, ensure_ascii=False))
-    if changed:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(out) + "\n")
+    return ("\n".join(out) + "\n").encode("utf-8") if changed else None
+
+
+def prepare_page_move(
+    base_dir: str, domain: str, old_identity: str, new_identity: str
+) -> PreparedMove:
+    """Build a byte-exact page move without changing the filesystem."""
+    from .engine.links import rewrite_link_targets
+
+    if old_identity == new_identity:
+        return PreparedMove(old_identity, new_identity, (), (), ())
+    dom = Path(base_dir) / domain
+    old_path = dom / f"{old_identity}.md"
+    new_path = dom / f"{new_identity}.md"
+    if not _within(dom, old_path) or not _within(dom, new_path):
+        raise ValueError(
+            f"move_page: '{old_identity}' -> '{new_identity}' escapes domain '{domain}'"
+        )
+    if new_path.exists():
+        raise FileExistsError(f"page '{domain}/{new_identity}' exists")
+
+    old_content = old_path.read_bytes()
+    mapping = {old_identity: new_identity}
+    edits: list[PlannedEdit] = [
+        PlannedEdit(domain, f"{old_identity}.md", sha256(old_content).hexdigest(), None)
+    ]
+    changed_markdown = {f"{new_identity}.md"}
+    for slug in _page_slugs(dom):
+        path = dom / f"{slug}.md"
+        content = path.read_bytes()
+        rewritten = rewrite_link_targets(content.decode("utf-8"), mapping).encode("utf-8")
+        destination = f"{new_identity}.md" if slug == old_identity else f"{slug}.md"
+        if slug == old_identity:
+            edits.append(PlannedEdit(domain, destination, None, rewritten))
+        elif rewritten != content:
+            edits.append(
+                PlannedEdit(domain, destination, sha256(content).hexdigest(), rewritten)
+            )
+            changed_markdown.add(destination)
+
+    log_path = Path(_base.log_path(base_dir, domain))
+    try:
+        log_content = log_path.read_bytes()
+    except OSError:
+        log_content = None
+    if log_content is not None:
+        rewritten_log = _rekey_log_content(log_content, old_identity, new_identity)
+        if rewritten_log is not None:
+            edits.append(
+                PlannedEdit(
+                    domain,
+                    "log.jsonl",
+                    sha256(log_content).hexdigest(),
+                    rewritten_log,
+                )
+            )
+    return PreparedMove(
+        old_identity,
+        new_identity,
+        tuple(edits),
+        tuple(sorted(changed_markdown)),
+        (f"{old_identity}.md",),
+    )
 
 
 def move_page(base_dir, domain, old_identity: str, new_identity: str) -> MoveChange:
@@ -196,36 +264,21 @@ def move_page(base_dir, domain, old_identity: str, new_identity: str) -> MoveCha
     (defense-in-depth: the honest callers already validate/contain the slug and
     type before calling this, but this guard makes the invariant load-bearing
     here too)."""
-    from .engine.links import rewrite_link_targets
-    if old_identity == new_identity:
+    prepared = prepare_page_move(base_dir, domain, old_identity, new_identity)
+    if not prepared.edits:
         return MoveChange((), ())
     dom = Path(base_dir) / domain
     old_p = dom / f"{old_identity}.md"
     new_p = dom / f"{new_identity}.md"
-    if not _within(dom, old_p) or not _within(dom, new_p):
-        raise ValueError(
-            f"move_page: '{old_identity}' -> '{new_identity}' escapes domain '{domain}'")
-    if new_p.exists():
-        raise FileExistsError(f"page '{domain}/{new_identity}' exists")
     new_p.parent.mkdir(parents=True, exist_ok=True)
     os.replace(old_p, new_p)
-    mapping = {old_identity: new_identity}
-    changed = {f"{new_identity}.md"}
-    for slug in _page_slugs(dom):
-        p = dom / f"{slug}.md"
-        try:
-            text = p.read_text(encoding="utf-8")
-        except OSError:
+    for edit in prepared.edits:
+        if edit.after is None:
             continue
-        new_text = rewrite_link_targets(text, mapping)
-        if new_text != text:
-            p.write_text(new_text, encoding="utf-8")
-            changed.add(f"{slug}.md")
-    _rekey_log(base_dir, domain, old_identity, new_identity)
-    return MoveChange(
-        tuple(sorted(changed)),
-        (f"{old_identity}.md",),
-    )
+        path = dom / edit.file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(edit.after)
+    return MoveChange(prepared.refresh_files, prepared.delete_files)
 
 
 def migrate_layout(base_dir, domain) -> dict:

@@ -11,7 +11,8 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
   before changing `.iwiki.toml` or creating a domain.
 - **After changing functionality:** use `wiki_write_page` for a new page,
   `wiki_update_page` for one existing `##` section, and `wiki_delete_page` only
-  when the documented source was removed. Run `wiki_lint` after the write.
+  when the documented source was removed. `new_heading` renames that section. Run
+  `wiki_lint` after the write.
 - **Links and cache:** use relative `<type>/<slug>.md#heading` links inside one domain;
   use `iwiki://<domain>/<page-id>#<anchor>` only across domains. Do not link to root
   `index.md` / `log.md`: they are generated, not graph pages. `.iwiki/graph.sqlite3`
@@ -20,3 +21,6 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
 - **Periodically / at end of session:** call `wiki_sync` to pull/push the base.
 - Editing an existing page is section-scoped through `wiki_update_page`;
   `wiki_write_page` still refuses to overwrite a page.
+- Cross-domain page moves and heading renames rewrite exact links automatically only
+  when all visible referrers are writable; a read-only visible referrer blocks before
+  the mutation. Hidden domains are not inspected or rewritten.

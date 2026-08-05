@@ -42,6 +42,20 @@ def test_agent_snippets_use_supported_existing_page_update_path():
         assert "Do not imply the tool can update existing pages directly" not in text
 
 
+def test_authoring_rules_explain_safe_cross_domain_rewrites():
+    assert "new_heading" in AUTHORING_RULES
+    assert "all visible referrers are writable" in AUTHORING_RULES
+    assert "hidden domains are not inspected" in AUTHORING_RULES
+
+
+def test_agent_snippets_explain_cross_domain_rewrite_boundary():
+    root = Path(__file__).parents[1]
+    for relative in ("templates/AGENTS.md.snippet", "templates/CLAUDE.md.snippet"):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert "new_heading" in text
+        assert "all visible referrers are writable" in text
+
+
 def test_public_readmes_describe_description_as_a_separate_summary_vector():
     root = Path(__file__).parents[1]
     english = (root / "README.md").read_text(encoding="utf-8")

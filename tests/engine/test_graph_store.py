@@ -1399,3 +1399,52 @@ def test_failing_known_migration_rolls_back_schema_and_version(tmp_path, monkeyp
         "SELECT count(*) FROM sqlite_master WHERE type = 'table'"
     ).fetchone()[0] == 0
     connection.close()
+
+
+def test_query_incoming_pages_filters_scope_anchor_and_orders_sources(tmp_path):
+    from iwiki_mcp.engine.graph_store import GraphStore
+
+    for domain, pages in {
+        "alpha": {
+            "z.md": "[A](iwiki://target/page#one)\n[B](iwiki://target/page#two)\n",
+        },
+        "beta": {"a.md": "[A](iwiki://target/page#one)\n"},
+        "hidden": {"h.md": "[A](iwiki://target/page#one)\n"},
+    }.items():
+        root = tmp_path / domain
+        root.mkdir()
+        for file, content in pages.items():
+            (root / file).write_text(content, encoding="utf-8")
+
+    store = GraphStore(tmp_path)
+    for domain in ("alpha", "beta", "hidden"):
+        store.rebuild_domain(
+            domain,
+            tmp_path / domain,
+            markdown_fingerprint=domain,
+            fingerprint_provider=lambda domain=domain: domain,
+            indexed_at="2026-08-04T12:00:00Z",
+        )
+
+    all_anchors = store.query_incoming_pages(
+        ("beta", "alpha"), "target/page"
+    )
+    one_anchor = store.query_incoming_pages(
+        ("beta", "alpha"), "target/page", "one"
+    )
+    two_anchor = store.query_incoming_pages(
+        ("beta", "alpha"), "target/page", "two"
+    )
+
+    assert [(page.domain, page.file) for page in all_anchors] == [
+        ("alpha", "z.md"),
+        ("beta", "a.md"),
+    ]
+    assert [(page.domain, page.file) for page in one_anchor] == [
+        ("alpha", "z.md"),
+        ("beta", "a.md"),
+    ]
+    assert [(page.domain, page.file) for page in two_anchor] == [
+        ("alpha", "z.md"),
+    ]
+    assert all(page.domain != "hidden" for page in all_anchors)

@@ -154,6 +154,24 @@ def test_auto_commit_non_repo_warns(tmp_path):
     assert "warning" in res
 
 
+def test_auto_commit_public_helper_acquires_base_lock(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    (tmp_path / "x.md").write_text("hi")
+    entered = []
+
+    class Lock:
+        def __enter__(self):
+            entered.append(True)
+
+        def __exit__(self, *_args):
+            entered.append(False)
+
+    monkeypatch.setattr(sync, "base_lock", lambda *_args, **_kwargs: Lock())
+
+    assert sync.auto_commit(str(tmp_path), "message")["committed"] is True
+    assert entered == [True, False]
+
+
 def test_sync_no_remote_warns(tmp_path):
     _init_repo(tmp_path)
     (tmp_path / "x.md").write_text("hi")

@@ -187,9 +187,11 @@ flowchart TB
 ```
 
 **Binding resolution** (`base.resolve_binding`): `base` comes from `.iwiki.toml`
-`base` or `IWIKI_BASE_DIR`; `read`/`write` from `.iwiki.toml`. An empty/absent `read`
-defaults the search scope to *all* domains. `write` must equal the current project
-domain (the project directory's basename). `wiki_bind` protects an existing non-empty
+`base` or `IWIKI_BASE_DIR`; `read`/`write`/optional `write_scope` from `.iwiki.toml`.
+An empty/absent `read` defaults the search scope to *all* domains. `write` must equal
+the current project domain (the project directory's basename). `write_scope` must
+contain that primary write domain and stay inside `read`; omitted it keeps scalar
+compatibility, making only `write` mutable. `wiki_bind` protects an existing non-empty
 `read` — it may only *append* the current project domain, never swap the scope.
 
 ## MCP tool surface
@@ -349,6 +351,33 @@ in-place (`section.replace_section`, which rejects an ambiguous/missing heading)
 does a whole-file ingest-log upsert (`upsert_ingest_log` keeps one record per page),
 and rolls back by restoring the original bytes. `wiki_delete_page` removes the file,
 appends a `delete` log op, reindexes, and rolls back by rewriting the file.
+
+### Cross-domain rewrite coordinator
+
+`server` builds immutable page-move or heading-rename edits; `cross_domain` owns
+their shared execution. It discovers only the bound visible read set, resolved through
+`base.resolve_scope` so an empty `read` means every current domain. Exact relative
+links are candidates inside the target domain and exact `iwiki://` links are candidates
+across visible domains. Before any file is changed, every candidate domain must belong
+to `write_scope`; a visible read-only candidate returns `write_scope_blocked`. Hidden
+domains are neither inspected nor reported, so they are never rewritten.
+
+The coordinator acquires `mutation_lock(base)` before recovery, exclusion setup, staged
+path validation, snapshotting, Markdown/index/log edits, and the local commit. It stages
+only explicit affected Markdown paths plus existing or tracked domain-root `index.jsonl`
+and `log.jsonl`; never-created optional logs remain journaled as absent but are omitted
+from Git pathspecs. It creates one commit with the `Iwiki-Transaction: <id>` trailer. Push occurs
+after the lock and remains fail-soft. This separates canonical portable Markdown/JSONL
+from the derived SQLite graph: batch graph refresh happens after the local commit; a
+failure marks the affected graph state dirty, with fingerprint-checked Markdown fallback
+instead of rolling back canonical files.
+
+The fsynced journal at `.iwiki/transactions/<id>` records snapshots and advances
+`prepared` → `applied` → `committed` → `finalized`. Pending journals are recovered under
+the same lock before an overlapping mutation. A pre-commit journal restores its snapshots;
+a committed journal completes graph-safe finalization. Missing/corrupt or conflicting
+Git evidence is ambiguous and stops with `manual_recovery_required`, preserving the
+journal for operator repair.
 
 ## Indexing pipeline
 

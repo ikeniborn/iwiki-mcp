@@ -17,3 +17,24 @@ def test_create_domain_makes_no_iwiki_dir(tmp_path, monkeypatch):
     server.wiki_create_domain("d")
     assert (tmp_path / "d").is_dir()
     assert not (tmp_path / "d" / ".iwiki").exists()
+
+
+def test_create_domain_bootstraps_empty_unbound_domain_with_exact_pathspec(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(base, "resolve_binding", lambda project_dir=None: base.Binding(
+        base=str(tmp_path), read=("d",), write="d", project_dir=str(tmp_path)))
+    monkeypatch.setattr(server.sync, "ensure_fresh", lambda *_: {"state": "clean"})
+    calls = []
+    monkeypatch.setattr(
+        server.sync,
+        "commit_and_push",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or {"committed": False, "pushed": False},
+    )
+
+    out = server.wiki_create_domain("new-domain")
+
+    assert out["created"] == "new-domain"
+    assert list((tmp_path / "new-domain").iterdir()) == []
+    assert calls[0][1]["pathspec"] == "new-domain"
