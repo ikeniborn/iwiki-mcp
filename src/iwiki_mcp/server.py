@@ -1640,7 +1640,7 @@ def _apply_okf_page_move(
         raise cross_domain.CrossDomainError("write_scope_blocked")
 
     rewrite = CrossDomainRewrite(domain, current_identity, new_identity)
-    rewritten_links = 0
+    rewritten_links = prepared.rewritten_links
     for candidate in candidates:
         source = graph._read_scoped_markdown(
             bind.base, candidate.domain, candidate.file
