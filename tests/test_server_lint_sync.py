@@ -2,7 +2,6 @@ import json
 import os
 
 from iwiki_mcp import base, server
-from iwiki_mcp.engine import lint as lint_engine
 
 
 def _seed(tmp_path, monkeypatch):
@@ -314,7 +313,7 @@ def test_remediation_plan_blocks_unreadable_stale_inputs(tmp_path, monkeypatch):
             "missing_source": [],
         }
 
-    monkeypatch.setattr(lint_engine, "lint", fake_lint)
+    monkeypatch.setattr(server, "lint", fake_lint)
 
     out = server.wiki_remediation_plan()
 
