@@ -36,7 +36,14 @@ from .engine.links import (
     slugify_heading,
     to_markdown_links,
 )
+from .engine.lint import lint
 from .engine.okf_artifacts import RESERVED_OKF
+from .engine.related import related
+# Not used directly, but engine.search must join the startup import closure:
+# store.query defers its import (cycle guard), and a module missing from the
+# closure gets loaded lazily from disk — after an on-disk package upgrade that
+# mixes new source with stale cached modules in a long-lived stdio process.
+from .engine import search  # noqa: F401
 from .engine.section import SectionError, replace_section
 from .engine.store import VectorStore
 from .engine.validate import validate_page
@@ -538,9 +545,6 @@ def wiki_search(
 
 @_safe
 def wiki_related(domain: str, section_id: str) -> dict:
-    from .engine.related import related
-    from .engine.store import VectorStore
-
     bind = base.resolve_binding()
     cfg = Config.load()
     valid_domain = _validate_domain(domain)
@@ -1307,8 +1311,6 @@ def wiki_bind(
 
 @_safe
 def wiki_lint(domain: str | None = None) -> dict:
-    from .engine.lint import lint
-
     bind = base.resolve_binding()
     targets = [domain] if domain else base.resolve_scope(bind, "project", None)
     valid_targets = [_validate_domain(target) for target in targets]
@@ -1329,8 +1331,6 @@ def wiki_lint(domain: str | None = None) -> dict:
 
 @_safe
 def wiki_remediation_plan(domain: str | None = None) -> dict:
-    from .engine.lint import lint
-
     bind = base.resolve_binding()
     if not bind.write:
         return {
@@ -1824,7 +1824,6 @@ def wiki_export_okf(domain: str | None = None) -> dict:
                                   _after_commit=_after_commit_graph(
                                       graph_mutation, rebuild=True
                                   ))
-    from .engine.lint import lint
     report = lint(str(dom_path), project_dir=bind.project_dir)
     result = {
         "domain": valid_domain,
