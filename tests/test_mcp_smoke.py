@@ -123,8 +123,8 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                     "hybrid", "lexical", "semantic",
                 }
                 bind_schema = tools["wiki_bind"].inputSchema
-                assert "write_scope" in bind_schema["properties"]
-                assert "write_scope" not in bind_schema.get("required", [])
+                assert "write" in bind_schema["properties"]
+                assert "primary" in bind_schema["properties"]
                 update_schema = tools["wiki_update_page"].inputSchema
                 assert "new_heading" in update_schema["properties"]
                 assert "new_heading" not in update_schema.get("required", [])
@@ -132,7 +132,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 assert not res.isError
                 assert res.content
                 status_payload = json.loads(res.content[0].text)
-                assert status_payload["write_scope"] == []
+                assert status_payload["write"] == []
                 lint_result = await session.call_tool(
                     "wiki_lint", {"domain": "backend"}
                 )

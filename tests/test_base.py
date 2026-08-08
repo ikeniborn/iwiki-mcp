@@ -18,63 +18,95 @@ def test_resolve_from_env(tmp_path, monkeypatch):
     b = _mkbase(tmp_path, "backend", "shared")
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n'
+    )
     monkeypatch.setenv("IWIKI_BASE_DIR", b)
     bind = base.resolve_binding(str(proj))
     assert bind.base == b
     assert bind.read == ("backend",)
-    assert bind.write == "backend"
-    assert bind.write_scope == ("backend",)
+    assert bind.write == ("backend",)
+    assert bind.primary == "backend"
+    assert (proj / ".iwikiignore").is_file()
 
 
-def test_manual_binding_fixture_keeps_scalar_write_compatibility():
-    bind = base.Binding(
-        base="/wiki",
-        read=("backend",),
-        write="backend",
-        project_dir="/project",
-    )
-
-    assert bind.write_scope == ()
-    assert base.writable_domains(bind) == ("backend",)
-    assert base.write_scope_error(bind, "backend") is None
-    assert "outside bound write scope" in base.write_scope_error(bind, "other")["error"]
-
-
-def test_resolve_binding_deduplicates_explicit_write_scope(tmp_path, monkeypatch):
+def test_resolve_list_write_with_primary_domain(tmp_path, monkeypatch):
     b = _mkbase(tmp_path, "backend", "shared")
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text(
         'read = ["backend", "shared"]\n'
-        'write = "backend"\n'
-        'write_scope = ["backend", "shared", "backend"]\n'
+        'write = ["backend", "shared"]\n'
+        'primary = "backend"\n'
     )
     monkeypatch.setenv("IWIKI_BASE_DIR", b)
 
     bind = base.resolve_binding(str(proj))
 
-    assert bind.write_scope == ("backend", "shared")
+    assert bind.write == ("backend", "shared")
+    assert bind.primary == "backend"
+    assert base.writable_domains(bind) == ("backend", "shared")
+
+
+def test_resolve_rejects_scalar_write_configuration(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "backend")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text('write = "backend"\n')
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    with pytest.raises(base.BaseError, match="write must be an array"):
+        base.resolve_binding(str(proj))
+
+
+def test_manual_binding_fixture_exposes_write_domains():
+    bind = base.Binding(
+        base="/wiki",
+        read=("backend",),
+        write=("backend",),
+        primary="backend",
+        project_dir="/project",
+    )
+
+    assert base.writable_domains(bind) == ("backend",)
+    assert base.write_scope_error(bind, "backend") is None
+    assert "outside bound write scope" in base.write_scope_error(bind, "other")["error"]
+
+
+def test_resolve_binding_deduplicates_write_domains(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "backend", "shared")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend", "shared"]\n'
+        'write = ["backend", "shared", "backend"]\n'
+        'primary = "backend"\n'
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    bind = base.resolve_binding(str(proj))
+
+    assert bind.write == ("backend", "shared")
 
 
 @pytest.mark.parametrize(
-    ("write_scope", "message"),
+    ("write", "primary", "message"),
     [
-        ('["shared"]', "primary write domain"),
-        ('["backend", "hidden"]', "read scope"),
-        ('["backend", "missing"]', "not found"),
+        ('["shared"]', '"backend"', "primary domain"),
+        ('["backend", "hidden"]', '"backend"', "read scope"),
+        ('["backend", "missing"]', '"backend"', "not found"),
     ],
 )
-def test_resolve_binding_rejects_invalid_write_scope(
-    tmp_path, monkeypatch, write_scope, message
+def test_resolve_binding_rejects_invalid_write(
+    tmp_path, monkeypatch, write, primary, message
 ):
     b = _mkbase(tmp_path, "backend", "shared", "hidden")
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text(
         'read = ["backend", "shared"]\n'
-        'write = "backend"\n'
-        f"write_scope = {write_scope}\n"
+        f"write = {write}\n"
+        f"primary = {primary}\n"
     )
     monkeypatch.setenv("IWIKI_BASE_DIR", b)
 
@@ -82,7 +114,7 @@ def test_resolve_binding_rejects_invalid_write_scope(
         base.resolve_binding(str(proj))
 
 
-def test_resolve_binding_rejects_absolute_write_scope_domain(tmp_path, monkeypatch):
+def test_resolve_binding_rejects_absolute_write_domain(tmp_path, monkeypatch):
     b = _mkbase(tmp_path, "backend")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -91,8 +123,7 @@ def test_resolve_binding_rejects_absolute_write_scope_domain(tmp_path, monkeypat
     (proj / ".iwiki.toml").write_text(
         f'base = "{b}"\n'
         f'read = ["{outside}"]\n'
-        f'write = "{outside}"\n'
-        f'write_scope = ["{outside}"]\n'
+        f'write = ["{outside}"]\nprimary = "{outside}"\n'
     )
     monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
 
@@ -121,7 +152,7 @@ def test_scope_all_vs_explicit(tmp_path, monkeypatch):
     b = _mkbase(tmp_path, "a", "b", "c")
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / ".iwiki.toml").write_text('read = ["a"]\nwrite = "a"\n')
+    (proj / ".iwiki.toml").write_text('read = ["a"]\nwrite = ["a"]\nprimary = "a"\n')
     monkeypatch.setenv("IWIKI_BASE_DIR", b)
     bind = base.resolve_binding(str(proj))
     assert base.resolve_scope(bind, "project", None) == ["a"]
@@ -135,12 +166,12 @@ def test_write_project_config_roundtrip(tmp_path, monkeypatch):
     proj.mkdir()
     monkeypatch.setenv("IWIKI_BASE_DIR", b)
     base.write_project_config(
-        str(proj), read=["x"], write="x", write_scope=["x", "x"]
+        str(proj), read=["x"], write=["x", "x"], primary="x"
     )
     bind = base.resolve_binding(str(proj))
-    assert bind.write == "x"
+    assert bind.write == ("x",)
     assert bind.read == ("x",)
-    assert bind.write_scope == ("x",)
+    assert bind.primary == "x"
 
 
 def test_write_project_config_preserves_fields_on_partial_updates(tmp_path, monkeypatch):
@@ -149,20 +180,20 @@ def test_write_project_config_preserves_fields_on_partial_updates(tmp_path, monk
     proj.mkdir()
     monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
     (proj / ".iwiki.toml").write_text(
-        f'base = "{b}"\nread = ["a", "b"]\nwrite = "a"\n'
+        f'base = "{b}"\nread = ["a", "b"]\nwrite = ["a"]\nprimary = "a"\n'
     )
 
-    base.write_project_config(str(proj), write="b")
+    base.write_project_config(str(proj), write=["b"], primary="b")
     bind = base.resolve_binding(str(proj))
     assert bind.base == b
     assert bind.read == ("a", "b")
-    assert bind.write == "b"
+    assert bind.write == ("b",)
 
     base.write_project_config(str(proj), read=["b"])
     bind = base.resolve_binding(str(proj))
     assert bind.base == b
     assert bind.read == ("b",)
-    assert bind.write == "b"
+    assert bind.write == ("b",)
 
 
 def test_write_project_config_preserves_unknown_lines_and_comments(
@@ -173,17 +204,17 @@ def test_write_project_config_preserves_unknown_lines_and_comments(
     proj.mkdir()
     monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
     (proj / ".iwiki.toml").write_text(
-        f'# keep me\nbase = "{b}"\ncustom = "value"\nread = ["a"]\nwrite = "a"\n'
+        f'# keep me\nbase = "{b}"\ncustom = "value"\nread = ["a"]\nwrite = ["a"]\nprimary = "a"\n'
     )
 
-    base.write_project_config(str(proj), read=["b"], write="b")
+    base.write_project_config(str(proj), read=["b"], write=["b"], primary="b")
 
     text = (proj / ".iwiki.toml").read_text()
     assert "# keep me" in text
     assert 'custom = "value"' in text
     assert f'base = "{b}"' in text
     assert 'read = ["b"]' in text
-    assert 'write = "b"' in text
+    assert 'write = ["b"]' in text
 
 
 def test_write_project_config_removes_multiline_core_assignment(
@@ -200,15 +231,15 @@ def test_write_project_config_removes_multiline_core_assignment(
         "read = [\n"
         '  "old",\n'
         "]\n"
-        'write = "old"\n'
+        'write = ["old"]\nprimary = "old"\n'
     )
 
-    base.write_project_config(str(proj), read=["new"], write="new")
+    base.write_project_config(str(proj), read=["new"], write=["new"], primary="new")
 
     text = (proj / ".iwiki.toml").read_text()
     bind = base.resolve_binding(str(proj))
     assert bind.read == ("new",)
-    assert bind.write == "new"
+    assert bind.write == ("new",)
     assert "# keep multiline" in text
     assert 'custom = "value"' in text
     assert '"old"' not in text

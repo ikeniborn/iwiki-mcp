@@ -10,7 +10,9 @@ def _seed(tmp_path, monkeypatch):
     (b / "backend" / "auth.md").write_text("# Auth\n## Overview\no\n## Flow\nx\n")
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n'
+    )
     monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
     monkeypatch.setenv("IWIKI_PROJECT_DIR", str(proj))
     return str(b)
@@ -44,7 +46,7 @@ def test_lint_resolves_only_visible_cross_domain_targets_without_migration(
     project = tmp_path / "proj"
     project.mkdir()
     (project / ".iwiki.toml").write_text(
-        'read = ["alpha", "beta"]\nwrite = "alpha"\n', encoding="utf-8"
+        'read = ["alpha", "beta"]\nwrite = ["alpha"]\nprimary = "alpha"\n', encoding="utf-8"
     )
     monkeypatch.setenv("IWIKI_BASE_DIR", str(wiki_base))
     monkeypatch.setenv("IWIKI_PROJECT_DIR", str(project))
@@ -87,7 +89,7 @@ def test_index_rejects_existing_domain_outside_scope_before_freshness(
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text(
-        'read = ["backend", "other"]\nwrite = "backend"\n', encoding="utf-8"
+        'read = ["backend", "other"]\nwrite = ["backend"]\nprimary = "backend"\n', encoding="utf-8"
     )
     monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
     monkeypatch.setenv("IWIKI_PROJECT_DIR", str(proj))
@@ -110,7 +112,7 @@ def _seed_remediation(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / ".iwiki.toml").write_text(
-        'read = ["backend"]\nwrite = "backend"\n',
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
@@ -143,14 +145,14 @@ def test_remediation_plan_rejects_non_write_domain(tmp_path, monkeypatch):
     b, _, proj = _seed_remediation(tmp_path, monkeypatch)
     (b / "other").mkdir(parents=True)
     (proj / ".iwiki.toml").write_text(
-        'read = ["backend", "other"]\nwrite = "backend"\n',
+        'read = ["backend", "other"]\nwrite = ["backend"]\nprimary = "backend"\n',
         encoding="utf-8",
     )
 
     out = server.wiki_remediation_plan("other")
 
     assert "error" in out
-    assert "bound write domain" in out["hint"]
+    assert "bound primary domain" in out["hint"]
 
 
 def test_remediation_plan_rejects_missing_write_domain(tmp_path, monkeypatch):

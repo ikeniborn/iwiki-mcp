@@ -7,7 +7,7 @@ def _bind(tmp_path, monkeypatch, dom):
     b = tmp_path
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / ".iwiki.toml").write_text(f'read = ["{dom}"]\nwrite = "{dom}"\n')
+    (proj / ".iwiki.toml").write_text(f'read = ["{dom}"]\nwrite = ["{dom}"]\nprimary = "{dom}"\n')
     monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
     monkeypatch.setenv("IWIKI_PROJECT_DIR", str(proj))
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x/v1")

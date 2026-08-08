@@ -170,20 +170,20 @@ The server resolves project binding from `.iwiki.toml` in the project root. The 
 ```toml
 # .iwiki.toml
 read = ["backend", "frontend"]
-write = "backend"
-write_scope = ["backend", "frontend"]
+write = ["backend", "frontend"]
+primary = "backend"
 # base = "/home/user/wiki"
 ```
 
-`read` controls the default project search scope. To read from **every** domain in the base, set `read = []` or omit the line entirely — an empty or absent `read` falls back to all domains. `read = ["all"]` is **not** a wildcard; it is treated as a literal domain named `all`. `write` is the primary target for tools that need one, such as `wiki_index` without a `domain` argument. `write_scope` is the explicit set of domains mutating tools may change; it must contain `write` and be a subset of `read`. Omitting it preserves scalar `write` compatibility: only the primary domain is writable. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
+`read` controls the default project search scope. To read from **every** domain in the base, set `read = []` or omit the line entirely — an empty or absent `read` falls back to all domains. `read = ["all"]` is **not** a wildcard; it is treated as a literal domain named `all`. `write` is the list of domains mutating tools may change. `primary` selects the default target for tools such as `wiki_index` without a `domain` argument and must belong to `write`. Every write domain must also belong to `read`. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
 
 You can also bind from the MCP tool surface:
 
 ```text
-wiki_bind(read=["backend", "frontend"], write="backend", write_scope=["backend", "frontend"])
+wiki_bind(read=["backend", "frontend"], write=["backend", "frontend"], primary="backend")
 ```
 
-`wiki_bind` validates that every provided read and write-scope domain already exists. For an existing non-empty `read`, the tool preserves configured domains and may only append the current project domain. `write` must match the current project domain, derived from the project directory name. `wiki_create_domain` may bootstrap an empty missing domain outside the current write scope; it creates no page, index, or log. Bind that domain before writing to it.
+`wiki_bind` validates that every provided read and write domain already exists. For an existing non-empty `read`, the tool preserves configured domains and may only append the current project domain. `primary` must match the current project domain, derived from the project directory name. `wiki_create_domain` may bootstrap an empty missing domain outside the current write list; it creates no page, index, or log. Bind that domain before writing to it.
 
 ## Teach the agent to use iwiki
 
@@ -283,7 +283,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 `wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None, new_heading=None)` — it replaces only the named `##` section and leaves the rest of the page intact. `new_heading` is optional: without it this is the ordinary single-domain update; with it, the server rewrites exact incoming relative links in the page domain and exact `iwiki://` links from visible read domains. `wiki_apply_okf` applies the same transaction only when a type change moves a page.
 
-The cross-domain operation starts only when every discovered visible referrer is in `write_scope`; a visible read-only referrer blocks before any Markdown changes. Hidden domains are not inspected or reported, and are never rewritten. Results include `transaction_id`, `rewritten_pages`, `affected_domains`, and `rewritten_links` in addition to normal write fields.
+The cross-domain operation starts only when every discovered visible referrer is in `write`; a visible read-only referrer blocks before any Markdown changes. Hidden domains are not inspected or reported, and are never rewritten. Results include `transaction_id`, `rewritten_pages`, `affected_domains`, and `rewritten_links` in addition to normal write fields.
 
 Each cross-domain operation holds the base mutation lock, stages only affected Markdown plus domain-root `index.jsonl` / `log.jsonl`, and creates one local commit carrying `Iwiki-Transaction: <id>`. Its fsynced local journal is `.iwiki/transactions/<id>` and advances `prepared` → `applied` → `committed` → `finalized`. A pre-commit interruption restores snapshots; a post-commit interruption repairs/marks the derived graph and finalizes the journal before another overlapping mutation. Ambiguous recovery returns `manual_recovery_required`. Push remains fail-soft: a local commit and authoritative portable files are retained if publication fails.
 
@@ -381,7 +381,7 @@ wiki_create_domain(name="backend")
 3. Bind the project, and append the agent snippet (see [Teach the agent to use iwiki](#teach-the-agent-to-use-iwiki)):
 
 ```text
-wiki_bind(read=["backend"], write="backend")
+wiki_bind(read=["backend"], write=["backend"], primary="backend")
 ```
 
 4. Write the first page:
