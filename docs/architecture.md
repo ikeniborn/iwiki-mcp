@@ -187,11 +187,10 @@ flowchart TB
 ```
 
 **Binding resolution** (`base.resolve_binding`): `base` comes from `.iwiki.toml`
-`base` or `IWIKI_BASE_DIR`; `read`/`write`/optional `write_scope` from `.iwiki.toml`.
+`base` or `IWIKI_BASE_DIR`; `read`/`write`/`primary` from `.iwiki.toml`.
 An empty/absent `read` defaults the search scope to *all* domains. `write` must equal
-the current project domain (the project directory's basename). `write_scope` must
-contain that primary write domain and stay inside `read`; omitted it keeps scalar
-compatibility, making only `write` mutable. `wiki_bind` protects an existing non-empty
+the current project domain (the project directory's basename). `primary` must belong
+to `write`, and every write domain must stay inside `read`. `wiki_bind` protects an existing non-empty
 `read` — it may only *append* the current project domain, never swap the scope.
 
 ## MCP tool surface
@@ -359,7 +358,7 @@ their shared execution. It discovers only the bound visible read set, resolved t
 `base.resolve_scope` so an empty `read` means every current domain. Exact relative
 links are candidates inside the target domain and exact `iwiki://` links are candidates
 across visible domains. Before any file is changed, every candidate domain must belong
-to `write_scope`; a visible read-only candidate returns `write_scope_blocked`. Hidden
+to `write`; a visible read-only candidate returns `write_scope_blocked`. Hidden
 domains are neither inspected nor reported, so they are never rewritten.
 
 The coordinator acquires `mutation_lock(base)` before recovery, exclusion setup, staged

@@ -30,7 +30,7 @@ def _base(tmp_path: Path):
     _git(base, "add", "-A")
     _git(base, "commit", "-q", "-m", "seed")
     binding = Binding(
-        str(base), ("alpha", "beta"), "alpha", str(tmp_path), ("alpha", "beta")
+        str(base), ("alpha", "beta"), ("alpha", "beta"), str(tmp_path), "alpha"
     )
     return base, binding
 
@@ -144,7 +144,7 @@ def test_execute_plan_rejects_read_only_domain_and_changed_preimage(tmp_path):
     base, binding = _base(tmp_path)
     plan = _plan(base)
     read_only = Binding(
-        binding.base, binding.read, binding.write, binding.project_dir, ("alpha",)
+        binding.base, binding.read, ("alpha",), binding.project_dir, "alpha"
     )
 
     with pytest.raises(cross_domain.CrossDomainError) as blocked:

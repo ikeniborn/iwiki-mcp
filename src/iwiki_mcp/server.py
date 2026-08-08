@@ -169,13 +169,17 @@ def _creation_binding() -> base.Binding:
         raise base.BaseError(
             "no wiki base configured: set IWIKI_BASE_DIR or add `base` to .iwiki.toml"
         )
-    write = str(config.get("write") or "").strip() or None
+    raw_write = config.get("write")
+    if isinstance(raw_write, str):
+        raise base.BaseError("write must be an array of domains")
+    write = base._unique_str_tuple(raw_write)
+    primary = config.get("primary") or (write[0] if write else None)
     return base.Binding(
-        os.path.abspath(os.path.expanduser(wiki_base)),
-        base._as_str_tuple(config.get("read")),
-        write,
-        project_dir,
-        (),
+        base=os.path.abspath(os.path.expanduser(wiki_base)),
+        read=base._as_str_tuple(config.get("read")),
+        write=write,
+        primary=primary,
+        project_dir=project_dir,
     )
 
 
@@ -193,7 +197,7 @@ def _safe(fn):
             }
         except cross_domain.CrossDomainError as e:
             hint = {
-                "write_scope_blocked": "add every visible referrer domain to write_scope",
+                "write_scope_blocked": "add every visible referrer domain to write",
                 "heading_collision": "choose a heading with a unique anchor",
                 "target_collision": "delete or rename the colliding page first",
                 "source_changed": "retry the complete operation against current Markdown",
@@ -227,7 +231,7 @@ def _mutation_guard(fn):
                 "wiki_export_okf",
             }
             supplied_domain = args[0] if args else kwargs.get("domain")
-            if optional_domain and supplied_domain is None and bind.write is None:
+            if optional_domain and supplied_domain is None and bind.primary is None:
                 token = _MUTATION_BINDING.set(bind)
                 try:
                     return fn(*args, **kwargs)
@@ -411,8 +415,8 @@ def wiki_status() -> dict:
     return {
         "base": bind.base,
         "read": list(bind.read),
-        "write": bind.write,
-        "write_scope": list(base.writable_domains(bind)),
+        "write": list(bind.write),
+        "primary": bind.primary,
         "project_dir": bind.project_dir,
         "domains": base.list_domains(bind.base),
     }
@@ -485,7 +489,7 @@ def wiki_search(
     bind = base.resolve_binding()
     cfg = Config.load()
     if intent.strip().lower() == "write":
-        target = bind.write or (domains[0] if domains else None)
+        target = bind.primary or (domains[0] if domains else None)
         if not target:
             return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
         target = _validate_domain(target)      # path guards are load-bearing
@@ -1164,7 +1168,7 @@ def wiki_delete_page(domain: str, slug: str) -> dict:
 @_safe
 def wiki_index(domain: str | None = None) -> dict:
     bind = _resolved_binding()
-    target = domain or bind.write
+    target = domain or bind.primary
     if not target:
         return {
             "error": "no domain given and no write-target bound",
@@ -1220,16 +1224,14 @@ def wiki_create_domain(name: str) -> dict:
 @_safe
 def wiki_bind(
     read: list[str] | None = None,
-    write: str | None = None,
-    write_scope: list[str] | None = None,
+    write: list[str] | None = None,
+    primary: str | None = None,
 ) -> dict:
     bind = base.resolve_binding()
     current_domain = _validate_domain(base.current_project_domain(bind.project_dir))
     valid_read = None if read is None else [_validate_domain(d) for d in read]
-    valid_write = None if write is None else _validate_domain(write)
-    valid_write_scope = (
-        None if write_scope is None else [_validate_domain(d) for d in write_scope]
-    )
+    valid_write = None if write is None else [_validate_domain(d) for d in write]
+    valid_primary = None if primary is None else _validate_domain(primary)
     merged_read = None
     if valid_read is not None:
         merged, read_error = base.merge_read_scope(
@@ -1251,60 +1253,49 @@ def wiki_bind(
                 "error": f"domain '{domain}' not found",
                 "hint": "create it with wiki_create_domain",
             }
-    if valid_write is not None:
-        if not _domain_path(bind.base, valid_write).is_dir():
+    for domain in valid_write or ():
+        if not _domain_path(bind.base, domain).is_dir():
             return {
-                "error": f"domain '{valid_write}' not found",
+                "error": f"domain '{domain}' not found",
                 "hint": "create it with wiki_create_domain",
             }
-        if valid_write != current_domain:
-            return {
-                "error": "write domain must match current project domain",
-                "hint": f"use write='{current_domain}' for this project",
-            }
-    elif bind.write is not None and bind.write != current_domain:
+    candidate_read = tuple(merged_read) if merged_read is not None else bind.read
+    candidate_write = tuple(valid_write) if valid_write is not None else bind.write
+    candidate_primary = valid_primary
+    if candidate_primary is None:
+        candidate_primary = (
+            bind.primary if bind.primary in candidate_write else
+            (candidate_write[0] if candidate_write else None)
+        )
+    if candidate_primary != current_domain:
         return {
             "error": "write domain must match current project domain",
-            "hint": f"use write='{current_domain}' for this project",
+            "hint": f"include '{current_domain}' in write and set it as primary",
         }
-    candidate_read = tuple(merged_read) if merged_read is not None else bind.read
-    candidate_write = valid_write if valid_write is not None else bind.write
-    config = base.load_project_config(bind.project_dir)
-    if valid_write_scope is not None:
-        scope_value = valid_write_scope
-        scope_explicit = True
-    elif "write_scope" in config:
-        scope_value = bind.write_scope
-        scope_explicit = True
-    else:
-        scope_value = None
-        scope_explicit = False
     try:
-        base._resolved_write_scope(
+        base._resolved_write_domains(
             bind.base,
             candidate_read,
             candidate_write,
-            scope_value,
-            explicit=scope_explicit,
+            candidate_primary,
         )
     except base.BaseError as exc:
         return {
             "error": str(exc),
-            "hint": "write_scope must contain the primary write domain and be a "
-                    "subset of existing read domains",
+            "hint": "write domains must exist and be included in read",
         }
     base.write_project_config(
         bind.project_dir,
         read=merged_read,
         write=valid_write,
-        write_scope=valid_write_scope,
+        primary=valid_primary,
     )
     ignore.ensure_iwikiignore(bind.project_dir)
     new = base.resolve_binding()
     return {
         "read": list(new.read),
-        "write": new.write,
-        "write_scope": list(base.writable_domains(new)),
+        "write": list(new.write),
+        "primary": new.primary,
         "project_dir": new.project_dir,
     }
 
@@ -1332,16 +1323,16 @@ def wiki_lint(domain: str | None = None) -> dict:
 @_safe
 def wiki_remediation_plan(domain: str | None = None) -> dict:
     bind = base.resolve_binding()
-    if not bind.write:
+    if not bind.primary:
         return {
             "error": "no write domain bound",
             "hint": "set write in .iwiki.toml via wiki_bind",
         }
-    target = _validate_domain(domain or bind.write)
-    if target != bind.write:
+    target = _validate_domain(domain or bind.primary)
+    if target != bind.primary:
         return {
             "error": "domain must match bound write domain",
-            "hint": f"use the bound write domain '{bind.write}'",
+            "hint": f"use the bound primary domain '{bind.primary}'",
         }
     dom_path = _domain_path(bind.base, target)
     base.migrate_store_location(bind.base, target)
@@ -1355,14 +1346,6 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
     for finding in report.get("stale", []):
         page = finding.get("page", "")
         source = finding.get("source", "")
-        if source and ignore.is_ignored(ignore_spec, source, bind.project_dir):
-            blocked_candidates.append({
-                "domain": target,
-                "page": page,
-                "source": source,
-                "reason": "source_ignored",
-            })
-            continue
         try:
             slug = _slug_from_page_path(dom_path, page)
             current_markdown = _read_text(page)
@@ -1382,6 +1365,14 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
                 "page": page,
                 "source": source,
                 "reason": "source_outside_project",
+            })
+            continue
+        if source and ignore.is_ignored(ignore_spec, source, bind.project_dir):
+            blocked_candidates.append({
+                "domain": target,
+                "page": page,
+                "source": source,
+                "reason": "source_ignored",
             })
             continue
         try:
@@ -1462,7 +1453,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     layout move is itself a write -- the domain is always reindexed, and
     committed only when something actually moved."""
     bind = _resolved_binding()
-    target = domain or bind.write
+    target = domain or bind.primary
     if not target:
         return {"error": "no domain given and no write-target bound",
                 "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
@@ -1797,7 +1788,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
 @_safe
 def wiki_export_okf(domain: str | None = None) -> dict:
     bind = _resolved_binding()
-    target = domain or bind.write
+    target = domain or bind.primary
     if not target:
         return {"error": "no domain given and no write-target bound",
                 "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}

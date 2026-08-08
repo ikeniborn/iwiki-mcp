@@ -67,9 +67,9 @@ def _setup(
     binding = base.Binding(
         str(wiki),
         read_scope,
-        "target",
-        str(tmp_path),
         write_scope,
+        str(tmp_path),
+        "target",
     )
     monkeypatch.setattr(base, "resolve_binding", lambda: binding)
     monkeypatch.setattr(sync, "ensure_fresh", lambda _base: {"state": "fresh"})

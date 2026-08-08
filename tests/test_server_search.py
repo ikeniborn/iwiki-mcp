@@ -13,7 +13,9 @@ def _seed(tmp_path, monkeypatch):
     )
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n'
+    )
     monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
     monkeypatch.setenv("IWIKI_PROJECT_DIR", str(proj))
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x/v1")

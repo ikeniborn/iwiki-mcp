@@ -7,7 +7,9 @@ def _seed(tmp_path, monkeypatch):
     (b / "backend" / "auth.md").write_text("# Auth\n## Overview\no\n## Flow\nx\n")
     proj = tmp_path / "proj"
     proj.mkdir()
-    (proj / ".iwiki.toml").write_text('read = ["backend"]\nwrite = "backend"\n')
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n'
+    )
     monkeypatch.setenv("IWIKI_BASE_DIR", str(b))
     monkeypatch.setenv("IWIKI_PROJECT_DIR", str(proj))
     return str(b)
@@ -16,7 +18,8 @@ def _seed(tmp_path, monkeypatch):
 def test_status(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     out = server.wiki_status()
-    assert out["write"] == "backend"
+    assert out["write"] == ["backend"]
+    assert out["primary"] == "backend"
     assert "backend" in out["domains"]
 
 

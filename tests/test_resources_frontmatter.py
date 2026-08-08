@@ -17,7 +17,7 @@ def test_public_docs_describe_cross_domain_transaction_contract():
     root = Path(__file__).parents[1]
     for relative in ("README.md", "docs/README.ru.md"):
         text = (root / relative).read_text(encoding="utf-8")
-        assert "write_scope" in text
+        assert "write = [" in text
         assert "new_heading" in text
         assert ".iwiki/transactions/<id>" in text
         assert "Iwiki-Transaction" in text
