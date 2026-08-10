@@ -57,6 +57,7 @@ def _parser_inputs(
     *,
     languages: Iterable[str],
     schema_version: int | str,
+    parser_version: str = "",
     grammar_version: str,
     adapter_version: str,
     resolver_version: str,
@@ -65,6 +66,7 @@ def _parser_inputs(
         "adapter_version": adapter_version,
         "grammar_version": grammar_version,
         "languages": sorted(set(languages)),
+        "parser_version": parser_version,
         "resolver_version": resolver_version,
         "schema_version": schema_version,
     }
@@ -74,6 +76,7 @@ def parser_fingerprint(
     *,
     languages: Iterable[str],
     schema_version: int | str,
+    parser_version: str = "",
     grammar_version: str,
     adapter_version: str,
     resolver_version: str,
@@ -82,6 +85,7 @@ def parser_fingerprint(
         _parser_inputs(
             languages=languages,
             schema_version=schema_version,
+            parser_version=parser_version,
             grammar_version=grammar_version,
             adapter_version=adapter_version,
             resolver_version=resolver_version,
@@ -142,6 +146,7 @@ def compose_fingerprints(
     git_commit: str | None,
     dirty_marker: str,
     schema_version: int | str,
+    parser_version: str = "",
     grammar_version: str,
     adapter_version: str,
     resolver_version: str,
@@ -152,6 +157,7 @@ def compose_fingerprints(
     parser_inputs = _parser_inputs(
         languages=config.languages,
         schema_version=schema_version,
+        parser_version=parser_version,
         grammar_version=grammar_version,
         adapter_version=adapter_version,
         resolver_version=resolver_version,

@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: c4faa3021d3b5042
+  plan_hash: 663221f82b1299f4
   last_run: 2026-08-10
   phases:
     structure: { status: passed }
@@ -28,7 +28,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 9: Wiki selector parsing and derived links"
-      section_hash: e45054151d4639ca
+      section_hash: 867df7f80d409bbe
       fragment: "Extend frontmatter parsing to preserve a `code` mapping without changing existing normalized fields."
       text: >-
         R-021/R-024 require authored `code:` selectors to survive Wiki authoring,
@@ -48,7 +48,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "(document)"
-      section_hash: c4faa3021d3b5042
+      section_hash: 663221f82b1299f4
       fragment: null
       text: >-
         The approved intent states that any task touching proposal-first or
@@ -68,7 +68,7 @@ review:
       phase: coverage
       severity: WARNING
       section: "(document)"
-      section_hash: c4faa3021d3b5042
+      section_hash: 663221f82b1299f4
       fragment: null
       text: >-
         AC-02, AC-05 and AC-24 are claimed as produced (Tasks 1, 2, 9) but no step
@@ -159,7 +159,7 @@ review:
       phase: verifiability
       severity: INFO
       section: "(document)"
-      section_hash: c4faa3021d3b5042
+      section_hash: 663221f82b1299f4
       fragment: null
       text: >-
         The intent health metric "source text, credentials and secret-like files
@@ -174,7 +174,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 9: Wiki selector parsing and derived links"
-      section_hash: e45054151d4639ca
+      section_hash: 867df7f80d409bbe
       fragment: "server.wiki_code_context([\"pkg.Service.run\"], include_wiki=True)"
       text: >-
         Task 9 called `wiki_code_context` before Task 10 registered it, so its
@@ -202,7 +202,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 6: Full-build indexer and runtime state facade"
-      section_hash: 99212348bd6efefc
+      section_hash: f5bc2591c04b8bee
       fragment: "tests/codegraph/conftest.py"
       text: >-
         Tasks 6 through 12 depended on undefined fixtures and test-double
@@ -244,7 +244,7 @@ review:
       phase: coverage
       severity: WARNING
       section: "Task 6: Full-build indexer and runtime state facade"
-      section_hash: 99212348bd6efefc
+      section_hash: f5bc2591c04b8bee
       fragment: "test_nonready_state_guard_and_bounded_auto_rebuild"
       text: >-
         AC-08 had no state-driven proof for missing/dirty/rebuilding/failed or
@@ -280,7 +280,7 @@ review:
       phase: coverage
       severity: WARNING
       section: "Task 6: Full-build indexer and runtime state facade"
-      section_hash: 99212348bd6efefc
+      section_hash: f5bc2591c04b8bee
       fragment: "test_build_logs_are_sanitized_and_cache_is_git_ignored"
       text: >-
         AC-25 claimed sanitized logs without checking source, secrets, or
@@ -356,7 +356,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Unit B — discovery, Python indexing, resolution, and search"
-      section_hash: 40d813c6b7a1ff41
+      section_hash: f8eb13e4dcd9d0d1
       fragment: null
       text: >-
         F-005 was closed prematurely: the linked spec assigned contradictory
@@ -370,7 +370,7 @@ review:
       phase: consistency
       severity: WARNING
       section: "Task 9: Wiki selector parsing and derived links"
-      section_hash: e45054151d4639ca
+      section_hash: 867df7f80d409bbe
       fragment: "Extend the stdlib-only frontmatter parser/renderer only for the exact nested `code` contract"
       text: >-
         Nested `code` parsing/rendering could regress existing flat-frontmatter,
@@ -1193,6 +1193,9 @@ git commit -m "feat(codegraph): resolve Python relations"
 - [ ] **Step 1: Write failing full-build, no-op, and fault-publication tests**
 
 ```python
+import time
+
+
 def test_indexer_builds_noops_and_preserves_previous_revision_on_failure(seed_runtime):
     first = seed_runtime.index(force=False)
     second = seed_runtime.index(force=False)
@@ -1255,9 +1258,66 @@ def test_build_logs_are_sanitized_and_cache_is_git_ignored(seed_runtime, caplog)
     assert secret not in caplog.text
     assert str(seed_runtime.project_dir) not in caplog.text
     assert seed_runtime.git_status() == ""
+
+
+def test_deadline_cancels_before_publication_and_worker_cleans_up(seed_runtime):
+    runtime = seed_runtime.with_config(max_rebuild_seconds=0.1)
+    previous = runtime.index(force=True)["revision"]
+    runtime.pause_before_publication()
+
+    started = time.monotonic()
+    out = runtime.index(force=True)
+
+    assert out["code"] == "busy"
+    assert time.monotonic() - started < 0.5
+    assert runtime.status()["fresh"] is False
+    runtime.release_worker()
+    runtime.join_workers()
+    assert runtime.status()["revision"] == previous
+    assert runtime.active_workers == 0
+    assert runtime.staging_paths() == []
+
+
+def test_inflight_atomic_publication_may_finish_after_busy(seed_runtime):
+    runtime = seed_runtime.with_config(max_rebuild_seconds=0.1)
+    previous = runtime.index(force=True)["revision"]
+    runtime.project_file("src/changed.py", "def changed(): pass\n")
+    runtime.pause_inside_atomic_publication()
+
+    out = runtime.index(force=True)
+
+    assert out["code"] == "busy"
+    assert runtime.status()["fresh"] is False
+    assert runtime.status()["revision"] in (previous, None)
+    runtime.release_worker()
+    runtime.join_workers()
+    assert runtime.status()["state"] == "ready"
+    assert runtime.status()["fresh"] is True
+    assert runtime.status()["revision"] != previous
+
+
+def test_cache_symlink_and_toolchain_drift_fail_closed(seed_runtime, tmp_path):
+    escaped = seed_runtime.with_cache_symlink(tmp_path / "outside")
+    assert escaped.index(force=True)["code"] == "unsafe_path"
+    assert list((tmp_path / "outside").iterdir()) == []
+
+    ready = seed_runtime.index(force=True)
+    changed = seed_runtime.with_toolchain_versions(
+        parser="parser-next", adapter="adapter-next", resolver="resolver-next"
+    ).status()
+    assert changed["state"] == "dirty"
+    assert changed["fresh"] is False
+    assert changed["parser_version"] == ready["parser_version"]
+
+
+def test_noop_reports_only_noop_timings(seed_runtime):
+    seed_runtime.index(force=True)
+    out = seed_runtime.index(force=False)
+    assert out["no_op"] is True
+    assert set(out["phase_timings_ms"]) <= {"no_op"}
 ```
 
-`tests/codegraph/conftest.py` owns test harnesses, never production API. In Task 6 define `seed_runtime`, `ready_runtime`, `seed_binding`, `seed_without_primary`, and `fake_runtime_factory`; the factory returns the `FakeRuntime` double used by server tests. The runtime double records `embedding_requests`, `database_accesses`, and `build_attempts`, and offers `with_config`, `with_state`, `fail_with_message`, `project_file`, `git_status`, `wiki_hashes`, and `hold_publication_lock`. Later tasks extend this same file only when their dependencies exist: Task 9 adds `link_fixture`/`seed_wiki`, Task 11 adds `seed_lint`/`seed_lint_without_graph`, and Task 12 adds `runtime_pair` plus `switch_branch`/`mutate_sources`. Every fixture closes SQLite handles in teardown and exposes only deterministic project-relative fixture data.
+`tests/codegraph/conftest.py` owns test harnesses, never production API. In Task 6 define `seed_runtime`, `ready_runtime`, `seed_binding`, `seed_without_primary`, and `fake_runtime_factory`; the factory returns the `FakeRuntime` double used by server tests. The runtime double records `embedding_requests`, `database_accesses`, `build_attempts`, and `active_workers`, and offers `with_config`, `with_state`, `with_cache_symlink`, `with_toolchain_versions`, `fail_with_message`, `project_file`, `git_status`, `wiki_hashes`, `hold_publication_lock`, `pause_before_publication`, `pause_inside_atomic_publication`, `release_worker`, `join_workers`, and `staging_paths`. Pause/release hooks use events rather than sleeps; the elapsed assertion only proves the caller does not wait for a deliberately blocked worker. Later tasks extend this same file only when their dependencies exist: Task 9 adds `link_fixture`/`seed_wiki`, Task 11 adds `seed_lint`/`seed_lint_without_graph`, and Task 12 adds `runtime_pair` plus `switch_branch`/`mutate_sources`. Every fixture joins owned workers and closes SQLite/lock handles in teardown and exposes only deterministic project-relative fixture data.
 
 - [ ] **Step 2: Run indexer/runtime tests and confirm missing facade**
 
@@ -1283,7 +1343,7 @@ class CodeGraphRuntime:
             return {"error": "code graph rebuild failed", "code": "rebuild_failed", "hint": "inspect wiki_code_status and retry"}
 ```
 
-Load configuration through `load_code_graph_config(binding.project_dir)`. Implement spec Section 12's 13 ordered build steps. Use a UUID only for the staging filename, never for portable IDs. Acquire the per-domain `FileLock`, validate staging, checkpoint/close it, atomically replace the canonical DB, atomically replace metadata JSON, reopen and verify revision, then release. Status reads metadata/schema only. Matching fingerprint returns no-op. Missing/dirty bounded lazy build uses the configured request budget; non-ready guards return `fresh=false`, a stable hint, and no stale graph rows. Emit only stable error codes/counts/timings to logs—never source, absolute project paths, environment values, or exception payloads.
+Load configuration through `load_code_graph_config(binding.project_dir)`. Implement spec Section 12's 13 ordered build steps. Use a UUID only for the staging filename, never for portable IDs. Acquire the per-domain reader/writer lock, validate staging, checkpoint/close it, atomically replace the canonical DB, atomically replace metadata JSON, reopen and verify revision, then release. Status reads metadata/schema only. Matching fingerprint returns no-op. Missing/dirty bounded lazy build uses the configured request budget; non-ready guards return `fresh=false`, a stable hint, and no stale graph rows. Enforce Section 12.2's cooperative deadline: the caller returns `busy` by the deadline, cancellation prevents a new publication section, and an atomic section already entered may finish under the writer lock while metadata stays non-ready until final verification. Run blocking discovery/parser/Git/SQLite work in a bounded worker, retain cancellation/deadline checks before publication, and close or join worker resources in deterministic test teardown. Emit only stable error codes/counts/timings to logs—never source, absolute project paths, environment values, or exception payloads.
 
 - [ ] **Step 4: Run runtime, store, graph, and concurrency-adjacent tests**
 
@@ -1291,7 +1351,7 @@ Load configuration through `load_code_graph_config(binding.project_dir)`. Implem
 uv run pytest -q tests/codegraph/test_indexer_runtime.py tests/codegraph/test_store.py tests/test_graph_runtime.py tests/test_lock.py
 ```
 
-Expected: all focused tests pass; disabled mode creates/reads no code DB, bounded auto-rebuild and every non-ready state are covered, the build path makes zero embedding calls, logs are sanitized, code-cache artifacts remain absent from `git status`, and fault injection never exposes staging or changes the previous ready revision.
+Expected: all focused tests pass; disabled mode creates/reads no code DB, bounded auto-rebuild and every non-ready state are covered, the build path makes zero embedding calls, logs are sanitized, code-cache artifacts remain absent from `git status`, and fault injection never exposes staging or changes the previous ready revision. A caller blocked before publication returns `busy` by its deadline, cancellation prevents later publication, teardown joins the worker and removes staging, an already-entered atomic section stays non-ready until final verification and may then publish, cache-parent symlinks fail closed without outside writes, persisted toolchain provenance makes changed runtimes dirty, and no-op timing contains no previous-build phases.
 
 - [ ] **Step 5: Bump version and commit indexing lifecycle**
 

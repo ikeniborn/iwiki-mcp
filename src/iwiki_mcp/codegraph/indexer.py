@@ -1,0 +1,1221 @@
+"""Deterministic full-build indexing and atomic code graph publication."""
+from __future__ import annotations
+
+from collections import Counter
+from contextlib import closing
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import threading
+import time
+from typing import Callable, Iterable, Mapping, Protocol, Sequence
+
+from filelock import Timeout
+
+from iwiki_mcp import base as wiki_base
+
+from .config import CodeGraphConfig
+from .discovery import DiscoveryError, DiscoverySnapshot, discover_sources
+from .fingerprint import (
+    FingerprintSet,
+    compose_fingerprints,
+    git_commit as current_git_commit,
+    git_dirty_marker,
+)
+from .languages.base import LanguageAdapter
+from .location import CodeGraphPaths
+from .models import (
+    CodeGraphError,
+    FileRecord,
+    ParsedFile,
+    RelationRecord,
+    file_id,
+    relation_id,
+    symbol_id,
+)
+from .resolver import SymbolIndex
+from .schema import SCHEMA_VERSION, TABLES, CodeGraphStoreError
+from .store import CodeGraphStore, code_graph_write_lock
+
+
+_PHASE_NAMES = (
+    "discovery",
+    "fingerprint",
+    "parsing",
+    "resolution",
+    "persistence",
+    "validation",
+    "publication",
+)
+KNOWN_WARNING_CODES = frozenset({
+    "directory_changed",
+    "directory_depth_limit",
+    "directory_limit_reached",
+    "directory_unavailable",
+    "entry_excluded",
+    "entry_limit_reached",
+    "entry_unavailable",
+    "file_changed",
+    "file_limit_reached",
+    "file_too_large",
+    "file_unavailable",
+    "ignored",
+    "metadata_unavailable",
+    "metadata_reconstructed",
+    "metrics_incomplete",
+    "parse_error",
+    "secret_excluded",
+    "symlink_excluded",
+})
+
+
+class CodeGraphBuildError(CodeGraphError):
+    """Raised when a full graph snapshot cannot be built safely."""
+
+    code = "rebuild_failed"
+
+
+class CodeGraphParseError(CodeGraphError):
+    """Raised when a configured language adapter cannot parse safely."""
+
+    code = "parse_failed"
+
+
+class CodeGraphStoreFailure(CodeGraphError):
+    """Raised when snapshot storage fails before safe publication."""
+
+    code = "store_failed"
+
+
+class CodeGraphStaleError(CodeGraphError):
+    """Raised when persisted inputs no longer match project sources."""
+
+    code = "stale"
+
+
+class CodeGraphUnsafePathError(CodeGraphError):
+    """Raised when discovery rejects an unsafe project path."""
+
+    code = "unsafe_path"
+
+
+class BuildControl:
+    """Linearize caller cancellation against atomic publication entry."""
+
+    def __init__(self) -> None:
+        self.cancelled = threading.Event()
+        self.publication_entered = threading.Event()
+        self._publication_gate = threading.Lock()
+
+    def cancel(self) -> None:
+        if self._publication_gate.acquire(blocking=False):
+            try:
+                self.cancelled.set()
+            finally:
+                self._publication_gate.release()
+        else:
+            self.cancelled.set()
+
+    def enter_publication(
+        self,
+        *,
+        deadline: float,
+        lock_path: Path,
+    ) -> None:
+        self._publication_gate.acquire()
+        if self.cancelled.is_set() or time.monotonic() >= deadline:
+            self._publication_gate.release()
+            raise Timeout(str(lock_path))
+        self.publication_entered.set()
+
+    def leave_publication(self) -> None:
+        if self.publication_entered.is_set():
+            self._publication_gate.release()
+
+
+@dataclass(frozen=True)
+class AdapterBinding:
+    """Composition-root supplied adapter and deterministic version inputs."""
+
+    adapter: LanguageAdapter
+    parser_version: str
+    grammar_version: str
+    adapter_version: str
+
+
+@dataclass(frozen=True)
+class AdapterFactory:
+    """Lazy composition input for one language adapter implementation."""
+
+    create: Callable[[], LanguageAdapter]
+    parser_version: str
+    grammar_version: str
+    adapter_version: str
+
+    def bind(self) -> AdapterBinding:
+        return AdapterBinding(
+            adapter=self.create(),
+            parser_version=self.parser_version,
+            grammar_version=self.grammar_version,
+            adapter_version=self.adapter_version,
+        )
+
+
+class WikiSelectorResolver(Protocol):
+    """Task 9 extension seam for deterministic Wiki selector resolution."""
+
+    def resolve(
+        self,
+        *,
+        domain: str,
+        project_dir: str,
+        parsed_files: tuple[ParsedFile, ...],
+        relations: tuple[RelationRecord, ...],
+    ) -> Sequence[Mapping[str, object]]:
+        """Return normalized wiki_code_links rows for final persistence."""
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((time.monotonic() - started) * 1000))
+
+
+def _check_deadline(deadline: float | None, lock_path: Path) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise Timeout(str(lock_path))
+
+
+def _lock_timeout(maximum: float, deadline: float | None) -> float:
+    if deadline is None:
+        return maximum
+    return max(0.0, min(maximum, deadline - time.monotonic()))
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+
+def _safe_metadata(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _safe_phase_timings(value: object) -> dict[str, int]:
+    mapping = value if isinstance(value, Mapping) else {}
+    return {
+        phase: timing
+        for phase in _PHASE_NAMES
+        if type(timing := mapping.get(phase)) is int and timing >= 0
+    }
+
+
+def sanitize_warning_codes(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({
+        item for item in value
+        if isinstance(item, str) and item in KNOWN_WARNING_CODES
+    })
+
+
+class CodeGraphIndexer:
+    """Build one immutable snapshot for a request-scoped primary domain."""
+
+    def __init__(
+        self,
+        *,
+        cache_base: str,
+        project_dir: str,
+        domain: str,
+        config: CodeGraphConfig,
+        paths: CodeGraphPaths,
+        adapters: Mapping[str, AdapterBinding],
+        resolver_version: str,
+        wiki_selector_resolver: WikiSelectorResolver,
+    ) -> None:
+        self.cache_base = cache_base
+        self.project_dir = project_dir
+        self.domain = domain
+        self.config = config
+        self.paths = paths
+        self.adapters = dict(adapters)
+        self.resolver_version = resolver_version
+        self.wiki_selector_resolver = wiki_selector_resolver
+        self.store = CodeGraphStore(
+            paths.database,
+            cache_base=cache_base,
+        )
+
+    def _config_for_languages(
+        self,
+        config: CodeGraphConfig,
+        languages: list[str] | None,
+    ) -> CodeGraphConfig:
+        if languages is None:
+            return config
+        if not languages or any(item not in self.adapters for item in languages):
+            raise CodeGraphBuildError("invalid code graph languages")
+        return replace(config, languages=tuple(languages))
+
+    def _bindings(
+        self, config: CodeGraphConfig
+    ) -> tuple[AdapterBinding, ...]:
+        try:
+            return tuple(self.adapters[language] for language in config.languages)
+        except KeyError as exc:
+            raise CodeGraphBuildError(
+                "invalid code graph languages"
+            ) from exc
+
+    def _parser_version(self, config: CodeGraphConfig) -> str:
+        return ";".join(
+            f"{binding.adapter.language}:{binding.parser_version}"
+            for binding in self._bindings(config)
+        )
+
+    def _grammar_version(self, config: CodeGraphConfig) -> str:
+        return ";".join(
+            f"{binding.adapter.language}:{binding.grammar_version}"
+            for binding in self._bindings(config)
+        )
+
+    def _adapter_version(self, config: CodeGraphConfig) -> str:
+        return ";".join(
+            f"{binding.adapter.language}:{binding.adapter_version}"
+            for binding in self._bindings(config)
+        )
+
+    def _extensions(self, config: CodeGraphConfig) -> tuple[str, ...]:
+        return tuple(sorted({
+            extension
+            for binding in self._bindings(config)
+            for extension in binding.adapter.extensions
+        }))
+
+    def _fingerprints(
+        self,
+        discovered: DiscoverySnapshot,
+        config: CodeGraphConfig,
+    ) -> tuple[FingerprintSet, str | None, str]:
+        commit = current_git_commit(self.project_dir)
+        dirty = git_dirty_marker(self.project_dir)
+        fingerprints = compose_fingerprints(
+            discovered.files,
+            config,
+            repository_id=self.domain,
+            git_commit=commit,
+            dirty_marker=dirty,
+            schema_version=SCHEMA_VERSION,
+            parser_version=self._parser_version(config),
+            grammar_version=self._grammar_version(config),
+            adapter_version=self._adapter_version(config),
+            resolver_version=self.resolver_version,
+        )
+        return fingerprints, commit, dirty
+
+    def _quarantine_unusable_canonical(self) -> None:
+        if not self.paths.database.exists():
+            return
+        try:
+            with closing(self.store.open_existing()):
+                pass
+        except CodeGraphStoreError:
+            if not self.store.canonical_handles_available():
+                raise Timeout(str(self.paths.lock))
+            self.store.quarantine_corrupt()
+
+    def _ready_metadata(
+        self,
+        fingerprints: FingerprintSet,
+        commit: str | None,
+        config: CodeGraphConfig,
+        *,
+        persisted: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        metadata = dict(
+            persisted
+            if persisted is not None
+            else (_safe_metadata(self.paths.metadata) or {})
+        )
+        try:
+            with closing(self.store.open_existing()) as connection:
+                row = connection.execute(
+                    "SELECT source_fingerprint, config_fingerprint, "
+                    "parser_fingerprint, git_commit, revision, state, "
+                    "indexed_at "
+                    "FROM repositories WHERE repository_id = ?",
+                    (self.domain,),
+                ).fetchone()
+                if row is not None:
+                    counts = self._stored_counts(connection)
+        except (CodeGraphStoreError, OSError):
+            return None
+        expected = (
+            fingerprints.source,
+            fingerprints.config,
+            fingerprints.parser,
+            commit,
+            row[4] if row is not None else None,
+            "ready",
+        )
+        if row is None or row[:6] != expected:
+            return None
+        metadata_timings = _safe_phase_timings(
+            metadata.get("phase_timings_ms")
+        )
+        metadata_duration = metadata.get("duration_ms")
+        metadata_matches = (
+            metadata.get("state") == "ready"
+            and metadata.get("revision") == row[4]
+            and metadata.get("input_fingerprint") == fingerprints.inputs
+            and metadata.get("git_commit") == commit
+            and set(metadata_timings) == set(_PHASE_NAMES)
+            and type(metadata_duration) is int
+            and metadata_duration >= 0
+        )
+        if not metadata_matches:
+            metadata = {}
+        resolution_states = counts["resolution_states"]
+        resolution_total = sum(resolution_states.values())
+        resolution_ratios = {
+            state: count / resolution_total
+            for state, count in resolution_states.items()
+            if resolution_total
+        }
+        excluded_files = metadata.get("excluded_files")
+        parser_errors = metadata.get("parser_errors")
+        result = {
+            "domain": self.domain,
+            "state": "ready",
+            "revision": row[4],
+            "fresh": True,
+            "git_commit": commit,
+            "fingerprints": {
+                "source": fingerprints.source,
+                "config": fingerprints.config,
+                "parser": fingerprints.parser,
+            },
+            "input_fingerprint": fingerprints.inputs,
+            "schema_version": SCHEMA_VERSION,
+            "parser_version": self._parser_version(config),
+            "grammar_version": self._grammar_version(config),
+            "adapter_version": self._adapter_version(config),
+            "resolver_version": self.resolver_version,
+            "counts": counts,
+            "resolution_ratios": resolution_ratios,
+            "excluded_files": (
+                excluded_files
+                if type(excluded_files) is int and excluded_files >= 0
+                else 0
+            ),
+            "truncated": (
+                metadata.get("truncated")
+                if type(metadata.get("truncated")) is bool
+                else False
+            ),
+            "parser_errors": (
+                parser_errors
+                if type(parser_errors) is int and parser_errors >= 0
+                else 0
+            ),
+            "indexed_at": row[6],
+            "warnings": (
+                sanitize_warning_codes(metadata.get("warnings"))
+                if metadata_matches
+                else ["metadata_reconstructed", "metrics_incomplete"]
+            ),
+        }
+        if metadata_matches:
+            result["phase_timings_ms"] = metadata_timings
+            result["duration_ms"] = metadata_duration
+        return result
+
+    @staticmethod
+    def _stored_counts(connection) -> dict[str, object]:
+        return {
+            "languages": dict(connection.execute(
+                "SELECT language, COUNT(*) FROM files "
+                "GROUP BY language ORDER BY language"
+            )),
+            "files": connection.execute(
+                "SELECT COUNT(*) FROM files"
+            ).fetchone()[0],
+            "symbols": connection.execute(
+                "SELECT COUNT(*) FROM symbols"
+            ).fetchone()[0],
+            "relations": connection.execute(
+                "SELECT COUNT(*) FROM relations"
+            ).fetchone()[0],
+            "symbol_kinds": dict(connection.execute(
+                "SELECT kind, COUNT(*) FROM symbols GROUP BY kind ORDER BY kind"
+            )),
+            "relation_types": dict(connection.execute(
+                "SELECT relation_type, COUNT(*) FROM relations "
+                "GROUP BY relation_type ORDER BY relation_type"
+            )),
+            "resolution_states": dict(connection.execute(
+                "SELECT resolution_state, COUNT(*) FROM relations "
+                "GROUP BY resolution_state ORDER BY resolution_state"
+            )),
+        }
+
+    def _parse(
+        self,
+        discovered: DiscoverySnapshot,
+    ) -> tuple[tuple[ParsedFile, ...], tuple[str, ...]]:
+        parsed_files = []
+        warnings = []
+        for source in discovered.files:
+            binding = next(
+                (
+                    candidate
+                    for candidate in self.adapters.values()
+                    if any(
+                        source.path.casefold().endswith(extension.casefold())
+                        for extension in candidate.adapter.extensions
+                    )
+                ),
+                None,
+            )
+            if binding is None:
+                raise CodeGraphParseError("source adapter is unavailable")
+            adapter = binding.adapter
+            try:
+                parsed = adapter.parse_file(source.content, source.path)
+            except Exception as exc:
+                raise CodeGraphParseError("code graph parse failed") from exc
+            language = adapter.language
+            stable_file_id = file_id(self.domain, language, source.path)
+            remapped_symbols = []
+            symbol_ids = {}
+            for item in parsed.symbols:
+                try:
+                    metadata = json.loads(item.metadata_json)
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+                module = metadata.get("module", "") if isinstance(metadata, dict) else ""
+                if not isinstance(module, str):
+                    module = ""
+                stable_symbol_id = symbol_id(
+                    language,
+                    self.domain,
+                    module,
+                    item.qualified_name,
+                    item.signature or "",
+                )
+                symbol_ids[item.symbol_id] = stable_symbol_id
+                remapped_symbols.append(
+                    replace(
+                        item,
+                        symbol_id=stable_symbol_id,
+                        file_id=stable_file_id,
+                    )
+                )
+            remapped_references = tuple(
+                replace(
+                    item,
+                    source_symbol_id=(
+                        symbol_ids.get(item.source_symbol_id)
+                        if item.source_symbol_id is not None
+                        else None
+                    ),
+                    source_file_id=stable_file_id,
+                )
+                for item in parsed.references
+            )
+            parsed_files.append(
+                ParsedFile(
+                    file=FileRecord(
+                        file_id=stable_file_id,
+                        repository_id=self.domain,
+                        path=source.path,
+                        language=language,
+                        content_hash=source.content_hash,
+                        parser_version=binding.parser_version,
+                        size_bytes=source.size_bytes,
+                    ),
+                    symbols=tuple(remapped_symbols),
+                    references=remapped_references,
+                    warnings=parsed.warnings,
+                )
+            )
+            warnings.extend(parsed.warnings)
+        return tuple(parsed_files), tuple(warnings)
+
+    def _resolve(self, parsed_files: tuple[ParsedFile, ...]):
+        index = SymbolIndex.from_parsed_files(parsed_files)
+        relations = []
+        warnings = []
+        for parsed in parsed_files:
+            try:
+                adapter = self.adapters[parsed.file.language].adapter
+                result = adapter.resolve_references(parsed, index)
+            except KeyError as exc:
+                raise CodeGraphBuildError(
+                    "source adapter is unavailable"
+                ) from exc
+            relations.extend(result.relations)
+            warnings.extend(result.warnings)
+        return tuple(sorted(relations, key=lambda item: item.relation_id)), tuple(warnings)
+
+    @staticmethod
+    def _relation_rows(
+        relations: Iterable[RelationRecord],
+    ) -> tuple[dict[str, object], ...]:
+        rows = []
+        for relation in relations:
+            row = asdict(relation)
+            row.pop("source_byte", None)
+            rows.append(row)
+        return tuple(sorted(rows, key=lambda row: str(row["relation_id"])))
+
+    @staticmethod
+    def _unresolved_relations(
+        parsed_files: tuple[ParsedFile, ...],
+    ) -> tuple[RelationRecord, ...]:
+        relations = []
+        for parsed in parsed_files:
+            for reference in parsed.references:
+                source_identity = (
+                    reference.source_symbol_id or reference.source_file_id
+                )
+                source_location = ":".join((
+                    str(reference.source_line or 0),
+                    str(reference.source_byte or 0),
+                ))
+                target = reference.target_reference or ""
+                relations.append(RelationRecord(
+                    relation_id=relation_id(
+                        parsed.file.language,
+                        source_identity,
+                        reference.relation_type,
+                        source_location,
+                        target,
+                    ),
+                    source_symbol_id=reference.source_symbol_id,
+                    source_file_id=reference.source_file_id,
+                    target_symbol_id=None,
+                    target_reference=reference.target_reference,
+                    relation_type=reference.relation_type,
+                    source_line=reference.source_line,
+                    confidence=0.0,
+                    resolution_state="unresolved",
+                    metadata_json="{}",
+                    source_byte=reference.source_byte,
+                ))
+        return tuple(sorted(relations, key=lambda item: item.relation_id))
+
+    def _initial_snapshot(
+        self,
+        *,
+        parsed_files: tuple[ParsedFile, ...],
+        unresolved_relations: tuple[RelationRecord, ...],
+        fingerprints: FingerprintSet,
+        commit: str | None,
+        indexed_at: str,
+    ) -> dict[str, tuple[dict[str, object], ...]]:
+        files = tuple(asdict(item.file) for item in parsed_files)
+        symbols = tuple(
+            asdict(symbol)
+            for parsed in parsed_files
+            for symbol in parsed.symbols
+        )
+        snapshot = {
+            "repositories": (
+                {
+                    "repository_id": self.domain,
+                    "root_path": str(Path(self.project_dir).resolve()),
+                    "git_remote": None,
+                    "git_commit": commit,
+                    "source_fingerprint": fingerprints.source,
+                    "config_fingerprint": fingerprints.config,
+                    "parser_fingerprint": fingerprints.parser,
+                    "revision": fingerprints.inputs,
+                    "state": "rebuilding",
+                    "indexed_at": indexed_at,
+                },
+            ),
+            "files": files,
+            "symbols": symbols,
+            "relations": self._relation_rows(unresolved_relations),
+            "wiki_code_links": (),
+        }
+        if set(snapshot) != set(TABLES):
+            raise CodeGraphBuildError("invalid code graph snapshot")
+        return snapshot
+
+    @staticmethod
+    def _revision(
+        *,
+        parsed_files: tuple[ParsedFile, ...],
+        relations: tuple[RelationRecord, ...],
+        wiki_code_links: Sequence[Mapping[str, object]],
+        fingerprints: FingerprintSet,
+        commit: str | None,
+    ) -> str:
+        files = tuple(asdict(item.file) for item in parsed_files)
+        symbols = tuple(
+            asdict(symbol)
+            for parsed in parsed_files
+            for symbol in parsed.symbols
+        )
+        rows_for_revision = {
+            "fingerprints": asdict(fingerprints),
+            "git_commit": commit,
+            "files": sorted(files, key=lambda row: str(row["file_id"])),
+            "symbols": sorted(symbols, key=lambda row: str(row["symbol_id"])),
+            "relations": list(CodeGraphIndexer._relation_rows(relations)),
+            "wiki_code_links": sorted(
+                wiki_code_links, key=lambda row: str(row["link_id"])
+            ),
+        }
+        return "sha256:" + hashlib.sha256(
+            _canonical_json(rows_for_revision)
+        ).hexdigest()
+
+    @staticmethod
+    def _counts(
+        parsed_files: tuple[ParsedFile, ...], relations: Iterable[object]
+    ) -> dict[str, object]:
+        relation_rows = tuple(relations)
+        symbols = tuple(
+            symbol for parsed in parsed_files for symbol in parsed.symbols
+        )
+        return {
+            "languages": dict(sorted(Counter(
+                item.file.language for item in parsed_files
+            ).items())),
+            "files": len(parsed_files),
+            "symbols": len(symbols),
+            "relations": len(relation_rows),
+            "symbol_kinds": dict(sorted(Counter(
+                item.kind for item in symbols
+            ).items())),
+            "relation_types": dict(sorted(Counter(
+                item.relation_type for item in relation_rows
+            ).items())),
+            "resolution_states": dict(sorted(Counter(
+                item.resolution_state for item in relation_rows
+            ).items())),
+        }
+
+    def _metadata(
+        self,
+        *,
+        revision: str,
+        fingerprints: FingerprintSet,
+        commit: str | None,
+        counts: Mapping[str, object],
+        indexed_at: str,
+        discovered: DiscoverySnapshot,
+        parser_warnings: tuple[str, ...],
+        resolver_warnings: tuple[str, ...],
+        timings: Mapping[str, int],
+        config: CodeGraphConfig,
+        duration_ms: int,
+    ) -> dict[str, object]:
+        warnings = sanitize_warning_codes(sorted(
+            {item.code for item in discovered.warnings}
+            | set(parser_warnings)
+            | set(resolver_warnings)
+        ))
+        resolution_states = counts.get("resolution_states", {})
+        if not isinstance(resolution_states, Mapping):
+            resolution_states = {}
+        resolution_total = sum(
+            value for value in resolution_states.values()
+            if isinstance(value, int) and value >= 0
+        )
+        resolution_ratios = {
+            state: count / resolution_total
+            for state, count in resolution_states.items()
+            if resolution_total and isinstance(count, int) and count >= 0
+        }
+        return {
+            "domain": self.domain,
+            "state": "ready",
+            "revision": revision,
+            "fresh": True,
+            "git_commit": commit,
+            "fingerprints": {
+                "source": fingerprints.source,
+                "config": fingerprints.config,
+                "parser": fingerprints.parser,
+            },
+            "input_fingerprint": fingerprints.inputs,
+            "schema_version": SCHEMA_VERSION,
+            "parser_version": self._parser_version(config),
+            "grammar_version": self._grammar_version(config),
+            "adapter_version": self._adapter_version(config),
+            "resolver_version": self.resolver_version,
+            "counts": dict(counts),
+            "resolution_ratios": resolution_ratios,
+            "excluded_files": len(discovered.warnings),
+            "truncated": discovered.truncated,
+            "parser_errors": parser_warnings.count("parse_error"),
+            "indexed_at": indexed_at,
+            "phase_timings_ms": dict(timings),
+            "duration_ms": duration_ms,
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _generation(metadata: Mapping[str, object]) -> int:
+        value = metadata.get("generation")
+        return value if type(value) is int and value >= 0 else 0
+
+    def _transition_metadata(
+        self,
+        *,
+        state: str,
+        generation: int,
+        revision: str | None,
+        prior_state: str | None = None,
+        publication_phase: str | None = None,
+        recovery_policy: str | None = None,
+    ) -> dict[str, object]:
+        metadata = {
+            "domain": self.domain,
+            "state": state,
+            "generation": generation,
+            "revision": revision,
+            "fresh": False,
+            "schema_version": SCHEMA_VERSION,
+            "warnings": ["metrics_incomplete"],
+        }
+        if prior_state is not None:
+            metadata["prior_state"] = prior_state
+            metadata["previous_revision"] = revision
+        if publication_phase is not None:
+            metadata["publication_phase"] = publication_phase
+        if recovery_policy is not None:
+            metadata["recovery_policy"] = recovery_policy
+        return metadata
+
+    def _publish_metadata_record(
+        self,
+        metadata: Mapping[str, object],
+        *,
+        deadline: float | None,
+    ) -> None:
+        staging = self.store.prepare_metadata(self.paths.metadata, metadata)
+        try:
+            _check_deadline(deadline, self.paths.lock)
+            self.store.publish_metadata(
+                self.paths.metadata,
+                staging,
+                deadline=deadline,
+            )
+        except CodeGraphStoreError:
+            try:
+                self.store.discard_metadata(staging)
+            except CodeGraphError:
+                pass
+            _check_deadline(deadline, self.paths.lock)
+            raise
+        except BaseException:
+            try:
+                self.store.discard_metadata(staging)
+            except CodeGraphError:
+                pass
+            raise
+
+    def _verify_published(self, revision: str) -> None:
+        with closing(self.store.open_existing()) as connection:
+            row = connection.execute(
+                "SELECT revision, state FROM repositories "
+                "WHERE repository_id = ?",
+                (self.domain,),
+            ).fetchone()
+        if row != (revision, "ready"):
+            raise CodeGraphBuildError("code graph publication verification failed")
+
+    def mark_dirty_if_stale(self, *, deadline: float | None = None) -> bool:
+        """Discover fingerprints for a query and persist ready-to-dirty drift."""
+        config = self.config
+        if deadline is None:
+            deadline = time.monotonic() + config.max_rebuild_seconds
+        try:
+            with code_graph_write_lock(
+                self.paths.lock,
+                timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
+            ):
+                _check_deadline(deadline, self.paths.lock)
+                discovered = discover_sources(
+                    self.project_dir,
+                    config,
+                    extensions=self._extensions(config),
+                )
+                _check_deadline(deadline, self.paths.lock)
+                fingerprints, commit, _dirty = self._fingerprints(
+                    discovered, config
+                )
+                _check_deadline(deadline, self.paths.lock)
+                if self._ready_metadata(fingerprints, commit, config) is not None:
+                    return False
+                self.store.set_repository_state(self.domain, "dirty")
+                return True
+        except DiscoveryError as exc:
+            raise CodeGraphUnsafePathError(
+                "unsafe code graph source path"
+            ) from exc
+        except CodeGraphStoreError as exc:
+            raise CodeGraphStoreFailure("code graph store failed") from exc
+
+    def build(
+        self,
+        *,
+        force: bool = False,
+        languages: list[str] | None = None,
+        deadline: float | None = None,
+        restore_prior_on_abort: bool = False,
+        control: BuildControl | None = None,
+    ) -> dict[str, object]:
+        """Run the bounded 13-stage full-build/publication lifecycle."""
+        started = time.monotonic()
+        staging = None
+        generation = None
+        previous_revision = None
+        prior_state = None
+        publication_entered = False
+        timings = {phase: 0 for phase in _PHASE_NAMES}
+        try:
+            config = self._config_for_languages(self.config, languages)
+            if deadline is None:
+                deadline = started + config.max_rebuild_seconds
+            _check_deadline(deadline, self.paths.lock)
+            with code_graph_write_lock(
+                self.paths.lock,
+                timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
+            ):
+                _check_deadline(deadline, self.paths.lock)
+                previous_metadata = _safe_metadata(self.paths.metadata) or {}
+                generation = self._generation(previous_metadata) + 1
+                try:
+                    authoritative = self.store.reconstruct_metadata(self.domain)
+                except CodeGraphStoreError:
+                    authoritative = {}
+                revision_value = authoritative.get("revision")
+                previous_revision = (
+                    revision_value if isinstance(revision_value, str) else None
+                )
+                state_value = authoritative.get("state")
+                prior_state = (
+                    state_value
+                    if state_value in {"missing", "ready", "dirty", "failed"}
+                    else "missing"
+                )
+                self._publish_metadata_record(
+                    self._transition_metadata(
+                        state="rebuilding",
+                        generation=generation,
+                        revision=previous_revision,
+                        prior_state=prior_state,
+                        publication_phase="building",
+                        recovery_policy=(
+                            "restore_prior"
+                            if restore_prior_on_abort
+                            else "failed"
+                        ),
+                    ),
+                    deadline=deadline,
+                )
+                _check_deadline(deadline, self.paths.lock)
+                wiki_base.ensure_graph_store_excluded(self.cache_base)
+                _check_deadline(deadline, self.paths.lock)
+                self._quarantine_unusable_canonical()
+                _check_deadline(deadline, self.paths.lock)
+                phase = time.monotonic()
+                discovered = discover_sources(
+                    self.project_dir,
+                    config,
+                    extensions=self._extensions(config),
+                )
+                timings["discovery"] = _elapsed_ms(phase)
+                _check_deadline(deadline, self.paths.lock)
+
+                phase = time.monotonic()
+                fingerprints, commit, _dirty = self._fingerprints(
+                    discovered, config
+                )
+                timings["fingerprint"] = _elapsed_ms(phase)
+                _check_deadline(deadline, self.paths.lock)
+                if not force:
+                    ready = self._ready_metadata(
+                        fingerprints,
+                        commit,
+                        config,
+                        persisted=previous_metadata,
+                    )
+                    if ready is not None:
+                        persisted_ready = {
+                            **ready,
+                            "generation": generation,
+                        }
+                        self._publish_metadata_record(
+                            persisted_ready,
+                            deadline=deadline,
+                        )
+                        result = dict(ready)
+                        result["no_op"] = True
+                        result["duration_ms"] = _elapsed_ms(started)
+                        result["phase_timings_ms"] = {
+                            "no_op": result["duration_ms"]
+                        }
+                        return result
+
+                staging = self.store.create_staging_path()
+                _check_deadline(deadline, self.paths.lock)
+                phase = time.monotonic()
+                parsed_files, parser_warnings = self._parse(discovered)
+                timings["parsing"] = _elapsed_ms(phase)
+                _check_deadline(deadline, self.paths.lock)
+
+                indexed_at = datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                )
+                unresolved_relations = self._unresolved_relations(parsed_files)
+                snapshot = self._initial_snapshot(
+                    parsed_files=parsed_files,
+                    unresolved_relations=unresolved_relations,
+                    fingerprints=fingerprints,
+                    commit=commit,
+                    indexed_at=indexed_at,
+                )
+                phase = time.monotonic()
+                staging_store = CodeGraphStore(
+                    staging,
+                    cache_base=self.cache_base,
+                )
+                staging_store.insert_snapshot(snapshot)
+                timings["persistence"] = _elapsed_ms(phase)
+                _check_deadline(deadline, self.paths.lock)
+
+                phase = time.monotonic()
+                relations, resolver_warnings = self._resolve(parsed_files)
+                persistence_phase = time.monotonic()
+                staging_store.replace_relations(self._relation_rows(relations))
+                timings["persistence"] += _elapsed_ms(persistence_phase)
+                _check_deadline(deadline, self.paths.lock)
+                wiki_code_links = tuple(self.wiki_selector_resolver.resolve(
+                    domain=self.domain,
+                    project_dir=self.project_dir,
+                    parsed_files=parsed_files,
+                    relations=relations,
+                ))
+                _check_deadline(deadline, self.paths.lock)
+                revision = self._revision(
+                    parsed_files=parsed_files,
+                    relations=relations,
+                    wiki_code_links=wiki_code_links,
+                    fingerprints=fingerprints,
+                    commit=commit,
+                )
+                persistence_phase = time.monotonic()
+                staging_store.finalize_snapshot(
+                    repository_id=self.domain,
+                    revision=revision,
+                    indexed_at=indexed_at,
+                    wiki_code_links=wiki_code_links,
+                )
+                timings["persistence"] += _elapsed_ms(persistence_phase)
+                timings["resolution"] = _elapsed_ms(phase)
+                counts = self._counts(parsed_files, relations)
+                _check_deadline(deadline, self.paths.lock)
+
+                phase = time.monotonic()
+                self.store.prepare_staging(
+                    staging,
+                    repository_id=self.domain,
+                    expected_revision=revision,
+                )
+                timings["validation"] = _elapsed_ms(phase)
+                _check_deadline(deadline, self.paths.lock)
+
+                phase = time.monotonic()
+                while not self.store.canonical_handles_available():
+                    if time.monotonic() >= deadline:
+                        raise Timeout(str(self.paths.lock))
+                    time.sleep(0.01)
+                _check_deadline(deadline, self.paths.lock)
+                if control is not None:
+                    assert deadline is not None
+                    control.enter_publication(
+                        deadline=deadline,
+                        lock_path=self.paths.lock,
+                    )
+                    publication_entered = True
+                    deadline = None
+                try:
+                    self.store.replace_staging(staging)
+                except CodeGraphStoreError as exc:
+                    raise CodeGraphBuildError(
+                        "code graph publication failed"
+                    ) from exc
+                staging = None
+                _check_deadline(deadline, self.paths.lock)
+
+                incomplete_metadata = self._metadata(
+                    revision=revision,
+                    fingerprints=fingerprints,
+                    commit=commit,
+                    counts=counts,
+                    indexed_at=indexed_at,
+                    discovered=discovered,
+                    parser_warnings=parser_warnings,
+                    resolver_warnings=resolver_warnings,
+                    timings=timings,
+                    config=config,
+                    duration_ms=_elapsed_ms(started),
+                )
+                incomplete_metadata["state"] = "rebuilding"
+                incomplete_metadata["generation"] = generation
+                incomplete_metadata["fresh"] = False
+                incomplete_metadata["prior_state"] = prior_state
+                incomplete_metadata["previous_revision"] = previous_revision
+                incomplete_metadata["publication_phase"] = "provisional"
+                incomplete_metadata["recovery_policy"] = "failed"
+                incomplete_metadata.pop("duration_ms", None)
+                incomplete_metadata.pop("phase_timings_ms", None)
+                incomplete_metadata["warnings"] = sorted({
+                    *incomplete_metadata["warnings"],
+                    "metrics_incomplete",
+                })
+                self._publish_metadata_record(
+                    incomplete_metadata,
+                    deadline=deadline,
+                )
+                _check_deadline(deadline, self.paths.lock)
+                self._verify_published(revision)
+                _check_deadline(deadline, self.paths.lock)
+                ready_metadata = self._metadata(
+                    revision=revision,
+                    fingerprints=fingerprints,
+                    commit=commit,
+                    counts=counts,
+                    indexed_at=indexed_at,
+                    discovered=discovered,
+                    parser_warnings=parser_warnings,
+                    resolver_warnings=resolver_warnings,
+                    timings=timings,
+                    config=config,
+                    duration_ms=_elapsed_ms(started),
+                )
+                ready_metadata["generation"] = generation
+                ready_metadata["publication_phase"] = (
+                    "pending_final_verify"
+                )
+                ready_metadata["recovery_policy"] = "failed"
+                ready_metadata.pop("duration_ms", None)
+                ready_metadata.pop("phase_timings_ms", None)
+                self._publish_metadata_record(
+                    ready_metadata,
+                    deadline=deadline,
+                )
+                _check_deadline(deadline, self.paths.lock)
+                self._verify_published(revision)
+                _check_deadline(deadline, self.paths.lock)
+                timings["publication"] = _elapsed_ms(phase)
+                metadata = self._metadata(
+                    revision=revision,
+                    fingerprints=fingerprints,
+                    commit=commit,
+                    counts=counts,
+                    indexed_at=indexed_at,
+                    discovered=discovered,
+                    parser_warnings=parser_warnings,
+                    resolver_warnings=resolver_warnings,
+                    timings=timings,
+                    config=config,
+                    duration_ms=_elapsed_ms(started),
+                )
+                metadata["generation"] = generation
+                metadata["publication_phase"] = "pending_final_verify"
+                metadata["recovery_policy"] = "failed"
+                diagnostics_staging = None
+                try:
+                    _check_deadline(deadline, self.paths.lock)
+                    diagnostics_staging = self.store.prepare_metadata(
+                        self.paths.metadata, metadata
+                    )
+                    _check_deadline(deadline, self.paths.lock)
+                    self.store.refresh_metadata_diagnostics(
+                        self.paths.metadata,
+                        diagnostics_staging,
+                        deadline=deadline,
+                    )
+                    diagnostics_staging = None
+                except Timeout:
+                    if diagnostics_staging is not None:
+                        self.store.discard_metadata(diagnostics_staging)
+                    raise
+                except CodeGraphError as exc:
+                    if diagnostics_staging is not None:
+                        self.store.discard_metadata(diagnostics_staging)
+                    raise CodeGraphStoreFailure(
+                        "code graph diagnostics publication failed"
+                    ) from exc
+                metadata["no_op"] = False
+                return metadata
+        except Timeout:
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            raise
+        except DiscoveryError as exc:
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            raise CodeGraphUnsafePathError(
+                "unsafe code graph source path"
+            ) from exc
+        except CodeGraphStoreError as exc:
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            raise CodeGraphStoreFailure("code graph store failed") from exc
+        except CodeGraphError:
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            raise
+        except Exception as exc:
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            raise CodeGraphBuildError("code graph rebuild failed") from exc
+        finally:
+            if publication_entered and control is not None:
+                control.leave_publication()
+
+
+__all__ = [
+    "AdapterBinding",
+    "AdapterFactory",
+    "BuildControl",
+    "KNOWN_WARNING_CODES",
+    "CodeGraphBuildError",
+    "CodeGraphIndexer",
+    "CodeGraphParseError",
+    "CodeGraphStaleError",
+    "CodeGraphStoreFailure",
+    "CodeGraphUnsafePathError",
+    "WikiSelectorResolver",
+    "sanitize_warning_codes",
+]

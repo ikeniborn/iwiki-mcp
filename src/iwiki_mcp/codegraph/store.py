@@ -4,14 +4,19 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
 import stat
-import tempfile
+import time
 from typing import Iterator, Mapping, Sequence
 from urllib.parse import quote
+import uuid
 
+from filelock import ReadWriteLock, Timeout
+
+from .location import CodeGraphLocationError, open_cache_directory
 from .schema import (
     BUSY_TIMEOUT_MS,
     INDEXES,
@@ -33,6 +38,94 @@ _PRIMARY_KEYS = {
     "relations": "relation_id",
     "wiki_code_links": "link_id",
 }
+
+
+def _discard_lock(lock: ReadWriteLock | None) -> None:
+    if lock is None:
+        return
+    try:
+        lock.close()
+    except Exception:
+        pass
+
+
+@contextmanager
+def _code_graph_lock(
+    path: str | Path,
+    *,
+    timeout: float,
+    write: bool,
+) -> Iterator[None]:
+    lock = None
+    cache_context = open_cache_directory(
+        CodeGraphStore._absolute(Path(path)).parent.parent,
+        create=True,
+    )
+    try:
+        cache_directory = cache_context.__enter__()
+        assert cache_directory is not None
+        lock_path = CodeGraphStore._absolute(Path(path))
+        secure_lock_path = cache_directory / lock_path.name
+        lock = ReadWriteLock(
+            str(secure_lock_path),
+            timeout=timeout,
+            blocking=write,
+            is_singleton=False,
+        )
+        if write:
+            lock.acquire_write(timeout=timeout)
+        else:
+            lock.acquire_read(timeout=timeout, blocking=False)
+    except Timeout:
+        _discard_lock(lock)
+        try:
+            cache_context.__exit__(None, None, None)
+        except Exception:
+            pass
+        raise
+    except Exception as exc:
+        _discard_lock(lock)
+        try:
+            cache_context.__exit__(None, None, None)
+        except Exception:
+            pass
+        raise CodeGraphStoreError(
+            "cannot acquire code graph lock"
+        ) from exc
+    try:
+        yield
+    finally:
+        close_error = None
+        try:
+            lock.close()
+        except Exception as exc:
+            close_error = exc
+        try:
+            cache_context.__exit__(None, None, None)
+        except Exception as exc:
+            close_error = close_error or exc
+        if close_error is not None:
+            raise CodeGraphStoreError(
+                "cannot release code graph lock"
+            ) from close_error
+
+
+@contextmanager
+def code_graph_read_lock(path: str | Path) -> Iterator[None]:
+    """Hold a nonblocking shared lock and close its SQLite handle."""
+    with _code_graph_lock(path, timeout=0, write=False):
+        yield
+
+
+@contextmanager
+def code_graph_write_lock(
+    path: str | Path,
+    *,
+    timeout: float,
+) -> Iterator[None]:
+    """Hold a bounded exclusive lock and close its SQLite handle."""
+    with _code_graph_lock(path, timeout=timeout, write=True):
+        yield
 
 
 @dataclass(frozen=True)
@@ -102,19 +195,77 @@ _INSERTS = {
 class CodeGraphStore:
     """Own one separate, rebuildable code graph SQLite cache."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        cache_base: str | Path | None = None,
+    ) -> None:
         self.path = Path(path)
+        self.cache_base = (
+            None
+            if cache_base is None
+            else self._absolute(Path(cache_base))
+        )
         self._staging_identities: dict[Path, _StagingIdentity] = {}
+        self._metadata_staging: dict[Path, Path] = {}
+
+    def _cache_relative(self, path: Path) -> Path:
+        absolute = self._absolute(path)
+        if self.cache_base is None:
+            return absolute
+        try:
+            relative = absolute.relative_to(self.cache_base / ".iwiki")
+        except ValueError as exc:
+            raise CodeGraphStoreError(
+                "unsafe code graph cache path"
+            ) from exc
+        if relative == Path(".") or ".." in relative.parts:
+            raise CodeGraphStoreError("unsafe code graph cache path")
+        return relative
+
+    @contextmanager
+    def _secure_paths(
+        self,
+        *paths: Path,
+        create: bool,
+    ) -> Iterator[tuple[Path, ...]]:
+        if self.cache_base is None:
+            yield tuple(self._absolute(path) for path in paths)
+            return
+        relatives = tuple(self._cache_relative(path) for path in paths)
+        try:
+            with open_cache_directory(
+                self.cache_base,
+                create=create,
+            ) as cache_directory:
+                if cache_directory is None:
+                    raise CodeGraphStoreError(
+                        "code graph cache directory unavailable"
+                    )
+                yield tuple(
+                    cache_directory.joinpath(*relative.parts)
+                    for relative in relatives
+                )
+        except CodeGraphStoreError:
+            raise
+        except CodeGraphLocationError as exc:
+            raise CodeGraphStoreError(
+                "unsafe code graph cache path"
+            ) from exc
 
     def connect(self) -> sqlite3.Connection:
         """Return a configured raw connection; the caller must close it."""
         connection = None
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(
-                self.path,
-                timeout=BUSY_TIMEOUT_MS / 1000,
-            )
+            with self._secure_paths(self.path, create=True) as secured:
+                path = secured[0]
+                if self.cache_base is None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                connection = sqlite3.connect(
+                    path,
+                    timeout=BUSY_TIMEOUT_MS / 1000,
+                )
             configure(connection)
             objects = tuple(
                 connection.execute(
@@ -167,6 +318,75 @@ class CodeGraphStore:
         except (KeyError, sqlite3.DatabaseError) as exc:
             raise CodeGraphStoreError("cannot insert code graph snapshot") from exc
 
+    def replace_relations(
+        self, relations: Sequence[Mapping[str, object]]
+    ) -> None:
+        """Replace persisted unresolved inputs with resolved relation rows."""
+        try:
+            with self._transaction() as connection:
+                connection.execute("DELETE FROM relations")
+                rows = sorted(
+                    relations, key=lambda row: str(row["relation_id"])
+                )
+                connection.executemany(_INSERTS["relations"], rows)
+        except CodeGraphStoreError:
+            raise
+        except (KeyError, sqlite3.DatabaseError) as exc:
+            raise CodeGraphStoreError(
+                "cannot update code graph relations"
+            ) from exc
+
+    def finalize_snapshot(
+        self,
+        *,
+        repository_id: str,
+        revision: str,
+        indexed_at: str,
+        wiki_code_links: Sequence[Mapping[str, object]],
+    ) -> None:
+        """Persist selector links and mark a fully resolved snapshot ready."""
+        try:
+            with self._transaction() as connection:
+                connection.execute("DELETE FROM wiki_code_links")
+                rows = sorted(
+                    wiki_code_links, key=lambda row: str(row["link_id"])
+                )
+                connection.executemany(_INSERTS["wiki_code_links"], rows)
+                cursor = connection.execute(
+                    "UPDATE repositories SET revision = ?, state = 'ready', "
+                    "indexed_at = ? WHERE repository_id = ?",
+                    (revision, indexed_at, repository_id),
+                )
+                if cursor.rowcount != 1:
+                    raise CodeGraphStoreError(
+                        "code graph repository is unavailable"
+                    )
+        except CodeGraphStoreError:
+            raise
+        except (KeyError, sqlite3.DatabaseError) as exc:
+            raise CodeGraphStoreError(
+                "cannot finalize code graph snapshot"
+            ) from exc
+
+    def set_repository_state(self, repository_id: str, state: str) -> None:
+        """Materialize one lifecycle transition without exposing old rows."""
+        try:
+            with self._transaction() as connection:
+                cursor = connection.execute(
+                    "UPDATE repositories SET state = ? WHERE repository_id = ?",
+                    (state, repository_id),
+                )
+                if cursor.rowcount != 1:
+                    raise CodeGraphStoreError(
+                        "code graph repository is unavailable"
+                    )
+        except CodeGraphStoreError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise CodeGraphStoreError(
+                "cannot update code graph state"
+            ) from exc
+
     def stable_rows(self, table: str) -> tuple[dict[str, object], ...]:
         """Read one schema table in stable primary-ID order."""
         try:
@@ -198,10 +418,8 @@ class CodeGraphStore:
 
     def inspect_state(self, repository_id: str | None = None) -> str:
         """Return a persisted lifecycle state, or missing for no usable cache."""
-        if not self.path.is_file() or self.path.stat().st_size == 0:
-            return "missing"
         try:
-            connection = self.connect()
+            connection = self.open_existing()
             try:
                 if repository_id is None:
                     row = connection.execute(
@@ -220,9 +438,12 @@ class CodeGraphStore:
 
     def reconstruct_metadata(self, repository_id: str | None = None) -> dict[str, object]:
         """Reconstruct cache metadata with SQL revision as authority."""
-        if not self.path.is_file() or self.path.stat().st_size == 0:
-            raise CodeGraphStoreError("code graph metadata unavailable")
-        connection = self.connect()
+        try:
+            connection = self.open_existing()
+        except CodeGraphStoreError as exc:
+            raise CodeGraphStoreError(
+                "code graph metadata unavailable"
+            ) from exc
         try:
             columns = (
                 "repository_id, git_commit, source_fingerprint, "
@@ -257,71 +478,79 @@ class CodeGraphStore:
     def quarantine_corrupt(self) -> Path:
         """Move an unusable code cache to a deterministic diagnostic sibling."""
         try:
-            payload = self.path.read_bytes()
-            digest = hashlib.sha256(payload).hexdigest()[:16]
-            sources = [
-                (candidate, suffix)
+            candidates = tuple(
+                Path(f"{self.path}{suffix}")
                 for suffix in ("", "-wal", "-shm")
-                if (candidate := Path(f"{self.path}{suffix}")).exists()
-            ]
-            attempt = 0
-            while True:
-                collision_suffix = "" if attempt == 0 else f"-{attempt}"
-                quarantined = self.path.with_name(
-                    f"{self.path.name}.corrupt-{digest}{collision_suffix}"
-                )
-                targets = {
-                    suffix: Path(f"{quarantined}{suffix}")
-                    for suffix in ("", "-wal", "-shm")
-                }
-                reserved = []
+            )
+            with self._secure_paths(*candidates, create=False) as secured:
+                canonical = secured[0]
+                payload = canonical.read_bytes()
+                digest = hashlib.sha256(payload).hexdigest()[:16]
+                sources = [
+                    (candidate, suffix)
+                    for candidate, suffix in zip(
+                        secured, ("", "-wal", "-shm")
+                    )
+                    if candidate.exists()
+                ]
+                attempt = 0
+                while True:
+                    collision_suffix = "" if attempt == 0 else f"-{attempt}"
+                    quarantined = canonical.with_name(
+                        f"{canonical.name}.corrupt-{digest}{collision_suffix}"
+                    )
+                    targets = {
+                        suffix: Path(f"{quarantined}{suffix}")
+                        for suffix in ("", "-wal", "-shm")
+                    }
+                    reserved = []
+                    try:
+                        for target in targets.values():
+                            descriptor = os.open(
+                                target,
+                                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                0o600,
+                            )
+                            reserved.append(target)
+                            os.close(descriptor)
+                    except FileExistsError:
+                        for target in reserved:
+                            target.unlink()
+                        attempt += 1
+                        continue
+                    except OSError:
+                        for target in reserved:
+                            try:
+                                target.unlink()
+                            except FileNotFoundError:
+                                pass
+                        raise
+                    break
+
+                pending = set(reserved)
+                moved = []
                 try:
-                    for target in targets.values():
-                        descriptor = os.open(
-                            target,
-                            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                            0o600,
-                        )
-                        reserved.append(target)
-                        os.close(descriptor)
-                except FileExistsError:
-                    for target in reserved:
-                        target.unlink()
-                    attempt += 1
-                    continue
+                    for source, suffix in sources:
+                        target = targets[suffix]
+                        os.replace(source, target)
+                        pending.remove(target)
+                        moved.append((source, target))
                 except OSError:
-                    for target in reserved:
+                    for source, target in reversed(moved):
+                        if source.exists():
+                            continue
+                        try:
+                            os.replace(target, source)
+                        except OSError:
+                            pass
+                    raise
+                finally:
+                    for target in pending:
                         try:
                             target.unlink()
                         except FileNotFoundError:
                             pass
-                    raise
-                break
-
-            pending = set(reserved)
-            moved = []
-            try:
-                for source, suffix in sources:
-                    target = targets[suffix]
-                    os.replace(source, target)
-                    pending.remove(target)
-                    moved.append((source, target))
-            except OSError:
-                for source, target in reversed(moved):
-                    if source.exists():
-                        continue
-                    try:
-                        os.replace(target, source)
-                    except OSError:
-                        pass
-                raise
-            finally:
-                for target in pending:
-                    try:
-                        target.unlink()
-                    except FileNotFoundError:
-                        pass
-            return quarantined
+                return self.path.with_name(quarantined.name)
         except OSError as exc:
             raise CodeGraphStoreError("cannot quarantine code graph cache") from exc
 
@@ -335,21 +564,25 @@ class CodeGraphStore:
         private_directory = None
         staging = None
         try:
-            canonical.parent.mkdir(parents=True, exist_ok=True)
-            private_directory = Path(tempfile.mkdtemp(
-                prefix=f"{canonical.name}.staging-",
-                dir=canonical.parent,
-            ))
-            os.chmod(private_directory, 0o700)
-            directory_status = os.lstat(private_directory)
-            staging = private_directory / "snapshot.sqlite3"
-            descriptor = os.open(
-                staging,
-                os.O_CREAT | os.O_EXCL | os.O_RDWR,
-                0o600,
+            private_directory = canonical.parent / (
+                f"{canonical.name}.staging-{uuid.uuid4()}"
             )
-            os.close(descriptor)
-            status = os.lstat(staging)
+            staging = private_directory / "snapshot.sqlite3"
+            with self._secure_paths(
+                private_directory, staging, create=True
+            ) as secured:
+                secure_directory, secure_staging = secured
+                if self.cache_base is None:
+                    secure_directory.parent.mkdir(parents=True, exist_ok=True)
+                secure_directory.mkdir(mode=0o700)
+                directory_status = os.lstat(secure_directory)
+                descriptor = os.open(
+                    secure_staging,
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                    0o600,
+                )
+                os.close(descriptor)
+                status = os.lstat(secure_staging)
             if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
                 raise OSError("invalid staging reservation")
             self._staging_identities[staging] = _StagingIdentity(
@@ -363,13 +596,19 @@ class CodeGraphStore:
         except OSError as exc:
             if staging is not None:
                 try:
-                    staging.unlink()
-                except FileNotFoundError:
+                    with self._secure_paths(
+                        staging, create=False
+                    ) as secured:
+                        secured[0].unlink()
+                except (CodeGraphStoreError, FileNotFoundError):
                     pass
             if private_directory is not None:
                 try:
-                    private_directory.rmdir()
-                except OSError:
+                    with self._secure_paths(
+                        private_directory, create=False
+                    ) as secured:
+                        secured[0].rmdir()
+                except (CodeGraphStoreError, OSError):
                     pass
             raise CodeGraphStoreError("cannot create code graph staging") from exc
 
@@ -408,8 +647,11 @@ class CodeGraphStore:
         canonical = self._absolute(self.path)
         prefix = f"{canonical.name}.staging-"
         try:
-            directory_status = os.lstat(identity.directory)
-            status = os.lstat(staging)
+            with self._secure_paths(
+                identity.directory, staging, create=False
+            ) as secured:
+                directory_status = os.lstat(secured[0])
+                status = os.lstat(secured[1])
         except OSError:
             raise CodeGraphStoreError("invalid code graph staging database")
         valid = (
@@ -445,20 +687,34 @@ class CodeGraphStore:
         if identity is None:
             return
         try:
-            if not self._directory_identity_matches(identity):
-                return
-            if not self._file_identity_matches(staging_path, identity):
-                return
-            for suffix in ("-wal", "-shm"):
-                sidecar = Path(f"{staging_path}{suffix}")
-                try:
-                    status = os.lstat(sidecar)
-                except FileNotFoundError:
-                    continue
-                if stat.S_ISREG(status.st_mode) and status.st_nlink == 1:
-                    sidecar.unlink()
-            staging_path.unlink()
-            self._remove_empty_staging_directory(identity)
+            sidecars = tuple(
+                Path(f"{staging_path}{suffix}")
+                for suffix in ("-wal", "-shm")
+            )
+            with self._secure_paths(
+                identity.directory, staging_path, *sidecars, create=False
+            ) as secured:
+                secure_directory, secure_staging, *secure_sidecars = secured
+                directory_status = os.lstat(secure_directory)
+                file_status = os.lstat(secure_staging)
+                if (
+                    not stat.S_ISDIR(directory_status.st_mode)
+                    or (directory_status.st_dev, directory_status.st_ino)
+                    != (identity.directory_dev, identity.directory_ino)
+                    or not stat.S_ISREG(file_status.st_mode)
+                    or (file_status.st_dev, file_status.st_ino)
+                    != (identity.file_dev, identity.file_ino)
+                ):
+                    return
+                for sidecar in secure_sidecars:
+                    try:
+                        status = os.lstat(sidecar)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(status.st_mode) and status.st_nlink == 1:
+                        sidecar.unlink()
+                secure_staging.unlink()
+                secure_directory.rmdir()
         except OSError as exc:
             raise CodeGraphStoreError("cannot discard code graph staging") from exc
         finally:
@@ -487,21 +743,27 @@ class CodeGraphStore:
                 connection.close()
             raise CodeGraphSchemaError("incompatible code graph schema") from exc
 
-    def publish_staging(
+    def open_existing(self) -> sqlite3.Connection:
+        """Open the canonical database without creating a missing cache."""
+        with self._secure_paths(self.path, create=False) as secured:
+            return self._connect_existing(secured[0])
+
+    def prepare_staging(
         self,
         staging: str | Path,
         *,
         repository_id: str,
         expected_revision: str,
     ) -> None:
-        """Publish registered staging while caller holds the per-domain writer lock."""
+        """Validate and checkpoint a registered staging snapshot, then close it."""
         staging_path = self._absolute(Path(staging))
         identity = self._staging_identities.get(staging_path)
         if identity is None:
             raise CodeGraphStoreError("invalid code graph staging database")
         try:
             self._validate_staging_identity(staging_path, identity)
-            connection = self._connect_existing(staging_path)
+            with self._secure_paths(staging_path, create=False) as secured:
+                connection = self._connect_existing(secured[0])
             try:
                 validate_integrity(connection)
                 repositories = connection.execute(
@@ -519,32 +781,66 @@ class CodeGraphStore:
                     raise CodeGraphStoreError("cannot checkpoint code graph staging")
             finally:
                 connection.close()
+        except CodeGraphStoreError:
+            self.discard_staging(staging_path)
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            self.discard_staging(staging_path)
+            raise CodeGraphStoreError("cannot prepare code graph staging") from exc
 
-            if any(Path(f"{self.path}{suffix}").exists() for suffix in ("-wal", "-shm")):
+    def canonical_handles_available(self) -> bool:
+        """Return whether no replace-incompatible canonical sidecar is present."""
+        sidecars = tuple(
+            Path(f"{self.path}{suffix}") for suffix in ("-wal", "-shm")
+        )
+        with self._secure_paths(*sidecars, create=True) as secured:
+            return not any(path.exists() for path in secured)
+
+    def replace_staging(self, staging: str | Path) -> None:
+        """Atomically replace the canonical database with prepared staging."""
+        staging_path = self._absolute(Path(staging))
+        identity = self._staging_identities.get(staging_path)
+        if identity is None:
+            raise CodeGraphStoreError("invalid code graph staging database")
+        try:
+            self._validate_staging_identity(staging_path, identity)
+            if not self.canonical_handles_available():
                 raise CodeGraphStoreError("code graph canonical database is in use")
             canonical = self._absolute(self.path)
-            canonical.parent.mkdir(parents=True, exist_ok=True)
-            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            source_descriptor = os.open(identity.directory, directory_flags)
-            try:
-                destination_descriptor = os.open(canonical.parent, directory_flags)
+            with self._secure_paths(
+                identity.directory, staging_path, canonical, create=True
+            ) as secured:
+                secure_directory, secure_staging, secure_canonical = secured
+                directory_flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                source_descriptor = os.open(
+                    secure_directory, directory_flags
+                )
                 try:
-                    self._validate_staging_identity(staging_path, identity)
+                    destination_flags = (
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    )
+                    destination_descriptor = os.open(
+                        secure_canonical.parent, destination_flags
+                    )
                     try:
+                        self._validate_staging_identity(
+                            staging_path, identity
+                        )
                         os.replace(
-                            staging_path.name,
-                            canonical.name,
+                            secure_staging.name,
+                            secure_canonical.name,
                             src_dir_fd=source_descriptor,
                             dst_dir_fd=destination_descriptor,
                         )
-                    except (NotImplementedError, TypeError):
-                        self._validate_staging_identity(staging_path, identity)
-                        os.replace(staging_path, canonical)
+                    finally:
+                        os.close(destination_descriptor)
                 finally:
-                    os.close(destination_descriptor)
-            finally:
-                os.close(source_descriptor)
-            self._remove_empty_staging_directory(identity)
+                    os.close(source_descriptor)
+                secure_directory.rmdir()
         except CodeGraphStoreError:
             self.discard_staging(staging_path)
             raise
@@ -553,6 +849,211 @@ class CodeGraphStore:
             raise CodeGraphStoreError("cannot publish code graph staging") from exc
         finally:
             self._staging_identities.pop(staging_path, None)
+
+    def prepare_metadata(
+        self,
+        metadata_path: str | Path,
+        metadata: Mapping[str, object],
+    ) -> Path:
+        """Write and fsync metadata temp before canonical publication starts."""
+        destination = self._absolute(Path(metadata_path))
+        staging = destination.with_name(
+            f"{destination.name}.staging-{uuid.uuid4()}"
+        )
+        try:
+            with self._secure_paths(
+                destination, staging, create=True
+            ) as secured:
+                secure_destination, secure_staging = secured
+                if self.cache_base is None:
+                    secure_destination.parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                payload = json.dumps(
+                    metadata,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                descriptor = os.open(
+                    secure_staging,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+                try:
+                    with os.fdopen(
+                        descriptor, "wb", closefd=False
+                    ) as handle:
+                        handle.write(payload)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                finally:
+                    os.close(descriptor)
+            self._metadata_staging[staging] = destination
+            return staging
+        except (OSError, TypeError, ValueError) as exc:
+            try:
+                with self._secure_paths(
+                    staging, create=False
+                ) as secured:
+                    secured[0].unlink()
+            except (CodeGraphStoreError, FileNotFoundError):
+                pass
+            raise CodeGraphStoreError("cannot prepare code graph metadata") from exc
+
+    def discard_metadata(self, staging: str | Path) -> None:
+        """Remove only a metadata temp created by this store instance."""
+        staging_path = self._absolute(Path(staging))
+        if staging_path not in self._metadata_staging:
+            return
+        try:
+            with self._secure_paths(
+                staging_path, create=False
+            ) as secured:
+                secured[0].unlink(missing_ok=True)
+            self._metadata_staging.pop(staging_path, None)
+        except OSError as exc:
+            raise CodeGraphStoreError(
+                "cannot discard code graph metadata"
+            ) from exc
+
+    def publish_metadata(
+        self,
+        metadata_path: str | Path,
+        staging: str | Path,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        """Atomically replace metadata from a registered prepared temp."""
+        destination = self._absolute(Path(metadata_path))
+        staging_path = self._absolute(Path(staging))
+        with self._secure_paths(
+            destination, staging_path, create=False
+        ) as secured:
+            self._replace_registered_metadata(
+                destination,
+                staging_path,
+                deadline=deadline,
+                secure_destination=secured[0],
+                secure_staging=secured[1],
+            )
+
+    def _replace_registered_metadata(
+        self,
+        destination: Path,
+        staging_path: Path,
+        *,
+        deadline: float | None,
+        secure_destination: Path | None = None,
+        secure_staging: Path | None = None,
+    ) -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CodeGraphStoreError(
+                "code graph metadata publication deadline exceeded"
+            )
+        registered = self._metadata_staging.pop(staging_path, None)
+        if registered != destination:
+            raise CodeGraphStoreError("invalid code graph metadata staging")
+        actual_destination = secure_destination or destination
+        actual_staging = secure_staging or staging_path
+        try:
+            status = os.lstat(actual_staging)
+            if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+                raise OSError("invalid metadata staging")
+            os.replace(actual_staging, actual_destination)
+        except OSError as exc:
+            try:
+                actual_staging.unlink()
+            except FileNotFoundError:
+                pass
+            raise CodeGraphStoreError("cannot publish code graph metadata") from exc
+
+    def refresh_metadata_diagnostics(
+        self,
+        metadata_path: str | Path,
+        staging: str | Path,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        """Add timings atomically; this refresh's own write cost is excluded."""
+        destination = self._absolute(Path(metadata_path))
+        staging_path = self._absolute(Path(staging))
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CodeGraphStoreError(
+                "code graph diagnostics refresh deadline exceeded"
+            )
+        if self._metadata_staging.get(staging_path) != destination:
+            raise CodeGraphStoreError("invalid code graph metadata staging")
+        with self._secure_paths(
+            destination, staging_path, create=False
+        ) as secured:
+            secure_destination, secure_staging = secured
+            try:
+                current = json.loads(
+                    secure_destination.read_text(encoding="utf-8")
+                )
+                candidate = json.loads(
+                    secure_staging.read_text(encoding="utf-8")
+                )
+            except (
+                FileNotFoundError,
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise CodeGraphStoreError(
+                    "cannot validate code graph diagnostics refresh"
+                ) from exc
+            if not isinstance(current, dict) or not isinstance(candidate, dict):
+                raise CodeGraphStoreError(
+                    "invalid code graph diagnostics refresh"
+                )
+            diagnostics = {"duration_ms", "phase_timings_ms"}
+            current_lifecycle = {
+                key: value for key, value in current.items()
+                if key not in diagnostics
+            }
+            candidate_lifecycle = {
+                key: value for key, value in candidate.items()
+                if key not in diagnostics
+            }
+            duration = candidate.get("duration_ms")
+            timings = candidate.get("phase_timings_ms")
+            if (
+                current.get("state") != "ready"
+                or candidate_lifecycle != current_lifecycle
+                or type(duration) is not int
+                or duration < 0
+                or not isinstance(timings, dict)
+                or any(
+                    type(value) is not int or value < 0
+                    for value in timings.values()
+                )
+            ):
+                raise CodeGraphStoreError(
+                    "invalid code graph diagnostics refresh"
+                )
+            self._replace_registered_metadata(
+                destination,
+                staging_path,
+                deadline=deadline,
+                secure_destination=secure_destination,
+                secure_staging=secure_staging,
+            )
+
+    def publish_staging(
+        self,
+        staging: str | Path,
+        *,
+        repository_id: str,
+        expected_revision: str,
+    ) -> None:
+        """Publish registered staging while caller holds the per-domain writer lock."""
+        self.prepare_staging(
+            staging,
+            repository_id=repository_id,
+            expected_revision=expected_revision,
+        )
+        self.replace_staging(staging)
 
 
 __all__ = [
@@ -563,4 +1064,6 @@ __all__ = [
     "CodeGraphSchemaError",
     "CodeGraphStore",
     "CodeGraphStoreError",
+    "code_graph_read_lock",
+    "code_graph_write_lock",
 ]

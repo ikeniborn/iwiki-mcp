@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as _dt
 import functools
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 import re
@@ -27,8 +28,10 @@ from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from .codegraph import config as _codegraph_config  # noqa: F401
 from .codegraph import discovery as _codegraph_discovery  # noqa: F401
 from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
+from .codegraph import indexer as _codegraph_indexer
 from .codegraph import location as _codegraph_location  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
+from .codegraph import runtime as _codegraph_runtime  # noqa: F401
 from .codegraph import schema as _codegraph_schema  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
@@ -59,6 +62,39 @@ from .engine.section import SectionError, replace_section
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unavailable"
+
+
+_PYTHON_PARSER_VERSION = (
+    "tree-sitter-python:" + _distribution_version("tree-sitter-python")
+)
+_CODE_GRAPH_ADAPTER_FACTORIES = {
+    "python": _codegraph_indexer.AdapterFactory(
+        create=_codegraph_python.PythonAdapter,
+        parser_version=_PYTHON_PARSER_VERSION,
+        grammar_version=";".join((
+            "tree-sitter:" + _distribution_version("tree-sitter"),
+            "tree-sitter-language-pack:"
+            + _distribution_version("tree-sitter-language-pack"),
+            _PYTHON_PARSER_VERSION,
+        )),
+        adapter_version="python-adapter-v1",
+    )
+}
+
+
+def _create_code_graph_runtime(binding: base.Binding):
+    """Compose configured language adapters without initializing parsers."""
+    return _codegraph_runtime.CodeGraphRuntime(
+        binding,
+        adapter_factories=_CODE_GRAPH_ADAPTER_FACTORIES,
+    )
 
 
 class _ActivityReceiveStream:
@@ -1933,7 +1969,10 @@ def main() -> None:
         _print_startup_failure(str(exc), cfg)
         raise SystemExit(1) from None
     mcp.set_idle_timeout(cfg.idle_timeout_seconds)
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        _codegraph_runtime.shutdown_code_graph_workers()
 
 
 if __name__ == "__main__":

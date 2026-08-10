@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 5a597c9b75fad2d5
+  spec_hash: 70ec736646c299d7
   last_run: 2026-08-10
   phases:
     structure: { status: passed }
@@ -518,7 +518,9 @@ stateDiagram-v2
 
 Startup reads metadata and checks schema compatibility only. It never performs discovery or a full build. Search/context on `dirty`, `rebuilding`, or `failed` returns `fresh=false`, a sanitized warning, and remediation rather than presenting old graph data as current.
 
-For `missing` or `dirty`, search/context MAY attempt one rebuild only when `auto_rebuild = "bounded"` and the remaining request budget is at least `max_rebuild_seconds`. If publication does not finish inside that limit, the call returns a non-ready diagnostic and a `wiki_code_index` hint; it does not return graph nodes from the old snapshot.
+For `missing` or `dirty`, search/context MAY attempt one rebuild only when `auto_rebuild = "bounded"` and the remaining request budget is at least `max_rebuild_seconds`. The caller waits for at most `max_rebuild_seconds`. When that deadline expires, it cancels the build cooperatively, returns a non-ready diagnostic and a `wiki_code_index` hint, and never returns graph nodes from the old snapshot.
+
+Cancellation MUST prevent any new publication critical section from starting. Discovery, parsing, Git exclusion setup, SQLite work, and cleanup MAY finish asynchronously after the caller returns, but they MUST observe cancellation before entering publication and MUST NOT publish. If cancellation arrives after the atomic publication critical section has already started, that in-flight section MAY finish under the writer lock after the caller has returned. During either kind of asynchronous completion, metadata remains non-ready and readers return `fresh=false`; readers may observe the new snapshot only after its complete database, metadata, and final-verification proof are published. This cooperative boundary is required because blocking `fsync`, SQLite, and `os.replace` calls cannot be safely interrupted.
 
 ## 13. MCP contracts
 
@@ -747,7 +749,7 @@ Expected outputs: bounded context/source reads, final four-tool registration, ge
 
 ## 19. Risks and mitigations
 
-- **Atomic replace with concurrent processes:** open database handles can delay replacement on some platforms. Mitigation: short-lived read-only connections, bounded writer deadline, explicit `busy`, staging isolation, and fault-injection tests.
+- **Atomic replace with concurrent processes:** open database handles can delay replacement on some platforms, and an already-entered `fsync`/SQLite/`os.replace` critical section cannot be safely interrupted. Mitigation: short-lived read-only connections, a bounded caller wait with cooperative cancellation before publication, completion of an already-entered atomic section under the writer lock, explicit `busy`, non-ready metadata until final verification, staging isolation, and fault-injection tests.
 - **Dynamic Python false certainty:** syntactic calls cannot model runtime dispatch. Mitigation: conservative resolver states, preserved references/candidates, and false-resolution quality gates.
 - **Tree-sitter startup cost:** mandatory dependencies could affect ordinary Wiki startup. Mitigation: lazy grammar/parser initialization and measured startup gate.
 - **Selector expansion cost:** broad globs can create excessive links. Mitigation: materialize file links only, reuse file limits, report truncation/conflicts, and avoid per-symbol expansion.

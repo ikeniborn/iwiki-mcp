@@ -35,10 +35,15 @@ def test_main_loads_config_probes_and_runs_mcp_in_order(monkeypatch):
         lambda actual: calls.append(("probe", actual)),
     )
     monkeypatch.setattr(server.mcp, "run", lambda: calls.append("run"))
+    monkeypatch.setattr(
+        server._codegraph_runtime,
+        "shutdown_code_graph_workers",
+        lambda: calls.append("shutdown-code-graph"),
+    )
 
     server.main()
 
-    assert calls == ["load", ("probe", cfg), "run"]
+    assert calls == ["load", ("probe", cfg), "run", "shutdown-code-graph"]
 
 
 def test_main_does_not_import_tree_sitter_language_pack(monkeypatch):
