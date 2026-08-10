@@ -1,4 +1,5 @@
 from dataclasses import replace
+import sys
 
 import pytest
 
@@ -38,6 +39,19 @@ def test_main_loads_config_probes_and_runs_mcp_in_order(monkeypatch):
     server.main()
 
     assert calls == ["load", ("probe", cfg), "run"]
+
+
+def test_main_does_not_import_tree_sitter_language_pack(monkeypatch):
+    cfg = _cfg()
+    monkeypatch.delitem(sys.modules, "tree_sitter_language_pack", raising=False)
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.Config, "load", lambda: cfg)
+    monkeypatch.setattr(server, "probe_embedding_endpoint", lambda actual: None)
+    monkeypatch.setattr(server.mcp, "run", lambda: None)
+
+    server.main()
+
+    assert "tree_sitter_language_pack" not in sys.modules
 
 
 def test_main_applies_project_before_loading_config(monkeypatch, tmp_path):

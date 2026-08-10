@@ -22,6 +22,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
+# Code graph contracts are startup-safe and belong to the same import closure;
+# language adapters remain lazy and are not imported here.
+from .codegraph import config as _codegraph_config  # noqa: F401
+from .codegraph import location as _codegraph_location  # noqa: F401
+from .codegraph import models as _codegraph_models  # noqa: F401
 from .lock import mutation_lock
 from .engine import rerank
 from .engine import frontmatter as _fm
