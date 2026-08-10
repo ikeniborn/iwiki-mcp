@@ -10,10 +10,12 @@ import functools
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
 import json
+import logging
 import os
 import re
 import secrets
 import sys
+import time
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
@@ -64,6 +66,9 @@ from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def _distribution_version(name: str) -> str:
     try:
         return version(name)
@@ -89,7 +94,7 @@ _CODE_GRAPH_ADAPTER_FACTORIES = {
 }
 
 
-def _create_code_graph_runtime(binding: base.Binding):
+def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
     return _codegraph_runtime.CodeGraphRuntime(
         binding,
@@ -235,6 +240,8 @@ def _safe(fn):
     def wrap(*a, **k):
         try:
             return fn(*a, **k)
+        except _codegraph_models.CodeGraphError as e:
+            return _codegraph_runtime.sanitized_error(e)
         except base.BaseError as e:
             return {"error": str(e), "hint": "set IWIKI_BASE_DIR or run wiki_bind"}
         except (ConfigError, EmbedError) as e:
@@ -258,6 +265,34 @@ def _safe(fn):
             return result
         except Exception as e:
             return {"error": str(e), "hint": "unexpected error; see server logs"}
+
+    return wrap
+
+
+def _code_safe(fn):
+    """Sanitize unexpected code-tool failures without changing Wiki tools."""
+    @functools.wraps(fn)
+    def wrap(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return fn(*args, **kwargs)
+        except _codegraph_models.CodeGraphError as exc:
+            return _codegraph_runtime.sanitized_error(exc)
+        except base.BaseError:
+            return _missing_code_primary()
+        except (ConfigError, EmbedError):
+            raise
+        except Exception:
+            duration_ms = max(0, int((time.monotonic() - started) * 1000))
+            LOGGER.error(
+                "code_graph_handler code=rebuild_failed count=1 duration_ms=%d",
+                duration_ms,
+            )
+            return {
+                "error": "code graph rebuild failed",
+                "code": "rebuild_failed",
+                "hint": "inspect wiki_code_status and retry",
+            }
 
     return wrap
 
@@ -467,6 +502,56 @@ def wiki_status() -> dict:
         "project_dir": bind.project_dir,
         "domains": base.list_domains(bind.base),
     }
+
+
+def _missing_code_primary() -> dict:
+    return {
+        "error": "code graph is not configured",
+        "code": "not_configured",
+        "hint": "configure a primary domain and enable code_graph",
+    }
+
+
+@_safe
+@_code_safe
+def wiki_code_status() -> dict:
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).status()
+
+
+@_safe
+@_code_safe
+def wiki_code_index(
+    force: bool = False,
+    languages: list[str] | None = None,
+) -> dict:
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).index(force=force, languages=languages)
+
+
+@_safe
+@_code_safe
+def wiki_code_search(
+    query: str,
+    kinds: list[str] | None = None,
+    path: str | None = None,
+    languages: list[str] | None = None,
+    limit: int = 20,
+) -> dict:
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).search(
+        query,
+        kinds=kinds,
+        path=path,
+        languages=languages,
+        limit=limit,
+    )
 
 
 @_safe
@@ -1900,6 +1985,9 @@ wiki_sync = _mutation_guard(wiki_sync)
 
 # Thin MCP wrappers; implementation functions above stay unit-testable.
 mcp.tool()(wiki_status)
+mcp.tool()(wiki_code_status)
+mcp.tool()(wiki_code_index)
+mcp.tool()(wiki_code_search)
 mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 from contextlib import closing
+from dataclasses import asdict
 import json
 import logging
 from pathlib import Path
@@ -27,6 +28,11 @@ from .indexer import (
 )
 from .location import CodeGraphLocationError, CodeGraphLocationResolver
 from .models import CodeGraphError
+from .query import (
+    CodeGraphQuery,
+    CodeGraphQueryError,
+    validate_search_request,
+)
 from .schema import SCHEMA_VERSION, CodeGraphStoreError
 from .store import (
     CodeGraphStore,
@@ -200,6 +206,18 @@ def _typed_failure(error: CodeGraphError) -> dict[str, object]:
         "hint": hint,
         "fresh": False,
     }
+
+
+def sanitized_error(error: CodeGraphError) -> dict[str, object]:
+    """Map typed graph failures without exposing exception text."""
+    code = getattr(error, "code", "rebuild_failed")
+    if code == "invalid_config":
+        return _invalid_config()
+    if code == "not_configured":
+        return _not_configured()
+    if code == "busy":
+        return CodeGraphRuntime._busy_response()
+    return _typed_failure(error)
 
 
 def _metadata(path: Path) -> Mapping[str, object]:
@@ -894,6 +912,7 @@ class CodeGraphRuntime:
                 0.0,
                 min(freshness_budget, self.config.max_rebuild_seconds),
             )
+            freshness_started = time.monotonic()
             try:
                 became_dirty = self._indexer.mark_dirty_if_stale(
                     deadline=freshness_deadline
@@ -915,6 +934,15 @@ class CodeGraphRuntime:
                     "results": [],
                 }
             except Exception:
+                duration_ms = max(
+                    0,
+                    int((time.monotonic() - freshness_started) * 1000),
+                )
+                LOGGER.error(
+                    "code_graph_query_guard code=rebuild_failed "
+                    "count=1 duration_ms=%d",
+                    duration_ms,
+                )
                 return {
                     **status,
                     **_rebuild_failed(),
@@ -972,5 +1000,126 @@ class CodeGraphRuntime:
             "hint": _INDEX_HINT,
         }
 
+    def search(
+        self,
+        query: str,
+        *,
+        kinds: list[str] | None = None,
+        path: str | None = None,
+        languages: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        """Search only one revision proven ready under the shared reader lock."""
+        try:
+            request = validate_search_request(
+                query,
+                kinds=kinds,
+                path=path,
+                languages=languages,
+                limit=limit,
+            )
+        except CodeGraphQueryError:
+            return _invalid_config()
+        guarded = self.query_guard()
+        if guarded.get("fresh") is not True:
+            return guarded
+        assert self.paths is not None and self._store is not None
+        guarded_revision = guarded.get("revision")
+        query_started = time.monotonic()
+        try:
+            query_engine = CodeGraphQuery(self.binding.primary or "")
+            with code_graph_read_lock(self.paths.lock):
+                before = dict(_metadata(self.paths.metadata))
+                if (
+                    _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    or before.get("state") != "ready"
+                    or before.get("revision") != guarded_revision
+                ):
+                    return {
+                        **self._with_rebuilding_state(
+                            guarded,
+                            shared_writer=_BUILD_WORKERS.is_active(
+                                self._worker_domain_key
+                            ),
+                        ),
+                        "fresh": False,
+                        "results": [],
+                        "hint": _INDEX_HINT,
+                    }
+                with closing(self._store.open_existing()) as connection:
+                    repository = connection.execute(
+                        "SELECT state, revision FROM repositories "
+                        "WHERE repository_id = ?",
+                        (self.binding.primary,),
+                    ).fetchone()
+                    if repository != ("ready", guarded_revision):
+                        return {
+                            **guarded,
+                            "fresh": False,
+                            "results": [],
+                            "hint": _INDEX_HINT,
+                        }
+                    results = query_engine.search(
+                        connection,
+                        request,
+                    )
+                after = dict(_metadata(self.paths.metadata))
+                if (
+                    before != after
+                    or _BUILD_WORKERS.is_active(self._worker_domain_key)
+                ):
+                    return {
+                        **guarded,
+                        "fresh": False,
+                        "results": [],
+                        "hint": _INDEX_HINT,
+                    }
+        except CodeGraphQueryError:
+            return _invalid_config()
+        except Timeout:
+            return {
+                **self._busy_response(),
+                "fresh": False,
+                "results": [],
+            }
+        except CodeGraphStoreError:
+            return {
+                **_typed_failure(CodeGraphStoreFailure()),
+                "fresh": False,
+                "results": [],
+            }
+        except CodeGraphError as exc:
+            return {
+                **sanitized_error(exc),
+                "fresh": False,
+                "results": [],
+            }
+        except Exception:
+            duration_ms = max(
+                0,
+                int((time.monotonic() - query_started) * 1000),
+            )
+            LOGGER.error(
+                "code_graph_query code=rebuild_failed count=1 duration_ms=%d",
+                duration_ms,
+            )
+            return {
+                **_rebuild_failed(),
+                "fresh": False,
+                "results": [],
+            }
+        return {
+            "domain": guarded.get("domain"),
+            "state": guarded.get("state"),
+            "revision": guarded_revision,
+            "fresh": True,
+            "warnings": list(guarded.get("warnings", [])),
+            "results": [asdict(item) for item in results],
+        }
 
-__all__ = ["CodeGraphRuntime", "shutdown_code_graph_workers"]
+
+__all__ = [
+    "CodeGraphRuntime",
+    "sanitized_error",
+    "shutdown_code_graph_workers",
+]

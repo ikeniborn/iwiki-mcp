@@ -19,6 +19,7 @@ EXPECTED_TOOLS = {
     "wiki_delete_page", "wiki_index", "wiki_create_domain", "wiki_bind",
     "wiki_lint", "wiki_remediation_plan", "wiki_migrate_okf", "wiki_apply_okf",
     "wiki_export_okf", "wiki_sync",
+    "wiki_code_status", "wiki_code_index", "wiki_code_search",
 }
 
 
