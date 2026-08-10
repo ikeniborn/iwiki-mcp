@@ -27,6 +27,8 @@ from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from .codegraph import config as _codegraph_config  # noqa: F401
 from .codegraph import location as _codegraph_location  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
+from .codegraph import schema as _codegraph_schema  # noqa: F401
+from .codegraph import store as _codegraph_store  # noqa: F401
 from .lock import mutation_lock
 from .engine import rerank
 from .engine import frontmatter as _fm
