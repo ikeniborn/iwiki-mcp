@@ -1,13 +1,29 @@
 ---
 review:
-  spec_hash: f4c34540a20da5a1
-  last_run: 2026-08-09
+  spec_hash: 5a597c9b75fad2d5
+  last_run: 2026-08-10
   phases:
     structure: { status: passed }
     coverage: { status: passed }
     clarity: { status: passed }
     consistency: { status: passed }
-  findings: []
+  findings:
+    - id: F-001
+      phase: consistency
+      severity: CRITICAL
+      section: "17. Sequential delivery units"
+      section_hash: 5444b4d65964ec36
+      fragment: "It closes R-001 through R-012 except adapter behavior."
+      text: >-
+        The former Unit A requirement range contradicted Unit B's explicit
+        discovery/fingerprinting/full-build outputs and made the approved
+        sequential delivery boundary impossible to implement without drift.
+      fix: >-
+        Assign Unit A to R-001..R-009 primitives; assign discovery through
+        search, build observability, and three R-016 tools to Unit B; let Unit C
+        complete R-016 and own context/Wiki/evidence requirements.
+      verdict: fixed
+      verdict_at: 2026-08-09
 chain:
   intent: docs/superpowers/intents/2026-08-09-iwiki-mcp-code-graph-intent.md
   spec: null
@@ -237,7 +253,7 @@ exclude = [
 ]
 ```
 
-MVP accepts only `python` in `languages`. Unknown languages are configuration errors local to code tools. Operator overrides remain `IWIKI_CODE_GRAPH_ENABLED`, `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES`, and `IWIKI_CODE_GRAPH_AUTO_REBUILD`. There is no `database`, `project_id`, `project_uuid`, or `incremental` setting.
+The runtime reads this mapping from `load_project_config(binding.project_dir).get("code_graph", {})`; `Binding` is not expanded with raw configuration. `auto_rebuild` accepts exactly `"off"` or `"bounded"`. MVP accepts only `python` in `languages`. Unknown languages are configuration errors local to code tools. Operator overrides remain exactly `IWIKI_CODE_GRAPH_ENABLED`, `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES`, and `IWIKI_CODE_GRAPH_AUTO_REBUILD`; the last uses the same `off|bounded` values. There is no `database`, `project_id`, `project_uuid`, or `incremental` setting.
 
 ## 7. Data model
 
@@ -684,17 +700,17 @@ flowchart LR
     class Incremental,TypeScript warning
 ```
 
-### 17.1 Unit A — contracts, storage, and lifecycle
+### 17.1 Unit A — contracts, storage, and lifecycle primitives
 
-Expected outputs: package skeleton, models, schema v1, locations, configuration, mandatory dependencies, stable IDs, runtime state model, atomic publication primitives, and focused unit/security tests. It closes R-001 through R-012 except adapter behavior.
+Expected outputs: package skeleton, models, schema v1, locations, configuration loading, mandatory dependencies, portable identity primitives, runtime-state storage primitives, atomic-publication primitives, and focused unit/security tests. It owns R-001 through R-009. It supplies identity primitives for R-012 but does not claim end-to-end determinism before source discovery, parsing, resolution, and rebuild are available.
 
-### 17.2 Unit B — Python indexing, resolution, and search
+### 17.2 Unit B — discovery, Python indexing, resolution, and search
 
-Expected outputs: safe discovery, fingerprinting, Python adapter, resolver, full rebuild/no-op, `status`, `index`, `search`, golden fixtures, determinism evidence, and fail-soft integration. It closes R-013 through R-018 and the corresponding quality gates.
+Expected outputs: safe discovery, fingerprinting, Python adapter, resolver, full rebuild/no-op, `status`, `index`, `search`, golden fixtures, end-to-end determinism evidence, build observability, and fail-soft integration. It owns R-010 through R-015, R-017, R-018, and R-025, plus the `status`/`index`/`search` portion of R-016. This includes R-011/R-012 discovery and deterministic graph evidence. Unit B consumes Unit A storage/publication primitives; no Unit B output is a prerequisite of Unit A.
 
 ### 17.3 Unit C — context, Wiki links, lint, and benchmark
 
-Expected outputs: bounded context/source reads, generic Wiki-code links, selector parsing, code-aware lint, recovery/concurrency integration tests, benchmark runner/report, Wiki documentation, and final regression evidence. It closes R-019 through R-030.
+Expected outputs: bounded context/source reads, final four-tool registration, generic Wiki-code links, selector parsing, code-aware lint, recovery/concurrency integration tests, benchmark runner/report, Wiki documentation, and final regression evidence. It completes R-016 with `context` and owns R-019 through R-024 plus R-026 through R-030. Recovery/concurrency tests may reinforce earlier storage and fail-soft requirements without moving their ownership.
 
 ## 18. Acceptance criteria
 
@@ -740,7 +756,7 @@ Expected outputs: bounded context/source reads, generic Wiki-code links, selecto
 
 ## 20. Human checkpoints
 
-All design forks raised during brainstorming are resolved for the Python MVP: language boundary, dependency packaging, repository identity, primary-domain routing, specification shape, generic Wiki-link schema, and technical-debt treatment. Implementation MUST stop and return to design review if it needs to weaken a hard constraint, add incremental/TypeScript scope, change the four MCP contracts, change `wiki_search`, or replace the approved storage/identity/publication model.
+All original design forks raised during brainstorming are resolved for the Python MVP: language boundary, dependency packaging, repository identity, primary-domain routing, specification shape, generic Wiki-link schema, and technical-debt treatment. The corrected Unit A/Unit B allocation in Section 17 is a renewed human checkpoint because delivery slices are proposal-first; implementation MUST NOT begin until this amended specification is approved. After approval, implementation MUST stop and return to design review if it needs to weaken a hard constraint, add incremental/TypeScript scope, change the four MCP contracts, change `wiki_search`, replace the approved storage/identity/publication model, or move work across the approved unit boundaries.
 
 ## 21. Traceability summary
 
