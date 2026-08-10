@@ -1,6 +1,6 @@
 [project]
 name = "iwiki-mcp"
-version = "0.7.66"
+version = "0.7.67"
 description = "MCP server for a shared, git-synced wiki knowledge base split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,7 @@ dependencies = [
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.13.3",
     "tomli>=2.0; python_version < '3.11'",
+    "tree-sitter-python>=0.25.0",
 ]
 
 [project.scripts]

@@ -22,8 +22,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
-# Code graph contracts are startup-safe and belong to the same import closure;
-# language adapters remain lazy and are not imported here.
+# Code graph adapters join the full startup import closure; their grammar and
+# parser initialization remains lazy until an adapter parses source.
 from .codegraph import config as _codegraph_config  # noqa: F401
 from .codegraph import discovery as _codegraph_discovery  # noqa: F401
 from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
@@ -31,6 +31,8 @@ from .codegraph import location as _codegraph_location  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
 from .codegraph import schema as _codegraph_schema  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
+from .codegraph import languages as _codegraph_languages  # noqa: F401
+from .codegraph.languages import python as _codegraph_python  # noqa: F401
 from .lock import mutation_lock
 from .engine import rerank
 from .engine import frontmatter as _fm
