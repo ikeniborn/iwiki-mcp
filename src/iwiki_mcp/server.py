@@ -25,6 +25,8 @@ from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 # Code graph contracts are startup-safe and belong to the same import closure;
 # language adapters remain lazy and are not imported here.
 from .codegraph import config as _codegraph_config  # noqa: F401
+from .codegraph import discovery as _codegraph_discovery  # noqa: F401
+from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
 from .codegraph import location as _codegraph_location  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
 from .codegraph import schema as _codegraph_schema  # noqa: F401
