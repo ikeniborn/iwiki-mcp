@@ -8,7 +8,7 @@ from ..models import ParsedFile, ResolutionResult
 if TYPE_CHECKING:
     # The project index is introduced by the resolution layer.  Keeping this
     # import type-only prevents parser adapters from coupling to that layer.
-    from ..index import SymbolIndex
+    from ..resolver import SymbolIndex
 
 
 class LanguageAdapter(Protocol):

@@ -1,0 +1,2 @@
+def known():
+    return None

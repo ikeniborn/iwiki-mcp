@@ -86,6 +86,7 @@ class ReferenceRecord:
     relation_type: str
     target_reference: str | None
     source_line: int | None
+    source_byte: int | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class RelationRecord:
     confidence: float
     resolution_state: str
     metadata_json: str
+    source_byte: int | None = None
 
 
 @dataclass(frozen=True)
