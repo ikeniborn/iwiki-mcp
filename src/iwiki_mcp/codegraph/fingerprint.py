@@ -61,14 +61,18 @@ def _parser_inputs(
     grammar_version: str,
     adapter_version: str,
     resolver_version: str,
+    normalizer_version: str,
+    unicode_data_version: str,
 ) -> dict[str, Any]:
     return {
         "adapter_version": adapter_version,
         "grammar_version": grammar_version,
         "languages": sorted(set(languages)),
+        "normalizer_version": normalizer_version,
         "parser_version": parser_version,
         "resolver_version": resolver_version,
         "schema_version": schema_version,
+        "unicode_data_version": unicode_data_version,
     }
 
 
@@ -80,6 +84,8 @@ def parser_fingerprint(
     grammar_version: str,
     adapter_version: str,
     resolver_version: str,
+    normalizer_version: str,
+    unicode_data_version: str,
 ) -> str:
     return _hash(
         _parser_inputs(
@@ -89,6 +95,8 @@ def parser_fingerprint(
             grammar_version=grammar_version,
             adapter_version=adapter_version,
             resolver_version=resolver_version,
+            normalizer_version=normalizer_version,
+            unicode_data_version=unicode_data_version,
         )
     )
 
@@ -150,6 +158,8 @@ def compose_fingerprints(
     grammar_version: str,
     adapter_version: str,
     resolver_version: str,
+    normalizer_version: str,
+    unicode_data_version: str,
 ) -> FingerprintSet:
     """Compose portable fingerprints for later build/no-op consumption."""
     rows = _source_rows(files)
@@ -161,6 +171,8 @@ def compose_fingerprints(
         grammar_version=grammar_version,
         adapter_version=adapter_version,
         resolver_version=resolver_version,
+        normalizer_version=normalizer_version,
+        unicode_data_version=unicode_data_version,
     )
     source = _hash(rows)
     configuration = _hash(normalized)

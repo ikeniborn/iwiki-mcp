@@ -17,7 +17,6 @@ import uuid
 from filelock import ReadWriteLock, Timeout
 
 from .location import CodeGraphLocationError, open_cache_directory
-from .models import NORMALIZER_VERSION, UNICODE_DATA_VERSION
 from .schema import (
     BUSY_TIMEOUT_MS,
     INDEXES,
@@ -401,14 +400,6 @@ class CodeGraphStore:
                 for table in TABLES:
                     primary_key = _PRIMARY_KEYS[table]
                     rows = [dict(row) for row in snapshot[table]]
-                    if table == "repositories":
-                        for row in rows:
-                            row.setdefault(
-                                "normalizer_version", NORMALIZER_VERSION
-                            )
-                            row.setdefault(
-                                "unicode_data_version", UNICODE_DATA_VERSION
-                            )
                     rows.sort(key=lambda row: str(row[primary_key]))
                     connection.executemany(_INSERTS[table], rows)
         except CodeGraphStoreError:

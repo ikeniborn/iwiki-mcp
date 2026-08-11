@@ -16,6 +16,7 @@ from filelock import Timeout
 
 from iwiki_mcp import base as wiki_base
 
+from . import models as codegraph_models
 from .config import CodeGraphConfig
 from .discovery import DiscoveryError, DiscoverySnapshot, discover_sources
 from .fingerprint import (
@@ -298,10 +299,19 @@ class CodeGraphIndexer:
             for extension in binding.adapter.extensions
         }))
 
+    @staticmethod
+    def _normalization_versions() -> tuple[str, str]:
+        return (
+            codegraph_models.NORMALIZER_VERSION,
+            codegraph_models.UNICODE_DATA_VERSION,
+        )
+
     def _fingerprints(
         self,
         discovered: DiscoverySnapshot,
         config: CodeGraphConfig,
+        *,
+        normalization_versions: tuple[str, str],
     ) -> tuple[FingerprintSet, str | None, str]:
         commit = current_git_commit(self.project_dir)
         dirty = git_dirty_marker(self.project_dir)
@@ -316,6 +326,8 @@ class CodeGraphIndexer:
             grammar_version=self._grammar_version(config),
             adapter_version=self._adapter_version(config),
             resolver_version=self.resolver_version,
+            normalizer_version=normalization_versions[0],
+            unicode_data_version=normalization_versions[1],
         )
         return fingerprints, commit, dirty
 
@@ -335,6 +347,7 @@ class CodeGraphIndexer:
         fingerprints: FingerprintSet,
         commit: str | None,
         config: CodeGraphConfig,
+        normalization_versions: tuple[str, str],
         *,
         persisted: Mapping[str, object] | None = None,
     ) -> dict[str, object] | None:
@@ -347,7 +360,8 @@ class CodeGraphIndexer:
             with closing(self.store.open_existing()) as connection:
                 row = connection.execute(
                     "SELECT source_fingerprint, config_fingerprint, "
-                    "parser_fingerprint, git_commit, revision, state, "
+                    "parser_fingerprint, normalizer_version, "
+                    "unicode_data_version, git_commit, revision, state, "
                     "indexed_at "
                     "FROM repositories WHERE repository_id = ?",
                     (self.domain,),
@@ -360,11 +374,13 @@ class CodeGraphIndexer:
             fingerprints.source,
             fingerprints.config,
             fingerprints.parser,
+            normalization_versions[0],
+            normalization_versions[1],
             commit,
-            row[4] if row is not None else None,
+            row[6] if row is not None else None,
             "ready",
         )
-        if row is None or row[:6] != expected:
+        if row is None or row[:8] != expected:
             return None
         metadata_timings = _safe_phase_timings(
             metadata.get("phase_timings_ms")
@@ -372,9 +388,11 @@ class CodeGraphIndexer:
         metadata_duration = metadata.get("duration_ms")
         metadata_matches = (
             metadata.get("state") == "ready"
-            and metadata.get("revision") == row[4]
+            and metadata.get("revision") == row[6]
             and metadata.get("input_fingerprint") == fingerprints.inputs
             and metadata.get("git_commit") == commit
+            and metadata.get("normalizer_version") == normalization_versions[0]
+            and metadata.get("unicode_data_version") == normalization_versions[1]
             and set(metadata_timings) == set(_PHASE_NAMES)
             and type(metadata_duration) is int
             and metadata_duration >= 0
@@ -393,7 +411,7 @@ class CodeGraphIndexer:
         result = {
             "domain": self.domain,
             "state": "ready",
-            "revision": row[4],
+            "revision": row[6],
             "fresh": True,
             "git_commit": commit,
             "fingerprints": {
@@ -407,6 +425,8 @@ class CodeGraphIndexer:
             "grammar_version": self._grammar_version(config),
             "adapter_version": self._adapter_version(config),
             "resolver_version": self.resolver_version,
+            "normalizer_version": normalization_versions[0],
+            "unicode_data_version": normalization_versions[1],
             "counts": counts,
             "resolution_ratios": resolution_ratios,
             "excluded_files": (
@@ -424,7 +444,7 @@ class CodeGraphIndexer:
                 if type(parser_errors) is int and parser_errors >= 0
                 else 0
             ),
-            "indexed_at": row[6],
+            "indexed_at": row[8],
             "warnings": (
                 sanitize_warning_codes(metadata.get("warnings"))
                 if metadata_matches
@@ -649,6 +669,7 @@ class CodeGraphIndexer:
         fingerprints: FingerprintSet,
         commit: str | None,
         indexed_at: str,
+        normalization_versions: tuple[str, str],
     ) -> dict[str, tuple[dict[str, object], ...]]:
         files = tuple(asdict(item.file) for item in parsed_files)
         symbols = tuple(
@@ -666,6 +687,8 @@ class CodeGraphIndexer:
                     "source_fingerprint": fingerprints.source,
                     "config_fingerprint": fingerprints.config,
                     "parser_fingerprint": fingerprints.parser,
+                    "normalizer_version": normalization_versions[0],
+                    "unicode_data_version": normalization_versions[1],
                     "revision": fingerprints.inputs,
                     "state": "rebuilding",
                     "indexed_at": indexed_at,
@@ -749,6 +772,7 @@ class CodeGraphIndexer:
         timings: Mapping[str, int],
         config: CodeGraphConfig,
         duration_ms: int,
+        normalization_versions: tuple[str, str],
     ) -> dict[str, object]:
         warnings = sanitize_warning_codes(sorted(
             {item.code for item in discovered.warnings}
@@ -784,6 +808,8 @@ class CodeGraphIndexer:
             "grammar_version": self._grammar_version(config),
             "adapter_version": self._adapter_version(config),
             "resolver_version": self.resolver_version,
+            "normalizer_version": normalization_versions[0],
+            "unicode_data_version": normalization_versions[1],
             "counts": dict(counts),
             "resolution_ratios": resolution_ratios,
             "excluded_files": len(discovered.warnings),
@@ -869,6 +895,7 @@ class CodeGraphIndexer:
     def mark_dirty_if_stale(self, *, deadline: float | None = None) -> bool:
         """Discover fingerprints for a query and persist ready-to-dirty drift."""
         config = self.config
+        normalization_versions = self._normalization_versions()
         if deadline is None:
             deadline = time.monotonic() + config.max_rebuild_seconds
         try:
@@ -884,10 +911,17 @@ class CodeGraphIndexer:
                 )
                 _check_deadline(deadline, self.paths.lock)
                 fingerprints, commit, _dirty = self._fingerprints(
-                    discovered, config
+                    discovered,
+                    config,
+                    normalization_versions=normalization_versions,
                 )
                 _check_deadline(deadline, self.paths.lock)
-                if self._ready_metadata(fingerprints, commit, config) is not None:
+                if self._ready_metadata(
+                    fingerprints,
+                    commit,
+                    config,
+                    normalization_versions,
+                ) is not None:
                     return False
                 self.store.set_repository_state(self.domain, "dirty")
                 return True
@@ -917,6 +951,7 @@ class CodeGraphIndexer:
         timings = {phase: 0 for phase in _PHASE_NAMES}
         try:
             config = self._config_for_languages(self.config, languages)
+            normalization_versions = self._normalization_versions()
             if deadline is None:
                 deadline = started + config.max_rebuild_seconds
             _check_deadline(deadline, self.paths.lock)
@@ -972,7 +1007,9 @@ class CodeGraphIndexer:
 
                 phase = time.monotonic()
                 fingerprints, commit, _dirty = self._fingerprints(
-                    discovered, config
+                    discovered,
+                    config,
+                    normalization_versions=normalization_versions,
                 )
                 timings["fingerprint"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
@@ -981,6 +1018,7 @@ class CodeGraphIndexer:
                         fingerprints,
                         commit,
                         config,
+                        normalization_versions,
                         persisted=previous_metadata,
                     )
                     if ready is not None:
@@ -1017,6 +1055,7 @@ class CodeGraphIndexer:
                     fingerprints=fingerprints,
                     commit=commit,
                     indexed_at=indexed_at,
+                    normalization_versions=normalization_versions,
                 )
                 phase = time.monotonic()
                 staging_store = CodeGraphStore(
@@ -1103,6 +1142,7 @@ class CodeGraphIndexer:
                     timings=timings,
                     config=config,
                     duration_ms=_elapsed_ms(started),
+                    normalization_versions=normalization_versions,
                 )
                 incomplete_metadata["state"] = "rebuilding"
                 incomplete_metadata["generation"] = generation
@@ -1136,6 +1176,7 @@ class CodeGraphIndexer:
                     timings=timings,
                     config=config,
                     duration_ms=_elapsed_ms(started),
+                    normalization_versions=normalization_versions,
                 )
                 ready_metadata["generation"] = generation
                 ready_metadata["publication_phase"] = (
@@ -1164,6 +1205,7 @@ class CodeGraphIndexer:
                     timings=timings,
                     config=config,
                     duration_ms=_elapsed_ms(started),
+                    normalization_versions=normalization_versions,
                 )
                 metadata["generation"] = generation
                 metadata["publication_phase"] = "pending_final_verify"

@@ -15,6 +15,7 @@ from filelock import Timeout
 
 from iwiki_mcp.base import Binding
 
+from . import models as codegraph_models
 from .config import CodeGraphConfig, CodeGraphConfigError, load_code_graph_config
 from .fingerprint import parser_fingerprint
 from .indexer import (
@@ -359,7 +360,12 @@ class CodeGraphRuntime:
             return _not_configured()
         return None
 
-    def _missing_status(self) -> dict[str, object]:
+    def _missing_status(
+        self,
+        normalization_versions: tuple[str, str] | None = None,
+    ) -> dict[str, object]:
+        if normalization_versions is None:
+            normalization_versions = self._normalization_versions()
         return {
             "enabled": True,
             "domain": self.binding.primary,
@@ -371,6 +377,8 @@ class CodeGraphRuntime:
             "grammar_version": self._grammar_version,
             "adapter_version": self._adapter_version,
             "resolver_version": self._resolver_version,
+            "normalizer_version": normalization_versions[0],
+            "unicode_data_version": normalization_versions[1],
             "counts": {
                 "languages": {},
                 "files": 0,
@@ -397,7 +405,17 @@ class CodeGraphRuntime:
             "hint": _INDEX_HINT,
         }
 
-    def _current_toolchain_fingerprint(self) -> str:
+    @staticmethod
+    def _normalization_versions() -> tuple[str, str]:
+        return (
+            codegraph_models.NORMALIZER_VERSION,
+            codegraph_models.UNICODE_DATA_VERSION,
+        )
+
+    def _current_toolchain_fingerprint(
+        self,
+        normalization_versions: tuple[str, str],
+    ) -> str:
         assert self.config is not None
         return parser_fingerprint(
             languages=self.config.languages,
@@ -406,6 +424,8 @@ class CodeGraphRuntime:
             grammar_version=self._grammar_version,
             adapter_version=self._adapter_version,
             resolver_version=self._resolver_version,
+            normalizer_version=normalization_versions[0],
+            unicode_data_version=normalization_versions[1],
         )
 
     def _with_rebuilding_state(
@@ -460,22 +480,28 @@ class CodeGraphRuntime:
         self,
         *,
         persisted_metadata: Mapping[str, object] | None = None,
+        normalization_versions: tuple[str, str] | None = None,
     ) -> dict[str, object]:
         """Read authoritative metadata/schema while publication cannot race."""
         assert self.paths is not None and self._store is not None
+        if normalization_versions is None:
+            normalization_versions = self._normalization_versions()
         if not self.paths.database.is_file():
-            return self._with_rebuilding_state(self._missing_status())
+            return self._with_rebuilding_state(
+                self._missing_status(normalization_versions)
+            )
         try:
             with closing(self._store.open_existing()) as connection:
                 row = connection.execute(
                     "SELECT repository_id, git_commit, source_fingerprint, "
-                    "config_fingerprint, parser_fingerprint, revision, state, "
+                    "config_fingerprint, parser_fingerprint, "
+                    "normalizer_version, unicode_data_version, revision, state, "
                     "indexed_at FROM repositories WHERE repository_id = ?",
                     (self.binding.primary,),
                 ).fetchone()
                 if row is None:
                     return self._with_rebuilding_state(
-                        self._missing_status()
+                        self._missing_status(normalization_versions)
                     )
                 counts = self._count_rows(connection)
         except Exception:
@@ -487,14 +513,14 @@ class CodeGraphRuntime:
             if persisted_metadata is not None
             else _metadata(self.paths.metadata)
         )
-        state = str(row[6])
+        state = str(row[8])
         persisted_timings = _safe_phase_timings(
             persisted.get("phase_timings_ms")
         )
         persisted_duration = persisted.get("duration_ms")
         metadata_matches = (
             persisted.get("state") == "ready"
-            and persisted.get("revision") == row[5]
+            and persisted.get("revision") == row[7]
             and set(persisted_timings) == set(_PHASE_NAMES)
             and type(persisted_duration) is int
             and persisted_duration >= 0
@@ -503,6 +529,8 @@ class CodeGraphRuntime:
         persisted_grammar_version = persisted.get("grammar_version")
         persisted_adapter_version = persisted.get("adapter_version")
         persisted_resolver_version = persisted.get("resolver_version")
+        persisted_normalizer_version = persisted.get("normalizer_version")
+        persisted_unicode_data_version = persisted.get("unicode_data_version")
         toolchain_mismatch = (
             metadata_matches
             and (
@@ -510,10 +538,20 @@ class CodeGraphRuntime:
                 or persisted_grammar_version != self._grammar_version
                 or persisted_adapter_version != self._adapter_version
                 or persisted_resolver_version != self._resolver_version
+                or persisted_normalizer_version != normalization_versions[0]
+                or persisted_unicode_data_version != normalization_versions[1]
+                or row[5] != normalization_versions[0]
+                or row[6] != normalization_versions[1]
             )
         ) or (
             not metadata_matches
-            and row[4] != self._current_toolchain_fingerprint()
+            and (
+                row[4] != self._current_toolchain_fingerprint(
+                    normalization_versions
+                )
+                or row[5] != normalization_versions[0]
+                or row[6] != normalization_versions[1]
+            )
         )
         if not metadata_matches:
             persisted = {}
@@ -528,7 +566,7 @@ class CodeGraphRuntime:
             "enabled": True,
             "domain": self.binding.primary,
             "state": effective_state,
-            "revision": row[5],
+            "revision": row[7],
             "fresh": effective_state == "ready",
             "git_commit": row[1],
             "fingerprints": {
@@ -557,6 +595,16 @@ class CodeGraphRuntime:
                 if isinstance(persisted_resolver_version, str)
                 else None
             ),
+            "normalizer_version": (
+                persisted_normalizer_version
+                if isinstance(persisted_normalizer_version, str)
+                else None
+            ),
+            "unicode_data_version": (
+                persisted_unicode_data_version
+                if isinstance(persisted_unicode_data_version, str)
+                else None
+            ),
             "counts": counts,
             "resolution_ratios": {
                 resolution_state: count / resolution_total
@@ -574,7 +622,7 @@ class CodeGraphRuntime:
             "parser_errors": _safe_nonnegative(
                 persisted.get("parser_errors")
             ),
-            "indexed_at": row[7],
+            "indexed_at": row[9],
             "warnings": sanitize_warning_codes(persisted.get("warnings")),
         }
         if metadata_matches:
@@ -601,6 +649,7 @@ class CodeGraphRuntime:
                 "enabled": unavailable.get("code") != "not_configured",
             }
         assert self.paths is not None and self._store is not None
+        normalization_versions = self._normalization_versions()
         for _attempt in range(4):
             before = dict(_metadata(self.paths.metadata))
             try:
@@ -609,11 +658,14 @@ class CodeGraphRuntime:
                     if before != locked_metadata:
                         continue
                     status = self._read_status(
-                        persisted_metadata=locked_metadata
+                        persisted_metadata=locked_metadata,
+                        normalization_versions=normalization_versions,
                     )
                     after = dict(_metadata(self.paths.metadata))
             except Timeout:
-                return self._shared_rebuilding_status(before)
+                return self._shared_rebuilding_status(
+                    before, normalization_versions
+                )
             except CodeGraphStoreError:
                 return self._store_failure_status()
             if locked_metadata != after:
@@ -667,9 +719,14 @@ class CodeGraphRuntime:
         try:
             with code_graph_read_lock(self.paths.lock):
                 current = dict(_metadata(self.paths.metadata))
-                status = self._read_status(persisted_metadata=current)
+                status = self._read_status(
+                    persisted_metadata=current,
+                    normalization_versions=normalization_versions,
+                )
         except Timeout:
-            return self._shared_rebuilding_status(metadata)
+            return self._shared_rebuilding_status(
+                metadata, normalization_versions
+            )
         except CodeGraphStoreError:
             return self._store_failure_status()
         metadata = current
@@ -683,7 +740,8 @@ class CodeGraphRuntime:
                 return self._store_failure_status()
             if recovered:
                 return self._read_status(
-                    persisted_metadata=_metadata(self.paths.metadata)
+                    persisted_metadata=_metadata(self.paths.metadata),
+                    normalization_versions=normalization_versions,
                 )
             return self._with_rebuilding_state(
                 status, shared_writer=True
@@ -693,9 +751,10 @@ class CodeGraphRuntime:
     def _shared_rebuilding_status(
         self,
         metadata: Mapping[str, object],
+        normalization_versions: tuple[str, str] | None = None,
     ) -> dict[str, object]:
         revision = metadata.get("revision")
-        status = self._missing_status()
+        status = self._missing_status(normalization_versions)
         status["revision"] = revision if isinstance(revision, str) else None
         return self._with_rebuilding_state(status, shared_writer=True)
 
@@ -720,7 +779,11 @@ class CodeGraphRuntime:
                 )
             ):
                 return True
-            authoritative = self._read_status(persisted_metadata={})
+            normalization_versions = self._normalization_versions()
+            authoritative = self._read_status(
+                persisted_metadata={},
+                normalization_versions=normalization_versions,
+            )
             authoritative_state = authoritative.get("state")
             generation = current.get("generation")
             if type(generation) is not int or generation < 0:

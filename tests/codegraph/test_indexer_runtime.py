@@ -13,7 +13,9 @@ import pytest
 from filelock import Timeout
 
 from iwiki_mcp import base as wiki_base
+from iwiki_mcp.codegraph import models as codegraph_models
 from iwiki_mcp.codegraph.discovery import DiscoveryError
+from iwiki_mcp.codegraph.fingerprint import parser_fingerprint
 from iwiki_mcp.codegraph.indexer import (
     CodeGraphParseError,
     CodeGraphStaleError,
@@ -24,7 +26,7 @@ from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
-from iwiki_mcp.codegraph.schema import CodeGraphStoreError
+from iwiki_mcp.codegraph.schema import SCHEMA_VERSION, CodeGraphStoreError
 from iwiki_mcp.codegraph.store import (
     CodeGraphStore,
     code_graph_read_lock,
@@ -1207,6 +1209,8 @@ def test_reconstructed_metadata_uses_sql_toolchain_fingerprint(
         "grammar_version",
         "adapter_version",
         "resolver_version",
+        "normalizer_version",
+        "unicode_data_version",
     ):
         assert matching[key] is None
         assert status[key] is None
@@ -1216,6 +1220,96 @@ def test_reconstructed_metadata_uses_sql_toolchain_fingerprint(
     assert guarded["state"] == "dirty"
     assert guarded["fresh"] is False
     assert guarded["results"] == []
+
+
+@pytest.mark.parametrize(
+    "version_name",
+    ("NORMALIZER_VERSION", "UNICODE_DATA_VERSION"),
+)
+def test_status_marks_current_model_version_drift_dirty_before_query(
+    seed_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    version_name: str,
+):
+    built = seed_runtime.index(force=True)
+    current_version = getattr(codegraph_models, version_name)
+    assert built[version_name.casefold()] == current_version
+
+    monkeypatch.setattr(
+        codegraph_models,
+        version_name,
+        current_version + "-drift",
+    )
+
+    status = seed_runtime.status()
+
+    assert status["state"] == "dirty"
+    assert status["fresh"] is False
+    assert status["hint"] == "run wiki_code_index"
+    assert status[version_name.casefold()] == current_version
+
+
+def test_build_captures_one_model_version_pair_for_all_persistence(
+    seed_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime = seed_runtime.runtime
+    assert runtime.config is not None
+    assert runtime._indexer is not None
+    indexer = runtime._indexer
+    normalizer_version = codegraph_models.NORMALIZER_VERSION
+    unicode_data_version = codegraph_models.UNICODE_DATA_VERSION
+    expected_parser_fingerprint = parser_fingerprint(
+        languages=runtime.config.languages,
+        schema_version=SCHEMA_VERSION,
+        parser_version=indexer._parser_version(runtime.config),
+        grammar_version=indexer._grammar_version(runtime.config),
+        adapter_version=indexer._adapter_version(runtime.config),
+        resolver_version=indexer.resolver_version,
+        normalizer_version=normalizer_version,
+        unicode_data_version=unicode_data_version,
+    )
+    real_fingerprints = indexer._fingerprints
+
+    def drift_after_capture(discovered, config, **kwargs):
+        monkeypatch.setattr(
+            codegraph_models,
+            "NORMALIZER_VERSION",
+            normalizer_version + "-drift",
+        )
+        monkeypatch.setattr(
+            codegraph_models,
+            "UNICODE_DATA_VERSION",
+            unicode_data_version + "-drift",
+        )
+        return real_fingerprints(discovered, config, **kwargs)
+
+    monkeypatch.setattr(indexer, "_fingerprints", drift_after_capture)
+
+    built = seed_runtime.index(force=True)
+    connection = runtime._store.open_existing()
+    try:
+        row = connection.execute(
+            "SELECT parser_fingerprint, normalizer_version, "
+            "unicode_data_version FROM repositories"
+        ).fetchone()
+    finally:
+        connection.close()
+    metadata = json.loads(
+        seed_runtime.paths.metadata.read_text(encoding="utf-8")
+    )
+
+    assert row == (
+        expected_parser_fingerprint,
+        normalizer_version,
+        unicode_data_version,
+    )
+    assert built["fingerprints"]["parser"] == expected_parser_fingerprint
+    assert built["normalizer_version"] == normalizer_version
+    assert built["unicode_data_version"] == unicode_data_version
+    assert metadata["fingerprints"]["parser"] == expected_parser_fingerprint
+    assert metadata["normalizer_version"] == normalizer_version
+    assert metadata["unicode_data_version"] == unicode_data_version
 
 
 def test_process_worker_registry_caps_four_domains_at_one(

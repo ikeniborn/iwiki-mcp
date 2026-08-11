@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from iwiki_mcp.codegraph import models
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.discovery import (
     DiscoveryError,
@@ -18,6 +19,8 @@ from iwiki_mcp.codegraph.discovery import (
 )
 from iwiki_mcp.codegraph.fingerprint import (
     FingerprintSet,
+    _parser_inputs,
+    _source_rows,
     compose_fingerprints,
     config_fingerprint,
     git_commit,
@@ -26,6 +29,7 @@ from iwiki_mcp.codegraph.fingerprint import (
     parser_fingerprint,
     source_fingerprint,
 )
+from iwiki_mcp.codegraph.models import module_key
 
 
 def _write(path: Path, content: bytes = b"pass\n") -> None:
@@ -510,6 +514,63 @@ def test_discovery_output_and_warnings_are_sorted_posix_and_relocatable(
     assert list(left.warnings) == sorted(
         left.warnings, key=lambda item: (item.path, item.code, item.detail)
     )
+    fingerprint_kwargs = {
+        "repository_id": "example-domain",
+        "git_commit": "1" * 40,
+        "dirty_marker": "clean",
+        "schema_version": 2,
+        "parser_version": "tree-sitter@1",
+        "grammar_version": "tree-sitter-python@1",
+        "adapter_version": "python-adapter@1",
+        "resolver_version": "resolver@1",
+        "normalizer_version": models.NORMALIZER_VERSION,
+        "unicode_data_version": models.UNICODE_DATA_VERSION,
+    }
+    left_fingerprints = compose_fingerprints(
+        left.files,
+        config,
+        **fingerprint_kwargs,
+    )
+    right_fingerprints = compose_fingerprints(
+        right.files,
+        config,
+        **fingerprint_kwargs,
+    )
+    assert left_fingerprints == right_fingerprints
+
+
+def test_discovery_occurrence_keys_preserve_duplicate_relative_paths() -> None:
+    fixture = (
+        Path(__file__).parents[1]
+        / "fixtures"
+        / "codegraph"
+        / "python_duplicate_modules"
+    )
+
+    snapshot = discover_sources(fixture, _config(), extensions=(".py",))
+
+    occurrence_keys = [module_key(source.path) for source in snapshot.files]
+    assert occurrence_keys == [
+        "root_a/pkg/service.py",
+        "root_b/pkg/service.py",
+    ]
+    assert len(set(occurrence_keys)) == 2
+    canonical_rows = _source_rows(snapshot.files)
+    assert [path for path, _content_hash in canonical_rows] == occurrence_keys
+    assert canonical_rows[0][1] == canonical_rows[1][1]
+
+
+def test_discovery_occurrence_keys_preserve_unicode_relative_paths() -> None:
+    fixture = (
+        Path(__file__).parents[1]
+        / "fixtures"
+        / "codegraph"
+        / "python_unicode"
+    )
+
+    snapshot = discover_sources(fixture, _config(), extensions=(".py",))
+
+    assert [source.path for source in snapshot.files] == ["pkg/straße.py"]
 
 
 def test_discovery_errors_are_sanitized(tmp_path: Path) -> None:
@@ -619,6 +680,8 @@ def test_config_parser_and_composed_fingerprints_are_deterministic() -> None:
         grammar_version="tree-sitter-python@1",
         adapter_version="python-adapter@1",
         resolver_version="resolver@1",
+        normalizer_version=models.NORMALIZER_VERSION,
+        unicode_data_version=models.UNICODE_DATA_VERSION,
     )
     first = compose_fingerprints(
         files,
@@ -631,6 +694,8 @@ def test_config_parser_and_composed_fingerprints_are_deterministic() -> None:
         grammar_version="tree-sitter-python@1",
         adapter_version="python-adapter@1",
         resolver_version="resolver@1",
+        normalizer_version=models.NORMALIZER_VERSION,
+        unicode_data_version=models.UNICODE_DATA_VERSION,
     )
     second = compose_fingerprints(
         reversed(files),
@@ -643,6 +708,8 @@ def test_config_parser_and_composed_fingerprints_are_deterministic() -> None:
         grammar_version="tree-sitter-python@1",
         adapter_version="python-adapter@1",
         resolver_version="resolver@1",
+        normalizer_version=models.NORMALIZER_VERSION,
+        unicode_data_version=models.UNICODE_DATA_VERSION,
     )
 
     assert isinstance(first, FingerprintSet)
@@ -680,12 +747,71 @@ def test_composed_fingerprint_changes_for_each_versioned_input(changed, field) -
         "grammar_version": "grammar@1",
         "adapter_version": "adapter@1",
         "resolver_version": "resolver@1",
+        "normalizer_version": models.NORMALIZER_VERSION,
+        "unicode_data_version": models.UNICODE_DATA_VERSION,
     }
     baseline = compose_fingerprints(files, config, **kwargs)
     mutated = compose_fingerprints(files, config, **(kwargs | changed))
 
     assert getattr(mutated, field) != getattr(baseline, field)
     assert mutated.inputs != baseline.inputs
+
+
+def test_fingerprint_inputs_include_schema_normalizer_and_unicode_versions() -> None:
+    files = (SourceFile("a.py", b"a", "a" * 64, 1),)
+    config = _config(languages=["python"])
+    kwargs = {
+        "repository_id": "example-domain",
+        "git_commit": "1" * 40,
+        "dirty_marker": "clean",
+        "schema_version": 1,
+        "parser_version": "tree-sitter@1",
+        "grammar_version": "tree-sitter-python@1",
+        "adapter_version": "python-adapter@1",
+        "resolver_version": "resolver@1",
+        "normalizer_version": "casefold-token-v1",
+        "unicode_data_version": "15.1.0",
+    }
+
+    parser_inputs = _parser_inputs(
+        languages=("python", "python"),
+        schema_version=kwargs["schema_version"],
+        parser_version=kwargs["parser_version"],
+        grammar_version=kwargs["grammar_version"],
+        adapter_version=kwargs["adapter_version"],
+        resolver_version=kwargs["resolver_version"],
+        normalizer_version=kwargs["normalizer_version"],
+        unicode_data_version=kwargs["unicode_data_version"],
+    )
+    assert parser_inputs == {
+        "adapter_version": "python-adapter@1",
+        "grammar_version": "tree-sitter-python@1",
+        "languages": ["python"],
+        "normalizer_version": "casefold-token-v1",
+        "parser_version": "tree-sitter@1",
+        "resolver_version": "resolver@1",
+        "schema_version": 1,
+        "unicode_data_version": "15.1.0",
+    }
+
+    baseline = compose_fingerprints(files, config, **kwargs)
+    changes = {
+        "schema_version": 2,
+        "parser_version": "tree-sitter@2",
+        "grammar_version": "tree-sitter-python@2",
+        "adapter_version": "python-adapter@2",
+        "resolver_version": "resolver@2",
+        "normalizer_version": "casefold-token-v2",
+        "unicode_data_version": "16.0.0",
+    }
+    for field, changed_value in changes.items():
+        mutated = compose_fingerprints(
+            files,
+            config,
+            **(kwargs | {field: changed_value}),
+        )
+        assert mutated.parser != baseline.parser
+        assert mutated.inputs != baseline.inputs
 
 
 def test_config_fingerprint_preserves_ordered_exclude_semantics() -> None:
