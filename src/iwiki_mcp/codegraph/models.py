@@ -203,6 +203,15 @@ class ReferenceRecord:
     target_reference: str | None
     source_line: int | None
     source_byte: int | None = None
+    source_module_id: str | None = None
+    source_end_line: int | None = None
+    source_end_byte: int | None = None
+    binding_name: str | None = None
+    binding_kind: Literal["implicit_binding", "explicit_alias"] | None = None
+    binding_name_tokens_casefold: str | None = None
+    target_kind_hint: Literal["module", "member"] | None = None
+    resolution_hint: Literal["unresolved"] | None = None
+    resolution_scope: Literal["file", "project"] | None = None
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,7 @@ from .models import (
     RelationRecord,
     relation_id,
 )
-from .resolver import SymbolIndex
+from .resolver import SymbolIndex, sort_relations
 from .schema import SCHEMA_VERSION, TABLES, CodeGraphStoreError
 from .store import CodeGraphStore, code_graph_write_lock
 
@@ -593,12 +593,21 @@ class CodeGraphIndexer:
         for parsed in parsed_files:
             for reference in parsed.references:
                 source_identity = (
-                    reference.source_symbol_id or reference.source_file_id
+                    reference.source_symbol_id
+                    or reference.source_module_id
+                    or reference.source_file_id
                 )
-                target = reference.target_reference or ""
+                target = reference.target_reference
+                if not target:
+                    continue
                 adapter = adapters[parsed.file.language].adapter
                 source_line = reference.source_line or 1
                 source_byte = reference.source_byte or 0
+                source_end_line = reference.source_end_line or source_line
+                source_end_byte = (
+                    reference.source_end_byte
+                    if reference.source_end_byte is not None else source_byte
+                )
                 relations.append(RelationRecord(
                     relation_id=relation_id(
                         parsed.file.language,
@@ -607,33 +616,35 @@ class CodeGraphIndexer:
                         source_identity,
                         reference.relation_type,
                         source_line,
-                        source_line,
+                        source_end_line,
                         source_byte,
-                        source_byte,
+                        source_end_byte,
                         None,
                         target,
-                        None,
-                        None,
+                        reference.binding_kind,
+                        reference.binding_name,
                     ),
                     source_file_id=reference.source_file_id,
-                    source_module_id=None,
+                    source_module_id=reference.source_module_id,
                     source_symbol_id=reference.source_symbol_id,
                     target_module_id=None,
                     target_symbol_id=None,
-                    target_reference=reference.target_reference,
+                    target_reference=target,
                     relation_type=reference.relation_type,
                     source_start_line=source_line,
-                    source_end_line=source_line,
+                    source_end_line=source_end_line,
                     source_start_byte=source_byte,
-                    source_end_byte=source_byte,
-                    binding_name=None,
-                    binding_kind=None,
-                    binding_name_tokens_casefold=None,
+                    source_end_byte=source_end_byte,
+                    binding_name=reference.binding_name,
+                    binding_kind=reference.binding_kind,
+                    binding_name_tokens_casefold=(
+                        reference.binding_name_tokens_casefold
+                    ),
                     confidence=0.0,
                     resolution_state="unresolved",
                     metadata_json="{}",
                 ))
-        return tuple(sorted(relations, key=lambda item: item.relation_id))
+        return sort_relations(relations)
 
     def _initial_snapshot(
         self,

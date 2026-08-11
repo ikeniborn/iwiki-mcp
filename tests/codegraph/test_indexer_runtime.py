@@ -7,6 +7,7 @@ from dataclasses import replace
 import json
 import logging
 from pathlib import Path
+import sqlite3
 import threading
 import time
 
@@ -28,7 +29,12 @@ from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
-from iwiki_mcp.codegraph.schema import SCHEMA_VERSION, CodeGraphStoreError
+from iwiki_mcp.codegraph.schema import (
+    SCHEMA_VERSION,
+    CodeGraphStoreError,
+    validate_integrity,
+    validate_schema,
+)
 from iwiki_mcp.codegraph.store import (
     CodeGraphStore,
     code_graph_read_lock,
@@ -1159,6 +1165,156 @@ def test_build_persists_unresolved_inputs_before_resolution_and_selector_seam(
         "wiki_selector_resolution",
         "finalize",
         "validate",
+    ]
+
+
+def test_full_build_persists_schema_v2_import_staging_and_final_rows(
+    seed_runtime, monkeypatch
+):
+    provider = b"def helper():\n    return None\n"
+    source = (
+        b"import pkg.helper as svc\n"
+        b"from pkg.helper import helper\n"
+        b"from pkg.helper import *\n"
+    )
+    seed_runtime.project_file("src/pkg/helper.py").write_bytes(provider)
+    seed_runtime.project_file("src/pkg/use.py").write_bytes(source)
+    staged_imports = []
+    real_insert = CodeGraphStore.insert_snapshot
+
+    def observed_insert(store, snapshot):
+        staged_imports.extend(
+            row for row in snapshot["relations"]
+            if row["relation_type"] == "IMPORTS"
+        )
+        return real_insert(store, snapshot)
+
+    monkeypatch.setattr(CodeGraphStore, "insert_snapshot", observed_insert)
+
+    result = seed_runtime.index(force=True)
+
+    assert result["state"] == "ready"
+    assert len(staged_imports) == 3
+    assert {
+        (
+            row["binding_name"],
+            row["binding_kind"],
+            row["binding_name_tokens_casefold"],
+        )
+        for row in staged_imports
+    } == {
+        ("svc", "explicit_alias", codegraph_models.token_key("svc")),
+        ("helper", "implicit_binding", codegraph_models.token_key("helper")),
+        ("*", "implicit_binding", codegraph_models.token_key("*")),
+    }
+    assert all(row["resolution_state"] == "unresolved"
+               for row in staged_imports)
+    assert all(row["target_module_id"] is None
+               and row["target_symbol_id"] is None
+               and row["target_reference"]
+               for row in staged_imports)
+    assert all(row["source_module_id"] is not None
+               and row["source_symbol_id"] is None
+               for row in staged_imports)
+    assert {
+        (
+            row["source_start_line"], row["source_end_line"],
+            row["source_start_byte"], row["source_end_byte"],
+        )
+        for row in staged_imports
+    } == {
+        (1, 1, 0, len(b"import pkg.helper as svc")),
+        (
+            2,
+            2,
+            source.index(b"from pkg.helper"),
+            source.index(b"from pkg.helper import *") - 1,
+        ),
+        (
+            3,
+            3,
+            source.index(b"from pkg.helper import *"),
+            len(source.rstrip(b"\n")),
+        ),
+    }
+
+    with closing(sqlite3.connect(seed_runtime.paths.database)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        validate_schema(connection)
+        validate_integrity(connection)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        final_imports = connection.execute(
+            "SELECT binding_name, binding_kind, target_module_id, "
+            "target_symbol_id, target_reference, resolution_state, "
+            "source_start_line, source_end_line, source_start_byte, "
+            "source_end_byte FROM relations WHERE relation_type = 'IMPORTS' "
+            "ORDER BY source_start_byte"
+        ).fetchall()
+
+    assert len(final_imports) == 3
+    assert final_imports[0][0:2] == ("svc", "explicit_alias")
+    assert final_imports[0][2] is not None
+    assert final_imports[0][3:6] == (None, None, "resolved")
+    assert final_imports[0][6:10] == (
+        1, 1, 0, len(b"import pkg.helper as svc")
+    )
+    assert final_imports[1][0:2] == ("helper", "implicit_binding")
+    assert final_imports[1][2] is None
+    assert final_imports[1][3] is not None
+    assert final_imports[1][4:6] == (None, "resolved")
+    assert final_imports[1][6:10] == (
+        2,
+        2,
+        source.index(b"from pkg.helper"),
+        source.index(b"from pkg.helper import *") - 1,
+    )
+    assert final_imports[2][0:2] == ("*", "implicit_binding")
+    assert final_imports[2][2:4] == (None, None)
+    assert final_imports[2][4:6] == ("pkg.helper.*", "unresolved")
+    assert final_imports[2][6:10] == (
+        3,
+        3,
+        source.index(b"from pkg.helper import *"),
+        len(source.rstrip(b"\n")),
+    )
+
+
+def test_full_build_coalesces_only_exact_duplicate_import_relations(
+    seed_runtime,
+):
+    seed_runtime.project_file("src/pkg/a.py").write_bytes(
+        b"def f():\n    pass\n"
+    )
+    seed_runtime.project_file("src/pkg/use.py").write_bytes(
+        b"from pkg.a import f, f\n"
+        b"from pkg.a import f\n"
+    )
+
+    result = seed_runtime.index(force=True)
+
+    assert result["state"] == "ready"
+    with closing(sqlite3.connect(seed_runtime.paths.database)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        validate_schema(connection)
+        validate_integrity(connection)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        imports = connection.execute(
+            "SELECT source_start_line, source_end_line, source_start_byte, "
+            "source_end_byte, binding_name, resolution_state "
+            "FROM relations WHERE relation_type = 'IMPORTS' "
+            "ORDER BY source_start_byte"
+        ).fetchall()
+
+    assert imports == [
+        (1, 1, 0, len(b"from pkg.a import f, f"), "f", "resolved"),
+        (
+            2,
+            2,
+            len(b"from pkg.a import f, f\n"),
+            len(b"from pkg.a import f, f\nfrom pkg.a import f"),
+            "f",
+            "resolved",
+        ),
     ]
 
 
