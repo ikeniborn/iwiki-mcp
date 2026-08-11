@@ -10,13 +10,14 @@ from pathlib import Path
 import sqlite3
 import stat
 import time
-from typing import Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 import uuid
 
 from filelock import ReadWriteLock, Timeout
 
 from .location import CodeGraphLocationError, open_cache_directory
+from .models import NORMALIZER_VERSION, UNICODE_DATA_VERSION
 from .schema import (
     BUSY_TIMEOUT_MS,
     INDEXES,
@@ -26,6 +27,7 @@ from .schema import (
     CodeGraphStoreError,
     configure,
     create_schema,
+    inspect_compatibility as inspect_schema_compatibility,
     validate_integrity,
     validate_schema,
 )
@@ -38,6 +40,30 @@ _PRIMARY_KEYS = {
     "relations": "relation_id",
     "wiki_code_links": "link_id",
 }
+
+
+class CodeGraphPublishedError(CodeGraphStoreError):
+    """Report a durability error after the canonical namespace changed."""
+
+    published = True
+
+
+def run_publication_protocol(
+    *,
+    replace: Callable[[], None],
+    metadata_rebuilding: Callable[[], None],
+    verify_1: Callable[[], None],
+    metadata_ready_pending: Callable[[], None],
+    verify_2: Callable[[], None],
+    timing_refresh: Callable[[], None],
+) -> None:
+    """Run the six ordered publication hooks without owning full-build work."""
+    replace()
+    metadata_rebuilding()
+    verify_1()
+    metadata_ready_pending()
+    verify_2()
+    timing_refresh()
 
 
 def _discard_lock(lock: ReadWriteLock | None) -> None:
@@ -142,42 +168,60 @@ _INSERTS = {
         INSERT INTO repositories (
             repository_id, root_path, git_remote, git_commit,
             source_fingerprint, config_fingerprint, parser_fingerprint,
+            normalizer_version, unicode_data_version,
             revision, state, indexed_at
         ) VALUES (
             :repository_id, :root_path, :git_remote, :git_commit,
             :source_fingerprint, :config_fingerprint, :parser_fingerprint,
+            :normalizer_version, :unicode_data_version,
             :revision, :state, :indexed_at
         )
     """,
     "files": """
         INSERT INTO files (
-            file_id, repository_id, path, language, content_hash,
-            parser_version, size_bytes
+            file_id, repository_id, path, path_casefold, file_local_name,
+            file_name_tokens_casefold, language, content_hash,
+            parser_version, size_bytes, start_line, end_line,
+            start_byte, end_byte, module_key, module_id,
+            module_qualified_name, module_local_name,
+            module_name_tokens_casefold
         ) VALUES (
-            :file_id, :repository_id, :path, :language, :content_hash,
-            :parser_version, :size_bytes
+            :file_id, :repository_id, :path, :path_casefold, :file_local_name,
+            :file_name_tokens_casefold, :language, :content_hash,
+            :parser_version, :size_bytes, :start_line, :end_line,
+            :start_byte, :end_byte, :module_key, :module_id,
+            :module_qualified_name, :module_local_name,
+            :module_name_tokens_casefold
         )
     """,
     "symbols": """
         INSERT INTO symbols (
             symbol_id, file_id, kind, qualified_name, local_name,
-            start_line, end_line, start_byte, end_byte, signature,
-            visibility, content_hash, metadata_json
+            name_tokens_casefold, start_line, end_line, start_byte, end_byte,
+            signature, signature_casefold, visibility, content_hash,
+            metadata_json
         ) VALUES (
             :symbol_id, :file_id, :kind, :qualified_name, :local_name,
-            :start_line, :end_line, :start_byte, :end_byte, :signature,
-            :visibility, :content_hash, :metadata_json
+            :name_tokens_casefold, :start_line, :end_line, :start_byte, :end_byte,
+            :signature, :signature_casefold, :visibility, :content_hash,
+            :metadata_json
         )
     """,
     "relations": """
         INSERT INTO relations (
-            relation_id, source_symbol_id, source_file_id, target_symbol_id,
-            target_reference, relation_type, source_line, confidence,
-            resolution_state, metadata_json
+            relation_id, source_file_id, source_module_id, source_symbol_id,
+            target_module_id, target_symbol_id, target_reference, relation_type,
+            source_start_line, source_end_line, source_start_byte,
+            source_end_byte, binding_name, binding_kind,
+            binding_name_tokens_casefold, confidence, resolution_state,
+            metadata_json
         ) VALUES (
-            :relation_id, :source_symbol_id, :source_file_id, :target_symbol_id,
-            :target_reference, :relation_type, :source_line, :confidence,
-            :resolution_state, :metadata_json
+            :relation_id, :source_file_id, :source_module_id, :source_symbol_id,
+            :target_module_id, :target_symbol_id, :target_reference, :relation_type,
+            :source_start_line, :source_end_line, :source_start_byte,
+            :source_end_byte, :binding_name, :binding_kind,
+            :binding_name_tokens_casefold, :confidence, :resolution_state,
+            :metadata_json
         )
     """,
     "wiki_code_links": """
@@ -288,6 +332,51 @@ class CodeGraphStore:
                 connection.close()
             raise CodeGraphSchemaError("incompatible code graph schema") from exc
 
+    def inspect_compatibility(self) -> str:
+        """Inspect exact compatibility through a true read-only connection."""
+        connection = None
+        try:
+            with self._secure_paths(self.path, create=False) as secured:
+                resolved = secured[0].resolve(strict=True).as_posix()
+                uri = (
+                    f"file:{quote(resolved, safe='/:')}"
+                    "?mode=ro&immutable=1"
+                )
+                connection = sqlite3.connect(uri, uri=True)
+            return inspect_schema_compatibility(connection)
+        except (CodeGraphStoreError, OSError, sqlite3.DatabaseError):
+            return "incompatible"
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def verify_canonical(
+        self,
+        repository_id: str,
+        expected_revision: str,
+    ) -> None:
+        """Independently reopen and verify one published canonical snapshot."""
+        connection = None
+        try:
+            connection = self.open_existing()
+            validate_integrity(connection)
+            row = connection.execute(
+                "SELECT revision, state FROM repositories "
+                "WHERE repository_id = ?",
+                (repository_id,),
+            ).fetchone()
+            if row != (expected_revision, "ready"):
+                raise CodeGraphStoreError(
+                    "code graph canonical verification failed"
+                )
+        except (CodeGraphStoreError, sqlite3.DatabaseError) as exc:
+            raise CodeGraphStoreError(
+                "code graph canonical verification failed"
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection = self.connect()
@@ -311,7 +400,16 @@ class CodeGraphStore:
             with self._transaction() as connection:
                 for table in TABLES:
                     primary_key = _PRIMARY_KEYS[table]
-                    rows = sorted(snapshot[table], key=lambda row: str(row[primary_key]))
+                    rows = [dict(row) for row in snapshot[table]]
+                    if table == "repositories":
+                        for row in rows:
+                            row.setdefault(
+                                "normalizer_version", NORMALIZER_VERSION
+                            )
+                            row.setdefault(
+                                "unicode_data_version", UNICODE_DATA_VERSION
+                            )
+                    rows.sort(key=lambda row: str(row[primary_key]))
                     connection.executemany(_INSERTS[table], rows)
         except CodeGraphStoreError:
             raise
@@ -558,6 +656,24 @@ class CodeGraphStore:
     def _absolute(path: Path) -> Path:
         return Path(os.path.abspath(path))
 
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        """Make one completed namespace transition durable on supported hosts."""
+        if os.name == "nt":
+            return
+        descriptor = None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            descriptor = os.open(path, flags)
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise CodeGraphStoreError(
+                "cannot sync code graph directory"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def create_staging_path(self) -> Path:
         """Securely reserve and register one staging file beside the canonical."""
         canonical = self._absolute(self.path)
@@ -802,6 +918,7 @@ class CodeGraphStore:
         identity = self._staging_identities.get(staging_path)
         if identity is None:
             raise CodeGraphStoreError("invalid code graph staging database")
+        published = False
         try:
             self._validate_staging_identity(staging_path, identity)
             if not self.canonical_handles_available():
@@ -836,15 +953,33 @@ class CodeGraphStore:
                             src_dir_fd=source_descriptor,
                             dst_dir_fd=destination_descriptor,
                         )
+                        published = True
                     finally:
                         os.close(destination_descriptor)
                 finally:
                     os.close(source_descriptor)
-                secure_directory.rmdir()
-        except CodeGraphStoreError:
+                self._fsync_directory(secure_directory)
+                self._fsync_directory(secure_canonical.parent)
+                try:
+                    secure_directory.rmdir()
+                except OSError:
+                    pass
+                else:
+                    self._fsync_directory(secure_canonical.parent)
+        except CodeGraphPublishedError:
+            raise
+        except CodeGraphStoreError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph snapshot published without durable namespace sync"
+                ) from exc
             self.discard_staging(staging_path)
             raise
         except (OSError, sqlite3.DatabaseError) as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph snapshot published without durable namespace sync"
+                ) from exc
             self.discard_staging(staging_path)
             raise CodeGraphStoreError("cannot publish code graph staging") from exc
         finally:
@@ -926,16 +1061,35 @@ class CodeGraphStore:
         """Atomically replace metadata from a registered prepared temp."""
         destination = self._absolute(Path(metadata_path))
         staging_path = self._absolute(Path(staging))
-        with self._secure_paths(
-            destination, staging_path, create=False
-        ) as secured:
-            self._replace_registered_metadata(
-                destination,
-                staging_path,
-                deadline=deadline,
-                secure_destination=secured[0],
-                secure_staging=secured[1],
-            )
+        published = False
+        try:
+            with self._secure_paths(
+                destination, staging_path, create=False
+            ) as secured:
+                self._replace_registered_metadata(
+                    destination,
+                    staging_path,
+                    deadline=deadline,
+                    secure_destination=secured[0],
+                    secure_staging=secured[1],
+                )
+                published = True
+        except CodeGraphPublishedError:
+            raise
+        except CodeGraphStoreError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph metadata published before context close failed"
+                ) from exc
+            raise
+        except OSError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph metadata published before context close failed"
+                ) from exc
+            raise CodeGraphStoreError(
+                "cannot publish code graph metadata"
+            ) from exc
 
     def _replace_registered_metadata(
         self,
@@ -955,12 +1109,25 @@ class CodeGraphStore:
             raise CodeGraphStoreError("invalid code graph metadata staging")
         actual_destination = secure_destination or destination
         actual_staging = secure_staging or staging_path
+        published = False
         try:
             status = os.lstat(actual_staging)
             if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
                 raise OSError("invalid metadata staging")
             os.replace(actual_staging, actual_destination)
+            published = True
+            self._fsync_directory(actual_destination.parent)
+        except CodeGraphStoreError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph metadata published without durable namespace sync"
+                ) from exc
+            raise
         except OSError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph metadata published without durable namespace sync"
+                ) from exc
             try:
                 actual_staging.unlink()
             except FileNotFoundError:
@@ -983,62 +1150,83 @@ class CodeGraphStore:
             )
         if self._metadata_staging.get(staging_path) != destination:
             raise CodeGraphStoreError("invalid code graph metadata staging")
-        with self._secure_paths(
-            destination, staging_path, create=False
-        ) as secured:
-            secure_destination, secure_staging = secured
-            try:
-                current = json.loads(
-                    secure_destination.read_text(encoding="utf-8")
+        published = False
+        try:
+            with self._secure_paths(
+                destination, staging_path, create=False
+            ) as secured:
+                secure_destination, secure_staging = secured
+                try:
+                    current = json.loads(
+                        secure_destination.read_text(encoding="utf-8")
+                    )
+                    candidate = json.loads(
+                        secure_staging.read_text(encoding="utf-8")
+                    )
+                except (
+                    FileNotFoundError,
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise CodeGraphStoreError(
+                        "cannot validate code graph diagnostics refresh"
+                    ) from exc
+                if not isinstance(current, dict) or not isinstance(
+                    candidate, dict
+                ):
+                    raise CodeGraphStoreError(
+                        "invalid code graph diagnostics refresh"
+                    )
+                diagnostics = {"duration_ms", "phase_timings_ms"}
+                current_lifecycle = {
+                    key: value for key, value in current.items()
+                    if key not in diagnostics
+                }
+                candidate_lifecycle = {
+                    key: value for key, value in candidate.items()
+                    if key not in diagnostics
+                }
+                duration = candidate.get("duration_ms")
+                timings = candidate.get("phase_timings_ms")
+                if (
+                    current.get("state") != "ready"
+                    or candidate_lifecycle != current_lifecycle
+                    or type(duration) is not int
+                    or duration < 0
+                    or not isinstance(timings, dict)
+                    or any(
+                        type(value) is not int or value < 0
+                        for value in timings.values()
+                    )
+                ):
+                    raise CodeGraphStoreError(
+                        "invalid code graph diagnostics refresh"
+                    )
+                self._replace_registered_metadata(
+                    destination,
+                    staging_path,
+                    deadline=deadline,
+                    secure_destination=secure_destination,
+                    secure_staging=secure_staging,
                 )
-                candidate = json.loads(
-                    secure_staging.read_text(encoding="utf-8")
-                )
-            except (
-                FileNotFoundError,
-                OSError,
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-            ) as exc:
-                raise CodeGraphStoreError(
-                    "cannot validate code graph diagnostics refresh"
+                published = True
+        except CodeGraphPublishedError:
+            raise
+        except CodeGraphStoreError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph diagnostics published before context close failed"
                 ) from exc
-            if not isinstance(current, dict) or not isinstance(candidate, dict):
-                raise CodeGraphStoreError(
-                    "invalid code graph diagnostics refresh"
-                )
-            diagnostics = {"duration_ms", "phase_timings_ms"}
-            current_lifecycle = {
-                key: value for key, value in current.items()
-                if key not in diagnostics
-            }
-            candidate_lifecycle = {
-                key: value for key, value in candidate.items()
-                if key not in diagnostics
-            }
-            duration = candidate.get("duration_ms")
-            timings = candidate.get("phase_timings_ms")
-            if (
-                current.get("state") != "ready"
-                or candidate_lifecycle != current_lifecycle
-                or type(duration) is not int
-                or duration < 0
-                or not isinstance(timings, dict)
-                or any(
-                    type(value) is not int or value < 0
-                    for value in timings.values()
-                )
-            ):
-                raise CodeGraphStoreError(
-                    "invalid code graph diagnostics refresh"
-                )
-            self._replace_registered_metadata(
-                destination,
-                staging_path,
-                deadline=deadline,
-                secure_destination=secure_destination,
-                secure_staging=secure_staging,
-            )
+            raise
+        except OSError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph diagnostics published before context close failed"
+                ) from exc
+            raise CodeGraphStoreError(
+                "cannot refresh code graph diagnostics"
+            ) from exc
 
     def publish_staging(
         self,
@@ -1062,8 +1250,10 @@ __all__ = [
     "SCHEMA_VERSION",
     "TABLES",
     "CodeGraphSchemaError",
+    "CodeGraphPublishedError",
     "CodeGraphStore",
     "CodeGraphStoreError",
     "code_graph_read_lock",
     "code_graph_write_lock",
+    "run_publication_protocol",
 ]

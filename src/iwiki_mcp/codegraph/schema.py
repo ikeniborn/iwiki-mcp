@@ -7,7 +7,7 @@ import sqlite3
 from .models import CodeGraphError
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5_000
 TABLES = (
     "repositories",
@@ -23,7 +23,7 @@ class CodeGraphStoreError(CodeGraphError):
 
 
 class CodeGraphSchemaError(CodeGraphStoreError):
-    """Raised when a code graph database does not match schema v1."""
+    """Raised when a code graph database does not match schema v2."""
 
 
 TABLE_DDL = {
@@ -36,6 +36,8 @@ TABLE_DDL = {
             source_fingerprint TEXT NOT NULL,
             config_fingerprint TEXT NOT NULL,
             parser_fingerprint TEXT NOT NULL,
+            normalizer_version TEXT NOT NULL,
+            unicode_data_version TEXT NOT NULL,
             revision TEXT NOT NULL,
             state TEXT NOT NULL
                 CHECK (state IN ('ready', 'dirty', 'rebuilding', 'failed')),
@@ -47,26 +49,52 @@ TABLE_DDL = {
             file_id TEXT PRIMARY KEY,
             repository_id TEXT NOT NULL
                 REFERENCES repositories(repository_id) ON DELETE CASCADE,
-            path TEXT NOT NULL,
+            path TEXT NOT NULL COLLATE BINARY,
+            path_casefold TEXT,
+            file_local_name TEXT NOT NULL COLLATE BINARY,
+            file_name_tokens_casefold TEXT NOT NULL,
             language TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             parser_version TEXT NOT NULL,
             size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
-            UNIQUE(repository_id, path)
+            start_line INTEGER NOT NULL CHECK (start_line = 1),
+            end_line INTEGER NOT NULL CHECK (end_line >= start_line),
+            start_byte INTEGER NOT NULL CHECK (start_byte = 0),
+            end_byte INTEGER NOT NULL CHECK (end_byte = size_bytes),
+            module_key TEXT NOT NULL COLLATE BINARY,
+            module_id TEXT UNIQUE,
+            module_qualified_name TEXT COLLATE BINARY,
+            module_local_name TEXT COLLATE BINARY,
+            module_name_tokens_casefold TEXT,
+            UNIQUE(repository_id, path),
+            CHECK (
+                (module_id IS NULL
+                 AND module_qualified_name IS NULL
+                 AND module_local_name IS NULL
+                 AND module_name_tokens_casefold IS NULL)
+                OR
+                (module_id IS NOT NULL
+                 AND module_qualified_name IS NOT NULL
+                 AND module_local_name IS NOT NULL
+                 AND module_name_tokens_casefold IS NOT NULL)
+            )
         )
     """,
     "symbols": """
         CREATE TABLE symbols (
             symbol_id TEXT PRIMARY KEY,
             file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-            kind TEXT NOT NULL,
-            qualified_name TEXT NOT NULL,
-            local_name TEXT NOT NULL,
+            kind TEXT NOT NULL
+                CHECK (kind IN ('class', 'function', 'async_function', 'method')),
+            qualified_name TEXT NOT NULL COLLATE BINARY,
+            local_name TEXT NOT NULL COLLATE BINARY,
+            name_tokens_casefold TEXT NOT NULL,
             start_line INTEGER NOT NULL CHECK (start_line >= 1),
             end_line INTEGER NOT NULL CHECK (end_line >= start_line),
-            start_byte INTEGER,
-            end_byte INTEGER,
+            start_byte INTEGER NOT NULL CHECK (start_byte >= 0),
+            end_byte INTEGER NOT NULL CHECK (end_byte >= start_byte),
             signature TEXT,
+            signature_casefold TEXT,
             visibility TEXT,
             content_hash TEXT NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -76,12 +104,27 @@ TABLE_DDL = {
     "relations": """
         CREATE TABLE relations (
             relation_id TEXT PRIMARY KEY,
-            source_symbol_id TEXT REFERENCES symbols(symbol_id) ON DELETE CASCADE,
-            source_file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-            target_symbol_id TEXT REFERENCES symbols(symbol_id) ON DELETE CASCADE,
+            source_file_id TEXT NOT NULL
+                REFERENCES files(file_id) ON DELETE CASCADE,
+            source_module_id TEXT
+                REFERENCES files(module_id) ON DELETE CASCADE,
+            source_symbol_id TEXT
+                REFERENCES symbols(symbol_id) ON DELETE CASCADE,
+            target_module_id TEXT
+                REFERENCES files(module_id) ON DELETE CASCADE,
+            target_symbol_id TEXT
+                REFERENCES symbols(symbol_id) ON DELETE CASCADE,
             target_reference TEXT,
-            relation_type TEXT NOT NULL,
-            source_line INTEGER,
+            relation_type TEXT NOT NULL
+                CHECK (relation_type IN ('DECLARES', 'IMPORTS', 'CALLS', 'INHERITS')),
+            source_start_line INTEGER NOT NULL CHECK (source_start_line >= 1),
+            source_end_line INTEGER NOT NULL CHECK (source_end_line >= source_start_line),
+            source_start_byte INTEGER NOT NULL CHECK (source_start_byte >= 0),
+            source_end_byte INTEGER NOT NULL CHECK (source_end_byte >= source_start_byte),
+            binding_name TEXT COLLATE BINARY,
+            binding_kind TEXT
+                CHECK (binding_kind IN ('implicit_binding', 'explicit_alias')),
+            binding_name_tokens_casefold TEXT,
             confidence REAL NOT NULL DEFAULT 1.0
                 CHECK (confidence >= 0.0 AND confidence <= 1.0),
             resolution_state TEXT NOT NULL
@@ -89,7 +132,38 @@ TABLE_DDL = {
                     'resolved', 'partially_resolved', 'unresolved', 'ambiguous'
                 )),
             metadata_json TEXT NOT NULL DEFAULT '{}',
-            CHECK (target_symbol_id IS NOT NULL OR target_reference IS NOT NULL)
+            CHECK (source_module_id IS NULL OR source_symbol_id IS NULL),
+            CHECK (
+                (target_module_id IS NOT NULL)
+                + (target_symbol_id IS NOT NULL) <= 1
+            ),
+            CHECK (
+                (resolution_state IN ('resolved', 'ambiguous')
+                 AND target_reference IS NULL
+                 AND ((target_module_id IS NOT NULL)
+                      + (target_symbol_id IS NOT NULL) = 1))
+                OR
+                (resolution_state = 'partially_resolved'
+                 AND target_reference IS NOT NULL
+                 AND ((target_module_id IS NOT NULL)
+                      + (target_symbol_id IS NOT NULL) = 1))
+                OR
+                (resolution_state = 'unresolved'
+                 AND target_reference IS NOT NULL
+                 AND target_module_id IS NULL
+                 AND target_symbol_id IS NULL)
+            ),
+            CHECK (
+                (relation_type = 'IMPORTS'
+                 AND binding_name IS NOT NULL
+                 AND binding_kind IS NOT NULL
+                 AND binding_name_tokens_casefold IS NOT NULL)
+                OR
+                (relation_type <> 'IMPORTS'
+                 AND binding_name IS NULL
+                 AND binding_kind IS NULL
+                 AND binding_name_tokens_casefold IS NULL)
+            )
         )
     """,
     "wiki_code_links": """
@@ -114,8 +188,24 @@ INDEX_DDL = {
     "idx_files_repository_path": (
         "CREATE INDEX idx_files_repository_path ON files(repository_id, path)"
     ),
+    "idx_files_repository_local": (
+        "CREATE INDEX idx_files_repository_local "
+        "ON files(repository_id, file_local_name)"
+    ),
     "idx_files_content_hash": (
         "CREATE INDEX idx_files_content_hash ON files(content_hash)"
+    ),
+    "idx_files_repository_module_key": (
+        "CREATE INDEX idx_files_repository_module_key "
+        "ON files(repository_id, module_key)"
+    ),
+    "idx_files_repository_module_qualified": (
+        "CREATE INDEX idx_files_repository_module_qualified "
+        "ON files(repository_id, module_qualified_name)"
+    ),
+    "idx_files_repository_module_local": (
+        "CREATE INDEX idx_files_repository_module_local "
+        "ON files(repository_id, module_local_name)"
     ),
     "idx_symbols_file": "CREATE INDEX idx_symbols_file ON symbols(file_id)",
     "idx_symbols_qualified": (
@@ -123,16 +213,32 @@ INDEX_DDL = {
     ),
     "idx_symbols_local": "CREATE INDEX idx_symbols_local ON symbols(local_name)",
     "idx_symbols_kind": "CREATE INDEX idx_symbols_kind ON symbols(kind)",
-    "idx_relations_source_type": (
-        "CREATE INDEX idx_relations_source_type "
+    "idx_relations_source_file_type": (
+        "CREATE INDEX idx_relations_source_file_type "
+        "ON relations(source_file_id, relation_type)"
+    ),
+    "idx_relations_source_module_type": (
+        "CREATE INDEX idx_relations_source_module_type "
+        "ON relations(source_module_id, relation_type)"
+    ),
+    "idx_relations_source_symbol_type": (
+        "CREATE INDEX idx_relations_source_symbol_type "
         "ON relations(source_symbol_id, relation_type)"
     ),
-    "idx_relations_target_type": (
-        "CREATE INDEX idx_relations_target_type "
+    "idx_relations_target_module_type": (
+        "CREATE INDEX idx_relations_target_module_type "
+        "ON relations(target_module_id, relation_type)"
+    ),
+    "idx_relations_target_symbol_type": (
+        "CREATE INDEX idx_relations_target_symbol_type "
         "ON relations(target_symbol_id, relation_type)"
     ),
     "idx_relations_reference": (
         "CREATE INDEX idx_relations_reference ON relations(target_reference)"
+    ),
+    "idx_relations_explicit_alias": (
+        "CREATE INDEX idx_relations_explicit_alias "
+        "ON relations(binding_kind, binding_name)"
     ),
     "idx_wiki_links_page": (
         "CREATE INDEX idx_wiki_links_page ON wiki_code_links(domain, page_id)"
@@ -145,6 +251,16 @@ INDEX_DDL = {
     ),
 }
 INDEXES = tuple(INDEX_DDL)
+EXPECTED_IMPLICIT_UNIQUE_INDEXES = tuple(sorted((
+    ("repositories", ("repository_id",)),
+    ("files", ("file_id",)),
+    ("files", ("module_id",)),
+    ("files", ("repository_id", "path")),
+    ("symbols", ("symbol_id",)),
+    ("symbols", ("file_id", "qualified_name", "start_line")),
+    ("relations", ("relation_id",)),
+    ("wiki_code_links", ("link_id",)),
+)))
 
 EXPECTED_COLUMNS = {
     "repositories": (
@@ -155,6 +271,8 @@ EXPECTED_COLUMNS = {
         ("source_fingerprint", "TEXT", 1, None, 0),
         ("config_fingerprint", "TEXT", 1, None, 0),
         ("parser_fingerprint", "TEXT", 1, None, 0),
+        ("normalizer_version", "TEXT", 1, None, 0),
+        ("unicode_data_version", "TEXT", 1, None, 0),
         ("revision", "TEXT", 1, None, 0),
         ("state", "TEXT", 1, None, 0),
         ("indexed_at", "TEXT", 1, None, 0),
@@ -163,10 +281,22 @@ EXPECTED_COLUMNS = {
         ("file_id", "TEXT", 0, None, 1),
         ("repository_id", "TEXT", 1, None, 0),
         ("path", "TEXT", 1, None, 0),
+        ("path_casefold", "TEXT", 0, None, 0),
+        ("file_local_name", "TEXT", 1, None, 0),
+        ("file_name_tokens_casefold", "TEXT", 1, None, 0),
         ("language", "TEXT", 1, None, 0),
         ("content_hash", "TEXT", 1, None, 0),
         ("parser_version", "TEXT", 1, None, 0),
         ("size_bytes", "INTEGER", 1, None, 0),
+        ("start_line", "INTEGER", 1, None, 0),
+        ("end_line", "INTEGER", 1, None, 0),
+        ("start_byte", "INTEGER", 1, None, 0),
+        ("end_byte", "INTEGER", 1, None, 0),
+        ("module_key", "TEXT", 1, None, 0),
+        ("module_id", "TEXT", 0, None, 0),
+        ("module_qualified_name", "TEXT", 0, None, 0),
+        ("module_local_name", "TEXT", 0, None, 0),
+        ("module_name_tokens_casefold", "TEXT", 0, None, 0),
     ),
     "symbols": (
         ("symbol_id", "TEXT", 0, None, 1),
@@ -174,23 +304,33 @@ EXPECTED_COLUMNS = {
         ("kind", "TEXT", 1, None, 0),
         ("qualified_name", "TEXT", 1, None, 0),
         ("local_name", "TEXT", 1, None, 0),
+        ("name_tokens_casefold", "TEXT", 1, None, 0),
         ("start_line", "INTEGER", 1, None, 0),
         ("end_line", "INTEGER", 1, None, 0),
-        ("start_byte", "INTEGER", 0, None, 0),
-        ("end_byte", "INTEGER", 0, None, 0),
+        ("start_byte", "INTEGER", 1, None, 0),
+        ("end_byte", "INTEGER", 1, None, 0),
         ("signature", "TEXT", 0, None, 0),
+        ("signature_casefold", "TEXT", 0, None, 0),
         ("visibility", "TEXT", 0, None, 0),
         ("content_hash", "TEXT", 1, None, 0),
         ("metadata_json", "TEXT", 1, "'{}'", 0),
     ),
     "relations": (
         ("relation_id", "TEXT", 0, None, 1),
-        ("source_symbol_id", "TEXT", 0, None, 0),
         ("source_file_id", "TEXT", 1, None, 0),
+        ("source_module_id", "TEXT", 0, None, 0),
+        ("source_symbol_id", "TEXT", 0, None, 0),
+        ("target_module_id", "TEXT", 0, None, 0),
         ("target_symbol_id", "TEXT", 0, None, 0),
         ("target_reference", "TEXT", 0, None, 0),
         ("relation_type", "TEXT", 1, None, 0),
-        ("source_line", "INTEGER", 0, None, 0),
+        ("source_start_line", "INTEGER", 1, None, 0),
+        ("source_end_line", "INTEGER", 1, None, 0),
+        ("source_start_byte", "INTEGER", 1, None, 0),
+        ("source_end_byte", "INTEGER", 1, None, 0),
+        ("binding_name", "TEXT", 0, None, 0),
+        ("binding_kind", "TEXT", 0, None, 0),
+        ("binding_name_tokens_casefold", "TEXT", 0, None, 0),
         ("confidence", "REAL", 1, "1.0", 0),
         ("resolution_state", "TEXT", 1, None, 0),
         ("metadata_json", "TEXT", 1, "'{}'", 0),
@@ -237,7 +377,7 @@ def configure(connection: sqlite3.Connection) -> None:
 
 
 def create_schema(connection: sqlite3.Connection) -> None:
-    """Create exact schema v1 in a verified-empty database."""
+    """Create exact schema v2 in a verified-empty database."""
     for statement in TABLE_DDL.values():
         connection.execute(statement)
     for statement in INDEX_DDL.values():
@@ -269,6 +409,25 @@ def validate_schema(connection: sqlite3.Connection) -> None:
     if table_ddl != EXPECTED_TABLE_DDL or index_ddl != EXPECTED_INDEX_DDL:
         raise CodeGraphSchemaError("incompatible code graph schema")
 
+    implicit_unique_indexes = tuple(sorted(
+        (
+            table,
+            tuple(
+                column[0]
+                for column in connection.execute(
+                    "SELECT name FROM pragma_index_info(?) ORDER BY seqno",
+                    (index_name,),
+                )
+            ),
+        )
+        for index_name, table in connection.execute(
+            "SELECT name, tbl_name FROM sqlite_master "
+            "WHERE type = 'index' AND sql IS NULL"
+        )
+    ))
+    if implicit_unique_indexes != EXPECTED_IMPLICIT_UNIQUE_INDEXES:
+        raise CodeGraphSchemaError("incompatible code graph schema")
+
     for table, expected in EXPECTED_COLUMNS.items():
         actual = tuple(
             (row[1], row[2].upper(), row[3], row[4], row[5])
@@ -276,6 +435,15 @@ def validate_schema(connection: sqlite3.Connection) -> None:
         )
         if actual != expected:
             raise CodeGraphSchemaError("incompatible code graph schema")
+
+
+def inspect_compatibility(connection: sqlite3.Connection) -> str:
+    """Classify schema compatibility without issuing any write operation."""
+    try:
+        validate_schema(connection)
+    except (CodeGraphStoreError, sqlite3.DatabaseError):
+        return "incompatible"
+    return "compatible"
 
 
 def validate_integrity(connection: sqlite3.Connection) -> None:
@@ -293,3 +461,25 @@ def validate_integrity(connection: sqlite3.Connection) -> None:
         raise CodeGraphStoreError("code graph integrity check failed") from exc
     if integrity_row != ("ok",):
         raise CodeGraphStoreError("code graph integrity check failed")
+
+    try:
+        provenance_row = connection.execute(
+            "SELECT 1 FROM relations AS relation "
+            "JOIN symbols AS symbol "
+            "ON symbol.symbol_id = relation.source_symbol_id "
+            "WHERE symbol.file_id <> relation.source_file_id "
+            "UNION ALL "
+            "SELECT 1 FROM relations AS relation "
+            "JOIN files AS module_file "
+            "ON module_file.module_id = relation.source_module_id "
+            "WHERE module_file.file_id <> relation.source_file_id "
+            "LIMIT 1"
+        ).fetchone()
+    except sqlite3.DatabaseError as exc:
+        raise CodeGraphStoreError(
+            "code graph relation provenance check failed"
+        ) from exc
+    if provenance_row is not None:
+        raise CodeGraphStoreError(
+            "code graph relation provenance check failed"
+        )

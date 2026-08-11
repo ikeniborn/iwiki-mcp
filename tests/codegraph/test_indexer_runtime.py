@@ -33,6 +33,30 @@ from iwiki_mcp.codegraph.store import (
 from iwiki_mcp.base import Binding
 
 
+def test_publication_primitive_orders_two_canonical_verifications():
+    from iwiki_mcp.codegraph.store import run_publication_protocol
+
+    events = []
+
+    run_publication_protocol(
+        replace=lambda: events.append("replace"),
+        metadata_rebuilding=lambda: events.append("metadata_rebuilding"),
+        verify_1=lambda: events.append("verify_1"),
+        metadata_ready_pending=lambda: events.append("metadata_ready_pending"),
+        verify_2=lambda: events.append("verify_2"),
+        timing_refresh=lambda: events.append("timing_refresh"),
+    )
+
+    assert events == [
+        "replace",
+        "metadata_rebuilding",
+        "verify_1",
+        "metadata_ready_pending",
+        "verify_2",
+        "timing_refresh",
+    ]
+
+
 def test_indexer_builds_noops_and_preserves_previous_revision_on_failure(
     seed_runtime,
 ):

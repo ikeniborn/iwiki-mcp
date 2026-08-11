@@ -1,4 +1,4 @@
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -7,6 +7,7 @@ import stat
 
 import pytest
 
+from iwiki_mcp.codegraph.models import NORMALIZER_VERSION, UNICODE_DATA_VERSION
 from iwiki_mcp.codegraph.schema import (
     BUSY_TIMEOUT_MS,
     INDEXES,
@@ -14,6 +15,7 @@ from iwiki_mcp.codegraph.schema import (
     TABLES,
     configure,
     validate_integrity,
+    validate_schema,
 )
 from iwiki_mcp.codegraph.store import (
     CodeGraphSchemaError,
@@ -25,14 +27,22 @@ from iwiki_mcp.engine.graph_store import GraphStore
 
 EXPECTED_INDEXES = {
     "idx_files_repository_path",
+    "idx_files_repository_local",
     "idx_files_content_hash",
+    "idx_files_repository_module_key",
+    "idx_files_repository_module_qualified",
+    "idx_files_repository_module_local",
     "idx_symbols_file",
     "idx_symbols_qualified",
     "idx_symbols_local",
     "idx_symbols_kind",
-    "idx_relations_source_type",
-    "idx_relations_target_type",
+    "idx_relations_source_file_type",
+    "idx_relations_source_module_type",
+    "idx_relations_source_symbol_type",
+    "idx_relations_target_module_type",
+    "idx_relations_target_symbol_type",
     "idx_relations_reference",
+    "idx_relations_explicit_alias",
     "idx_wiki_links_page",
     "idx_wiki_links_symbol",
     "idx_wiki_links_file",
@@ -54,6 +64,8 @@ def snapshot_with_symbol_file_and_wiki_links(
                 "source_fingerprint": "source-1",
                 "config_fingerprint": "config-1",
                 "parser_fingerprint": "parser-1",
+                "normalizer_version": NORMALIZER_VERSION,
+                "unicode_data_version": UNICODE_DATA_VERSION,
                 "revision": revision,
                 "state": state,
                 "indexed_at": "2026-08-10T00:00:00Z",
@@ -64,10 +76,22 @@ def snapshot_with_symbol_file_and_wiki_links(
                 "file_id": file_id,
                 "repository_id": repository_id,
                 "path": "pkg/module.py",
+                "path_casefold": None,
+                "file_local_name": "module.py",
+                "file_name_tokens_casefold": "\x1fmodule\x1fpy\x1f",
                 "language": "python",
                 "content_hash": "file-hash",
                 "parser_version": "python-v1",
                 "size_bytes": 64,
+                "start_line": 1,
+                "end_line": 4,
+                "start_byte": 0,
+                "end_byte": 64,
+                "module_key": "pkg/module.py",
+                "module_id": f"module-{repository_id}",
+                "module_qualified_name": "pkg.module",
+                "module_local_name": "module",
+                "module_name_tokens_casefold": "\x1fmodule\x1fpkg\x1f",
             },
         ),
         "symbols": (
@@ -77,11 +101,13 @@ def snapshot_with_symbol_file_and_wiki_links(
                 "kind": "function",
                 "qualified_name": "pkg.module.run",
                 "local_name": "run",
+                "name_tokens_casefold": "\x1fmodule\x1fpkg\x1frun\x1f",
                 "start_line": 2,
                 "end_line": 3,
                 "start_byte": 10,
                 "end_byte": 30,
                 "signature": "()",
+                "signature_casefold": None,
                 "visibility": "public",
                 "content_hash": "symbol-hash",
                 "metadata_json": "{}",
@@ -90,12 +116,20 @@ def snapshot_with_symbol_file_and_wiki_links(
         "relations": (
             {
                 "relation_id": f"relation-{repository_id}",
-                "source_symbol_id": symbol_id,
                 "source_file_id": file_id,
+                "source_module_id": None,
+                "source_symbol_id": symbol_id,
+                "target_module_id": None,
                 "target_symbol_id": symbol_id,
                 "target_reference": None,
-                "relation_type": "calls",
-                "source_line": 3,
+                "relation_type": "CALLS",
+                "source_start_line": 3,
+                "source_end_line": 3,
+                "source_start_byte": 20,
+                "source_end_byte": 24,
+                "binding_name": None,
+                "binding_kind": None,
+                "binding_name_tokens_casefold": None,
                 "confidence": 1.0,
                 "resolution_state": "resolved",
                 "metadata_json": "{}",
@@ -128,7 +162,7 @@ def snapshot_with_symbol_file_and_wiki_links(
     }
 
 
-def test_schema_v1_has_exact_tables_indexes_and_configuration(tmp_path):
+def test_schema_v2_has_exact_five_tables_and_twenty_indexes(tmp_path):
     store = CodeGraphStore(tmp_path / "code-backend.sqlite3")
 
     with closing(store.connect()) as connection:
@@ -139,26 +173,148 @@ def test_schema_v1_has_exact_tables_indexes_and_configuration(tmp_path):
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-        indexes = {
+        explicit_indexes = {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+                "WHERE type='index' AND sql IS NOT NULL"
             )
+        }
+        implicit_unique_indexes = {
+            (
+                table,
+                tuple(
+                    column[2]
+                    for column in connection.execute(
+                        f"PRAGMA index_info({index_name})"
+                    )
+                ),
+            )
+            for table in TABLES
+            for _, index_name, unique, origin, _ in connection.execute(
+                f"PRAGMA index_list({table})"
+            )
+            if unique and origin in {"pk", "u"}
         }
         assert tables == set(TABLES) == {
             "repositories", "files", "symbols", "relations", "wiki_code_links"
         }
-        assert indexes == set(INDEXES) == EXPECTED_INDEXES
-        assert connection.execute("PRAGMA user_version").fetchone() == (
-            SCHEMA_VERSION,
-        )
+        assert explicit_indexes == set(INDEXES) == EXPECTED_INDEXES
+        assert len(explicit_indexes) == 20
+        assert implicit_unique_indexes == {
+            ("repositories", ("repository_id",)),
+            ("files", ("file_id",)),
+            ("files", ("module_id",)),
+            ("files", ("repository_id", "path")),
+            ("symbols", ("symbol_id",)),
+            ("symbols", ("file_id", "qualified_name", "start_line")),
+            ("relations", ("relation_id",)),
+            ("wiki_code_links", ("link_id",)),
+        }
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute("PRAGMA busy_timeout").fetchone() == (
             BUSY_TIMEOUT_MS,
         )
         validate_integrity(connection)
+
+
+def test_schema_v1_is_incompatible_not_migrated(tmp_path):
+    path = tmp_path / "schema-v1.sqlite3"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "CREATE TABLE repositories (repository_id TEXT PRIMARY KEY)"
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+        before_journal_mode = connection.execute(
+            "PRAGMA journal_mode"
+        ).fetchone()
+        before = tuple(connection.iterdump())
+    before_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    before_sidecars = {
+        candidate.name for candidate in tmp_path.glob(f"{path.name}-*")
+    }
+
+    store = CodeGraphStore(path)
+
+    compatibility = store.inspect_compatibility()
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+        assert connection.execute("PRAGMA journal_mode").fetchone() == (
+            before_journal_mode
+        )
+        assert tuple(connection.iterdump()) == before
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before_hash
+    assert {
+        candidate.name for candidate in tmp_path.glob(f"{path.name}-*")
+    } == before_sidecars
+    assert compatibility == "incompatible"
+
+    compatible = CodeGraphStore(tmp_path / "schema-v2.sqlite3")
+    with closing(compatible.connect()):
+        pass
+    assert compatible.inspect_compatibility() == "compatible"
+
+
+def test_validate_schema_rejects_missing_implicit_unique_index(tmp_path):
+    store = CodeGraphStore(tmp_path / "missing-autoindex.sqlite3")
+    with closing(store.connect()) as connection:
+        module_index = next(
+            row[1]
+            for row in connection.execute("PRAGMA index_list(files)")
+            if tuple(
+                column[2]
+                for column in connection.execute(
+                    f"PRAGMA index_info({row[1]})"
+                )
+            ) == ("module_id",)
+        )
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "DELETE FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (module_index,),
+        )
+        connection.execute("PRAGMA writable_schema = OFF")
+
+        with pytest.raises(
+            CodeGraphSchemaError,
+            match="incompatible code graph schema",
+        ):
+            validate_schema(connection)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("source_end_line", 2), ("source_end_byte", 19)],
+)
+def test_schema_v2_rejects_invalid_relation_ranges(tmp_path, column, value):
+    store = CodeGraphStore(tmp_path / "invalid-range.sqlite3")
+    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links())
+
+    with closing(store.connect()) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"UPDATE relations SET {column} = ? WHERE relation_id = ?",
+                (value, "relation-backend"),
+            )
+
+
+def test_canonical_verification_reopens_and_checks_revision(tmp_path):
+    store = CodeGraphStore(tmp_path / "canonical.sqlite3")
+    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links())
+
+    store.verify_canonical("backend", "revision-1")
+    with closing(store.connect()) as connection:
+        connection.execute(
+            "UPDATE repositories SET revision = 'changed' "
+            "WHERE repository_id = 'backend'"
+        )
+        connection.commit()
+
+    with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
+        store.verify_canonical("backend", "revision-1")
 
 
 def test_file_and_repository_deletes_cascade_without_touching_wiki_store(tmp_path):
@@ -308,9 +464,15 @@ def test_integrity_failure_messages_are_sanitized(tmp_path):
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys = OFF")
         connection.execute(
-            "INSERT INTO files VALUES "
-            "('secret-file', 'missing-repository', 'a.py', 'python', "
-            "'hash', 'v1', 1)"
+            "INSERT INTO files ("
+            "file_id, repository_id, path, file_local_name, "
+            "file_name_tokens_casefold, language, content_hash, parser_version, "
+            "size_bytes, start_line, end_line, start_byte, end_byte, module_key"
+            ") VALUES ("
+            "'secret-file', 'missing-repository', 'a.py', 'a.py', "
+            "char(31) || 'a' || char(31) || 'py' || char(31), 'python', "
+            "'hash', 'v1', 1, 1, 1, 0, 1, 'a.py'"
+            ")"
         )
         connection.commit()
         with pytest.raises(CodeGraphStoreError) as raised:
@@ -334,6 +496,43 @@ def test_integrity_failure_messages_are_sanitized(tmp_path):
         validate_integrity(IntegrityFailureConnection())
     assert str(raised.value) == "code graph integrity check failed"
     assert "secret-row" not in str(raised.value)
+
+
+def test_integrity_rejects_relation_source_from_another_file(tmp_path):
+    path = tmp_path / "relation-provenance.sqlite3"
+    store = CodeGraphStore(path)
+    snapshot = snapshot_with_symbol_file_and_wiki_links()
+    other_file = dict(snapshot["files"][0])
+    other_file.update({
+        "file_id": "file-other",
+        "path": "pkg/other.py",
+        "file_local_name": "other.py",
+        "file_name_tokens_casefold": "\x1fother\x1fpy\x1f",
+        "module_key": "pkg/other.py",
+        "module_id": "module-other",
+        "module_qualified_name": "pkg.other",
+        "module_local_name": "other",
+        "module_name_tokens_casefold": "\x1fother\x1fpkg\x1f",
+    })
+    other_symbol = dict(snapshot["symbols"][0])
+    other_symbol.update({
+        "symbol_id": "symbol-other",
+        "file_id": "file-other",
+        "qualified_name": "pkg.other.run",
+    })
+    relation = dict(snapshot["relations"][0])
+    relation["source_symbol_id"] = "symbol-other"
+    snapshot["files"] += (other_file,)
+    snapshot["symbols"] += (other_symbol,)
+    snapshot["relations"] = (relation,)
+    store.insert_snapshot(snapshot)
+
+    with closing(store.connect()) as connection:
+        with pytest.raises(
+            CodeGraphStoreError,
+            match="relation provenance check failed",
+        ):
+            validate_integrity(connection)
 
 
 def test_configure_rejects_non_wal_journal_mode():
@@ -786,6 +985,188 @@ def test_replace_failure_keeps_canonical_and_returns_sanitized_error(
     assert "secret" not in str(raised.value)
     assert not staging.exists()
     assert store.reconstruct_metadata("backend")["revision"] == "old"
+
+
+def test_staging_directory_cleanup_failure_keeps_publication_successful(
+    tmp_path, monkeypatch
+):
+    canonical = tmp_path / "code-backend.sqlite3"
+    store = CodeGraphStore(canonical)
+    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
+    staging = store.create_staging_path()
+    CodeGraphStore(staging).insert_snapshot(
+        snapshot_with_symbol_file_and_wiki_links(revision="new")
+    )
+    staging_directory = staging.parent
+    real_rmdir = Path.rmdir
+
+    def fail_staging_rmdir(path):
+        if path == staging_directory:
+            raise OSError("post-replace cleanup fixture")
+        return real_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_staging_rmdir)
+
+    store.publish_staging(
+        staging,
+        repository_id="backend",
+        expected_revision="new",
+    )
+
+    assert store.reconstruct_metadata("backend")["revision"] == "new"
+    assert not staging.exists()
+    assert staging_directory.is_dir()
+
+
+def test_database_replace_fsyncs_namespace_transitions_in_order(
+    tmp_path, monkeypatch
+):
+    canonical = tmp_path / "code-backend.sqlite3"
+    store = CodeGraphStore(canonical)
+    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
+    staging = store.create_staging_path()
+    CodeGraphStore(staging).insert_snapshot(
+        snapshot_with_symbol_file_and_wiki_links(revision="new")
+    )
+    store.prepare_staging(
+        staging,
+        repository_id="backend",
+        expected_revision="new",
+    )
+    fsynced = []
+    monkeypatch.setattr(
+        store,
+        "_fsync_directory",
+        lambda path: fsynced.append(Path(path)),
+        raising=False,
+    )
+
+    store.replace_staging(staging)
+
+    assert fsynced == [staging.parent, canonical.parent, canonical.parent]
+
+
+def test_database_fsync_failure_reports_snapshot_already_published(
+    tmp_path, monkeypatch
+):
+    canonical = tmp_path / "code-backend.sqlite3"
+    store = CodeGraphStore(canonical)
+    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
+    staging = store.create_staging_path()
+    CodeGraphStore(staging).insert_snapshot(
+        snapshot_with_symbol_file_and_wiki_links(revision="new")
+    )
+    store.prepare_staging(
+        staging,
+        repository_id="backend",
+        expected_revision="new",
+    )
+
+    def fail_directory_fsync(_path):
+        raise CodeGraphStoreError("directory fsync fixture")
+
+    monkeypatch.setattr(
+        store,
+        "_fsync_directory",
+        fail_directory_fsync,
+        raising=False,
+    )
+
+    with pytest.raises(CodeGraphStoreError) as raised:
+        store.replace_staging(staging)
+
+    assert getattr(raised.value, "published", False) is True
+    assert CodeGraphStore(canonical).reconstruct_metadata("backend")[
+        "revision"
+    ] == "new"
+
+
+def test_metadata_replace_fsyncs_parent_directory(tmp_path, monkeypatch):
+    store = CodeGraphStore(tmp_path / "code-backend.sqlite3")
+    metadata_path = tmp_path / "code-backend.json"
+    metadata_path.write_text('{"state":"old"}', encoding="utf-8")
+    staging = store.prepare_metadata(metadata_path, {"state": "rebuilding"})
+    fsynced = []
+    monkeypatch.setattr(
+        store,
+        "_fsync_directory",
+        lambda path: fsynced.append(Path(path)),
+        raising=False,
+    )
+
+    store.publish_metadata(metadata_path, staging)
+
+    assert fsynced == [metadata_path.parent]
+
+
+def test_publish_metadata_context_close_failure_reports_already_published(
+    tmp_path, monkeypatch
+):
+    store = CodeGraphStore(tmp_path / "code-backend.sqlite3")
+    metadata_path = tmp_path / "code-backend.json"
+    metadata_path.write_text('{"state":"old"}', encoding="utf-8")
+    staging = store.prepare_metadata(metadata_path, {"state": "rebuilding"})
+    secure_paths = store._secure_paths
+
+    @contextmanager
+    def fail_context_close(*paths, create):
+        with secure_paths(*paths, create=create) as secured:
+            yield secured
+        raise OSError("metadata context close fixture")
+
+    monkeypatch.setattr(store, "_secure_paths", fail_context_close)
+
+    with pytest.raises(CodeGraphStoreError) as raised:
+        store.publish_metadata(metadata_path, staging)
+
+    assert getattr(raised.value, "published", False) is True
+    assert isinstance(raised.value.__cause__, OSError)
+    assert metadata_path.read_text(encoding="utf-8") == '{"state":"rebuilding"}'
+    assert not staging.exists()
+
+
+def test_refresh_metadata_context_close_failure_reports_already_published(
+    tmp_path, monkeypatch
+):
+    store = CodeGraphStore(tmp_path / "code-backend.sqlite3")
+    metadata_path = tmp_path / "code-backend.json"
+    current = {
+        "state": "ready",
+        "revision": "revision-1",
+        "duration_ms": 1,
+        "phase_timings_ms": {"build": 1},
+    }
+    candidate = {
+        **current,
+        "duration_ms": 2,
+        "phase_timings_ms": {"build": 2},
+    }
+    metadata_path.write_text(
+        '{"duration_ms":1,"phase_timings_ms":{"build":1},'
+        '"revision":"revision-1","state":"ready"}',
+        encoding="utf-8",
+    )
+    staging = store.prepare_metadata(metadata_path, candidate)
+    secure_paths = store._secure_paths
+
+    @contextmanager
+    def fail_context_close(*paths, create):
+        with secure_paths(*paths, create=create) as secured:
+            yield secured
+        raise OSError("diagnostics context close fixture")
+
+    monkeypatch.setattr(store, "_secure_paths", fail_context_close)
+
+    with pytest.raises(CodeGraphStoreError) as raised:
+        store.refresh_metadata_diagnostics(metadata_path, staging)
+
+    assert getattr(raised.value, "published", False) is True
+    assert isinstance(raised.value.__cause__, OSError)
+    assert metadata_path.read_text(encoding="utf-8") == (
+        '{"duration_ms":2,"phase_timings_ms":{"build":2},'
+        '"revision":"revision-1","state":"ready"}'
+    )
+    assert not staging.exists()
 
 
 def test_publication_recheck_rejects_reserved_path_swapped_to_external_hardlink(

@@ -44,14 +44,29 @@ def _snapshot():
     for offset, (identity, path, qualified, local, signature) in enumerate(fixtures):
         language = "typescript" if identity == "other-language" else "python"
         file_id = f"file:{identity}"
+        file_local_name = path.rsplit("/", 1)[-1]
         files.append({
             "file_id": file_id,
             "repository_id": "backend",
             "path": path,
+            "path_casefold": models_module.compact_casefold(path),
+            "file_local_name": file_local_name,
+            "file_name_tokens_casefold": models_module.token_key(
+                file_local_name
+            ),
             "language": language,
             "content_hash": f"hash:{identity}",
             "parser_version": "fixture",
             "size_bytes": 10,
+            "start_line": 1,
+            "end_line": 1,
+            "start_byte": 0,
+            "end_byte": 10,
+            "module_key": path,
+            "module_id": None,
+            "module_qualified_name": None,
+            "module_local_name": None,
+            "module_name_tokens_casefold": None,
         })
         symbols.append({
             "symbol_id": f"symbol:{identity}",
@@ -59,11 +74,13 @@ def _snapshot():
             "kind": "class" if identity == "other-kind" else "method",
             "qualified_name": qualified,
             "local_name": local,
+            "name_tokens_casefold": models_module.token_key(qualified, local),
             "start_line": offset + 1,
             "end_line": offset + 2,
             "start_byte": offset * 10,
             "end_byte": offset * 10 + 9,
             "signature": signature,
+            "signature_casefold": models_module.compact_casefold(signature),
             "visibility": "public",
             "content_hash": f"symbol-hash:{identity}",
             "metadata_json": "{}",
@@ -77,6 +94,8 @@ def _snapshot():
             "source_fingerprint": "source",
             "config_fingerprint": "config",
             "parser_fingerprint": "parser",
+            "normalizer_version": models_module.NORMALIZER_VERSION,
+            "unicode_data_version": models_module.UNICODE_DATA_VERSION,
             "revision": "sha256:fixture",
             "state": "ready",
             "indexed_at": "2026-08-10T00:00:00Z",
@@ -86,6 +105,66 @@ def _snapshot():
         "relations": (),
         "wiki_code_links": (),
     }
+
+
+_FILE_INSERT_SQL = """
+    INSERT INTO files (
+        file_id, repository_id, path, path_casefold, file_local_name,
+        file_name_tokens_casefold, language, content_hash, parser_version,
+        size_bytes, start_line, end_line, start_byte, end_byte, module_key,
+        module_id, module_qualified_name, module_local_name,
+        module_name_tokens_casefold
+    ) VALUES (
+        ?, 'backend', ?, ?, ?, ?, ?, ?, 'fixture', 10, 1, 1, 0, 10, ?,
+        NULL, NULL, NULL, NULL
+    )
+"""
+
+
+def _file_insert_values(file_id, path, language, content_hash):
+    local_name = path.rsplit("/", 1)[-1]
+    return (
+        file_id,
+        path,
+        models_module.compact_casefold(path),
+        local_name,
+        models_module.token_key(local_name),
+        language,
+        content_hash,
+        path,
+    )
+
+
+_SYMBOL_INSERT_SQL = """
+    INSERT INTO symbols (
+        symbol_id, file_id, kind, qualified_name, local_name,
+        name_tokens_casefold, start_line, end_line, start_byte, end_byte,
+        signature, signature_casefold, visibility, content_hash,
+        metadata_json
+    ) VALUES (
+        ?, ?, 'method', ?, ?, ?, 1, 1, 0, 1, ?, ?, 'public', ?, '{}'
+    )
+"""
+
+
+def _symbol_insert_values(
+    symbol_id,
+    file_id,
+    qualified_name,
+    local_name,
+    signature,
+    content_hash,
+):
+    return (
+        symbol_id,
+        file_id,
+        qualified_name,
+        local_name,
+        models_module.token_key(qualified_name, local_name),
+        signature,
+        models_module.compact_casefold(signature),
+        content_hash,
+    )
 
 
 def _large_connection(*, local_name: str | None = None):
@@ -166,38 +245,41 @@ def test_search_orders_each_symbol_by_its_strongest_match(search_connection):
 
 def test_prefix_tier_does_not_refetch_exact_local_rows(search_connection):
     search_connection.execute(
-        """
-        INSERT INTO files (
-            file_id, repository_id, path, language, content_hash,
-            parser_version, size_bytes
-        ) VALUES (
-            'file:tier-overlap', 'backend', 'tier-overlap/sample.py',
-            'python', 'hash:tier-overlap', 'fixture', 10
-        )
-        """
+        _FILE_INSERT_SQL,
+        _file_insert_values(
+            "file:tier-overlap",
+            "tier-overlap/sample.py",
+            "python",
+            "hash:tier-overlap",
+        ),
     )
     search_connection.executemany(
-        """
-        INSERT INTO symbols (
-            symbol_id, file_id, kind, qualified_name, local_name,
-            start_line, end_line, start_byte, end_byte, signature,
-            visibility, content_hash, metadata_json
-        ) VALUES (
-            ?, 'file:tier-overlap', 'method', ?, ?, 1, 1, 0, 1, '()',
-            'public', ?, '{}'
-        )
-        """,
+        _SYMBOL_INSERT_SQL,
         (
-            ("symbol:tier-qualified", "alpha", "root", "hash:tier-qualified"),
-            (
+            _symbol_insert_values(
+                "symbol:tier-qualified", "file:tier-overlap",
+                "alpha", "root", "()", "hash:tier-qualified",
+            ),
+            _symbol_insert_values(
                 "symbol:tier-local-overlap",
+                "file:tier-overlap",
                 "alpha.00_overlap",
                 "alpha",
+                "()",
                 "hash:tier-local-overlap",
             ),
-            ("symbol:tier-prefix-1", "alpha.10_first", "first", "hash:tier-1"),
-            ("symbol:tier-prefix-2", "alpha.20_second", "second", "hash:tier-2"),
-            ("symbol:tier-prefix-3", "alpha.30_third", "third", "hash:tier-3"),
+            _symbol_insert_values(
+                "symbol:tier-prefix-1", "file:tier-overlap",
+                "alpha.10_first", "first", "()", "hash:tier-1",
+            ),
+            _symbol_insert_values(
+                "symbol:tier-prefix-2", "file:tier-overlap",
+                "alpha.20_second", "second", "()", "hash:tier-2",
+            ),
+            _symbol_insert_values(
+                "symbol:tier-prefix-3", "file:tier-overlap",
+                "alpha.30_third", "third", "()", "hash:tier-3",
+            ),
         ),
     )
     request = validate_search_request(
@@ -248,35 +330,41 @@ def test_unicode_casefold_is_shared_by_sql_and_strongest_classification(
     search_connection,
 ):
     search_connection.executemany(
-        """
-        INSERT INTO files (
-            file_id, repository_id, path, language, content_hash,
-            parser_version, size_bytes
-        ) VALUES (?, 'backend', ?, 'python', ?, 'fixture', 10)
-        """,
+        _FILE_INSERT_SQL,
         (
-            ("file:unicode-qualified", "unicode/qualified.py", "hash:uq"),
-            ("file:unicode-local", "unicode/local.py", "hash:ul"),
-            ("file:unicode-signature", "unicode/signature.py", "hash:us"),
-            ("file:unicode-path", "unicode/Straße/data.py", "hash:path"),
+            _file_insert_values(
+                "file:unicode-qualified", "unicode/qualified.py",
+                "python", "hash:uq",
+            ),
+            _file_insert_values(
+                "file:unicode-local", "unicode/local.py", "python", "hash:ul",
+            ),
+            _file_insert_values(
+                "file:unicode-signature", "unicode/signature.py",
+                "python", "hash:us",
+            ),
+            _file_insert_values(
+                "file:unicode-path", "unicode/Straße/data.py",
+                "python", "hash:path",
+            ),
         ),
     )
     search_connection.executemany(
-        """
-        INSERT INTO symbols (
-            symbol_id, file_id, kind, qualified_name, local_name,
-            start_line, end_line, start_byte, end_byte, signature,
-            visibility, content_hash, metadata_json
-        ) VALUES (?, ?, 'method', ?, ?, 1, 1, 0, 1, ?, 'public', ?, '{}')
-        """,
+        _SYMBOL_INSERT_SQL,
         (
-            ("symbol:uq", "file:unicode-qualified", "Straße", "alias", "()", "hash:uq"),
-            ("symbol:ul", "file:unicode-local", "pkg.Local", "Straße", "()", "hash:ul"),
-            (
+            _symbol_insert_values(
+                "symbol:uq", "file:unicode-qualified", "Straße", "alias",
+                "()", "hash:uq",
+            ),
+            _symbol_insert_values(
+                "symbol:ul", "file:unicode-local", "pkg.Local", "Straße",
+                "()", "hash:ul",
+            ),
+            _symbol_insert_values(
                 "symbol:us", "file:unicode-signature", "pkg.Signature", "execute",
                 "(Straße: str)", "hash:us",
             ),
-            (
+            _symbol_insert_values(
                 "symbol:unicode-path", "file:unicode-path", "pkg.UnicodePath",
                 "deploy", "()", "hash:path",
             ),
@@ -324,33 +412,23 @@ def test_path_filter_is_case_sensitive_literal_prefix(search_connection):
         "underscore": "src/_literal/target.py",
     }
     search_connection.executemany(
-        """
-        INSERT INTO files (
-            file_id, repository_id, path, language, content_hash,
-            parser_version, size_bytes
-        ) VALUES (?, 'backend', ?, 'python', ?, 'fixture', 10)
-        """,
+        _FILE_INSERT_SQL,
         (
-            (f"file:path-{identity}", path, f"hash:path-{identity}")
+            _file_insert_values(
+                f"file:path-{identity}", path, "python", f"hash:path-{identity}"
+            )
             for identity, path in paths.items()
         ),
     )
     search_connection.executemany(
-        """
-        INSERT INTO symbols (
-            symbol_id, file_id, kind, qualified_name, local_name,
-            start_line, end_line, start_byte, end_byte, signature,
-            visibility, content_hash, metadata_json
-        ) VALUES (
-            ?, ?, 'method', ?, 'path_filter', 1, 1, 0, 1, '()',
-            'public', ?, '{}'
-        )
-        """,
+        _SYMBOL_INSERT_SQL,
         (
-            (
+            _symbol_insert_values(
                 f"symbol:path-{identity}",
                 f"file:path-{identity}",
                 f"pkg.path_{identity}",
+                "path_filter",
+                "()",
                 f"hash:symbol-path-{identity}",
             )
             for identity in paths
