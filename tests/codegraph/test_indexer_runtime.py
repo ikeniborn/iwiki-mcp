@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 import json
 import logging
@@ -17,6 +18,7 @@ from iwiki_mcp.codegraph import models as codegraph_models
 from iwiki_mcp.codegraph.discovery import DiscoveryError
 from iwiki_mcp.codegraph.fingerprint import parser_fingerprint
 from iwiki_mcp.codegraph.indexer import (
+    AdapterFactory,
     CodeGraphParseError,
     CodeGraphStaleError,
     CodeGraphStoreFailure,
@@ -33,6 +35,76 @@ from iwiki_mcp.codegraph.store import (
     code_graph_write_lock,
 )
 from iwiki_mcp.base import Binding
+
+
+def test_adapter_factory_binds_fresh_isolated_instances():
+    created = []
+
+    def create(source_paths):
+        adapter = PythonAdapter(
+            "domain",
+            source_paths,
+            parser_version="parser:test",
+        )
+        created.append(adapter)
+        return adapter
+
+    factory = AdapterFactory(
+        create=create,
+        extensions=(".py",),
+        parser_version="parser:test",
+        grammar_version="grammar:test",
+        adapter_version="adapter:test",
+    )
+
+    first = factory.bind(("pkg/__init__.py",))
+    first_mapping = dict(first.adapter._module_names)
+    second = factory.bind(("other.py",))
+
+    assert first.adapter is created[0]
+    assert second.adapter is created[1]
+    assert first.adapter is not second.adapter
+    assert first.adapter._module_names == first_mapping
+    assert first.adapter.repository_id == "domain"
+    assert second.adapter.repository_id == "domain"
+    assert not hasattr(first, "factory")
+
+
+def test_runtime_defers_fresh_adapter_binding_until_each_build(seed_binding):
+    calls = []
+
+    def create(source_paths):
+        adapter = PythonAdapter(
+            "project",
+            source_paths,
+            parser_version="parser:test",
+        )
+        calls.append((source_paths, adapter))
+        return adapter
+
+    runtime = CodeGraphRuntime(
+        seed_binding,
+        adapter_factories={
+            "python": AdapterFactory(
+                create=create,
+                extensions=(".py",),
+                parser_version="parser:test",
+                grammar_version="grammar:test",
+                adapter_version="adapter:test",
+            )
+        },
+    )
+
+    assert calls == []
+    assert runtime.index(force=True)["state"] == "ready"
+    assert runtime.index(force=True)["state"] == "ready"
+    runtime.join_workers(timeout=5)
+
+    assert [item[0] for item in calls] == [
+        ("src/pkg/__init__.py", "src/pkg/service.py"),
+        ("src/pkg/__init__.py", "src/pkg/service.py"),
+    ]
+    assert calls[0][1] is not calls[1][1]
 
 
 def test_publication_primitive_orders_two_canonical_verifications():
@@ -94,7 +166,7 @@ def test_failed_writer_leaves_rebuilding_for_later_status_recovery(
         published_states.append(payload["state"])
         return real_publish(metadata_path, staging, **kwargs)
 
-    def fail_parse(_discovered):
+    def fail_parse(_discovered, _config):
         raise CodeGraphParseError("parse fixture secret")
 
     monkeypatch.setattr(indexer.store, "publish_metadata", observed_publish)
@@ -336,8 +408,8 @@ def test_build_reports_observability_without_source_text(seed_runtime):
     out = seed_runtime.index(force=True)
 
     assert out["state"] == "ready"
-    assert out["counts"]["languages"] == {"python": 1}
-    assert out["counts"]["files"] == 1
+    assert out["counts"]["languages"] == {"python": 2}
+    assert out["counts"]["files"] == 2
     assert out["counts"]["symbols"] == 2
     assert "relations" in out["counts"]
     assert "resolution_ratios" in out
@@ -396,10 +468,10 @@ def test_status_and_guard_show_rebuilding_during_current_process_build(
     release = threading.Event()
     real_parse = ready_runtime.runtime._indexer._parse
 
-    def held_parse(discovered):
+    def held_parse(discovered, config):
         entered.set()
         assert release.wait(timeout=5)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -426,10 +498,10 @@ def test_second_runtime_observes_shared_writer_as_rebuilding(
     release = threading.Event()
     real_parse = ready_runtime.runtime._indexer._parse
 
-    def held_parse(discovered):
+    def held_parse(discovered, config):
         entered.set()
         assert release.wait(timeout=5)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -465,10 +537,10 @@ def test_writer_waits_for_status_shared_snapshot(
         assert release_status.wait(timeout=5)
         return result
 
-    def held_parse(discovered):
+    def held_parse(discovered, config):
         writer_entered.set()
         assert release_writer.wait(timeout=5)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     monkeypatch.setattr(observer.runtime, "_read_status", paused_status_read)
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
@@ -556,7 +628,7 @@ def test_old_writer_recovery_cannot_overwrite_new_writer_generation(
     observer = ready_runtime.with_config()
     old_indexer = old_writer.runtime._indexer
 
-    def fail_old_parse(_discovered):
+    def fail_old_parse(_discovered, _config):
         raise CodeGraphParseError("old writer failed")
 
     monkeypatch.setattr(old_indexer, "_parse", fail_old_parse)
@@ -578,10 +650,10 @@ def test_old_writer_recovery_cannot_overwrite_new_writer_generation(
         assert release_recovery.wait(timeout=5)
         return real_recover(expected)
 
-    def held_new_parse(discovered):
+    def held_new_parse(discovered, config):
         new_writer_entered.set()
         assert release_new_writer.wait(timeout=5)
-        return real_new_parse(discovered)
+        return real_new_parse(discovered, config)
 
     monkeypatch.setattr(observer.runtime, "_recover_stale_metadata", paused_recovery)
     monkeypatch.setattr(new_writer.runtime._indexer, "_parse", held_new_parse)
@@ -719,9 +791,9 @@ def test_bounded_rebuild_checks_one_shared_deadline_before_publication(
     )
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered):
+    def slow_parse(discovered, config):
         time.sleep(1.05)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -747,9 +819,9 @@ def test_bounded_rebuild_caps_larger_request_budget_at_configured_limit(
     )
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered):
+    def slow_parse(discovered, config):
         time.sleep(1.1)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -770,9 +842,9 @@ def test_explicit_index_uses_one_deadline_and_discards_staging(
     runtime = seed_runtime.with_config(max_rebuild_seconds=1)
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered):
+    def slow_parse(discovered, config):
         time.sleep(1.05)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -798,9 +870,9 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
     real_publish = indexer.store.publish_metadata
     published_states = []
 
-    def slow_parse(discovered):
+    def slow_parse(discovered, config):
         time.sleep(1.05)
-        return real_parse(discovered)
+        return real_parse(discovered, config)
 
     def observed_publish(metadata_path, staging, **kwargs):
         payload = json.loads(Path(staging).read_text(encoding="utf-8"))
@@ -1141,6 +1213,56 @@ def test_toolchain_drift_reports_persisted_snapshot_versions_as_dirty(
     assert guarded["results"] == []
 
 
+def test_python_adapter_v2_rebuilds_unchanged_v1_cache(seed_runtime):
+    current = seed_runtime
+    factory = current.runtime._indexer.adapter_factories["python"]
+    old = seed_runtime.with_toolchain_versions(
+        parser=factory.parser_version,
+        grammar=factory.grammar_version,
+        adapter="python-adapter-v1",
+        resolver=current.runtime._indexer.resolver_version,
+    )
+    first = old.index(force=True)
+
+    dirty = current.status()
+    rebuilt = current.index(force=False)
+    no_op = current.index(force=False)
+    expected_fingerprint = parser_fingerprint(
+        languages=current.runtime.config.languages,
+        schema_version=SCHEMA_VERSION,
+        parser_version=current.runtime._indexer._parser_version(
+            current.runtime.config
+        ),
+        grammar_version=current.runtime._indexer._grammar_version(
+            current.runtime.config
+        ),
+        adapter_version="python:python-adapter-v2",
+        resolver_version=current.runtime._indexer.resolver_version,
+        normalizer_version=codegraph_models.NORMALIZER_VERSION,
+        unicode_data_version=codegraph_models.UNICODE_DATA_VERSION,
+    )
+    metadata = json.loads(
+        current.paths.metadata.read_text(encoding="utf-8")
+    )
+    with closing(current.runtime._store.open_existing()) as connection:
+        repository_fingerprint = connection.execute(
+            "SELECT parser_fingerprint FROM repositories"
+        ).fetchone()[0]
+
+    assert dirty["state"] == "dirty"
+    assert dirty["fresh"] is False
+    assert rebuilt["state"] == "ready"
+    assert rebuilt["revision"] != first["revision"]
+    assert rebuilt["adapter_version"] == "python:python-adapter-v2"
+    assert rebuilt["fingerprints"]["parser"] == expected_fingerprint
+    assert repository_fingerprint == expected_fingerprint
+    assert metadata["adapter_version"] == "python:python-adapter-v2"
+    assert metadata["fingerprints"]["parser"] == expected_fingerprint
+    assert no_op["no_op"] is True
+    assert no_op["revision"] == rebuilt["revision"]
+    assert no_op["adapter_version"] == "python:python-adapter-v2"
+
+
 def test_grammar_only_drift_reports_persisted_snapshot_as_dirty(
     seed_runtime,
 ):
@@ -1406,19 +1528,14 @@ def test_slow_adapter_returns_by_deadline_and_cancels_before_publication(
         "def changed_while_parser_blocks():\n    return None\n",
         encoding="utf-8",
     )
-    adapter = runtime.runtime._indexer.adapters["python"].adapter
-    real_parse = adapter.parse_file
+    factory = runtime.runtime._indexer.adapter_factories["python"]
+    real_create = factory.create
     store = runtime.runtime._indexer.store
     real_replace = store.replace_staging
     entered = threading.Event()
     release = threading.Event()
     caller_returned = threading.Event()
     publications = []
-
-    def blocked_parse(*args, **kwargs):
-        entered.set()
-        assert release.wait(timeout=3)
-        return real_parse(*args, **kwargs)
 
     def observed_replace(*args, **kwargs):
         publications.append("database")
@@ -1428,7 +1545,23 @@ def test_slow_adapter_returns_by_deadline_and_cancels_before_publication(
         caller_returned.wait(timeout=2)
         release.set()
 
-    monkeypatch.setattr(adapter, "parse_file", blocked_parse)
+    def create_blocked_adapter(source_paths):
+        adapter = real_create(source_paths)
+        real_parse = adapter.parse_file
+
+        def parse(*args, **kwargs):
+            entered.set()
+            assert release.wait(timeout=3)
+            return real_parse(*args, **kwargs)
+
+        adapter.parse_file = parse
+        return adapter
+
+    monkeypatch.setitem(
+        runtime.runtime._indexer.adapter_factories,
+        "python",
+        replace(factory, create=create_blocked_adapter),
+    )
     monkeypatch.setattr(store, "replace_staging", observed_replace)
     releaser = threading.Thread(target=safety_release, daemon=True)
     releaser.start()
@@ -1568,12 +1701,22 @@ def test_runtime_maps_typed_build_failures_to_stable_sanitized_codes(
 def test_runtime_maps_real_parse_store_and_unsafe_path_failures(
     seed_runtime, monkeypatch
 ):
-    adapter = seed_runtime.runtime._indexer.adapters["python"].adapter
+    factory = seed_runtime.runtime._indexer.adapter_factories["python"]
+    real_create = factory.create
 
     def fail_parse(*_args, **_kwargs):
         raise RuntimeError("parse fixture secret")
 
-    monkeypatch.setattr(adapter, "parse_file", fail_parse)
+    def create_failing_adapter(source_paths):
+        adapter = real_create(source_paths)
+        adapter.parse_file = fail_parse
+        return adapter
+
+    monkeypatch.setitem(
+        seed_runtime.runtime._indexer.adapter_factories,
+        "python",
+        replace(factory, create=create_failing_adapter),
+    )
     assert seed_runtime.index(force=True)["code"] == "parse_failed"
     monkeypatch.undo()
 

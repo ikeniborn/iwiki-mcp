@@ -79,26 +79,37 @@ def _distribution_version(name: str) -> str:
 _PYTHON_PARSER_VERSION = (
     "tree-sitter-python:" + _distribution_version("tree-sitter-python")
 )
-_CODE_GRAPH_ADAPTER_FACTORIES = {
-    "python": _codegraph_indexer.AdapterFactory(
-        create=_codegraph_python.PythonAdapter,
-        parser_version=_PYTHON_PARSER_VERSION,
-        grammar_version=";".join((
-            "tree-sitter:" + _distribution_version("tree-sitter"),
-            "tree-sitter-language-pack:"
-            + _distribution_version("tree-sitter-language-pack"),
-            _PYTHON_PARSER_VERSION,
-        )),
-        adapter_version="python-adapter-v1",
-    )
-}
+
+
+def _code_graph_adapter_factories(repository_id):
+    def create_python_adapter(source_paths):
+        return _codegraph_python.PythonAdapter(
+            repository_id,
+            source_paths,
+            parser_version=_PYTHON_PARSER_VERSION,
+        )
+
+    return {
+        "python": _codegraph_indexer.AdapterFactory(
+            create=create_python_adapter,
+            extensions=(".py",),
+            parser_version=_PYTHON_PARSER_VERSION,
+            grammar_version=";".join((
+                "tree-sitter:" + _distribution_version("tree-sitter"),
+                "tree-sitter-language-pack:"
+                + _distribution_version("tree-sitter-language-pack"),
+                _PYTHON_PARSER_VERSION,
+            )),
+            adapter_version="python-adapter-v2",
+        )
+    }
 
 
 def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
     return _codegraph_runtime.CodeGraphRuntime(
         binding,
-        adapter_factories=_CODE_GRAPH_ADAPTER_FACTORIES,
+        adapter_factories=_code_graph_adapter_factories(binding.primary),
     )
 
 

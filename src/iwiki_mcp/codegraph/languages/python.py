@@ -1,15 +1,14 @@
-"""Tree-sitter-only Python declaration extraction.
-
-The ``FileRecord`` returned here is an explicitly non-persisted placeholder:
-its path and content hash allow Task 6 to reconstruct repository-bound identity.
-Neither its empty repository id nor its ``parse:`` file id may be stored.
-"""
+"""Tree-sitter-only Python declaration extraction."""
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import keyword
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any
+import token
+import tokenize
+from typing import Any, Mapping
 
 from ..models import (
     FileRecord,
@@ -18,6 +17,9 @@ from ..models import (
     ResolutionResult,
     SymbolRecord,
     compact_casefold,
+    file_id,
+    module_id,
+    symbol_id,
     token_key,
 )
 from ..resolver import resolve_references
@@ -39,26 +41,75 @@ def _relative_path(path: str) -> str:
         or ".." in posix_path.parts
     ):
         raise ValueError("invalid source path")
-    parts = [part for part in posix_path.parts if part != "."]
-    if parts and parts[0] == "src":
-        parts = parts[1:]
-    return "/".join(parts)
+    return "/".join(part for part in posix_path.parts if part != ".")
 
 
-def _module_name(path: str) -> str:
-    relative = _relative_path(path)
-    file_path = PurePosixPath(relative)
-    parts = list(file_path.parts)
+def _dotted_module(parts: list[str]) -> str | None:
     if parts and parts[-1] == "__init__.py":
         parts.pop()
     elif parts:
         parts[-1] = PurePosixPath(parts[-1]).stem
+    if not parts or any(
+        not part.isidentifier() or keyword.iskeyword(part)
+        for part in parts
+    ):
+        return None
     return ".".join(part for part in parts if part)
 
 
+def derive_module_names(source_paths: tuple[str, ...]) -> dict[str, str | None]:
+    """Derive dotted names only from source-root or package evidence."""
+    paths = tuple(sorted({_relative_path(path) for path in source_paths}))
+    package_dirs = {
+        PurePosixPath(path).parent.as_posix()
+        for path in paths
+        if PurePosixPath(path).name == "__init__.py"
+    }
+    result: dict[str, str | None] = {}
+    for path in paths:
+        parts = list(PurePosixPath(path).parts)
+        module_parts: list[str] | None = None
+        for index in range(1, len(parts)):
+            directory = PurePosixPath(*parts[:index]).as_posix()
+            descendants = (
+                PurePosixPath(*parts[:depth]).as_posix()
+                for depth in range(index, len(parts))
+            )
+            if directory in package_dirs and all(
+                item in package_dirs for item in descendants
+            ):
+                module_parts = parts[index - 1:]
+                break
+        result[path] = (
+            _dotted_module(module_parts.copy()) if module_parts is not None else None
+        )
+    return result
+
+
 def _compact(source: bytes) -> str:
-    """Normalize syntax spelling without interpreting Python values."""
-    return b"".join(source.split()).decode("utf-8", "replace")
+    """Normalize token spacing while preserving literal token contents."""
+    text = source.decode("utf-8", "replace")
+    ignored = {
+        token.ENDMARKER,
+        token.INDENT,
+        token.DEDENT,
+        token.NEWLINE,
+        tokenize.NL,
+        token.ENCODING,
+    }
+    values = []
+    previous_type = None
+    for item in tokenize.generate_tokens(io.StringIO(text).readline):
+        if item.type in ignored or item.type == token.COMMENT:
+            continue
+        if previous_type in {token.NAME, token.NUMBER} and item.type in {
+            token.NAME,
+            token.NUMBER,
+        }:
+            values.append(" ")
+        values.append(item.string)
+        previous_type = item.type
+    return "".join(values)
 
 
 def _visibility(name: str) -> str:
@@ -70,8 +121,33 @@ class PythonAdapter:
     prefix = "py"
     extensions = (".py",)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        repository_id: str,
+        source_paths_or_module_names: (
+            tuple[str, ...] | Mapping[str, str | None]
+        ),
+        *,
+        parser_version: str = "tree-sitter-python",
+    ) -> None:
+        if (
+            not isinstance(repository_id, str)
+            or not repository_id
+            or "\0" in repository_id
+        ):
+            raise ValueError("invalid repository id")
+        self.repository_id = repository_id
+        self.parser_version = parser_version
         self._parser: Any | None = None
+        if isinstance(source_paths_or_module_names, Mapping):
+            self._module_names = {
+                _relative_path(path): module_name
+                for path, module_name in source_paths_or_module_names.items()
+            }
+        else:
+            self._module_names = derive_module_names(
+                tuple(source_paths_or_module_names)
+            )
 
     def _get_parser(self):
         global _PARSER
@@ -99,33 +175,58 @@ class PythonAdapter:
             raise TypeError("source must be bytes")
         relative_path = _relative_path(path)
         content_hash = hashlib.sha256(source).hexdigest()
-        placeholder_id = f"parse:{hashlib.sha256(relative_path.encode()).hexdigest()}"
+        stable_file_id = file_id(
+            self.language,
+            self.prefix,
+            self.repository_id,
+            relative_path,
+        )
+        module = self._module_names.get(relative_path)
+        module_local_name = module.rsplit(".", 1)[-1] if module else None
+        stable_module_id = (
+            module_id(
+                self.language,
+                self.prefix,
+                self.repository_id,
+                relative_path,
+                module,
+            )
+            if module else None
+        )
         file = FileRecord(
-            file_id=placeholder_id,
-            repository_id="",
+            file_id=stable_file_id,
+            repository_id=self.repository_id,
             path=relative_path,
             path_casefold=compact_casefold(relative_path),
             file_local_name=PurePosixPath(relative_path).name,
             file_name_tokens_casefold=token_key(PurePosixPath(relative_path).name),
             language=self.language,
             content_hash=content_hash,
-            parser_version="tree-sitter-python",
+            parser_version=self.parser_version,
             size_bytes=len(source),
             start_line=1,
-            end_line=1,
+            end_line=max(1, source.count(b"\n") + 1),
             start_byte=0,
             end_byte=len(source),
             module_key=relative_path,
-            module_id=None,
-            module_qualified_name=None,
-            module_local_name=None,
-            module_name_tokens_casefold=None,
+            module_id=stable_module_id,
+            module_qualified_name=module,
+            module_local_name=module_local_name,
+            module_name_tokens_casefold=(
+                token_key(module, module_local_name) if module else None
+            ),
         )
         try:
             root = self._get_parser().parse(source).root_node
         except (TypeError, ValueError):
+            warnings = {"parse_error"}
+            if module is None:
+                warnings.add("module_name_unavailable")
             return ParsedFile(
-                file=file, symbols=(), references=(), warnings=("parse_error",)
+                file=file,
+                symbols=(),
+                references=(),
+                warnings=tuple(sorted(warnings)),
             )
 
         error_ranges = sorted(
@@ -133,12 +234,38 @@ class PythonAdapter:
             for node in self._walk(root)
             if node.type == "ERROR" or node.is_missing
         )
-        module = _module_name(relative_path)
         symbols: list[SymbolRecord] = []
-        self._collect(root, source, file.file_id, module, (), error_ranges, symbols)
-        warnings = ("parse_error",) if error_ranges or root.has_error else ()
+        self._collect(
+            root,
+            source,
+            file.file_id,
+            file.module_key,
+            module or "",
+            (),
+            error_ranges,
+            symbols,
+        )
+        symbols_by_id = {}
+        duplicate_symbol_ids = set()
+        for symbol in symbols:
+            previous = symbols_by_id.get(symbol.symbol_id)
+            if previous is not None:
+                duplicate_symbol_ids.add(symbol.symbol_id)
+            if previous is None or symbol.start_byte >= previous.start_byte:
+                symbols_by_id[symbol.symbol_id] = symbol
+        symbols = list(symbols_by_id.values())
+        warning_codes = {
+            *({"parse_error"} if error_ranges or root.has_error else set()),
+            *({"module_name_unavailable"} if module is None else set()),
+        }
+        warnings = tuple(sorted((
+            *warning_codes,
+            *("duplicate_symbol_identity" for _item in duplicate_symbol_ids),
+        )))
         symbols.sort(key=lambda item: (item.start_byte or -1, item.qualified_name))
-        references = self._references(root, source, file, module, symbols, error_ranges)
+        references = self._references(
+            root, source, file, module or "", symbols, error_ranges
+        )
         return ParsedFile(
             file=file,
             symbols=tuple(symbols),
@@ -672,12 +799,21 @@ class PythonAdapter:
             stack.extend(reversed(current.children))
 
     def _collect(
-        self, node, source, file_id, module, parents, error_ranges, symbols
+        self,
+        node,
+        source,
+        file_id,
+        module_key,
+        module,
+        parents,
+        error_ranges,
+        symbols,
     ):
         stack = [(node, parents)]
         while stack:
             current, current_parents = stack.pop()
             for child in reversed(current.named_children):
+                entity = child
                 declaration = child
                 if child.type == "decorated_definition":
                     definition = child.child_by_field_name("definition")
@@ -695,7 +831,7 @@ class PythonAdapter:
                     else None
                 )
                 is_valid = name is not None and not self._intersects(
-                    declaration, error_ranges
+                    entity, error_ranges
                 )
                 if is_valid:
                     is_class = declaration.type == "class_definition"
@@ -721,12 +857,11 @@ class PythonAdapter:
                     signature = (
                         None
                         if is_class
-                        else self._signature(declaration, source, is_async)
+                        else self._signature(
+                            declaration, source, is_async, kind
+                        )
                     )
-                    own = source[declaration.start_byte:declaration.end_byte]
-                    identity = ":".join(
-                        (file_id, ".".join(qualified_parts), signature or "")
-                    )
+                    own = source[entity.start_byte:entity.end_byte]
                     metadata = json.dumps(
                         {"language": "python", "module": module},
                         sort_keys=True,
@@ -736,17 +871,24 @@ class PythonAdapter:
                     symbols.append(
                         SymbolRecord(
                             symbol_id=(
-                                f"parse:{hashlib.sha256(identity.encode()).hexdigest()}"
+                                symbol_id(
+                                    self.language,
+                                    self.prefix,
+                                    self.repository_id,
+                                    module_key,
+                                    qualified_name,
+                                    signature or "",
+                                )
                             ),
                             file_id=file_id,
                             kind=kind,
                             qualified_name=qualified_name,
                             local_name=name,
                             name_tokens_casefold=token_key(qualified_name, name),
-                            start_line=declaration.start_point[0] + 1,
-                            end_line=declaration.end_point[0] + 1,
-                            start_byte=declaration.start_byte,
-                            end_byte=declaration.end_byte,
+                            start_line=entity.start_point[0] + 1,
+                            end_line=entity.end_point[0] + 1,
+                            start_byte=entity.start_byte,
+                            end_byte=entity.end_byte,
                             signature=signature,
                             signature_casefold=compact_casefold(signature),
                             visibility=_visibility(name),
@@ -773,7 +915,7 @@ class PythonAdapter:
         )
 
     @staticmethod
-    def _signature(node, source: bytes, is_async: bool) -> str:
+    def _signature(node, source: bytes, is_async: bool, kind: str) -> str:
         parameters = node.child_by_field_name("parameters")
         result = node.child_by_field_name("return_type")
         value = _compact(source[parameters.start_byte:parameters.end_byte]) if parameters else "()"
@@ -781,4 +923,4 @@ class PythonAdapter:
             value = "async" + value
         if result is not None:
             value += "->" + _compact(source[result.start_byte:result.end_byte])
-        return value
+        return kind + "|" + value

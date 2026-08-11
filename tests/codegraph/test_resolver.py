@@ -7,10 +7,34 @@ from pathlib import Path
 
 import pytest
 
-from iwiki_mcp.codegraph.languages.python import PythonAdapter
+from iwiki_mcp.codegraph.languages.python import PythonAdapter as _PythonAdapter
 from iwiki_mcp.codegraph.models import ReferenceRecord, SymbolRecord
 from iwiki_mcp.codegraph.resolver import resolve_references
 from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+
+_MODULE_NAMES = {
+    "dynamic.py": "dynamic",
+    "models.py": "models",
+    "use.py": "use",
+    "pkg/a.py": "pkg.a",
+    "pkg/b.py": "pkg.b",
+    "pkg/bad.py": "pkg.bad",
+    "pkg/before.py": "pkg.before",
+    "pkg/empty.py": "pkg.empty",
+    "pkg/factory.py": "pkg.factory",
+    "pkg/local.py": "pkg.local",
+    "pkg/nested.py": "pkg.nested",
+    "pkg/sibling.py": "pkg.sibling",
+    "pkg/use.py": "pkg.use",
+}
+
+
+class PythonAdapter(_PythonAdapter):
+    """Resolver fixture adapter with explicit deterministic module evidence."""
+
+    def __init__(self):
+        super().__init__("domain", _MODULE_NAMES)
 
 
 def _parse(adapter, path, source):
@@ -266,8 +290,12 @@ def test_function_bindings_hide_imported_alias_calls_before_binding():
     relations = adapter.resolve_references(
         consumer, SymbolIndex.from_parsed_files((provider, consumer))
     ).relations
+    calls = sorted(
+        (item for item in relations if item.relation_type == "CALLS"),
+        key=lambda item: item.source_line,
+    )
     assert [(item.source_line, item.target_reference, item.resolution_state)
-            for item in relations if item.relation_type == "CALLS"] == [
+            for item in calls] == [
                 (4, "f", "unresolved"),
                 (6, "f", "unresolved"),
                 (9, "f", "unresolved"),
@@ -545,7 +573,10 @@ def test_receiver_calls_require_matching_unshadowed_method_receiver():
     relations = adapter.resolve_references(
         parsed, SymbolIndex.from_parsed_files((parsed,))
     ).relations
-    calls = [item for item in relations if item.relation_type == "CALLS"]
+    calls = sorted(
+        (item for item in relations if item.relation_type == "CALLS"),
+        key=lambda item: item.source_line,
+    )
 
     assert [(item.source_line, item.target_reference, item.resolution_state)
             for item in calls] == [
@@ -577,7 +608,10 @@ def test_receiver_member_rebindings_suppress_method_resolution():
         parsed, SymbolIndex.from_parsed_files((parsed,))
     ).relations
 
-    calls = [item for item in relations if item.relation_type == "CALLS"]
+    calls = sorted(
+        (item for item in relations if item.relation_type == "CALLS"),
+        key=lambda item: item.source_line,
+    )
     assert [(item.source_line, item.target_reference, item.resolution_state)
             for item in calls] == [
                 (7, "self.method", "unresolved"),
@@ -630,8 +664,12 @@ def test_external_class_member_rebinding_invalidates_receiver_calls():
         parsed, SymbolIndex.from_parsed_files((parsed,))
     ).relations
 
+    calls = sorted(
+        (item for item in relations if item.relation_type == "CALLS"),
+        key=lambda item: item.source_line,
+    )
     assert [(item.source_line, item.target_reference, item.resolution_state)
-            for item in relations if item.relation_type == "CALLS"] == [
+            for item in calls] == [
                 (6, "self.method", "unresolved"),
                 (10, "cls.method", "unresolved"),
             ]
@@ -846,8 +884,12 @@ def test_dynamic_class_member_monkeypatch_invalidates_receiver_calls(monkeypatch
         parsed, SymbolIndex.from_parsed_files((parsed,))
     ).relations
 
+    calls = sorted(
+        (item for item in relations if item.relation_type == "CALLS"),
+        key=lambda item: item.source_line,
+    )
     assert [(item.target_reference, item.resolution_state)
-            for item in relations if item.relation_type == "CALLS"] == [
+            for item in calls] == [
                 ("self.method", "unresolved"),
                 ("setattr", "unresolved")
                 if monkeypatch.startswith("setattr")

@@ -300,8 +300,8 @@ class CodeGraphRuntime:
             ).resolve(ensure_excluded=False)
             factories = adapter_factories or {}
             try:
-                adapters = {
-                    language: factories[language].bind()
+                selected_factories = {
+                    language: factories[language]
                     for language in self.config.languages
                 }
             except KeyError:
@@ -309,16 +309,16 @@ class CodeGraphRuntime:
                 self.paths = None
                 return
             self._parser_version = ";".join(
-                f"{language}:{binding.parser_version}"
-                for language, binding in adapters.items()
+                f"{language}:{factory.parser_version}"
+                for language, factory in selected_factories.items()
             )
             self._grammar_version = ";".join(
-                f"{language}:{binding.grammar_version}"
-                for language, binding in adapters.items()
+                f"{language}:{factory.grammar_version}"
+                for language, factory in selected_factories.items()
             )
             self._adapter_version = ";".join(
-                f"{language}:{binding.adapter_version}"
-                for language, binding in adapters.items()
+                f"{language}:{factory.adapter_version}"
+                for language, factory in selected_factories.items()
             )
             self._store = CodeGraphStore(
                 self.paths.database,
@@ -330,7 +330,7 @@ class CodeGraphRuntime:
                 domain=binding.primary,
                 config=self.config,
                 paths=self.paths,
-                adapters=adapters,
+                adapter_factories=selected_factories,
                 resolver_version=self._resolver_version,
                 wiki_selector_resolver=_NoopWikiSelectorResolver(),
             )
@@ -944,7 +944,10 @@ class CodeGraphRuntime:
         assert self._indexer is not None and self.config is not None
         if languages is not None and (
             not languages
-            or any(language not in self._indexer.adapters for language in languages)
+            or any(
+                language not in self._indexer.adapter_factories
+                for language in languages
+            )
         ):
             return _invalid_config()
         deadline = time.monotonic() + self.config.max_rebuild_seconds

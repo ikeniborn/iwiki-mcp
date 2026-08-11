@@ -29,12 +29,9 @@ from .languages.base import LanguageAdapter
 from .location import CodeGraphPaths
 from .models import (
     CodeGraphError,
-    FileRecord,
     ParsedFile,
     RelationRecord,
-    file_id,
     relation_id,
-    symbol_id,
 )
 from .resolver import SymbolIndex
 from .schema import SCHEMA_VERSION, TABLES, CodeGraphStoreError
@@ -51,6 +48,7 @@ _PHASE_NAMES = (
     "publication",
 )
 KNOWN_WARNING_CODES = frozenset({
+    "duplicate_symbol_identity",
     "directory_changed",
     "directory_depth_limit",
     "directory_limit_reached",
@@ -66,6 +64,7 @@ KNOWN_WARNING_CODES = frozenset({
     "metadata_unavailable",
     "metadata_reconstructed",
     "metrics_incomplete",
+    "module_name_unavailable",
     "parse_error",
     "secret_excluded",
     "symlink_excluded",
@@ -150,14 +149,18 @@ class AdapterBinding:
 class AdapterFactory:
     """Lazy composition input for one language adapter implementation."""
 
-    create: Callable[[], LanguageAdapter]
+    create: Callable[[tuple[str, ...]], LanguageAdapter]
+    extensions: tuple[str, ...]
     parser_version: str
     grammar_version: str
     adapter_version: str
 
-    def bind(self) -> AdapterBinding:
+    def bind(
+        self,
+        source_paths: tuple[str, ...] = (),
+    ) -> AdapterBinding:
         return AdapterBinding(
-            adapter=self.create(),
+            adapter=self.create(source_paths),
             parser_version=self.parser_version,
             grammar_version=self.grammar_version,
             adapter_version=self.adapter_version,
@@ -236,7 +239,7 @@ class CodeGraphIndexer:
         domain: str,
         config: CodeGraphConfig,
         paths: CodeGraphPaths,
-        adapters: Mapping[str, AdapterBinding],
+        adapter_factories: Mapping[str, AdapterFactory],
         resolver_version: str,
         wiki_selector_resolver: WikiSelectorResolver,
     ) -> None:
@@ -245,7 +248,7 @@ class CodeGraphIndexer:
         self.domain = domain
         self.config = config
         self.paths = paths
-        self.adapters = dict(adapters)
+        self.adapter_factories = dict(adapter_factories)
         self.resolver_version = resolver_version
         self.wiki_selector_resolver = wiki_selector_resolver
         self.store = CodeGraphStore(
@@ -260,15 +263,20 @@ class CodeGraphIndexer:
     ) -> CodeGraphConfig:
         if languages is None:
             return config
-        if not languages or any(item not in self.adapters for item in languages):
+        if not languages or any(
+            item not in self.adapter_factories for item in languages
+        ):
             raise CodeGraphBuildError("invalid code graph languages")
         return replace(config, languages=tuple(languages))
 
-    def _bindings(
+    def _factories(
         self, config: CodeGraphConfig
-    ) -> tuple[AdapterBinding, ...]:
+    ) -> tuple[tuple[str, AdapterFactory], ...]:
         try:
-            return tuple(self.adapters[language] for language in config.languages)
+            return tuple(
+                (language, self.adapter_factories[language])
+                for language in config.languages
+            )
         except KeyError as exc:
             raise CodeGraphBuildError(
                 "invalid code graph languages"
@@ -276,27 +284,27 @@ class CodeGraphIndexer:
 
     def _parser_version(self, config: CodeGraphConfig) -> str:
         return ";".join(
-            f"{binding.adapter.language}:{binding.parser_version}"
-            for binding in self._bindings(config)
+            f"{language}:{factory.parser_version}"
+            for language, factory in self._factories(config)
         )
 
     def _grammar_version(self, config: CodeGraphConfig) -> str:
         return ";".join(
-            f"{binding.adapter.language}:{binding.grammar_version}"
-            for binding in self._bindings(config)
+            f"{language}:{factory.grammar_version}"
+            for language, factory in self._factories(config)
         )
 
     def _adapter_version(self, config: CodeGraphConfig) -> str:
         return ";".join(
-            f"{binding.adapter.language}:{binding.adapter_version}"
-            for binding in self._bindings(config)
+            f"{language}:{factory.adapter_version}"
+            for language, factory in self._factories(config)
         )
 
     def _extensions(self, config: CodeGraphConfig) -> tuple[str, ...]:
         return tuple(sorted({
             extension
-            for binding in self._bindings(config)
-            for extension in binding.adapter.extensions
+            for _language, factory in self._factories(config)
+            for extension in factory.extensions
         }))
 
     @staticmethod
@@ -488,14 +496,30 @@ class CodeGraphIndexer:
     def _parse(
         self,
         discovered: DiscoverySnapshot,
-    ) -> tuple[tuple[ParsedFile, ...], tuple[str, ...]]:
+        config: CodeGraphConfig,
+    ) -> tuple[
+        tuple[ParsedFile, ...],
+        tuple[str, ...],
+        Mapping[str, AdapterBinding],
+    ]:
+        adapters = {}
+        for language, factory in self._factories(config):
+            source_paths = tuple(sorted(
+                source.path
+                for source in discovered.files
+                if any(
+                    source.path.casefold().endswith(extension.casefold())
+                    for extension in factory.extensions
+                )
+            ))
+            adapters[language] = factory.bind(source_paths)
         parsed_files = []
         warnings = []
         for source in discovered.files:
             binding = next(
                 (
                     candidate
-                    for candidate in self.adapters.values()
+                    for candidate in adapters.values()
                     if any(
                         source.path.casefold().endswith(extension.casefold())
                         for extension in candidate.adapter.extensions
@@ -510,86 +534,35 @@ class CodeGraphIndexer:
                 parsed = adapter.parse_file(source.content, source.path)
             except Exception as exc:
                 raise CodeGraphParseError("code graph parse failed") from exc
-            language = adapter.language
-            stable_file_id = file_id(
-                language,
-                adapter.prefix,
+            expected = (
                 self.domain,
                 source.path,
+                source.content_hash,
+                source.size_bytes,
+                binding.parser_version,
+                adapter.language,
             )
-            remapped_symbols = []
-            symbol_ids = {}
-            for item in parsed.symbols:
-                stable_symbol_id = symbol_id(
-                    language,
-                    adapter.prefix,
-                    self.domain,
-                    source.path,
-                    item.qualified_name,
-                    item.signature or "",
-                )
-                symbol_ids[item.symbol_id] = stable_symbol_id
-                remapped_symbols.append(
-                    replace(
-                        item,
-                        symbol_id=stable_symbol_id,
-                        file_id=stable_file_id,
-                    )
-                )
-            remapped_references = tuple(
-                replace(
-                    item,
-                    source_symbol_id=(
-                        symbol_ids.get(item.source_symbol_id)
-                        if item.source_symbol_id is not None
-                        else None
-                    ),
-                    source_file_id=stable_file_id,
-                )
-                for item in parsed.references
+            actual = (
+                parsed.file.repository_id,
+                parsed.file.path,
+                parsed.file.content_hash,
+                parsed.file.size_bytes,
+                parsed.file.parser_version,
+                parsed.file.language,
             )
-            parsed_files.append(
-                ParsedFile(
-                    file=FileRecord(
-                        file_id=stable_file_id,
-                        repository_id=self.domain,
-                        path=source.path,
-                        path_casefold=parsed.file.path_casefold,
-                        file_local_name=parsed.file.file_local_name,
-                        file_name_tokens_casefold=(
-                            parsed.file.file_name_tokens_casefold
-                        ),
-                        language=language,
-                        content_hash=source.content_hash,
-                        parser_version=binding.parser_version,
-                        size_bytes=source.size_bytes,
-                        start_line=parsed.file.start_line,
-                        end_line=parsed.file.end_line,
-                        start_byte=parsed.file.start_byte,
-                        end_byte=parsed.file.end_byte,
-                        module_key=parsed.file.module_key,
-                        module_id=parsed.file.module_id,
-                        module_qualified_name=parsed.file.module_qualified_name,
-                        module_local_name=parsed.file.module_local_name,
-                        module_name_tokens_casefold=(
-                            parsed.file.module_name_tokens_casefold
-                        ),
-                    ),
-                    symbols=tuple(remapped_symbols),
-                    references=remapped_references,
-                    warnings=parsed.warnings,
-                )
-            )
+            if actual != expected:
+                raise CodeGraphParseError("adapter record context mismatch")
+            parsed_files.append(parsed)
             warnings.extend(parsed.warnings)
-        return tuple(parsed_files), tuple(warnings)
+        return tuple(parsed_files), tuple(warnings), adapters
 
-    def _resolve(self, parsed_files: tuple[ParsedFile, ...]):
+    def _resolve(self, parsed_files, adapters):
         index = SymbolIndex.from_parsed_files(parsed_files)
         relations = []
         warnings = []
         for parsed in parsed_files:
             try:
-                adapter = self.adapters[parsed.file.language].adapter
+                adapter = adapters[parsed.file.language].adapter
                 result = adapter.resolve_references(parsed, index)
             except KeyError as exc:
                 raise CodeGraphBuildError(
@@ -614,6 +587,7 @@ class CodeGraphIndexer:
     def _unresolved_relations(
         self,
         parsed_files: tuple[ParsedFile, ...],
+        adapters: Mapping[str, AdapterBinding],
     ) -> tuple[RelationRecord, ...]:
         relations = []
         for parsed in parsed_files:
@@ -622,7 +596,7 @@ class CodeGraphIndexer:
                     reference.source_symbol_id or reference.source_file_id
                 )
                 target = reference.target_reference or ""
-                adapter = self.adapters[parsed.file.language].adapter
+                adapter = adapters[parsed.file.language].adapter
                 source_line = reference.source_line or 1
                 source_byte = reference.source_byte or 0
                 relations.append(RelationRecord(
@@ -1041,14 +1015,20 @@ class CodeGraphIndexer:
                 staging = self.store.create_staging_path()
                 _check_deadline(deadline, self.paths.lock)
                 phase = time.monotonic()
-                parsed_files, parser_warnings = self._parse(discovered)
+                parsed_files, parser_warnings, adapters = self._parse(
+                    discovered,
+                    config,
+                )
                 timings["parsing"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
 
                 indexed_at = datetime.now(timezone.utc).isoformat().replace(
                     "+00:00", "Z"
                 )
-                unresolved_relations = self._unresolved_relations(parsed_files)
+                unresolved_relations = self._unresolved_relations(
+                    parsed_files,
+                    adapters,
+                )
                 snapshot = self._initial_snapshot(
                     parsed_files=parsed_files,
                     unresolved_relations=unresolved_relations,
@@ -1067,7 +1047,10 @@ class CodeGraphIndexer:
                 _check_deadline(deadline, self.paths.lock)
 
                 phase = time.monotonic()
-                relations, resolver_warnings = self._resolve(parsed_files)
+                relations, resolver_warnings = self._resolve(
+                    parsed_files,
+                    adapters,
+                )
                 persistence_phase = time.monotonic()
                 staging_store.replace_relations(self._relation_rows(relations))
                 timings["persistence"] += _elapsed_ms(persistence_phase)

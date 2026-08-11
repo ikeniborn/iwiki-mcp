@@ -37,7 +37,7 @@ def _runtime(
     *,
     parser_version: str | None = None,
     grammar_version: str | None = None,
-    adapter_version: str = "python-adapter-v1",
+    adapter_version: str = "python-adapter-v2",
     resolver_version: str = "resolver-v1",
 ) -> CodeGraphRuntime:
     parser_version = parser_version or (
@@ -49,11 +49,20 @@ def _runtime(
         + _distribution_version("tree-sitter-language-pack"),
         parser_version,
     ))
+
+    def create_python_adapter(source_paths):
+        return PythonAdapter(
+            binding.primary,
+            source_paths,
+            parser_version=parser_version,
+        )
+
     return CodeGraphRuntime(
         binding,
         adapter_factories={
             "python": AdapterFactory(
-                create=PythonAdapter,
+                create=create_python_adapter,
+                extensions=(".py",),
                 parser_version=parser_version,
                 grammar_version=grammar_version,
                 adapter_version=adapter_version,
@@ -331,6 +340,7 @@ def seed_binding(tmp_path):
     _git(project, "config", "user.email", "test@example.com")
     _git(project, "config", "user.name", "Test User")
     (project / "src" / "pkg").mkdir(parents=True)
+    (project / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (project / "src" / "pkg" / "service.py").write_text(
         "class Service:\n    def run(self, value: int = 1) -> str:\n"
         "        return str(value)\n",

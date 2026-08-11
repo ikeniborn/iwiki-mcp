@@ -551,13 +551,17 @@ def test_discovery_occurrence_keys_preserve_duplicate_relative_paths() -> None:
 
     occurrence_keys = [module_key(source.path) for source in snapshot.files]
     assert occurrence_keys == [
+        "namespace/pkg/service.py",
+        "root_a/pkg/__init__.py",
         "root_a/pkg/service.py",
+        "root_b/pkg/__init__.py",
         "root_b/pkg/service.py",
     ]
-    assert len(set(occurrence_keys)) == 2
+    assert len(set(occurrence_keys)) == 5
     canonical_rows = _source_rows(snapshot.files)
     assert [path for path, _content_hash in canonical_rows] == occurrence_keys
-    assert canonical_rows[0][1] == canonical_rows[1][1]
+    assert canonical_rows[1][1] == canonical_rows[3][1]
+    assert canonical_rows[2][1] == canonical_rows[4][1]
 
 
 def test_discovery_occurrence_keys_preserve_unicode_relative_paths() -> None:
