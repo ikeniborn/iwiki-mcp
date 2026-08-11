@@ -7,6 +7,8 @@ import time
 import pytest
 
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph import query as query_module
+from iwiki_mcp.codegraph import models as models_module
 from iwiki_mcp.codegraph.indexer import CodeGraphStaleError
 from iwiki_mcp.codegraph.query import (
     CodeGraphQuery,
@@ -146,11 +148,11 @@ def test_search_orders_each_symbol_by_its_strongest_match(search_connection):
     results = query.search(search_connection, request)
 
     assert [item.match for item in results] == [
-        "exact_qualified",
-        "exact_local",
-        "prefix",
-        "lexical",
-        "lexical",
+        "qualified_exact",
+        "local_exact",
+        "canonical_prefix",
+        "canonical_lexical",
+        "canonical_lexical",
         "signature",
         "path",
     ]
@@ -208,11 +210,11 @@ def test_prefix_tier_does_not_refetch_exact_local_rows(search_connection):
     results = CodeGraphQuery("backend").search(search_connection, request)
 
     assert [(item.symbol_id, item.match) for item in results] == [
-        ("symbol:tier-qualified", "exact_qualified"),
-        ("symbol:tier-local-overlap", "exact_local"),
-        ("symbol:tier-prefix-1", "prefix"),
-        ("symbol:tier-prefix-2", "prefix"),
-        ("symbol:tier-prefix-3", "prefix"),
+        ("symbol:tier-qualified", "qualified_exact"),
+        ("symbol:tier-local-overlap", "local_exact"),
+        ("symbol:tier-prefix-1", "canonical_prefix"),
+        ("symbol:tier-prefix-2", "canonical_prefix"),
+        ("symbol:tier-prefix-3", "canonical_prefix"),
     ]
 
 
@@ -228,7 +230,7 @@ def test_lexical_boundary_is_enforced_before_candidate_limit(search_connection):
     results = CodeGraphQuery("backend").search(search_connection, request)
 
     assert [item.local_name for item in results] == ["batch_run"]
-    assert results[0].match == "lexical"
+    assert results[0].match == "canonical_lexical"
 
 
 def test_tokenless_query_does_not_crowd_signature_or_path_fallback(
@@ -285,8 +287,8 @@ def test_unicode_casefold_is_shared_by_sql_and_strongest_classification(
     results = CodeGraphQuery("backend").search(search_connection, request)
 
     assert [(item.symbol_id, item.match) for item in results] == [
-        ("symbol:uq", "lexical"),
-        ("symbol:ul", "lexical"),
+        ("symbol:uq", "canonical_lexical"),
+        ("symbol:ul", "canonical_lexical"),
         ("symbol:us", "signature"),
         ("symbol:unicode-path", "path"),
     ]
@@ -305,7 +307,7 @@ def test_search_applies_filters_limit_and_range_contract(search_connection):
 
     assert len(results) == 1
     item = results[0]
-    assert item.match == "lexical"
+    assert item.match == "canonical_lexical"
     assert item.path == "src/lexical_a.py"
     assert item.start_line >= 1
     assert item.end_line >= item.start_line
@@ -403,6 +405,40 @@ def test_search_rejects_invalid_configuration(search_connection, arguments, mess
         validate_search_request(**arguments)
 
 
+def test_query_text_validation_is_pure_and_bounded(monkeypatch):
+    assert query_module._TOKENS is models_module._TOKENS
+    assert not hasattr(query_module, "re")
+
+    def unexpected_io(*_args, **_kwargs):
+        pytest.fail("query validation performed I/O")
+
+    monkeypatch.setattr(query_module.sqlite3, "connect", unexpected_io)
+
+    request = validate_search_request(" Straße ")
+    assert request.query == " Straße "
+    assert request.tokens == ("strasse",)
+    assert validate_search_request("x" * 4096).query == "x" * 4096
+
+    for invalid_query in (
+        "nul\0query",
+        "lone-surrogate-\ud800",
+        "é" * 2049,
+    ):
+        with pytest.raises(CodeGraphQueryError, match="query"):
+            validate_search_request(invalid_query)
+
+    with pytest.raises(CodeGraphQueryError, match="path"):
+        validate_search_request("run", path="\ud800")
+
+
+def test_query_rejects_more_than_64_distinct_tokens():
+    assert len(validate_search_request(" ".join(f"t{i}" for i in range(64))).tokens) == 64
+    assert validate_search_request("token " * 100).tokens == ("token",)
+
+    with pytest.raises(CodeGraphQueryError, match="query"):
+        validate_search_request(" ".join(f"t{i}" for i in range(65)))
+
+
 def test_runtime_search_returns_metadata_relative_ranges_and_no_stale_rows(
     ready_runtime,
 ):
@@ -414,9 +450,16 @@ def test_runtime_search_returns_metadata_relative_ranges_and_no_stale_rows(
     assert ready["fresh"] is True
     assert ready["results"]
     assert set(ready["results"][0]) == {
-        "symbol_id", "kind", "qualified_name", "local_name", "signature",
-        "path", "start_line", "end_line", "start_byte", "end_byte", "match",
+        "entity_id", "entity_type", "file_id", "module_id", "symbol_id",
+        "kind", "qualified_name", "local_name", "signature", "path",
+        "start_line", "end_line", "start_byte", "end_byte", "match",
+        "matched_alias", "alias_ambiguous", "alias_target_count",
     }
+    assert ready["results"][0]["entity_id"] == ready["results"][0]["symbol_id"]
+    assert ready["results"][0]["entity_type"] == "symbol"
+    assert ready["results"][0]["file_id"] is not None
+    assert ready["results"][0]["module_id"] is None
+    assert ready["results"][0]["match"] == "local_exact"
     assert not ready["results"][0]["path"].startswith("/")
 
     dirty = ready_runtime.with_state("dirty", auto_rebuild="off")
@@ -605,7 +648,7 @@ def test_query_stops_before_lower_tiers_when_stronger_results_fill_limit(
         if statement.lstrip().startswith("SELECT")
     ]
     assert [(item.qualified_name, item.match) for item in results] == [
-        ("run", "exact_qualified"),
+        ("run", "qualified_exact"),
     ]
     assert len(selects) == 1
     assert all(" CASE " not in statement for statement in selects)
@@ -712,7 +755,7 @@ def test_fallback_excludes_only_returned_stronger_symbol_ids(
     stronger_ids = [
         item.symbol_id
         for item in results
-        if item.match in {"exact_qualified", "exact_local", "prefix"}
+        if item.match in {"qualified_exact", "local_exact", "canonical_prefix"}
     ]
     assert stronger_ids == [
         "symbol:qualified",

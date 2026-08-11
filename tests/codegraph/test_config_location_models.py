@@ -1,8 +1,13 @@
 import hashlib
+import inspect
 import subprocess
+import unicodedata
+from dataclasses import asdict, fields
+from typing import Literal, get_type_hints
 
 import pytest
 
+from iwiki_mcp.codegraph import models as models_module
 from iwiki_mcp.codegraph.config import (
     CodeGraphConfig,
     CodeGraphConfigError,
@@ -14,11 +19,11 @@ from iwiki_mcp.codegraph.location import (
 )
 from iwiki_mcp.codegraph.models import (
     FileRecord,
-    LANGUAGE_PREFIXES,
-    file_id,
-    relation_id,
-    symbol_id,
+    RelationRecord,
+    SearchResult,
+    SymbolRecord,
 )
+from iwiki_mcp.codegraph.languages.python import PythonAdapter
 
 
 def test_code_graph_config_defaults_and_mapping_values():
@@ -151,22 +156,339 @@ def test_location_resolver_rejects_unsafe_domain(tmp_path):
         CodeGraphLocationResolver(str(tmp_path), "../unsafe", str(tmp_path)).resolve()
 
 
-def test_stable_ids_use_python_prefix_and_nul_delimited_hashes():
-    assert LANGUAGE_PREFIXES == {"python": "py"}
-    digest = hashlib.sha256(b"file\x00domain\x00python\x00pkg/module.py").hexdigest()
-    assert file_id("domain", "python", "pkg/module.py") == f"py:file:{digest}"
-    assert symbol_id("python", "domain", "pkg.module", "A.method", "(x: int)").startswith(
-        "py:symbol:"
+def test_schema_v2_identity_normalization_and_typed_records():
+    assert models_module.NORMALIZER_VERSION == "casefold-token-v1"
+    assert models_module.UNICODE_DATA_VERSION == unicodedata.unidata_version
+    assert not hasattr(models_module, "LANGUAGE_PREFIXES")
+    assert PythonAdapter.prefix == "py"
+    expected_record_types = {
+        FileRecord: {
+            "file_id": str,
+            "repository_id": str,
+            "path": str,
+            "path_casefold": str | None,
+            "file_local_name": str,
+            "file_name_tokens_casefold": str,
+            "language": str,
+            "content_hash": str,
+            "parser_version": str,
+            "size_bytes": int,
+            "start_line": int,
+            "end_line": int,
+            "start_byte": int,
+            "end_byte": int,
+            "module_key": str,
+            "module_id": str | None,
+            "module_qualified_name": str | None,
+            "module_local_name": str | None,
+            "module_name_tokens_casefold": str | None,
+        },
+        SymbolRecord: {
+            "symbol_id": str,
+            "file_id": str,
+            "kind": Literal["class", "function", "async_function", "method"],
+            "qualified_name": str,
+            "local_name": str,
+            "name_tokens_casefold": str,
+            "start_line": int,
+            "end_line": int,
+            "start_byte": int,
+            "end_byte": int,
+            "signature": str | None,
+            "signature_casefold": str | None,
+            "visibility": str | None,
+            "content_hash": str,
+            "metadata_json": str,
+        },
+        RelationRecord: {
+            "relation_id": str,
+            "source_file_id": str,
+            "source_module_id": str | None,
+            "source_symbol_id": str | None,
+            "target_module_id": str | None,
+            "target_symbol_id": str | None,
+            "target_reference": str | None,
+            "relation_type": Literal["DECLARES", "IMPORTS", "CALLS", "INHERITS"],
+            "source_start_line": int,
+            "source_end_line": int,
+            "source_start_byte": int,
+            "source_end_byte": int,
+            "binding_name": str | None,
+            "binding_kind": Literal["implicit_binding", "explicit_alias"] | None,
+            "binding_name_tokens_casefold": str | None,
+            "confidence": float,
+            "resolution_state": Literal[
+                "resolved", "partially_resolved", "unresolved", "ambiguous"
+            ],
+            "metadata_json": str,
+        },
+        SearchResult: {
+            "entity_id": str,
+            "entity_type": Literal["file", "module", "symbol"],
+            "file_id": str | None,
+            "module_id": str | None,
+            "symbol_id": str | None,
+            "kind": Literal[
+                "file", "module", "class", "function", "async_function", "method"
+            ],
+            "qualified_name": str,
+            "local_name": str,
+            "signature": str | None,
+            "path": str,
+            "start_line": int,
+            "end_line": int,
+            "start_byte": int,
+            "end_byte": int,
+            "match": Literal[
+                "qualified_exact",
+                "local_exact",
+                "alias_exact",
+                "canonical_prefix",
+                "alias_prefix",
+                "canonical_lexical",
+                "alias_lexical",
+                "signature",
+                "path",
+            ],
+            "matched_alias": str | None,
+            "alias_ambiguous": bool,
+            "alias_target_count": int,
+        },
+    }
+    for record_type, expected_types in expected_record_types.items():
+        assert tuple(field.name for field in fields(record_type)) == tuple(expected_types)
+        assert get_type_hints(record_type) == expected_types
+        parameters = inspect.signature(record_type).parameters
+        assert all(
+            parameters[name].default is inspect.Parameter.empty
+            for name in expected_types
+        )
+    with pytest.raises(TypeError):
+        FileRecord(path="a.py")
+    with pytest.raises(TypeError):
+        SymbolRecord()
+
+    assert models_module.token_key("Straße_Name", "NAME Straße") == (
+        "\x1fname\x1fstrasse\x1f"
     )
-    assert relation_id("python", "source", "calls", "3:2", "target").startswith(
-        "py:relation:"
+    assert models_module.token_key("e\N{COMBINING ACUTE ACCENT}") != (
+        models_module.token_key("\N{LATIN SMALL LETTER E WITH ACUTE}")
     )
-    with pytest.raises(ValueError):
-        file_id("domain", "typescript", "pkg/module.ts")
+    assert models_module.compact_casefold(None) is None
+    assert models_module.compact_casefold("ascii/path.py") is None
+    assert models_module.compact_casefold("Straße.py") == "strasse.py"
+    assert models_module.module_key("pkg/./module.py") == "pkg/module.py"
+    for unsafe_path in (
+        "",
+        "/pkg/module.py",
+        "../module.py",
+        "pkg\\module.py",
+        "a/\0b",
+        "\ud800",
+    ):
+        with pytest.raises(ValueError):
+            models_module.module_key(unsafe_path)
+
+    file_digest = hashlib.sha256(
+        b"file\x00domain\x00python\x00pkg/module.py"
+    ).hexdigest()
+    expected_file_id = f"py:file:{file_digest}"
+    assert models_module.file_id(
+        "python", "py", "domain", "pkg/module.py"
+    ) == expected_file_id
+
+    module_digest = hashlib.sha256(
+        b"module\x00python\x00domain\x00pkg/module.py\x00pkg.module"
+    ).hexdigest()
+    expected_module_id = f"py:module:{module_digest}"
+    assert models_module.module_id(
+        "python", "py", "domain", "pkg/module.py", "pkg.module"
+    ) == expected_module_id
+
+    symbol_digest = hashlib.sha256(
+        b"symbol\x00python\x00domain\x00pkg/module.py\x00pkg.module.run\x00function|run()"
+    ).hexdigest()
+    expected_symbol_id = f"py:symbol:{symbol_digest}"
+    assert models_module.symbol_id(
+        "python",
+        "py",
+        "domain",
+        "pkg/module.py",
+        "pkg.module.run",
+        "function|run()",
+    ) == expected_symbol_id
+
+    relation_parts = (
+        "relation",
+        "python",
+        "domain",
+        expected_symbol_id,
+        "CALLS",
+        "3",
+        "3",
+        "10",
+        "18",
+        expected_symbol_id,
+        "",
+        "",
+        "",
+    )
+    relation_digest = hashlib.sha256("\0".join(relation_parts).encode()).hexdigest()
+    expected_relation_id = f"py:relation:{relation_digest}"
+    assert models_module.relation_id(
+        "python",
+        "py",
+        "domain",
+        expected_symbol_id,
+        "CALLS",
+        3,
+        3,
+        10,
+        18,
+        expected_symbol_id,
+        None,
+        None,
+        None,
+    ) == expected_relation_id
+
+    file_record = FileRecord(
+        file_id=expected_file_id,
+        repository_id="domain",
+        path="pkg/module.py",
+        path_casefold=None,
+        file_local_name="module.py",
+        file_name_tokens_casefold="\x1fmodule\x1fpy\x1f",
+        language="python",
+        content_hash="file-hash",
+        parser_version="tree-sitter-python-v1",
+        size_bytes=120,
+        start_line=1,
+        end_line=8,
+        start_byte=0,
+        end_byte=120,
+        module_key="pkg/module.py",
+        module_id=expected_module_id,
+        module_qualified_name="pkg.module",
+        module_local_name="module",
+        module_name_tokens_casefold="\x1fmodule\x1fpkg\x1f",
+    )
+    symbol_record = SymbolRecord(
+        symbol_id=expected_symbol_id,
+        file_id=expected_file_id,
+        kind="function",
+        qualified_name="pkg.module.run",
+        local_name="run",
+        name_tokens_casefold="\x1fmodule\x1fpkg\x1frun\x1f",
+        start_line=3,
+        end_line=4,
+        start_byte=10,
+        end_byte=35,
+        signature="function|run()",
+        signature_casefold=None,
+        visibility="public",
+        content_hash="symbol-hash",
+        metadata_json="{}",
+    )
+    relation_record = RelationRecord(
+        relation_id=expected_relation_id,
+        source_file_id=expected_file_id,
+        source_module_id=None,
+        source_symbol_id=expected_symbol_id,
+        target_module_id=None,
+        target_symbol_id=expected_symbol_id,
+        target_reference=None,
+        relation_type="CALLS",
+        source_start_line=3,
+        source_end_line=3,
+        source_start_byte=10,
+        source_end_byte=18,
+        binding_name=None,
+        binding_kind=None,
+        binding_name_tokens_casefold=None,
+        confidence=1.0,
+        resolution_state="resolved",
+        metadata_json="{}",
+    )
+    search_result = SearchResult(
+        entity_id=expected_symbol_id,
+        entity_type="symbol",
+        file_id=expected_file_id,
+        module_id=expected_module_id,
+        symbol_id=expected_symbol_id,
+        kind="function",
+        qualified_name="pkg.module.run",
+        local_name="run",
+        signature="function|run()",
+        path="pkg/module.py",
+        start_line=3,
+        end_line=4,
+        start_byte=10,
+        end_byte=35,
+        match="qualified_exact",
+        matched_alias=None,
+        alias_ambiguous=False,
+        alias_target_count=0,
+    )
+
+    assert file_record.module_id == expected_module_id
+    assert (file_record.start_line, file_record.end_line) == (1, 8)
+    assert (file_record.start_byte, file_record.end_byte) == (0, 120)
+    assert symbol_record.symbol_id == search_result.entity_id
+    assert relation_record.target_symbol_id == expected_symbol_id
+    assert (relation_record.source_start_line, relation_record.source_end_line) == (3, 3)
+    assert (relation_record.source_start_byte, relation_record.source_end_byte) == (10, 18)
+    with pytest.raises(AttributeError):
+        file_record.path = "other.py"
+
+
+def test_schema_v2_records_do_not_synthesize_persisted_fields():
+    record = RelationRecord(
+        relation_id="py:relation:id",
+        source_file_id="py:file:source",
+        source_module_id="py:module:source",
+        source_symbol_id=None,
+        target_module_id="py:module:target",
+        target_symbol_id=None,
+        target_reference=None,
+        relation_type="IMPORTS",
+        source_start_line=1,
+        source_end_line=1,
+        source_start_byte=0,
+        source_end_byte=8,
+        binding_name="alias",
+        binding_kind="explicit_alias",
+        binding_name_tokens_casefold=None,
+        confidence=1.0,
+        resolution_state="resolved",
+        metadata_json="{}",
+    )
+
+    assert record.binding_name_tokens_casefold is None
+    assert asdict(record)["binding_name_tokens_casefold"] is None
 
 
 def test_models_are_frozen():
-    record = FileRecord("id", "repo", "a.py", "python", "hash", "v1", 1)
+    record = FileRecord(
+        file_id="id",
+        repository_id="repo",
+        path="a.py",
+        path_casefold=None,
+        file_local_name="a.py",
+        file_name_tokens_casefold="\x1fa\x1fpy\x1f",
+        language="python",
+        content_hash="hash",
+        parser_version="v1",
+        size_bytes=1,
+        start_line=1,
+        end_line=1,
+        start_byte=0,
+        end_byte=1,
+        module_key="a.py",
+        module_id=None,
+        module_qualified_name=None,
+        module_local_name=None,
+        module_name_tokens_casefold=None,
+    )
     with pytest.raises(AttributeError):
         record.path = "b.py"
 

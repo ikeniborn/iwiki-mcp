@@ -491,21 +491,20 @@ class CodeGraphIndexer:
             except Exception as exc:
                 raise CodeGraphParseError("code graph parse failed") from exc
             language = adapter.language
-            stable_file_id = file_id(self.domain, language, source.path)
+            stable_file_id = file_id(
+                language,
+                adapter.prefix,
+                self.domain,
+                source.path,
+            )
             remapped_symbols = []
             symbol_ids = {}
             for item in parsed.symbols:
-                try:
-                    metadata = json.loads(item.metadata_json)
-                except (TypeError, json.JSONDecodeError):
-                    metadata = {}
-                module = metadata.get("module", "") if isinstance(metadata, dict) else ""
-                if not isinstance(module, str):
-                    module = ""
                 stable_symbol_id = symbol_id(
                     language,
+                    adapter.prefix,
                     self.domain,
-                    module,
+                    source.path,
                     item.qualified_name,
                     item.signature or "",
                 )
@@ -535,10 +534,26 @@ class CodeGraphIndexer:
                         file_id=stable_file_id,
                         repository_id=self.domain,
                         path=source.path,
+                        path_casefold=parsed.file.path_casefold,
+                        file_local_name=parsed.file.file_local_name,
+                        file_name_tokens_casefold=(
+                            parsed.file.file_name_tokens_casefold
+                        ),
                         language=language,
                         content_hash=source.content_hash,
                         parser_version=binding.parser_version,
                         size_bytes=source.size_bytes,
+                        start_line=parsed.file.start_line,
+                        end_line=parsed.file.end_line,
+                        start_byte=parsed.file.start_byte,
+                        end_byte=parsed.file.end_byte,
+                        module_key=parsed.file.module_key,
+                        module_id=parsed.file.module_id,
+                        module_qualified_name=parsed.file.module_qualified_name,
+                        module_local_name=parsed.file.module_local_name,
+                        module_name_tokens_casefold=(
+                            parsed.file.module_name_tokens_casefold
+                        ),
                     ),
                     symbols=tuple(remapped_symbols),
                     references=remapped_references,
@@ -571,12 +586,13 @@ class CodeGraphIndexer:
         rows = []
         for relation in relations:
             row = asdict(relation)
-            row.pop("source_byte", None)
+            row["source_line"] = relation.source_start_line
+            row["source_byte"] = relation.source_start_byte
             rows.append(row)
         return tuple(sorted(rows, key=lambda row: str(row["relation_id"])))
 
-    @staticmethod
     def _unresolved_relations(
+        self,
         parsed_files: tuple[ParsedFile, ...],
     ) -> tuple[RelationRecord, ...]:
         relations = []
@@ -585,29 +601,43 @@ class CodeGraphIndexer:
                 source_identity = (
                     reference.source_symbol_id or reference.source_file_id
                 )
-                source_location = ":".join((
-                    str(reference.source_line or 0),
-                    str(reference.source_byte or 0),
-                ))
                 target = reference.target_reference or ""
+                adapter = self.adapters[parsed.file.language].adapter
+                source_line = reference.source_line or 1
+                source_byte = reference.source_byte or 0
                 relations.append(RelationRecord(
                     relation_id=relation_id(
                         parsed.file.language,
+                        adapter.prefix,
+                        self.domain,
                         source_identity,
                         reference.relation_type,
-                        source_location,
+                        source_line,
+                        source_line,
+                        source_byte,
+                        source_byte,
+                        None,
                         target,
+                        None,
+                        None,
                     ),
-                    source_symbol_id=reference.source_symbol_id,
                     source_file_id=reference.source_file_id,
+                    source_module_id=None,
+                    source_symbol_id=reference.source_symbol_id,
+                    target_module_id=None,
                     target_symbol_id=None,
                     target_reference=reference.target_reference,
                     relation_type=reference.relation_type,
-                    source_line=reference.source_line,
+                    source_start_line=source_line,
+                    source_end_line=source_line,
+                    source_start_byte=source_byte,
+                    source_end_byte=source_byte,
+                    binding_name=None,
+                    binding_kind=None,
+                    binding_name_tokens_casefold=None,
                     confidence=0.0,
                     resolution_state="unresolved",
                     metadata_json="{}",
-                    source_byte=reference.source_byte,
                 ))
         return tuple(sorted(relations, key=lambda item: item.relation_id))
 

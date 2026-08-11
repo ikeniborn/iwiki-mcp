@@ -50,7 +50,11 @@ class SymbolIndex:
 
 
 def resolve_references(
-    language: str, references: Iterable[ReferenceRecord], index: SymbolIndex
+    language: str,
+    language_prefix: str,
+    domain: str,
+    references: Iterable[ReferenceRecord],
+    index: SymbolIndex,
 ) -> tuple[RelationRecord, ...]:
     """Resolve only candidates already present in ``index``; never infer runtime values."""
     relations: list[RelationRecord] = []
@@ -76,22 +80,42 @@ def resolve_references(
         )
         targets = candidates or (None,)
         for candidate in targets:
-            target_identity = candidate.symbol_id if candidate else target
             source_identity = reference.source_symbol_id or reference.source_file_id
-            location = f"{reference.source_line or 0}:{reference.source_byte or 0}"
+            source_line = reference.source_line or 1
+            source_byte = reference.source_byte or 0
             relations.append(RelationRecord(
-                relation_id=relation_id(language, source_identity, reference.relation_type,
-                                        location, target_identity),
-                source_symbol_id=reference.source_symbol_id,
+                relation_id=relation_id(
+                    language,
+                    language_prefix,
+                    domain,
+                    source_identity,
+                    reference.relation_type,
+                    source_line,
+                    source_line,
+                    source_byte,
+                    source_byte,
+                    candidate.symbol_id if candidate else None,
+                    None if candidate else target,
+                    None,
+                    None,
+                ),
                 source_file_id=reference.source_file_id,
+                source_module_id=None,
+                source_symbol_id=reference.source_symbol_id,
+                target_module_id=None,
                 target_symbol_id=candidate.symbol_id if candidate else None,
                 target_reference=target,
                 relation_type=reference.relation_type,
-                source_line=reference.source_line,
+                source_start_line=source_line,
+                source_end_line=source_line,
+                source_start_byte=source_byte,
+                source_end_byte=source_byte,
+                binding_name=None,
+                binding_kind=None,
+                binding_name_tokens_casefold=None,
                 confidence=1.0 if state == "resolved" else 0.0,
                 resolution_state=state,
                 metadata_json="{}",
-                source_byte=reference.source_byte,
             ))
     return tuple(sorted(relations, key=lambda item: (
         item.source_symbol_id or item.source_file_id, item.relation_type,

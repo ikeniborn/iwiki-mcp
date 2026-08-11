@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath, PureWindowsPath
-import re
 import sqlite3
 
-from .models import CodeGraphError, SearchResult
+from .models import (
+    _TOKENS,
+    _validated_relative_posix,
+    CodeGraphError,
+    SearchResult,
+)
 from .schema import CodeGraphStoreError
 
 
 MATCH_RANK = {
-    "exact_qualified": 0,
-    "exact_local": 1,
-    "prefix": 2,
-    "lexical": 3,
+    "qualified_exact": 0,
+    "local_exact": 1,
+    "canonical_prefix": 2,
+    "canonical_lexical": 3,
     "signature": 4,
     "path": 5,
 }
@@ -29,9 +32,8 @@ KNOWN_SYMBOL_KINDS = frozenset({
 _COLUMNS = (
     "SELECT s.symbol_id, s.kind, s.qualified_name, s.local_name, "
     "s.signature, f.path, s.start_line, s.end_line, s.start_byte, "
-    "s.end_byte "
+    "s.end_byte, s.file_id "
 )
-_TOKENS = re.compile(r"[^\W_]+", re.UNICODE)
 
 
 class CodeGraphQueryError(CodeGraphError):
@@ -93,7 +95,7 @@ def _fallback_rank(
     path: object | None,
 ) -> int:
     if _token_match(query_tokens, qualified_name, local_name):
-        return MATCH_RANK["lexical"]
+        return MATCH_RANK["canonical_lexical"]
     if (
         signature is not None
         and folded_query in str(signature).casefold()
@@ -113,9 +115,19 @@ def validate_search_request(
     limit: int = 20,
 ) -> ValidatedSearchRequest:
     """Validate public inputs without touching status, locks, or SQLite."""
-    if not isinstance(query, str) or not query.strip():
+    if not isinstance(query, str) or not any(not char.isspace() for char in query):
         raise CodeGraphQueryError("query must be nonblank")
-    normalized_query = query.strip()
+    if "\0" in query:
+        raise CodeGraphQueryError("query must not contain NUL")
+    try:
+        encoded_query = query.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CodeGraphQueryError("query must be valid UTF-8") from exc
+    if len(encoded_query) > 4096:
+        raise CodeGraphQueryError("query must be at most 4096 UTF-8 bytes")
+    query_tokens = tuple(sorted(set(_tokens(query))))
+    if len(query_tokens) > 64:
+        raise CodeGraphQueryError("query must contain at most 64 distinct tokens")
     if kinds is None:
         normalized_kinds = tuple(sorted(KNOWN_SYMBOL_KINDS))
     elif (
@@ -137,26 +149,20 @@ def validate_search_request(
         raise CodeGraphQueryError("unsupported language")
     if type(limit) is not int or not 1 <= limit <= 100:
         raise CodeGraphQueryError("limit must be between 1 and 100")
-    if path is not None and (
-        not isinstance(path, str)
-        or not path
-        or "\0" in path
-        or "\\" in path
-        or PurePosixPath(path).is_absolute()
-        or PureWindowsPath(path).is_absolute()
-        or PureWindowsPath(path).drive
-        or ".." in PurePosixPath(path).parts
-    ):
-        raise CodeGraphQueryError(
-            "path must be a safe project-relative prefix"
-        )
+    if path is not None:
+        try:
+            _validated_relative_posix(path)
+        except ValueError as exc:
+            raise CodeGraphQueryError(
+                "path must be a safe project-relative prefix"
+            ) from exc
     return ValidatedSearchRequest(
-        query=normalized_query,
+        query=query,
         kinds=normalized_kinds,
         path=path,
         language="python",
         limit=limit,
-        tokens=tuple(dict.fromkeys(_tokens(normalized_query))),
+        tokens=query_tokens,
     )
 
 
@@ -177,15 +183,15 @@ class CodeGraphQuery:
         path = str(row[5])
         query = request.query
         if qualified_name == query:
-            return "exact_qualified"
+            return "qualified_exact"
         if local_name == query:
-            return "exact_local"
+            return "local_exact"
         folded = query.casefold()
         if (
             qualified_name.startswith(query)
             or local_name.startswith(query)
         ):
-            return "prefix"
+            return "canonical_prefix"
         fallback_rank = _fallback_rank(
             request.tokens,
             folded,
@@ -423,7 +429,26 @@ class CodeGraphQuery:
             match = self._classify(row, request)
             if match is None:
                 continue
-            item = SearchResult(*row[:10], match=match)
+            item = SearchResult(
+                entity_id=str(row[0]),
+                entity_type="symbol",
+                file_id=str(row[10]),
+                module_id=None,
+                symbol_id=str(row[0]),
+                kind=str(row[1]),
+                qualified_name=str(row[2]),
+                local_name=str(row[3]),
+                signature=row[4],
+                path=str(row[5]),
+                start_line=int(row[6]),
+                end_line=int(row[7]),
+                start_byte=int(row[8]),
+                end_byte=int(row[9]),
+                match=match,
+                matched_alias=None,
+                alias_ambiguous=False,
+                alias_target_count=0,
+            )
             previous = results.get(item.symbol_id)
             if previous is None or result_key(item) < result_key(previous):
                 results[item.symbol_id] = item

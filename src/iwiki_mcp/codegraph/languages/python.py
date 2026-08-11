@@ -11,7 +11,15 @@ import json
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
-from ..models import FileRecord, ParsedFile, ReferenceRecord, ResolutionResult, SymbolRecord
+from ..models import (
+    FileRecord,
+    ParsedFile,
+    ReferenceRecord,
+    ResolutionResult,
+    SymbolRecord,
+    compact_casefold,
+    token_key,
+)
 from ..resolver import resolve_references
 
 
@@ -59,6 +67,7 @@ def _visibility(name: str) -> str:
 
 class PythonAdapter:
     language = "python"
+    prefix = "py"
     extensions = (".py",)
 
     def __init__(self) -> None:
@@ -95,10 +104,22 @@ class PythonAdapter:
             file_id=placeholder_id,
             repository_id="",
             path=relative_path,
+            path_casefold=compact_casefold(relative_path),
+            file_local_name=PurePosixPath(relative_path).name,
+            file_name_tokens_casefold=token_key(PurePosixPath(relative_path).name),
             language=self.language,
             content_hash=content_hash,
             parser_version="tree-sitter-python",
             size_bytes=len(source),
+            start_line=1,
+            end_line=1,
+            start_byte=0,
+            end_byte=len(source),
+            module_key=relative_path,
+            module_id=None,
+            module_qualified_name=None,
+            module_local_name=None,
+            module_name_tokens_casefold=None,
         )
         try:
             root = self._get_parser().parse(source).root_node
@@ -129,7 +150,13 @@ class PythonAdapter:
         self, parsed: ParsedFile, project_index: Any
     ) -> ResolutionResult:
         return ResolutionResult(
-            relations=resolve_references(self.language, parsed.references, project_index),
+            relations=resolve_references(
+                self.language,
+                self.prefix,
+                parsed.file.repository_id,
+                parsed.references,
+                project_index,
+            ),
             warnings=(),
         )
 
@@ -705,6 +732,7 @@ class PythonAdapter:
                         sort_keys=True,
                         separators=(",", ":"),
                     )
+                    qualified_name = ".".join(qualified_parts)
                     symbols.append(
                         SymbolRecord(
                             symbol_id=(
@@ -712,13 +740,15 @@ class PythonAdapter:
                             ),
                             file_id=file_id,
                             kind=kind,
-                            qualified_name=".".join(qualified_parts),
+                            qualified_name=qualified_name,
                             local_name=name,
+                            name_tokens_casefold=token_key(qualified_name, name),
                             start_line=declaration.start_point[0] + 1,
                             end_line=declaration.end_point[0] + 1,
                             start_byte=declaration.start_byte,
                             end_byte=declaration.end_byte,
                             signature=signature,
+                            signature_casefold=compact_casefold(signature),
                             visibility=_visibility(name),
                             content_hash=hashlib.sha256(own).hexdigest(),
                             metadata_json=metadata,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import builtins
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -193,11 +194,28 @@ def test_same_line_and_file_scoped_references_have_stable_distinct_relation_ids(
         ReferenceRecord(None, "parse:file", "CALLS", "external.b", 4, 20),
         ReferenceRecord(None, "parse:file", "CALLS", "external.c", None, None),
     )
-    first = resolve_references("python", references, index)
-    second = resolve_references("python", references, index)
+    first = resolve_references("python", "py", "domain", references, index)
+    second = resolve_references("python", "py", "domain", references, index)
 
     assert len({item.relation_id for item in first}) == 3
     assert first == second
+    digest = hashlib.sha256("\0".join((
+        "relation",
+        "python",
+        "domain",
+        "parse:file",
+        "CALLS",
+        "4",
+        "4",
+        "10",
+        "10",
+        "",
+        "external.a",
+        "",
+        "",
+    )).encode()).hexdigest()
+    external_a = next(item for item in first if item.target_reference == "external.a")
+    assert external_a.relation_id == f"py:relation:{digest}"
 
 
 def test_index_ignores_bad_metadata_and_methods_as_module_exports():
@@ -287,7 +305,7 @@ def test_lambda_comprehension_and_nested_function_inherit_unshadowed_aliases():
 
 
 def test_relation_sorting_uses_byte_offset_within_same_line():
-    relations = resolve_references("python", (
+    relations = resolve_references("python", "py", "domain", (
         ReferenceRecord(None, "parse:file", "CALLS", "z", 1, 20),
         ReferenceRecord(None, "parse:file", "CALLS", "a", 1, 10),
     ), SymbolIndex.from_symbols(()))

@@ -15,6 +15,7 @@ class LanguageAdapter(Protocol):
     """Extract declarations, then resolve them in a later language-neutral pass."""
 
     language: str
+    prefix: str
     extensions: tuple[str, ...]
 
     def parse_file(self, source: bytes, path: str) -> ParsedFile:
