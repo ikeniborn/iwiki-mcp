@@ -250,17 +250,96 @@ class RuntimeHarness:
         return _git(Path(self.binding.base), "status", "--porcelain=v1")
 
     def wiki_hashes(self):
-        domain = Path(self.binding.base) / (self.binding.primary or "project")
+        base = Path(self.binding.base)
+        domain = base / (self.binding.primary or "project")
+        graph = base / ".iwiki" / "graph.sqlite3"
+        files = [
+            path for path in sorted(domain.rglob("*")) if path.is_file()
+        ]
+        if graph.is_file():
+            files.append(graph)
         return {
-            path.relative_to(domain).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(domain.rglob("*"))
-            if path.is_file()
+            path.relative_to(base).as_posix(): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in files
         }
 
     @contextmanager
     def hold_publication_lock(self):
         with code_graph_write_lock(self.paths.lock, timeout=1):
             yield
+
+    def inject_publication_fault(self, boundary):
+        """Fail one of the six durable publication boundaries exactly once."""
+        indexer = self.runtime._indexer
+        store = indexer.store
+        injected = False
+
+        def fail_once():
+            nonlocal injected
+            if injected:
+                return
+            injected = True
+            raise CodeGraphStoreError("injected publication boundary failure")
+
+        if boundary == "replace":
+            original = store.replace_staging
+
+            def replace(*args, **kwargs):
+                fail_once()
+                return original(*args, **kwargs)
+
+            self._monkeypatch.setattr(store, "replace_staging", replace)
+            return
+
+        if boundary in {"metadata_rebuilding", "ready_pending"}:
+            original = indexer._publish_metadata_record
+
+            def publish(metadata, **kwargs):
+                phase = metadata.get("publication_phase")
+                if (
+                    boundary == "metadata_rebuilding"
+                    and phase == "provisional"
+                ) or (
+                    boundary == "ready_pending"
+                    and phase == "pending_final_verify"
+                ):
+                    fail_once()
+                return original(metadata, **kwargs)
+
+            self._monkeypatch.setattr(
+                indexer, "_publish_metadata_record", publish
+            )
+            return
+
+        if boundary in {"verify_1", "verify_2"}:
+            original = indexer._verify_published
+            calls = 0
+
+            def verify(revision):
+                nonlocal calls
+                calls += 1
+                if calls == (1 if boundary == "verify_1" else 2):
+                    fail_once()
+                return original(revision)
+
+            self._monkeypatch.setattr(indexer, "_verify_published", verify)
+            return
+
+        if boundary == "timing_refresh":
+            original = store.refresh_metadata_diagnostics
+
+            def refresh(*args, **kwargs):
+                fail_once()
+                return original(*args, **kwargs)
+
+            self._monkeypatch.setattr(
+                store, "refresh_metadata_diagnostics", refresh
+            )
+            return
+
+        raise ValueError("unknown publication boundary")
 
 
 class FakeRuntime:
@@ -356,6 +435,23 @@ def seed_binding(tmp_path):
     _git(base, "config", "user.name", "Test User")
     (base / "project").mkdir()
     (base / "project" / "overview.md").write_text("# Project\n", encoding="utf-8")
+    (base / "project" / "index.jsonl").write_text(
+        json.dumps({
+            "id": "wiki-vector-sentinel",
+            "file": "overview.md",
+            "heading": "Project",
+            "chunk": 0,
+            "hash": "wiki-vector-hash",
+            "dim": 2,
+            "scale": 1.0,
+            "q": [1, 2],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (base / "project" / "log.jsonl").write_text(
+        '{"slug":"overview","hash":"wiki-ingest-sentinel"}\n',
+        encoding="utf-8",
+    )
     _git(base, "add", "-A")
     _git(base, "commit", "-q", "-m", "seed wiki")
 
@@ -401,11 +497,22 @@ def seed_without_primary(seed_binding):
 
 @pytest.fixture
 def seed_runtime(seed_binding, monkeypatch):
+    graph = Path(seed_binding.base) / ".iwiki" / "graph.sqlite3"
+    graph.parent.mkdir()
+    with closing(sqlite3.connect(graph)) as connection:
+        connection.execute("CREATE TABLE sentinel (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO sentinel VALUES ('wiki-graph-sentinel')")
+        connection.commit()
     harness = RuntimeHarness(seed_binding, monkeypatch)
     yield harness
     for runtime in harness._owned_runtimes:
         runtime.join_workers(timeout=5)
         assert runtime.active_workers == 0
+
+
+@pytest.fixture
+def runtime_pair(seed_runtime):
+    return seed_runtime, seed_runtime.with_config()
 
 
 @pytest.fixture
