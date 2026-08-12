@@ -1,7 +1,9 @@
 """FastMCP Unit B code-graph tool integration."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
+import sqlite3
 
 import pytest
 
@@ -90,6 +92,30 @@ def test_index_handler_validates_languages_before_binding(monkeypatch):
     monkeypatch.setattr(server.base, "resolve_binding", fail_binding)
 
     assert server.wiki_code_index(languages=["go"]) == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "nul\0query",
+        "lone-surrogate-\ud800",
+        "é" * 2049,
+        " ".join(f"t{i}" for i in range(65)),
+    ],
+)
+def test_search_validation_precedes_binding_for_all_text_bounds(
+    monkeypatch, query
+):
+    def fail_binding():
+        raise AssertionError("binding must not be resolved")
+
+    monkeypatch.setattr(server.base, "resolve_binding", fail_binding)
+
+    assert server.wiki_code_search(query) == {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
@@ -270,6 +296,57 @@ def test_search_handler_logs_unexpected_failure_without_sensitive_values(
     )
     assert "secret-handler-query" not in caplog.text
     assert "private-handler-query" not in caplog.text
+    assert "/private/path" not in caplog.text
+    assert "SELECT source" not in caplog.text
+
+
+def test_search_handler_maps_lazy_cursor_failure_without_leaking_text(
+    seed_binding, production_runtime_factory, monkeypatch, caplog
+):
+    runtime = production_runtime_factory(seed_binding)
+    assert runtime.index(force=True)["state"] == "ready"
+    original_read_lease = runtime._store.read_lease
+
+    class LazyFailureCursor:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise sqlite3.DatabaseError(
+                "secret lazy cursor /private/path SELECT source"
+            )
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, statement, parameters=()):
+            if statement.lstrip().startswith("WITH entities"):
+                return LazyFailureCursor()
+            return self.connection.execute(statement, parameters)
+
+    @contextmanager
+    def failing_read_lease():
+        with original_read_lease() as connection:
+            yield ConnectionProxy(connection)
+
+    monkeypatch.setattr(runtime._store, "read_lease", failing_read_lease)
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(server, "_code_runtime", lambda _binding: runtime)
+    caplog.clear()
+
+    result = server.wiki_code_search("run", kinds=["method"])
+
+    runtime.join_workers(timeout=5)
+    assert result == {
+        "error": "code graph store failed",
+        "code": "store_failed",
+        "hint": "inspect wiki_code_status and retry",
+        "fresh": False,
+        "results": [],
+    }
+    assert "secret lazy cursor" not in repr(result)
+    assert "secret lazy cursor" not in caplog.text
     assert "/private/path" not in caplog.text
     assert "SELECT source" not in caplog.text
 

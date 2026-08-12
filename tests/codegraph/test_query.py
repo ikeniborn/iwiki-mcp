@@ -1,8 +1,8 @@
 """Deterministic, bounded symbol search contracts."""
 from __future__ import annotations
 
+from pathlib import Path
 import sqlite3
-import time
 
 import pytest
 
@@ -167,45 +167,6 @@ def _symbol_insert_values(
     )
 
 
-def _large_connection(*, local_name: str | None = None):
-    connection = sqlite3.connect(":memory:")
-    connection.executescript(
-        """
-        CREATE TABLE files (
-            file_id TEXT PRIMARY KEY, repository_id TEXT, path TEXT, language TEXT
-        );
-        CREATE TABLE symbols (
-            symbol_id TEXT PRIMARY KEY, file_id TEXT, kind TEXT,
-            qualified_name TEXT, local_name TEXT, signature TEXT,
-            start_line INTEGER, end_line INTEGER,
-            start_byte INTEGER, end_byte INTEGER
-        );
-        CREATE INDEX idx_files_repository_path ON files(repository_id, path);
-        CREATE INDEX idx_symbols_file ON symbols(file_id);
-        CREATE INDEX idx_symbols_qualified ON symbols(qualified_name);
-        CREATE INDEX idx_symbols_local ON symbols(local_name);
-        CREATE INDEX idx_symbols_kind ON symbols(kind);
-        """
-    )
-    connection.execute(
-        "INSERT INTO files VALUES (?, ?, ?, ?)",
-        ("file:large", "backend", "src/large.py", "python"),
-    )
-    connection.executemany(
-        "INSERT INTO symbols VALUES (?, ?, 'function', ?, ?, '()', 1, 1, 0, 1)",
-        (
-            (
-                f"symbol:{number:06d}",
-                "file:large",
-                f"pkg.symbol_{number:06d}",
-                local_name or f"symbol_{number:06d}",
-            )
-            for number in range(100_000)
-        ),
-    )
-    return connection
-
-
 @pytest.fixture
 def search_connection(tmp_path):
     store = CodeGraphStore(tmp_path / "code.sqlite3")
@@ -213,6 +174,469 @@ def search_connection(tmp_path):
     connection = store.open_existing()
     yield connection
     connection.close()
+
+
+EXPECTED_MATCHES = [
+    "qualified_exact",
+    "local_exact",
+    "alias_exact",
+    "canonical_prefix",
+    "alias_prefix",
+    "canonical_lexical",
+    "alias_lexical",
+    "signature",
+    "path",
+]
+
+
+def _typed_file(identity, path, *, module=None):
+    local_name = path.rsplit("/", 1)[-1]
+    return {
+        "file_id": f"file:typed:{identity}",
+        "repository_id": "backend",
+        "path": path,
+        "path_casefold": models_module.compact_casefold(path),
+        "file_local_name": local_name,
+        "file_name_tokens_casefold": models_module.token_key(local_name),
+        "language": "python",
+        "content_hash": f"hash:typed:{identity}",
+        "parser_version": "fixture",
+        "size_bytes": 10,
+        "start_line": 1,
+        "end_line": 1,
+        "start_byte": 0,
+        "end_byte": 10,
+        "module_key": path,
+        "module_id": None if module is None else f"module:typed:{identity}",
+        "module_qualified_name": module,
+        "module_local_name": None if module is None else module.rsplit(".", 1)[-1],
+        "module_name_tokens_casefold": (
+            None
+            if module is None
+            else models_module.token_key(module, module.rsplit(".", 1)[-1])
+        ),
+    }
+
+
+def _typed_symbol(identity, file_identity, qualified, local, *, signature="()"):
+    return {
+        "symbol_id": f"symbol:typed:{identity}",
+        "file_id": f"file:typed:{file_identity}",
+        "kind": "method",
+        "qualified_name": qualified,
+        "local_name": local,
+        "name_tokens_casefold": models_module.token_key(qualified, local),
+        "start_line": 1,
+        "end_line": 1,
+        "start_byte": 0,
+        "end_byte": 10,
+        "signature": signature,
+        "signature_casefold": models_module.compact_casefold(signature),
+        "visibility": "public",
+        "content_hash": f"symbol-hash:typed:{identity}",
+        "metadata_json": "{}",
+    }
+
+
+def _alias_relation(identity, source_file, alias, *, target_module=None,
+                    target_symbol=None, state="resolved", start_byte=0,
+                    binding_kind="explicit_alias"):
+    return {
+        "relation_id": f"relation:typed:{identity}",
+        "source_file_id": f"file:typed:{source_file}",
+        "source_module_id": None,
+        "source_symbol_id": None,
+        "target_module_id": target_module,
+        "target_symbol_id": target_symbol,
+        "target_reference": (
+            "external.member" if state == "partially_resolved" else None
+        ),
+        "relation_type": "IMPORTS",
+        "source_start_line": 1,
+        "source_end_line": 1,
+        "source_start_byte": start_byte,
+        "source_end_byte": start_byte + 1,
+        "binding_name": alias,
+        "binding_kind": binding_kind,
+        "binding_name_tokens_casefold": models_module.token_key(alias),
+        "confidence": 1.0,
+        "resolution_state": state,
+        "metadata_json": "{}",
+    }
+
+
+@pytest.fixture
+def schema_v2_search_connection(tmp_path):
+    snapshot = _snapshot()
+    files = (
+        _typed_file("qualified-file", "needle"),
+        _typed_file("local-module", "typed/local.py", module="pkg.needle"),
+        _typed_file("alias-exact-target", "typed/alias_exact.py"),
+        _typed_file("canonical-prefix", "typed/prefix.py"),
+        _typed_file("alias-prefix-target", "typed/alias_prefix.py"),
+        _typed_file("canonical-lexical", "typed/lexical.py"),
+        _typed_file(
+            "alias-lexical-target",
+            "typed/alias_lexical.py",
+            module="pkg.AliasLexical",
+        ),
+        _typed_file("signature", "typed/signature.py"),
+        _typed_file("path", "typed/needle-assets/asset.py"),
+        _typed_file("source", "typed/source.py"),
+        _typed_file("svc-a", "services/a.py", module="services.alpha"),
+        _typed_file("svc-b", "services/b.py", module="services.beta"),
+        _typed_file("unicode-alias-target", "typed/unicode_alias.py"),
+        _typed_file("canonical-winner", "typed/canonical_winner.py"),
+        _typed_file(
+            "partial-module", "typed/partial_module.py",
+            module="pkg.PartialModule",
+        ),
+        _typed_file("partial-symbol", "typed/partial_symbol.py"),
+    )
+    symbols = (
+        _typed_symbol(
+            "alias-exact-target", "alias-exact-target",
+            "pkg.AliasExact", "alias_exact_target",
+        ),
+        _typed_symbol(
+            "canonical-prefix", "canonical-prefix",
+            "needle.prefix", "prefix_target",
+        ),
+        _typed_symbol(
+            "alias-prefix-target", "alias-prefix-target",
+            "pkg.AliasPrefix", "alias_prefix_target",
+        ),
+        _typed_symbol(
+            "canonical-lexical", "canonical-lexical",
+            "pkg.canonical_needle", "canonical_needle",
+        ),
+        _typed_symbol(
+            "signature", "signature", "pkg.Signature", "signature_target",
+            signature="(needle: str)",
+        ),
+        _typed_symbol(
+            "unicode-alias-target", "unicode-alias-target",
+            "pkg.AliasChoice", "alias_choice",
+        ),
+        _typed_symbol(
+            "canonical-winner", "canonical-winner",
+            "canonical_winner", "canonical_target",
+        ),
+        _typed_symbol(
+            "partial-symbol", "partial-symbol",
+            "pkg.PartialSymbol", "partial_symbol",
+        ),
+    )
+    relations = (
+        _alias_relation(
+            "needle-exact", "source", "needle",
+            target_symbol="symbol:typed:alias-exact-target",
+        ),
+        _alias_relation(
+            "needle-prefix", "source", "needle_alias",
+            target_symbol="symbol:typed:alias-prefix-target",
+        ),
+        _alias_relation(
+            "needle-lexical", "source", "alias_needle",
+            target_module="module:typed:alias-lexical-target",
+        ),
+        _alias_relation(
+            "svc-a-1", "source", "svc", target_module="module:typed:svc-a",
+            state="ambiguous", start_byte=10,
+        ),
+        _alias_relation(
+            "svc-a-2", "source", "svc", target_module="module:typed:svc-a",
+            state="ambiguous", start_byte=20,
+        ),
+        _alias_relation(
+            "svc-b", "source", "svc", target_module="module:typed:svc-b",
+            state="ambiguous", start_byte=30,
+        ),
+        _alias_relation(
+            "unicode-high", "source", "Ω_unicode",
+            target_symbol="symbol:typed:unicode-alias-target", start_byte=40,
+        ),
+        _alias_relation(
+            "unicode-low", "source", "ä_unicode",
+            target_symbol="symbol:typed:unicode-alias-target", start_byte=50,
+        ),
+        _alias_relation(
+            "implicit-hidden", "source", "hidden_alias",
+            target_symbol="symbol:typed:unicode-alias-target", start_byte=60,
+            binding_kind="implicit_binding",
+        ),
+        _alias_relation(
+            "canonical-winner", "source", "canonical_winner",
+            target_symbol="symbol:typed:canonical-winner", start_byte=70,
+        ),
+        _alias_relation(
+            "partial-module-exact", "source", "module-exact",
+            target_module="module:typed:partial-module",
+            state="partially_resolved", start_byte=80,
+        ),
+        _alias_relation(
+            "partial-module-prefix", "source", "module-prefix-tail",
+            target_module="module:typed:partial-module",
+            state="partially_resolved", start_byte=90,
+        ),
+        _alias_relation(
+            "partial-module-lexical", "source", "lexical module",
+            target_module="module:typed:partial-module",
+            state="partially_resolved", start_byte=100,
+        ),
+        _alias_relation(
+            "partial-symbol-exact", "source", "symbol-exact",
+            target_symbol="symbol:typed:partial-symbol",
+            state="partially_resolved", start_byte=110,
+        ),
+        _alias_relation(
+            "partial-symbol-prefix", "source", "symbol-prefix-tail",
+            target_symbol="symbol:typed:partial-symbol",
+            state="partially_resolved", start_byte=120,
+        ),
+        _alias_relation(
+            "partial-symbol-lexical", "source", "lexical symbol",
+            target_symbol="symbol:typed:partial-symbol",
+            state="partially_resolved", start_byte=130,
+        ),
+    )
+    typed_snapshot = {
+        **snapshot,
+        "files": (*snapshot["files"], *files),
+        "symbols": (*snapshot["symbols"], *symbols),
+        "relations": relations,
+    }
+    store = CodeGraphStore(tmp_path / "typed-code.sqlite3")
+    store.insert_snapshot(typed_snapshot)
+    connection = store.open_existing()
+    yield connection
+    connection.close()
+
+
+def test_search_returns_typed_union_in_exact_rank_order(
+    schema_v2_search_connection,
+):
+    results = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request("needle", limit=20),
+    )
+
+    typed_results = [item for item in results if ":typed:" in item.entity_id]
+    assert [row.match for row in typed_results] == EXPECTED_MATCHES
+    assert {row.entity_type for row in typed_results} == {
+        "file", "module", "symbol",
+    }
+    assert all(
+        row.entity_id in {row.file_id, row.module_id, row.symbol_id}
+        for row in typed_results
+    )
+
+
+def test_alias_aggregation_deduplicates_before_limit_without_candidate_cap(
+    schema_v2_search_connection,
+):
+    statements = []
+    schema_v2_search_connection.set_trace_callback(statements.append)
+
+    results = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request("svc", limit=1),
+    )
+
+    assert len(results) == 1
+    assert results[0].matched_alias == "svc"
+    assert results[0].alias_target_count == 2
+    assert results[0].alias_ambiguous is True
+    selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    assert selects
+    assert all(" LIMIT " not in statement.upper() for statement in selects)
+
+
+def test_alias_path_filter_counts_and_returns_target_entities(
+    schema_v2_search_connection,
+):
+    results = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request(
+            "svc", kinds=["module"], path="services/a", limit=20
+        ),
+    )
+
+    assert [item.entity_id for item in results] == ["module:typed:svc-a"]
+    assert results[0].path == "services/a.py"
+    assert results[0].alias_target_count == 1
+    assert results[0].alias_ambiguous is False
+
+
+def test_alias_fanout_and_public_alias_are_deterministic(
+    schema_v2_search_connection,
+):
+    query = CodeGraphQuery("backend")
+
+    ambiguous = query.search(
+        schema_v2_search_connection,
+        validate_search_request("svc", kinds=["module"], limit=20),
+    )
+    assert [item.entity_id for item in ambiguous] == [
+        "module:typed:svc-a",
+        "module:typed:svc-b",
+    ]
+    assert all(item.alias_target_count == 2 for item in ambiguous)
+    assert all(item.alias_ambiguous for item in ambiguous)
+
+    alias_choice = query.search(
+        schema_v2_search_connection,
+        validate_search_request("unicode", kinds=["method"], limit=20),
+    )
+    assert len(alias_choice) == 1
+    assert alias_choice[0].match == "alias_lexical"
+    assert alias_choice[0].matched_alias == "ä_unicode"
+
+
+def test_canonical_winner_deduplicates_alias_and_implicit_binding_is_hidden(
+    schema_v2_search_connection,
+):
+    query = CodeGraphQuery("backend")
+
+    canonical = query.search(
+        schema_v2_search_connection,
+        validate_search_request(
+            "canonical_winner", kinds=["method"], limit=20
+        ),
+    )
+
+    assert len(canonical) == 1
+    assert canonical[0].entity_id == "symbol:typed:canonical-winner"
+    assert canonical[0].match == "qualified_exact"
+    assert canonical[0].matched_alias is None
+    assert canonical[0].alias_target_count == 0
+    assert query.search(
+        schema_v2_search_connection,
+        validate_search_request("hidden_alias", kinds=["method"], limit=20),
+    ) == ()
+
+
+@pytest.mark.parametrize(
+    ("kind", "query", "match", "entity_id"),
+    [
+        ("module", "module-exact", "alias_exact", "module:typed:partial-module"),
+        (
+            "module", "module-prefix", "alias_prefix",
+            "module:typed:partial-module",
+        ),
+        (
+            "module", "module lexical", "alias_lexical",
+            "module:typed:partial-module",
+        ),
+        ("method", "symbol-exact", "alias_exact", "symbol:typed:partial-symbol"),
+        (
+            "method", "symbol-prefix", "alias_prefix",
+            "symbol:typed:partial-symbol",
+        ),
+        (
+            "method", "symbol lexical", "alias_lexical",
+            "symbol:typed:partial-symbol",
+        ),
+    ],
+)
+def test_partially_resolved_typed_aliases_participate_in_all_alias_tiers(
+    schema_v2_search_connection, kind, query, match, entity_id
+):
+    results = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request(query, kinds=[kind], limit=20),
+    )
+
+    assert len(results) == 1
+    assert results[0].entity_id == entity_id
+    assert results[0].match == match
+    assert results[0].alias_target_count == 1
+    assert results[0].alias_ambiguous is False
+
+
+class _LazyDatabaseFailure:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise sqlite3.DatabaseError("secret lazy SQLite failure")
+
+
+class _LazyFailureConnection:
+    def execute(self, *_args, **_kwargs):
+        return _LazyDatabaseFailure()
+
+
+def test_query_maps_lazy_cursor_database_failure_to_store_error():
+    with pytest.raises(CodeGraphStoreError, match="code graph search failed"):
+        CodeGraphQuery("backend").search(
+            _LazyFailureConnection(),
+            validate_search_request("run", kinds=["method"]),
+        )
+
+
+@pytest.mark.parametrize("kind", sorted(query_module.KNOWN_ENTITY_KINDS))
+def test_search_accepts_all_six_public_kinds(kind):
+    assert validate_search_request("entity", kinds=[kind]).kinds == (kind,)
+
+
+def test_percent_and_underscore_are_literal_search_characters(search_connection):
+    search_connection.executemany(
+        _FILE_INSERT_SQL,
+        (
+            _file_insert_values(
+                "file:wildcard-percent", "wildcards/percent.py",
+                "python", "hash:wildcard-percent",
+            ),
+            _file_insert_values(
+                "file:wildcard-underscore", "wildcards/underscore.py",
+                "python", "hash:wildcard-underscore",
+            ),
+        ),
+    )
+    search_connection.executemany(
+        _SYMBOL_INSERT_SQL,
+        (
+            _symbol_insert_values(
+                "symbol:wildcard-percent", "file:wildcard-percent",
+                "pkg.PercentLiteral", "percentLiteral", "(value: '%')",
+                "hash:symbol-wildcard-percent",
+            ),
+            _symbol_insert_values(
+                "symbol:wildcard-underscore", "file:wildcard-underscore",
+                "pkg.UnderscoreLiteral", "underscoreLiteral", "(value_name: str)",
+                "hash:symbol-wildcard-underscore",
+            ),
+        ),
+    )
+    query = CodeGraphQuery("backend")
+
+    percent = query.search(
+        search_connection,
+        validate_search_request("%", kinds=["method"], path="wildcards/"),
+    )
+    underscore = query.search(
+        search_connection,
+        validate_search_request("_", kinds=["method"], path="wildcards/"),
+    )
+
+    assert [(item.symbol_id, item.match) for item in percent] == [
+        ("symbol:wildcard-percent", "signature"),
+    ]
+    assert [(item.symbol_id, item.match) for item in underscore] == [
+        ("symbol:wildcard-underscore", "signature"),
+    ]
+
+
+def test_query_uses_no_python_sqlite_udf():
+    source = Path("src/iwiki_mcp/codegraph/query.py").read_text(encoding="utf-8")
+    assert ".create_function(" not in source
+    assert "FTS" not in source.upper()
+    assert "SEARCH_ENTITIES" not in source
 
 
 def test_search_orders_each_symbol_by_its_strongest_match(search_connection):
@@ -536,7 +960,7 @@ def test_runtime_search_returns_metadata_relative_ranges_and_no_stale_rows(
     assert ready["results"][0]["entity_id"] == ready["results"][0]["symbol_id"]
     assert ready["results"][0]["entity_type"] == "symbol"
     assert ready["results"][0]["file_id"] is not None
-    assert ready["results"][0]["module_id"] is None
+    assert ready["results"][0]["module_id"] is not None
     assert ready["results"][0]["match"] == "local_exact"
     assert not ready["results"][0]["path"].startswith("/")
 
@@ -695,199 +1119,3 @@ def test_query_guard_does_not_log_typed_freshness_failure(
 
     assert result["code"] == "stale"
     assert "code_graph_query_guard" not in caplog.text
-
-
-def test_query_uses_bounded_sql_candidates(search_connection):
-    statements = []
-    search_connection.set_trace_callback(statements.append)
-    request = validate_search_request("run", kinds=["method"], limit=7)
-
-    CodeGraphQuery("backend").search(search_connection, request)
-
-    selects = [statement for statement in statements if statement.lstrip().startswith("SELECT")]
-    assert len(selects) == 6
-    assert all(" LIMIT " in statement for statement in selects)
-    assert all("SELECT *" not in statement for statement in selects)
-    assert sum(statement.count("CASE ") for statement in selects) == 1
-
-
-def test_query_stops_before_lower_tiers_when_stronger_results_fill_limit(
-    search_connection,
-):
-    statements = []
-    search_connection.set_trace_callback(statements.append)
-    request = validate_search_request("run", limit=1)
-
-    results = CodeGraphQuery("backend").search(search_connection, request)
-
-    selects = [
-        statement
-        for statement in statements
-        if statement.lstrip().startswith("SELECT")
-    ]
-    assert [(item.qualified_name, item.match) for item in results] == [
-        ("run", "qualified_exact"),
-    ]
-    assert len(selects) == 1
-    assert all(" CASE " not in statement for statement in selects)
-
-
-def test_exact_and_prefix_candidates_use_name_indexes(search_connection):
-    statements = []
-    search_connection.set_trace_callback(statements.append)
-    request = validate_search_request("run", kinds=["method"], limit=7)
-
-    CodeGraphQuery("backend").search(search_connection, request)
-
-    selects = [statement for statement in statements if statement.lstrip().startswith("SELECT")]
-    plans = [
-        " ".join(
-            str(row[3])
-            for row in search_connection.execute(
-                "EXPLAIN QUERY PLAN " + statement
-            )
-        )
-        for statement in selects
-    ]
-    assert "idx_symbols_qualified" in plans[0]
-    assert "idx_symbols_local" in plans[1]
-    assert "idx_symbols_qualified" in plans[2]
-    assert "idx_symbols_local" in plans[3]
-    assert "idx_symbols_qualified" in plans[4]
-    assert "idx_symbols_qualified" not in plans[5]
-    assert "USE TEMP B-TREE FOR ORDER BY" not in plans[2]
-
-
-def test_fallback_uses_file_outer_index_plan(search_connection):
-    statements = []
-    search_connection.set_trace_callback(statements.append)
-    request = validate_search_request(
-        "definitely_absent_needle",
-        kinds=["method"],
-        limit=7,
-    )
-
-    assert CodeGraphQuery("backend").search(search_connection, request) == ()
-
-    fallback = [
-        statement
-        for statement in statements
-        if statement.lstrip().startswith("SELECT")
-    ][-1]
-    plan = " ".join(
-        str(row[3])
-        for row in search_connection.execute("EXPLAIN QUERY PLAN " + fallback)
-    )
-    assert "idx_files_repository_path" in plan
-    assert "idx_symbols_file" in plan
-    assert "sqlite_autoindex_files_1" not in plan
-
-
-def test_fallback_uses_sqlite_utf8_guard_instead_of_python_udf(
-    search_connection,
-):
-    statements = []
-    search_connection.set_trace_callback(statements.append)
-    request = validate_search_request(
-        "definitely_absent_needle",
-        kinds=["method"],
-        limit=7,
-    )
-
-    assert CodeGraphQuery("backend").search(search_connection, request) == ()
-
-    fallback = [
-        statement
-        for statement in statements
-        if statement.lstrip().startswith("SELECT")
-    ][-1]
-    assert "iwiki_code_has_non_ascii" not in fallback
-    for expression in (
-        "length(CAST(s.qualified_name AS BLOB)) > length(s.qualified_name)",
-        "length(CAST(s.local_name AS BLOB)) > length(s.local_name)",
-        "length(CAST(s.signature AS BLOB)) > length(s.signature)",
-        "length(CAST(f.path AS BLOB)) > length(f.path)",
-    ):
-        assert expression in fallback
-
-
-def test_fallback_excludes_only_returned_stronger_symbol_ids(
-    search_connection,
-):
-    statements = []
-    search_connection.set_trace_callback(statements.append)
-    request = validate_search_request(
-        "run",
-        kinds=["method"],
-        path="src/",
-        limit=7,
-    )
-
-    results = CodeGraphQuery("backend").search(search_connection, request)
-
-    fallback = [
-        statement
-        for statement in statements
-        if statement.lstrip().startswith("SELECT")
-    ][-1]
-    stronger_ids = [
-        item.symbol_id
-        for item in results
-        if item.match in {"qualified_exact", "local_exact", "canonical_prefix"}
-    ]
-    assert stronger_ids == [
-        "symbol:qualified",
-        "symbol:local",
-        "symbol:prefix",
-    ]
-    assert "s.symbol_id NOT IN" in fallback
-    assert all(f"'{symbol_id}'" in fallback for symbol_id in stronger_ids)
-    assert fallback.count("'symbol:") == len(stronger_ids)
-    assert "s.qualified_name <> 'run'" not in fallback
-
-
-def test_no_hit_search_over_100k_symbols_stays_within_ci_budget():
-    connection = _large_connection()
-    request = validate_search_request("definitely_absent_needle", limit=20)
-    query = CodeGraphQuery("backend")
-    assert query.search(connection, request) == ()  # Warm cache and query plan.
-
-    timings = []
-    for _run in range(5):
-        started = time.perf_counter()
-        assert query.search(connection, request) == ()
-        timings.append(time.perf_counter() - started)
-    connection.close()
-
-    assert max(timings) < 0.30  # 2x CI margin over provisional 150 ms target.
-
-
-def test_common_exact_local_over_100k_symbols_uses_ordered_index_and_budget():
-    connection = _large_connection(local_name="run")
-    request = validate_search_request("run", limit=20)
-    query = CodeGraphQuery("backend")
-    statements = []
-    connection.set_trace_callback(statements.append)
-    assert len(query.search(connection, request)) == 20
-
-    selects = [
-        statement
-        for statement in statements
-        if statement.lstrip().startswith("SELECT")
-    ]
-    assert len(selects) == 3
-    plan = " ".join(
-        str(row[3])
-        for row in connection.execute("EXPLAIN QUERY PLAN " + selects[2])
-    )
-    assert "idx_symbols_qualified" in plan
-    assert "USE TEMP B-TREE FOR ORDER BY" not in plan
-
-    timings = []
-    for _run in range(5):
-        started = time.perf_counter()
-        assert len(query.search(connection, request)) == 20
-        timings.append(time.perf_counter() - started)
-    connection.close()
-
-    assert max(timings) < 0.30  # 2x CI margin over provisional 150 ms target.

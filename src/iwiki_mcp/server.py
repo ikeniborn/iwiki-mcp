@@ -565,6 +565,13 @@ def wiki_code_search(
     languages: list[str] | None = None,
     limit: int = 20,
 ) -> dict:
+    _codegraph_runtime.validate_search_request(
+        query,
+        kinds=kinds,
+        path=path,
+        languages=languages,
+        limit=limit,
+    )
     bind = base.resolve_binding()
     if bind.primary is None:
         return _missing_code_primary()

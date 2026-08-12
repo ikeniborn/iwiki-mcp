@@ -1,4 +1,4 @@
-"""Language-neutral, deterministic symbol queries over a ready snapshot."""
+"""Projection-free typed entity search over one ready code-graph snapshot."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,28 +16,37 @@ from .schema import CodeGraphStoreError
 MATCH_RANK = {
     "qualified_exact": 0,
     "local_exact": 1,
-    "canonical_prefix": 2,
-    "canonical_lexical": 3,
-    "signature": 4,
-    "path": 5,
+    "alias_exact": 2,
+    "canonical_prefix": 3,
+    "alias_prefix": 4,
+    "canonical_lexical": 5,
+    "alias_lexical": 6,
+    "signature": 7,
+    "path": 8,
 }
+_MATCH_BY_RANK = {rank: name for name, rank in MATCH_RANK.items()}
 
-KNOWN_SYMBOL_KINDS = frozenset({
+KNOWN_ENTITY_KINDS = frozenset({
     "async_function",
     "class",
+    "file",
     "function",
     "method",
+    "module",
 })
+# Compatibility name for internal callers written before schema v2.
+KNOWN_SYMBOL_KINDS = KNOWN_ENTITY_KINDS
 
-_COLUMNS = (
-    "SELECT s.symbol_id, s.kind, s.qualified_name, s.local_name, "
-    "s.signature, f.path, s.start_line, s.end_line, s.start_byte, "
-    "s.end_byte, s.file_id "
+_ENTITY_COLUMNS = (
+    "entity_id, entity_type, file_id, module_id, symbol_id, kind, "
+    "qualified_name, local_name, name_tokens_casefold, signature, "
+    "signature_casefold, path, path_casefold, start_line, end_line, "
+    "start_byte, end_byte"
 )
 
 
 class CodeGraphQueryError(CodeGraphError):
-    """Raised when a symbol query violates the public search contract."""
+    """Raised when an entity query violates the public search contract."""
 
     code = "invalid_config"
 
@@ -56,54 +65,11 @@ class ValidatedSearchRequest:
 
 def result_key(item: SearchResult) -> tuple[int, str, str]:
     """Return the complete stable ordering key for one search result."""
-    return MATCH_RANK[item.match], item.qualified_name, item.symbol_id
-
-
-def _like(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
+    return MATCH_RANK[item.match], item.qualified_name, item.entity_id
 
 
 def _tokens(value: str) -> tuple[str, ...]:
     return tuple(_TOKENS.findall(value.casefold()))
-
-
-def _token_match(
-    query_tokens: tuple[str, ...],
-    qualified_name: object | None,
-    local_name: object | None,
-) -> bool:
-    if not query_tokens:
-        return False
-    names = (
-        "" if qualified_name is None else str(qualified_name),
-        "" if local_name is None else str(local_name),
-    )
-    name_tokens = set(_tokens(names[0]) + _tokens(names[1]))
-    return all(token in name_tokens for token in query_tokens)
-
-
-def _fallback_rank(
-    query_tokens: tuple[str, ...],
-    folded_query: str,
-    qualified_name: object | None,
-    local_name: object | None,
-    signature: object | None,
-    path: object | None,
-) -> int:
-    if _token_match(query_tokens, qualified_name, local_name):
-        return MATCH_RANK["canonical_lexical"]
-    if (
-        signature is not None
-        and folded_query in str(signature).casefold()
-    ):
-        return MATCH_RANK["signature"]
-    if path is not None and folded_query in str(path).casefold():
-        return MATCH_RANK["path"]
-    return len(MATCH_RANK)
 
 
 def validate_search_request(
@@ -114,7 +80,7 @@ def validate_search_request(
     languages: list[str] | None = None,
     limit: int = 20,
 ) -> ValidatedSearchRequest:
-    """Validate public inputs without touching status, locks, or SQLite."""
+    """Validate public inputs without touching binding, status, or SQLite."""
     if not isinstance(query, str) or not any(not char.isspace() for char in query):
         raise CodeGraphQueryError("query must be nonblank")
     if "\0" in query:
@@ -129,16 +95,16 @@ def validate_search_request(
     if len(query_tokens) > 64:
         raise CodeGraphQueryError("query must contain at most 64 distinct tokens")
     if kinds is None:
-        normalized_kinds = tuple(sorted(KNOWN_SYMBOL_KINDS))
+        normalized_kinds = tuple(sorted(KNOWN_ENTITY_KINDS))
     elif (
         not isinstance(kinds, list)
         or not kinds
         or any(
-            not isinstance(kind, str) or kind not in KNOWN_SYMBOL_KINDS
+            not isinstance(kind, str) or kind not in KNOWN_ENTITY_KINDS
             for kind in kinds
         )
     ):
-        raise CodeGraphQueryError("unknown symbol kind")
+        raise CodeGraphQueryError("unknown code kind")
     else:
         normalized_kinds = tuple(sorted(set(kinds)))
     if languages is not None and (
@@ -166,300 +132,253 @@ def validate_search_request(
     )
 
 
+def _lexical_expression(column: str, tokens: tuple[str, ...]) -> tuple[str, list[str]]:
+    if not tokens:
+        return "0", []
+    return (
+        " AND ".join(f"instr({column}, ?) > 0" for _token in tokens),
+        [f"\x1f{token}\x1f" for token in tokens],
+    )
+
+
+def _canonical_rank_sql(request: ValidatedSearchRequest) -> tuple[str, list[str]]:
+    lexical_sql, lexical_parameters = _lexical_expression(
+        "name_tokens_casefold", request.tokens
+    )
+    folded = request.query.casefold()
+    sql = f"""
+        CASE
+            WHEN qualified_name = ? THEN {MATCH_RANK['qualified_exact']}
+            WHEN local_name = ? THEN {MATCH_RANK['local_exact']}
+            WHEN substr(qualified_name, 1, length(?)) = ?
+              OR substr(local_name, 1, length(?)) = ?
+                THEN {MATCH_RANK['canonical_prefix']}
+            WHEN {lexical_sql} THEN {MATCH_RANK['canonical_lexical']}
+            WHEN signature IS NOT NULL
+             AND instr(COALESCE(signature_casefold, lower(signature)), ?) > 0
+                THEN {MATCH_RANK['signature']}
+            WHEN instr(COALESCE(path_casefold, lower(path)), ?) > 0
+                THEN {MATCH_RANK['path']}
+        END
+    """
+    return sql, [
+        request.query,
+        request.query,
+        request.query,
+        request.query,
+        request.query,
+        request.query,
+        *lexical_parameters,
+        folded,
+        folded,
+    ]
+
+
+def _alias_rank_sql(request: ValidatedSearchRequest) -> tuple[str, list[str]]:
+    lexical_sql, lexical_parameters = _lexical_expression(
+        "binding_name_tokens_casefold", request.tokens
+    )
+    sql = f"""
+        CASE
+            WHEN binding_name = ? THEN {MATCH_RANK['alias_exact']}
+            WHEN substr(binding_name, 1, length(?)) = ?
+                THEN {MATCH_RANK['alias_prefix']}
+            WHEN {lexical_sql} THEN {MATCH_RANK['alias_lexical']}
+        END
+    """
+    return sql, [
+        request.query,
+        request.query,
+        request.query,
+        *lexical_parameters,
+    ]
+
+
+def _query_sql(
+    domain: str,
+    request: ValidatedSearchRequest,
+) -> tuple[str, list[object]]:
+    placeholders = ", ".join("?" for _kind in request.kinds)
+    path_filter = ""
+    path_parameters: list[object] = []
+    if request.path is not None:
+        path_filter = "AND substr(path, 1, length(?)) = ?"
+        path_parameters.extend((request.path, request.path))
+    canonical_rank, canonical_parameters = _canonical_rank_sql(request)
+    alias_rank, alias_parameters = _alias_rank_sql(request)
+    sql = f"""
+        WITH entities ({_ENTITY_COLUMNS}) AS (
+            SELECT
+                f.file_id, 'file', f.file_id, NULL, NULL, 'file',
+                f.path, f.file_local_name, f.file_name_tokens_casefold,
+                NULL, NULL, f.path, f.path_casefold,
+                f.start_line, f.end_line, f.start_byte, f.end_byte
+            FROM files AS f
+            WHERE f.repository_id = ? AND f.language = ?
+            UNION ALL
+            SELECT
+                f.module_id, 'module', f.file_id, f.module_id, NULL, 'module',
+                f.module_qualified_name, f.module_local_name,
+                f.module_name_tokens_casefold,
+                NULL, NULL, f.path, f.path_casefold,
+                f.start_line, f.end_line, f.start_byte, f.end_byte
+            FROM files AS f
+            WHERE f.repository_id = ? AND f.language = ?
+              AND f.module_id IS NOT NULL
+            UNION ALL
+            SELECT
+                s.symbol_id, 'symbol', f.file_id, f.module_id, s.symbol_id,
+                s.kind, s.qualified_name, s.local_name,
+                s.name_tokens_casefold, s.signature, s.signature_casefold,
+                f.path, f.path_casefold,
+                s.start_line, s.end_line, s.start_byte, s.end_byte
+            FROM symbols AS s
+            JOIN files AS f ON f.file_id = s.file_id
+            WHERE f.repository_id = ? AND f.language = ?
+        ),
+        filtered_entities AS (
+            SELECT {_ENTITY_COLUMNS}
+            FROM entities
+            WHERE kind IN ({placeholders}) {path_filter}
+        ),
+        ranked_canonical AS (
+            SELECT {_ENTITY_COLUMNS}, {canonical_rank} AS match_rank
+            FROM filtered_entities
+        ),
+        canonical_matches AS (
+            SELECT {_ENTITY_COLUMNS}, match_rank, NULL AS matched_alias,
+                   0 AS alias_target_count
+            FROM ranked_canonical
+            WHERE match_rank IS NOT NULL
+        ),
+        alias_targets AS (
+            SELECT DISTINCT
+                r.binding_name, r.binding_name_tokens_casefold,
+                e.{_ENTITY_COLUMNS.replace(', ', ', e.')}
+            FROM relations AS r
+            JOIN filtered_entities AS e
+              ON e.entity_type = 'module'
+             AND e.module_id = r.target_module_id
+            WHERE r.relation_type = 'IMPORTS'
+              AND r.binding_kind = 'explicit_alias'
+              AND r.resolution_state IN (
+                  'resolved', 'ambiguous', 'partially_resolved'
+              )
+            UNION ALL
+            SELECT DISTINCT
+                r.binding_name, r.binding_name_tokens_casefold,
+                e.{_ENTITY_COLUMNS.replace(', ', ', e.')}
+            FROM relations AS r
+            JOIN filtered_entities AS e
+              ON e.entity_type = 'symbol'
+             AND e.symbol_id = r.target_symbol_id
+            WHERE r.relation_type = 'IMPORTS'
+              AND r.binding_kind = 'explicit_alias'
+              AND r.resolution_state IN (
+                  'resolved', 'ambiguous', 'partially_resolved'
+              )
+        ),
+        alias_counts AS (
+            SELECT binding_name, COUNT(DISTINCT entity_id) AS target_count
+            FROM alias_targets
+            GROUP BY binding_name
+        ),
+        ranked_aliases AS (
+            SELECT a.*, c.target_count, {alias_rank} AS match_rank
+            FROM alias_targets AS a
+            JOIN alias_counts AS c USING (binding_name)
+        ),
+        alias_matches AS (
+            SELECT {_ENTITY_COLUMNS}, match_rank,
+                   binding_name AS matched_alias,
+                   target_count AS alias_target_count
+            FROM ranked_aliases
+            WHERE match_rank IS NOT NULL
+        ),
+        matches AS (
+            SELECT * FROM canonical_matches
+            UNION ALL
+            SELECT * FROM alias_matches
+        )
+        SELECT * FROM matches
+        ORDER BY match_rank, qualified_name, entity_id, matched_alias
+    """
+    entity_parameters: list[object] = [
+        value
+        for _arm in range(3)
+        for value in (domain, request.language)
+    ]
+    return sql, [
+        *entity_parameters,
+        *request.kinds,
+        *path_parameters,
+        *canonical_parameters,
+        *alias_parameters,
+    ]
+
+
 class CodeGraphQuery:
-    """Retrieve bounded SQL candidates, then apply deterministic ranking."""
+    """Retrieve, rank, and de-duplicate all matching typed entities."""
 
     def __init__(self, domain: str) -> None:
         self.domain = domain
-
-    @staticmethod
-    def _classify(
-        row,
-        request: ValidatedSearchRequest,
-    ) -> str | None:
-        qualified_name = str(row[2])
-        local_name = str(row[3])
-        signature = row[4]
-        path = str(row[5])
-        query = request.query
-        if qualified_name == query:
-            return "qualified_exact"
-        if local_name == query:
-            return "local_exact"
-        folded = query.casefold()
-        if (
-            qualified_name.startswith(query)
-            or local_name.startswith(query)
-        ):
-            return "canonical_prefix"
-        fallback_rank = _fallback_rank(
-            request.tokens,
-            folded,
-            qualified_name,
-            local_name,
-            signature,
-            path,
-        )
-        if fallback_rank < len(MATCH_RANK):
-            return tuple(MATCH_RANK)[fallback_rank]
-        return None
-
-    def _candidate_rows(
-        self,
-        connection: sqlite3.Connection,
-        request: ValidatedSearchRequest,
-    ):
-        filters = ["f.repository_id = ?", "f.language = ?"]
-        filter_parameters: list[object] = [self.domain, request.language]
-        placeholders = ", ".join("?" for _kind in request.kinds)
-        filters.append(f"s.kind IN ({placeholders})")
-        filter_parameters.extend(request.kinds)
-        if request.path is not None:
-            filters.append("substr(f.path, 1, length(?)) = ?")
-            filter_parameters.extend((request.path, request.path))
-
-        def ordered_candidates(
-            predicate: str,
-            parameters: list[object],
-            remaining: int,
-        ):
-            sql = (
-                _COLUMNS
-                + "FROM symbols AS s INDEXED BY idx_symbols_qualified "
-                + "JOIN files AS f ON f.file_id = s.file_id "
-                + "WHERE "
-                + " AND ".join((*filters, f"({predicate})"))
-                + " ORDER BY s.qualified_name, s.symbol_id LIMIT ?"
-            )
-            return connection.execute(
-                sql,
-                [*filter_parameters, *parameters, remaining],
-            )
-
-        def has_local_candidates(
-            predicate: str,
-            parameters: list[object],
-        ) -> bool:
-            sql = (
-                "SELECT 1 FROM symbols AS s INDEXED BY idx_symbols_local "
-                "JOIN files AS f ON f.file_id = s.file_id WHERE "
-                + " AND ".join((*filters, f"({predicate})"))
-                + " LIMIT 1"
-            )
-            return connection.execute(
-                sql,
-                [*filter_parameters, *parameters],
-            ).fetchone() is not None
-
-        prefix_end = request.query + "\U0010ffff"
-        rows = []
-        rows.extend(ordered_candidates(
-            "s.qualified_name = ?",
-            [request.query],
-            request.limit,
-        ))
-        if len(rows) >= request.limit:
-            return rows
-
-        exact_local_sql = "s.qualified_name <> ? AND s.local_name = ?"
-        exact_local_parameters = [request.query, request.query]
-        if has_local_candidates(exact_local_sql, exact_local_parameters):
-            rows.extend(ordered_candidates(
-                exact_local_sql,
-                exact_local_parameters,
-                request.limit - len(rows),
-            ))
-            if len(rows) >= request.limit:
-                return rows
-
-        prefix_qualified_sql = (
-            "s.qualified_name <> ? AND s.local_name <> ? "
-            "AND s.qualified_name >= ? AND s.qualified_name < ?"
-        )
-        prefix_qualified_parameters = [
-            request.query,
-            request.query,
-            request.query,
-            prefix_end,
-        ]
-        prefix_local_sql = (
-            "s.qualified_name <> ? AND s.local_name <> ? "
-            "AND s.local_name >= ? AND s.local_name < ?"
-        )
-        prefix_local_parameters = [
-            request.query,
-            request.query,
-            request.query,
-            prefix_end,
-        ]
-        if has_local_candidates(prefix_local_sql, prefix_local_parameters):
-            prefix_sql = (
-                "s.qualified_name <> ? AND s.local_name <> ? AND "
-                "((s.qualified_name >= ? AND s.qualified_name < ?) OR "
-                "(s.local_name >= ? AND s.local_name < ?))"
-            )
-            prefix_parameters = [
-                request.query,
-                request.query,
-                request.query,
-                prefix_end,
-                request.query,
-                prefix_end,
-            ]
-        else:
-            prefix_sql = prefix_qualified_sql
-            prefix_parameters = prefix_qualified_parameters
-        rows.extend(ordered_candidates(
-            prefix_sql,
-            prefix_parameters,
-            request.limit - len(rows),
-        ))
-        if len(rows) >= request.limit:
-            return rows
-
-        folded = request.query.casefold()
-
-        def fallback_rank(
-            qualified_name,
-            local_name,
-            signature,
-            path,
-        ) -> int:
-            return _fallback_rank(
-                request.tokens,
-                folded,
-                qualified_name,
-                local_name,
-                signature,
-                path,
-            )
-
-        connection.create_function(
-            "iwiki_code_fallback_rank",
-            4,
-            fallback_rank,
-            deterministic=True,
-        )
-        fallback_rank_sql = (
-            "iwiki_code_fallback_rank("
-            "s.qualified_name, s.local_name, s.signature, f.path)"
-        )
-        lexical_prefilters = []
-        lexical_parameters: list[object] = []
-        for token in request.tokens:
-            lexical_prefilters.append(
-                "(instr(lower(s.qualified_name), ?) > 0 OR "
-                "instr(lower(s.local_name), ?) > 0)"
-            )
-            lexical_parameters.extend((token, token))
-        lexical_prefilter_sql = (
-            " AND ".join(lexical_prefilters)
-            if lexical_prefilters else "0"
-        )
-        escaped_folded = _like(folded)
-        signature_prefilter_sql = "s.signature LIKE ? ESCAPE '\\'"
-        path_prefilter_sql = "f.path LIKE ? ESCAPE '\\'"
-        non_ascii_sql = " OR ".join(
-            f"length(CAST({column} AS BLOB)) > length({column})"
-            for column in (
-                "s.qualified_name",
-                "s.local_name",
-                "s.signature",
-                "f.path",
-            )
-        )
-        prefilter_sql = (
-            f"({lexical_prefilter_sql}) OR {signature_prefilter_sql} "
-            f"OR {path_prefilter_sql} OR ({non_ascii_sql})"
-        )
-        prefilter_parameters = [
-            *lexical_parameters,
-            "%" + escaped_folded + "%",
-            "%" + escaped_folded + "%",
-        ]
-        candidate_rank_sql = (
-            f"CASE WHEN ({prefilter_sql}) THEN {fallback_rank_sql} "
-            f"ELSE {len(MATCH_RANK)} END"
-        )
-        stronger_parameters = [row[0] for row in rows]
-        stronger_sql = (
-            "s.symbol_id NOT IN ("
-            + ", ".join("?" for _symbol_id in stronger_parameters)
-            + ")"
-            if stronger_parameters else "1"
-        )
-        fallback_sql = (
-            _COLUMNS
-            + f", {fallback_rank_sql} AS match_rank "
-            + "FROM files AS f INDEXED BY idx_files_repository_path "
-            + "CROSS JOIN symbols AS s INDEXED BY idx_symbols_file "
-            + "WHERE "
-            + " AND ".join((
-                *filters,
-                "s.file_id = f.file_id",
-                f"({stronger_sql})",
-                f"({candidate_rank_sql} < {len(MATCH_RANK)})",
-            ))
-            + " ORDER BY match_rank, s.qualified_name, s.symbol_id LIMIT ?"
-        )
-        rows.extend(connection.execute(
-            fallback_sql,
-            [
-                *filter_parameters,
-                *stronger_parameters,
-                *prefilter_parameters,
-                request.limit - len(rows),
-            ],
-        ))
-        return rows
 
     def search(
         self,
         connection: sqlite3.Connection,
         request: ValidatedSearchRequest,
     ) -> tuple[SearchResult, ...]:
-        """Search one ready repository without reading source or all symbols."""
+        """Search one ready repository without reading project source."""
+        sql, parameters = _query_sql(self.domain, request)
         try:
-            rows = self._candidate_rows(connection, request)
+            rows = connection.execute(sql, parameters)
+            results: dict[str, SearchResult] = {}
+            winner_keys: dict[str, tuple[int, str, str, str]] = {}
+            for row in rows:
+                rank = int(row[17])
+                matched_alias = row[18]
+                item = SearchResult(
+                    entity_id=str(row[0]),
+                    entity_type=str(row[1]),
+                    file_id=None if row[2] is None else str(row[2]),
+                    module_id=None if row[3] is None else str(row[3]),
+                    symbol_id=None if row[4] is None else str(row[4]),
+                    kind=str(row[5]),
+                    qualified_name=str(row[6]),
+                    local_name=str(row[7]),
+                    signature=None if row[9] is None else str(row[9]),
+                    path=str(row[11]),
+                    start_line=int(row[13]),
+                    end_line=int(row[14]),
+                    start_byte=int(row[15]),
+                    end_byte=int(row[16]),
+                    match=_MATCH_BY_RANK[rank],
+                    matched_alias=(
+                        None if matched_alias is None else str(matched_alias)
+                    ),
+                    alias_ambiguous=int(row[19]) > 1,
+                    alias_target_count=int(row[19]),
+                )
+                winner_key = (
+                    rank,
+                    item.qualified_name,
+                    item.entity_id,
+                    item.matched_alias or "",
+                )
+                if winner_key < winner_keys.get(
+                    item.entity_id, (10, "", "", "")
+                ):
+                    results[item.entity_id] = item
+                    winner_keys[item.entity_id] = winner_key
         except sqlite3.DatabaseError as exc:
             raise CodeGraphStoreError("code graph search failed") from exc
-
-        results = {}
-        for row in rows:
-            match = self._classify(row, request)
-            if match is None:
-                continue
-            item = SearchResult(
-                entity_id=str(row[0]),
-                entity_type="symbol",
-                file_id=str(row[10]),
-                module_id=None,
-                symbol_id=str(row[0]),
-                kind=str(row[1]),
-                qualified_name=str(row[2]),
-                local_name=str(row[3]),
-                signature=row[4],
-                path=str(row[5]),
-                start_line=int(row[6]),
-                end_line=int(row[7]),
-                start_byte=int(row[8]),
-                end_byte=int(row[9]),
-                match=match,
-                matched_alias=None,
-                alias_ambiguous=False,
-                alias_target_count=0,
-            )
-            previous = results.get(item.symbol_id)
-            if previous is None or result_key(item) < result_key(previous):
-                results[item.symbol_id] = item
-        return tuple(
-            sorted(results.values(), key=result_key)[:request.limit]
-        )
+        return tuple(sorted(results.values(), key=result_key)[:request.limit])
 
 
 __all__ = [
     "CodeGraphQuery",
     "CodeGraphQueryError",
+    "KNOWN_ENTITY_KINDS",
     "KNOWN_SYMBOL_KINDS",
     "MATCH_RANK",
     "ValidatedSearchRequest",
