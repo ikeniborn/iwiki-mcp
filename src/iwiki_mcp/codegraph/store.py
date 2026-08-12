@@ -663,6 +663,19 @@ _INSERTS = {
 class CodeGraphStore:
     """Own one separate, rebuildable code graph SQLite cache."""
 
+    @staticmethod
+    def repository_state(
+        connection: sqlite3.Connection, repository_id: str
+    ) -> tuple[str, str] | None:
+        """Read lifecycle state and revision from a caller-held read lease."""
+        row = connection.execute(
+            "SELECT state, revision FROM repositories WHERE repository_id = ?",
+            (repository_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), str(row[1])
+
     def __init__(
         self,
         path: str | Path,

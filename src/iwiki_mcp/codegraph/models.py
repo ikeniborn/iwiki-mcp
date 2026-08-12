@@ -294,3 +294,49 @@ class SearchResult:
     matched_alias: str | None
     alias_ambiguous: bool
     alias_target_count: int
+
+
+@dataclass(frozen=True)
+class ContextNode:
+    entity_id: str
+    entity_type: Literal["file", "module", "symbol"]
+    file_id: str | None
+    module_id: str | None
+    symbol_id: str | None
+    kind: Literal[
+        "file", "module", "class", "function", "async_function", "method"
+    ]
+    qualified_name: str
+    local_name: str
+    signature: str | None
+    path: str
+    start_line: int
+    end_line: int
+    start_byte: int
+    end_byte: int
+
+
+@dataclass(frozen=True)
+class ContextRelation:
+    relation_id: str
+    source_entity_id: str
+    source_file_id: str
+    source_module_id: str | None
+    source_symbol_id: str | None
+    target_entity_id: str | None
+    target_module_id: str | None
+    target_symbol_id: str | None
+    target_reference: str | None
+    relation_type: Literal["DECLARES", "IMPORTS", "CALLS", "INHERITS"]
+    source_start_line: int
+    source_end_line: int
+    source_start_byte: int
+    source_end_byte: int
+    binding_name: str | None
+    binding_kind: Literal["implicit_binding", "explicit_alias"] | None
+    binding_name_tokens_casefold: str | None
+    confidence: float
+    resolution_state: Literal[
+        "resolved", "partially_resolved", "unresolved", "ambiguous"
+    ]
+    metadata_json: str

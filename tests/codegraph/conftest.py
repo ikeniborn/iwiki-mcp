@@ -14,6 +14,8 @@ import pytest
 
 from iwiki_mcp.base import Binding
 from iwiki_mcp.codegraph.config import CodeGraphConfig
+from iwiki_mcp.codegraph.context import CodeGraphContext, validate_context_request
+from iwiki_mcp.codegraph import models as models_module
 from iwiki_mcp.codegraph.indexer import AdapterFactory
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
@@ -149,6 +151,9 @@ class RuntimeHarness:
 
     def query_guard(self):
         return self.runtime.query_guard()
+
+    def context(self, seeds, **kwargs):
+        return self.runtime.context(seeds, **kwargs)
 
     def with_config(self, **overrides):
         _write_config(self.project_dir, Path(self.binding.base), **overrides)
@@ -308,6 +313,12 @@ class FakeRuntime:
             "hint": "run wiki_code_index" if self.state != "ready" else None,
         }
 
+    def context(self, seeds, **kwargs):
+        self.calls.append(("context", {"seeds": seeds, **kwargs}))
+        if self.state != "ready":
+            return {**self.query_guard(), "seeds": seeds, "nodes": []}
+        return {**self.query_guard(), "seeds": seeds, "nodes": []}
+
     def project_file(self, relative_path):
         return self.project_dir / relative_path
 
@@ -389,6 +400,122 @@ def seed_runtime(seed_binding, monkeypatch):
 def ready_runtime(seed_runtime):
     assert seed_runtime.index(force=True)["state"] == "ready"
     return seed_runtime
+
+
+class ContextHarness(RuntimeHarness):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._unsafe_source = False
+        with closing(sqlite3.connect(self.paths.database)) as connection:
+            rows = connection.execute(
+                "SELECT file_id, module_id, path FROM files ORDER BY path"
+            ).fetchall()
+            identifiers = {row[2]: (row[0], row[1]) for row in rows}
+            self.service_file_id, self.service_module_id = identifiers[
+                "src/pkg/service.py"
+            ]
+            self.worker_file_id, self.worker_module_id = identifiers[
+                "src/pkg/worker.py"
+            ]
+            self.loose_file_id, _unused = identifiers["loose.py"]
+            symbols = connection.execute(
+                "SELECT symbol_id, qualified_name FROM symbols"
+            ).fetchall()
+            by_name = {row[1]: row[0] for row in symbols}
+            self.service_class_id = by_name["pkg.service.Service"]
+            self.run_symbol_id = by_name["pkg.service.Service.run"]
+            self.work_symbol_id = by_name["pkg.worker.work"]
+
+    def context(self, seeds, **kwargs):
+        if not self._unsafe_source:
+            return super().context(seeds, **kwargs)
+        request = validate_context_request(seeds, **kwargs)
+        engine = CodeGraphContext(
+            self.binding.primary or "",
+            self.runtime._context_root,
+            self.runtime.config.max_file_bytes,
+        )
+        with self.runtime._store.read_lease() as connection:
+            response = engine.context(connection, request)
+        return {
+            "domain": self.binding.primary,
+            "state": "ready",
+            "revision": self.status()["revision"],
+            "fresh": "source_unavailable" not in response["warnings"],
+            **response,
+        }
+
+    def change_source_after_index(self):
+        self.project_file("src/pkg/service.py").write_text(
+            "class Changed:\n    pass\n", encoding="utf-8"
+        )
+
+    def replace_project_root_with_external_symlink(self):
+        external = self.project_dir.with_name(self.project_dir.name + "-external")
+        self.project_dir.rename(external)
+        source = external / "src/pkg/service.py"
+        self.project_dir.symlink_to(external, target_is_directory=True)
+        return source, "import pkg.worker as worker"
+
+    def make_source_unsafe(self, kind):
+        original = self.project_file("src/pkg/service.py")
+        if kind == "outside":
+            path = "../outside.py"
+            self.project_dir.parent.joinpath("outside.py").write_bytes(
+                original.read_bytes()
+            )
+        elif kind == "secret":
+            path = "credentials.py"
+            self.project_file(path).write_bytes(original.read_bytes())
+        else:
+            target = self.project_dir.parent / "outside.py"
+            target.write_bytes(original.read_bytes())
+            link = self.project_file("linked.py")
+            link.symlink_to(target)
+            path = "linked.py"
+        with closing(sqlite3.connect(self.paths.database)) as connection:
+            connection.execute(
+                "UPDATE files SET path = ?, path_casefold = NULL, "
+                "file_local_name = ?, file_name_tokens_casefold = ? "
+                "WHERE file_id = ?",
+                (
+                    path,
+                    Path(path).name,
+                    models_module.token_key(Path(path).name),
+                    self.service_file_id,
+                ),
+            )
+            connection.commit()
+        self._unsafe_source = True
+
+
+@pytest.fixture
+def ready_context(seed_binding, monkeypatch):
+    project = Path(seed_binding.project_dir)
+    project.joinpath("src/pkg/service.py").write_text(
+        "import pkg.worker as worker\n"
+        "class Service(external.Base):\n"
+        "    def run(self):\n"
+        "        return worker.work()\n",
+        encoding="utf-8",
+    )
+    project.joinpath("src/pkg/worker.py").write_text(
+        "def work():\n    return 1\n", encoding="utf-8"
+    )
+    project.joinpath("loose.py").write_text(
+        "import pkg.service\n", encoding="utf-8"
+    )
+    runtime = _runtime(seed_binding)
+    bootstrap = RuntimeHarness(seed_binding, monkeypatch, runtime=runtime)
+    assert bootstrap.index(force=True)["state"] == "ready"
+    harness = ContextHarness(
+        seed_binding,
+        monkeypatch,
+        runtime=runtime,
+        owned_runtimes=bootstrap._owned_runtimes,
+    )
+    yield harness
+    runtime.join_workers(timeout=5)
 
 
 @pytest.fixture
