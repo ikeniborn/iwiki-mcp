@@ -20,6 +20,7 @@ EXPECTED_TOOLS = {
     "wiki_lint", "wiki_remediation_plan", "wiki_migrate_okf", "wiki_apply_okf",
     "wiki_export_okf", "wiki_sync",
     "wiki_code_status", "wiki_code_index", "wiki_code_search",
+    "wiki_code_context",
 }
 
 
@@ -123,6 +124,26 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 assert _enum_values(search_schema["properties"]["mode"]) == {
                     "hybrid", "lexical", "semantic",
                 }
+                code_tools = {
+                    name: tool
+                    for name, tool in tools.items()
+                    if name.startswith("wiki_code_")
+                }
+                assert set(code_tools) == {
+                    "wiki_code_status",
+                    "wiki_code_index",
+                    "wiki_code_search",
+                    "wiki_code_context",
+                }
+                assert all(
+                    "domain" not in tool.inputSchema.get("properties", {})
+                    for tool in code_tools.values()
+                )
+                context_schema = tools["wiki_code_context"].inputSchema
+                context_properties = context_schema["properties"]
+                assert "seeds" in context_properties
+                assert "symbols" not in context_properties
+                assert context_properties["include_source"]["default"] is False
                 bind_schema = tools["wiki_bind"].inputSchema
                 assert "write" in bind_schema["properties"]
                 assert "primary" in bind_schema["properties"]

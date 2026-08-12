@@ -41,8 +41,35 @@ class _FakeRuntime:
             "limit": limit,
         }
 
+    def context(
+        self,
+        seeds,
+        *,
+        direction="both",
+        depth=1,
+        relations=None,
+        include_source=False,
+        include_wiki=True,
+        max_nodes=50,
+        max_files=20,
+        max_source_bytes=200_000,
+    ):
+        self.calls.append(f"context:{self.binding.primary}")
+        return {
+            "domain": self.binding.primary,
+            "seeds": seeds,
+            "direction": direction,
+            "depth": depth,
+            "relations": relations,
+            "include_source": include_source,
+            "include_wiki": include_wiki,
+            "max_nodes": max_nodes,
+            "max_files": max_files,
+            "max_source_bytes": max_source_bytes,
+        }
 
-def test_unit_b_handlers_use_the_bound_primary(seed_binding, monkeypatch):
+
+def test_code_handlers_use_the_bound_primary(seed_binding, monkeypatch):
     binding = replace(seed_binding, primary="backend")
     calls = []
     monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
@@ -65,10 +92,40 @@ def test_unit_b_handlers_use_the_bound_primary(seed_binding, monkeypatch):
         "languages": ["python"],
         "limit": 4,
     }
-    assert calls == ["status:backend", "index:backend", "search:backend"]
+    context = server.wiki_code_context(
+        ["py:symbol:" + "a" * 64],
+        direction="out",
+        depth=2,
+        relations=["CALLS"],
+        include_source=True,
+        include_wiki=False,
+        max_nodes=4,
+        max_files=3,
+        max_source_bytes=1024,
+    )
+    assert context == {
+        "domain": "backend",
+        "seeds": ["py:symbol:" + "a" * 64],
+        "direction": "out",
+        "depth": 2,
+        "relations": ["CALLS"],
+        "include_source": True,
+        "include_wiki": False,
+        "max_nodes": 4,
+        "max_files": 3,
+        "max_source_bytes": 1024,
+    }
+    assert calls == [
+        "status:backend",
+        "index:backend",
+        "search:backend",
+        "context:backend",
+    ]
 
 
-def test_unit_b_handlers_fail_soft_without_primary(seed_without_primary, monkeypatch):
+def test_code_handlers_fail_soft_without_primary(
+    seed_without_primary, monkeypatch
+):
     monkeypatch.setattr(
         server.base, "resolve_binding", lambda: seed_without_primary
     )
@@ -77,6 +134,7 @@ def test_unit_b_handlers_fail_soft_without_primary(seed_without_primary, monkeyp
         server.wiki_code_status(),
         server.wiki_code_index(),
         server.wiki_code_search("run"),
+        server.wiki_code_context(["py:file:" + "a" * 64]),
     ):
         assert result == {
             "error": "code graph is not configured",
@@ -123,6 +181,33 @@ def test_search_validation_precedes_binding_for_all_text_bounds(
 
 
 @pytest.mark.parametrize(
+    "arguments",
+    [
+        {"seeds": []},
+        {"seeds": ["not-an-entity-id"]},
+        {"seeds": ["py:file:" + "a" * 64], "direction": "sideways"},
+        {"seeds": ["py:file:" + "a" * 64], "depth": 4},
+        {"seeds": ["py:file:" + "a" * 64], "relations": ["DOCUMENTED_BY"]},
+        {"seeds": ["py:file:" + "a" * 64], "include_source": 1},
+        {"seeds": ["py:file:" + "a" * 64], "max_nodes": 51},
+        {"seeds": ["py:file:" + "a" * 64], "max_files": 21},
+        {"seeds": ["py:file:" + "a" * 64], "max_source_bytes": 200_001},
+    ],
+)
+def test_context_validation_precedes_binding(monkeypatch, arguments):
+    def fail_binding():
+        raise AssertionError("binding must not be resolved")
+
+    monkeypatch.setattr(server.base, "resolve_binding", fail_binding)
+
+    assert server.wiki_code_context(**arguments) == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
+@pytest.mark.parametrize(
     "call",
     [
         lambda: server.wiki_code_status(),
@@ -133,6 +218,7 @@ def test_search_validation_precedes_binding_for_all_text_bounds(
             path="src/private/",
             languages=["python"],
         ),
+        lambda: server.wiki_code_context(["py:module:" + "a" * 64]),
     ],
 )
 def test_code_handlers_sanitize_binding_errors(monkeypatch, caplog, call):
@@ -208,6 +294,7 @@ def test_search_handler_maps_invalid_config_without_leaking_text(
             path="src/private/",
             languages=["python"],
         ),
+        lambda: server.wiki_code_context(["py:module:" + "a" * 64]),
     ],
 )
 def test_code_handlers_sanitize_and_log_unexpected_runtime_factory_failure(
@@ -247,6 +334,7 @@ def test_code_handlers_sanitize_and_log_unexpected_runtime_factory_failure(
     assert "private-handler-query" not in caplog.text
     assert "/absolute/private/path" not in caplog.text
     assert "SELECT source SQL" not in caplog.text
+    assert server.wiki_status()["primary"] == seed_binding.primary
 
 
 def test_general_wiki_safe_keeps_existing_unexpected_error_contract():
@@ -352,11 +440,22 @@ def test_search_handler_maps_lazy_cursor_failure_without_leaking_text(
 
 
 @pytest.mark.asyncio
-async def test_fastmcp_registry_contains_only_unit_b_code_tools():
+async def test_fastmcp_registry_has_exact_code_tools():
     tools = {tool.name: tool for tool in await server.mcp.list_tools()}
 
-    assert {"wiki_code_status", "wiki_code_index", "wiki_code_search"} <= set(tools)
-    assert "wiki_code_context" not in tools
+    code_tools = {
+        name: tool for name, tool in tools.items() if name.startswith("wiki_code_")
+    }
+    assert set(code_tools) == {
+        "wiki_code_status",
+        "wiki_code_index",
+        "wiki_code_search",
+        "wiki_code_context",
+    }
+    assert all(
+        "domain" not in tool.inputSchema.get("properties", {})
+        for tool in code_tools.values()
+    )
     assert set(tools["wiki_code_status"].inputSchema.get("properties", {})) == set()
     assert set(tools["wiki_code_index"].inputSchema["properties"]) == {
         "force", "languages",
@@ -369,6 +468,23 @@ async def test_fastmcp_registry_contains_only_unit_b_code_tools():
     assert search_schema["properties"]["languages"]["default"] is None
     assert search_schema["properties"]["limit"]["default"] == 20
     assert "domain" not in search_schema["properties"]
+    context_schema = tools["wiki_code_context"].inputSchema
+    assert context_schema["required"] == ["seeds"]
+    assert set(context_schema["properties"]) == {
+        "seeds",
+        "direction",
+        "depth",
+        "relations",
+        "include_source",
+        "include_wiki",
+        "max_nodes",
+        "max_files",
+        "max_source_bytes",
+    }
+    assert "symbols" not in context_schema["properties"]
+    assert context_schema["properties"]["direction"]["default"] == "both"
+    assert context_schema["properties"]["include_source"]["default"] is False
+    assert context_schema["properties"]["include_wiki"]["default"] is True
 
 
 def test_wiki_search_regression_keeps_existing_function():

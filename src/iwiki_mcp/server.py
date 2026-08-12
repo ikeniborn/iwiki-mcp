@@ -591,6 +591,46 @@ def wiki_code_search(
 
 
 @_safe
+@_code_safe
+def wiki_code_context(
+    seeds: list[str],
+    direction: Literal["in", "out", "both"] = "both",
+    depth: int = 1,
+    relations: list[str] | None = None,
+    include_source: bool = False,
+    include_wiki: bool = True,
+    max_nodes: int = 50,
+    max_files: int = 20,
+    max_source_bytes: int = 200_000,
+) -> dict:
+    _codegraph_runtime.validate_context_request(
+        seeds,
+        direction=direction,
+        depth=depth,
+        relations=relations,
+        include_source=include_source,
+        include_wiki=include_wiki,
+        max_nodes=max_nodes,
+        max_files=max_files,
+        max_source_bytes=max_source_bytes,
+    )
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).context(
+        seeds,
+        direction=direction,
+        depth=depth,
+        relations=relations,
+        include_source=include_source,
+        include_wiki=include_wiki,
+        max_nodes=max_nodes,
+        max_files=max_files,
+        max_source_bytes=max_source_bytes,
+    )
+
+
+@_safe
 def wiki_list_domains() -> dict:
     bind = base.resolve_binding()
     out = []
@@ -2077,6 +2117,7 @@ mcp.tool()(wiki_status)
 mcp.tool()(wiki_code_status)
 mcp.tool()(wiki_code_index)
 mcp.tool()(wiki_code_search)
+mcp.tool()(wiki_code_context)
 mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)
