@@ -1542,13 +1542,39 @@ def wiki_lint(domain: str | None = None) -> dict:
     }
     reports = {}
     for target in valid_targets:
-        reports[target] = lint(
+        report = lint(
             visible_domains[target],
             project_dir=bind.project_dir,
             domain=target,
             base_dir=bind.base,
             visible_domains=visible_domains,
         )
+        try:
+            if target != bind.primary:
+                code_report = {
+                    "available": False,
+                    "state": "disabled",
+                    "revision": None,
+                    "findings": [],
+                    "hint": "code graph follows the bound primary domain",
+                }
+            else:
+                runtime = _code_runtime(bind)
+                code_report = _codegraph_linking.lint_domain(
+                    visible_domains[target],
+                    domain=target,
+                    runtime=runtime,
+                )
+        except Exception:
+            code_report = {
+                "available": False,
+                "state": "failed",
+                "revision": None,
+                "findings": [],
+                "hint": "inspect wiki_code_status and retry",
+            }
+        report["code_graph"] = code_report
+        reports[target] = report
     return {"domains": list(reports.keys()), "reports": reports}
 
 

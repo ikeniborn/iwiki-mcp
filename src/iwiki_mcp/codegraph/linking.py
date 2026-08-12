@@ -376,6 +376,585 @@ def resolve_selectors(
     return tuple(sorted(selected.values(), key=lambda row: str(row["link_id"])))
 
 
+def _code_lint_report(
+    *,
+    available: bool,
+    state: str,
+    revision: object = None,
+    findings: Sequence[Mapping[str, object]] = (),
+    hint: str | None = None,
+) -> dict[str, object]:
+    return {
+        "available": available,
+        "state": state,
+        "revision": revision if isinstance(revision, str) else None,
+        "findings": [dict(item) for item in findings],
+        "hint": hint,
+    }
+
+
+def _lint_unavailable(status: Mapping[str, object]) -> dict[str, object]:
+    warnings = status.get("warnings")
+    if (
+        isinstance(warnings, Sequence)
+        and "code_graph_incompatible" in warnings
+    ):
+        state = "incompatible"
+    elif status.get("code") == "not_configured":
+        state = "disabled" if status.get("enabled") is False else "missing"
+    else:
+        raw_state = status.get("state")
+        state = raw_state if raw_state in {
+            "missing", "dirty", "rebuilding", "failed", "incompatible"
+        } else "failed"
+    hint = "enable code_graph" if state == "disabled" else "run wiki_code_index"
+    if state == "failed" and not status.get("state"):
+        hint = "inspect wiki_code_status and retry"
+    return _code_lint_report(
+        available=False,
+        state=state,
+        revision=status.get("revision"),
+        hint=hint,
+    )
+
+
+def _lint_pages(wiki_dir: str, domain: str) -> Iterator[tuple[str, str, object]]:
+    root = Path(wiki_dir)
+    resolver = WikiSelectorResolver(root.parent)
+    watch = _SelectorWatch.create()
+    descriptors = resolver._page_descriptors(
+        domain,
+        watch_directory=watch.add_directory,
+        watch_file=watch.add_directory,
+    )
+    try:
+        for relative, descriptor, parent_fd, name, opened_identity in descriptors:
+            try:
+                before = os.fstat(descriptor)
+                chunks = []
+                consumed = 0
+                while True:
+                    chunk = os.read(descriptor, 65_536)
+                    if not chunk:
+                        break
+                    consumed += len(chunk)
+                    if consumed > _MAX_WIKI_PAGE_BYTES:
+                        raise SelectorError("Wiki page byte budget exceeded")
+                    chunks.append(chunk)
+                after = os.fstat(descriptor)
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+
+                def identity(value):
+                    return (
+                        value.st_dev,
+                        value.st_ino,
+                        value.st_size,
+                        value.st_mtime_ns,
+                    )
+                if (
+                    identity(before) != identity(after)
+                    or (current.st_dev, current.st_ino) != opened_identity
+                    or identity(after) != identity(current)
+                ):
+                    raise SelectorSnapshotChanged(
+                        "Wiki page changed during code lint"
+                    )
+                markdown = b"".join(chunks).decode("utf-8")
+                try:
+                    meta, _body = frontmatter.split(
+                        markdown, strict_code=True
+                    )
+                    code = meta.get("code")
+                except frontmatter.FrontmatterError:
+                    code = {"invalid": True}
+                if code is not None:
+                    yield f"{domain}/{relative[:-3]}", relative, code
+            finally:
+                os.close(descriptor)
+                os.close(parent_fd)
+        if watch.changed():
+            raise SelectorSnapshotChanged(
+                "Wiki selector snapshot changed during code lint"
+            )
+    finally:
+        try:
+            descriptors.close()
+        finally:
+            watch.close()
+
+
+def _selector_policy(project_dir: str, config):
+    from .discovery import _ignore_spec, _open_root_directory
+
+    descriptor = _open_root_directory(Path(project_dir).resolve(strict=True))
+    try:
+        ignore_spec, _warnings = _ignore_spec(
+            descriptor, config.exclude, config.max_file_bytes
+        )
+    finally:
+        os.close(descriptor)
+    return ignore_spec
+
+
+def _secret_selector(value: str) -> bool:
+    from .discovery import _is_secret_like
+
+    for part in PurePosixPath(value).parts:
+        literal = part.strip("*?[]!")
+        if literal and _is_secret_like(literal):
+            return True
+    return False
+
+
+def _built_in_ignored(value: str) -> bool:
+    from .discovery import _EXCLUDED_DIRECTORIES
+
+    return any(
+        part.casefold() in _EXCLUDED_DIRECTORIES
+        for part in PurePosixPath(value).parts[:-1]
+    )
+
+
+def _ignored_selector(value: str, config, ignore_spec) -> bool:
+    from .discovery import _TEST_DIRECTORIES
+
+    parts = tuple(part.casefold() for part in PurePosixPath(value).parts)
+    return (
+        _built_in_ignored(value)
+        or ignore_spec.match_file(value)
+        or (
+            not config.include_tests
+            and any(part in _TEST_DIRECTORIES for part in parts)
+        )
+    )
+
+
+def _glob_has_ignored_match(
+    project_dir: str, pattern: str, config, ignore_spec
+) -> bool:
+    """Bounded descriptor traversal of excluded path names, never contents."""
+    from .discovery import (
+        _EXCLUDED_DIRECTORIES,
+        _open_directory,
+        _open_root_directory,
+    )
+
+    root = Path(project_dir).resolve(strict=True)
+    root_descriptor = _open_root_directory(root)
+    frames: list[tuple[int, str, int]] = [(root_descriptor, "", 0)]
+    scanned_entries = 0
+    scanned_directories = 1
+    try:
+        while frames:
+            descriptor, parent, depth = frames.pop()
+            try:
+                with os.scandir(descriptor) as iterator:
+                    entries = sorted(iterator, key=lambda entry: entry.name)
+                for entry in entries:
+                    scanned_entries += 1
+                    if scanned_entries > 100_000:
+                        return False
+                    relative = f"{parent}/{entry.name}" if parent else entry.name
+                    status = os.stat(
+                        entry.name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(status.st_mode):
+                        continue
+                    if stat.S_ISDIR(status.st_mode):
+                        if (
+                            depth >= 256
+                            or scanned_directories >= 10_000
+                            or entry.name.casefold() in _EXCLUDED_DIRECTORIES
+                        ):
+                            continue
+                        try:
+                            child = _open_directory(
+                                descriptor, entry.name, status
+                            )
+                        except Exception:
+                            continue
+                        scanned_directories += 1
+                        frames.append((child, relative, depth + 1))
+                        continue
+                    if (
+                        stat.S_ISREG(status.st_mode)
+                        and PurePosixPath(entry.name).suffix.casefold() == ".py"
+                        and _glob_matches(relative, pattern)
+                        and _ignored_selector(relative, config, ignore_spec)
+                    ):
+                        return True
+            finally:
+                os.close(descriptor)
+        return False
+    finally:
+        for descriptor, _parent, _depth in frames:
+            os.close(descriptor)
+
+
+def _path_state(project_dir: str, relative: str) -> str:
+    root = Path(project_dir).resolve(strict=True)
+    current = root
+    for part in PurePosixPath(relative).parts:
+        current = current / part
+        try:
+            status = current.lstat()
+        except FileNotFoundError:
+            return "missing"
+        except OSError:
+            return "unsafe"
+        if stat.S_ISLNK(status.st_mode):
+            return "unsafe"
+    return "file" if current.is_file() else "missing"
+
+
+def _finding(
+    finding_type: str,
+    page_id: str,
+    selector_kind: str | None = None,
+    selector: str | None = None,
+    **details: object,
+) -> dict[str, object]:
+    item: dict[str, object] = {"type": finding_type, "page_id": page_id}
+    if selector_kind is not None:
+        item["selector_kind"] = selector_kind
+    if selector is not None:
+        item["selector"] = selector
+    item.update(details)
+    return item
+
+
+def _valid_lint_selectors(
+    code: object,
+    *,
+    page_id: str,
+    project_dir: str,
+    files_by_path: Mapping[str, Mapping[str, object]],
+    symbols_by_name: Mapping[str, Sequence[Mapping[str, object]]],
+    ignore_spec,
+    config,
+) -> tuple[dict[str, list[object]], list[dict[str, object]]]:
+    valid: dict[str, list[object]] = {
+        "symbols": [], "files": [], "source_globs": [],
+    }
+    findings: list[dict[str, object]] = []
+    if not isinstance(code, Mapping):
+        return valid, [_finding("unsafe_selector", page_id)]
+    if set(code) - _SELECTOR_KEYS:
+        findings.append(_finding("unsafe_selector", page_id))
+
+    selector_count = sum(
+        len(items) for key in _SELECTOR_KEYS
+        if type(items := code.get(key, [])) is list
+    )
+    if selector_count > _MAX_SELECTORS:
+        return valid, [*findings, _finding("unsafe_selector", page_id)]
+
+    symbols = code.get("symbols", [])
+    if type(symbols) is not list:
+        findings.append(_finding("unsafe_selector", page_id, "symbol"))
+        symbols = []
+    for item in symbols:
+        try:
+            if not isinstance(item, Mapping) or set(item) != {"qualified_name"}:
+                raise SelectorError("invalid symbol selector")
+            name = _selector_text(item["qualified_name"], "symbol")
+        except SelectorError:
+            findings.append(_finding("unsafe_selector", page_id, "symbol"))
+            continue
+        matches = tuple(symbols_by_name.get(name, ()))
+        if not matches:
+            findings.append(_finding(
+                "unknown_symbol", page_id, "symbol", name
+            ))
+        elif len(matches) > 1:
+            findings.append(_finding(
+                "ambiguous_symbol", page_id, "symbol", name,
+                matches=len(matches),
+            ))
+        valid["symbols"].append({"qualified_name": name})
+
+    files = code.get("files", [])
+    if type(files) is not list:
+        findings.append(_finding("unsafe_selector", page_id, "file"))
+        files = []
+    for item in files:
+        try:
+            path = _relative_selector(item, "file")
+        except SelectorError:
+            findings.append(_finding(
+                "unsafe_selector", page_id, "file",
+                item if isinstance(item, str) else None,
+            ))
+            continue
+        if _secret_selector(path):
+            findings.append(_finding(
+                "secret_selector", page_id, "file", path
+            ))
+            continue
+        if _ignored_selector(path, config, ignore_spec):
+            findings.append(_finding(
+                "ignored_selector", page_id, "file", path
+            ))
+            continue
+        path_state = _path_state(project_dir, path)
+        if path_state == "unsafe":
+            findings.append(_finding(
+                "unsafe_selector", page_id, "file", path
+            ))
+            continue
+        if path not in files_by_path:
+            findings.append(_finding(
+                "missing_file", page_id, "file", path
+            ))
+        valid["files"].append(path)
+
+    globs = code.get("source_globs", [])
+    if type(globs) is not list:
+        findings.append(_finding("unsafe_selector", page_id, "source_glob"))
+        globs = []
+    for item in globs:
+        try:
+            pattern = _relative_selector(item, "source_glob", glob=True)
+        except SelectorError:
+            findings.append(_finding(
+                "unsafe_selector", page_id, "source_glob",
+                item if isinstance(item, str) else None,
+            ))
+            continue
+        if _secret_selector(pattern):
+            findings.append(_finding(
+                "secret_selector", page_id, "source_glob", pattern
+            ))
+            continue
+        if _ignored_selector(pattern, config, ignore_spec):
+            findings.append(_finding(
+                "ignored_selector", page_id, "source_glob", pattern
+            ))
+            continue
+        if not any(_glob_matches(path, pattern) for path in files_by_path):
+            finding_type = (
+                "ignored_selector"
+                if _glob_has_ignored_match(
+                    project_dir, pattern, config, ignore_spec
+                )
+                else "empty_glob"
+            )
+            findings.append(_finding(
+                finding_type, page_id, "source_glob", pattern
+            ))
+        valid["source_globs"].append(pattern)
+    return valid, findings
+
+
+def _lint_ready_domain(
+    wiki_dir: str,
+    *,
+    domain: str,
+    runtime,
+    status: Mapping[str, object],
+) -> dict[str, object]:
+    revision = status.get("revision")
+    store = runtime._store
+    if store is None or not isinstance(revision, str):
+        return _lint_unavailable(status)
+    ignore_spec = _selector_policy(runtime.binding.project_dir, runtime.config)
+    findings: list[dict[str, object]] = []
+    with store.read_lease() as connection:
+        repository = store.repository_state(connection, domain)
+        if repository != ("ready", revision):
+            return _code_lint_report(
+                available=False,
+                state="dirty",
+                revision=revision,
+                hint="run wiki_code_index",
+            )
+        files = tuple(
+            dict(zip(("file_id", "path"), row))
+            for row in connection.execute(
+                "SELECT file_id, path FROM files WHERE repository_id = ?",
+                (domain,),
+            )
+        )
+        symbols = tuple(
+            dict(zip(("symbol_id", "qualified_name"), row))
+            for row in connection.execute(
+                "SELECT symbol_id, qualified_name FROM symbols "
+                "WHERE file_id IN (SELECT file_id FROM files "
+                "WHERE repository_id = ?)",
+                (domain,),
+            )
+        )
+        actual_by_page: dict[str, set[tuple[object, ...]]] = {}
+        for row in connection.execute(
+            "SELECT page_id, symbol_id, file_id, selector_kind, source "
+            "FROM wiki_code_links WHERE domain = ?",
+            (domain,),
+        ):
+            actual_by_page.setdefault(str(row[0]), set()).add(tuple(row[1:]))
+
+        files_by_path = {str(row["path"]): row for row in files}
+        symbols_by_name: dict[str, list[Mapping[str, object]]] = {}
+        for row in symbols:
+            symbols_by_name.setdefault(str(row["qualified_name"]), []).append(row)
+        observed_pages: set[str] = set()
+        for page_id, _relative, code in _lint_pages(wiki_dir, domain):
+            observed_pages.add(page_id)
+            valid, page_findings = _valid_lint_selectors(
+                code,
+                page_id=page_id,
+                project_dir=runtime.binding.project_dir,
+                files_by_path=files_by_path,
+                symbols_by_name=symbols_by_name,
+                ignore_spec=ignore_spec,
+                config=runtime.config,
+            )
+            findings.extend(page_findings)
+            expected_links = resolve_selectors(
+                {"code": valid},
+                {"files": files, "symbols": symbols},
+                domain=domain,
+                page_id=page_id,
+            )
+            expected_rows = {
+                (
+                    row["symbol_id"], row["file_id"],
+                    row["selector_kind"], row["source"],
+                )
+                for row in expected_links
+            }
+            provenance: dict[tuple[str, str], set[tuple[str, str]]] = {}
+            for kind, values in (
+                ("file", valid["files"]),
+                ("source_glob", valid["source_globs"]),
+            ):
+                for selector in values:
+                    for path, row in files_by_path.items():
+                        if (
+                            (kind == "file" and path == selector)
+                            or (
+                                kind == "source_glob"
+                                and _glob_matches(path, str(selector))
+                            )
+                        ):
+                            key = ("file", str(row["file_id"]))
+                            provenance.setdefault(key, set()).add(
+                                (kind, str(selector))
+                            )
+            for target, selectors in sorted(provenance.items()):
+                if len(selectors) > 1:
+                    findings.append(_finding(
+                        "conflicting_selectors", page_id,
+                        selectors=[
+                            {"kind": kind, "selector": selector}
+                            for kind, selector in sorted(selectors)
+                        ],
+                        target_type=target[0],
+                        target_id=target[1],
+                    ))
+            if expected_rows != actual_by_page.get(page_id, set()):
+                findings.append(_finding("stale_revision", page_id))
+        for page_id in sorted(set(actual_by_page) - observed_pages):
+            findings.append(_finding("stale_revision", page_id))
+
+    findings.sort(key=lambda item: json.dumps(
+        item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ))
+    return _code_lint_report(
+        available=True,
+        state="ready",
+        revision=revision,
+        findings=findings,
+        hint=None,
+    )
+
+
+def _read_only_status(runtime) -> Mapping[str, object]:
+    """Mirror status inspection while deliberately omitting recovery writes."""
+    if not hasattr(runtime, "_unavailable"):
+        return runtime.status()
+    unavailable = runtime._unavailable()
+    if unavailable is not None:
+        return {
+            **unavailable,
+            "enabled": unavailable.get("code") != "not_configured",
+        }
+    from .runtime import _metadata, _pending_final_verify
+
+    metadata: dict[str, object] = {}
+    status: Mapping[str, object] = {}
+    for _attempt in range(4):
+        before = dict(_metadata(runtime.paths.metadata))
+        status = runtime._read_status(
+            persisted_metadata=before,
+            normalization_versions=runtime._normalization_versions(),
+        )
+        after = dict(_metadata(runtime.paths.metadata))
+        if before == after:
+            metadata = after
+            break
+    else:
+        return {
+            "enabled": True,
+            "state": "rebuilding",
+            "revision": after.get("revision"),
+            "fresh": False,
+            "hint": "run wiki_code_index",
+        }
+    if (
+        metadata.get("state") in {"rebuilding", "recovering"}
+        or _pending_final_verify(metadata)
+    ):
+        return {
+            **status,
+            "state": "rebuilding",
+            "fresh": False,
+            "hint": "run wiki_code_index",
+        }
+    if metadata.get("state") == "failed":
+        return {
+            **status,
+            "state": "failed",
+            "fresh": False,
+            "hint": "run wiki_code_index",
+        }
+    return status
+
+
+def lint_domain(wiki_dir: str, *, domain: str, runtime) -> dict[str, object]:
+    """Lint authored selectors against a ready snapshot without rebuilding."""
+    try:
+        status = _read_only_status(runtime)
+        if not isinstance(status, Mapping):
+            raise TypeError("invalid code graph status")
+        if status.get("state") != "ready" or status.get("fresh") is False:
+            return _lint_unavailable(status)
+        result = _lint_ready_domain(
+            wiki_dir, domain=domain, runtime=runtime, status=status
+        )
+        if hasattr(runtime, "paths") and runtime.paths is not None:
+            from .runtime import _metadata
+
+            current = dict(_metadata(runtime.paths.metadata))
+            if (
+                current.get("state") != "ready"
+                or current.get("revision") != result.get("revision")
+            ):
+                return _lint_unavailable({
+                    "enabled": True,
+                    "state": current.get("state", "failed"),
+                    "revision": current.get("revision"),
+                })
+        return result
+    except Exception:
+        return _code_lint_report(
+            available=False,
+            state="failed",
+            hint="inspect wiki_code_status and retry",
+        )
+
+
 def _parsed_snapshot(
     parsed_files: tuple[ParsedFile, ...],
 ) -> dict[str, tuple[dict[str, object], ...]]:
