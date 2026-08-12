@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 import json
 import logging
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -15,7 +16,9 @@ import pytest
 from filelock import Timeout
 
 from iwiki_mcp import base as wiki_base
+from iwiki_mcp.codegraph import indexer as codegraph_indexer
 from iwiki_mcp.codegraph import models as codegraph_models
+from iwiki_mcp.codegraph import store as codegraph_store
 from iwiki_mcp.codegraph.discovery import DiscoveryError
 from iwiki_mcp.codegraph.fingerprint import parser_fingerprint
 from iwiki_mcp.codegraph.indexer import (
@@ -29,6 +32,7 @@ from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
+from iwiki_mcp.codegraph.query import CodeGraphQuery
 from iwiki_mcp.codegraph.schema import (
     SCHEMA_VERSION,
     CodeGraphStoreError,
@@ -41,6 +45,49 @@ from iwiki_mcp.codegraph.store import (
     code_graph_write_lock,
 )
 from iwiki_mcp.base import Binding
+
+
+def _install_schema_v1_cache(path: Path, *, sentinel: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            "CREATE TABLE repositories (repository_id TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "CREATE TABLE symbols ("
+            "symbol_id TEXT PRIMARY KEY, qualified_name TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO repositories(repository_id) VALUES (?)",
+            ("project",),
+        )
+        connection.execute(
+            "INSERT INTO symbols(symbol_id, qualified_name) VALUES (?, ?)",
+            ("legacy", sentinel),
+        )
+        connection.commit()
+
+
+def _database_text_values(path: Path) -> tuple[str, ...]:
+    values = []
+    with closing(sqlite3.connect(path)) as connection:
+        tables = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        )
+        for table in tables:
+            values.extend(
+                value
+                for row in connection.execute(f'SELECT * FROM "{table}"')
+                for value in row
+                if isinstance(value, str)
+            )
+    return tuple(values)
 
 
 def test_adapter_factory_binds_fresh_isolated_instances():
@@ -135,6 +182,93 @@ def test_publication_primitive_orders_two_canonical_verifications():
         "verify_2",
         "timing_refresh",
     ]
+
+
+def test_schema_v1_explicit_index_rebuilds_v2_without_row_migration(
+    seed_runtime,
+):
+    sentinel = "must-not-copy"
+    _install_schema_v1_cache(seed_runtime.paths.database, sentinel=sentinel)
+    wiki_before = seed_runtime.wiki_hashes()
+
+    incompatible = seed_runtime.status()
+    built = seed_runtime.index(force=False)
+
+    assert incompatible["state"] == "missing"
+    assert incompatible["fresh"] is False
+    assert "code_graph_incompatible" in incompatible["warnings"]
+    assert built["state"] == "ready"
+    assert built["schema_version"] == 2
+    assert sentinel not in _database_text_values(seed_runtime.paths.database)
+    assert seed_runtime.wiki_hashes() == wiki_before
+    assert list(seed_runtime.paths.database.parent.glob(
+        f"{seed_runtime.paths.database.name}.corrupt-*"
+    ))
+
+
+def test_publication_order_is_replace_metadata_verify_ready_verify_refresh(
+    seed_runtime, monkeypatch
+):
+    events = []
+    store = seed_runtime.runtime._indexer.store
+    indexer = seed_runtime.runtime._indexer
+    real_replace = store.replace_staging
+    real_publish = store.publish_metadata
+    real_verify = indexer._verify_published
+    real_refresh = store.refresh_metadata_diagnostics
+    replacement_complete = False
+    verification = 0
+
+    def observed_replace(*args, **kwargs):
+        nonlocal replacement_complete
+        result = real_replace(*args, **kwargs)
+        replacement_complete = True
+        events.append("replace")
+        return result
+
+    def observed_publish(metadata_path, staging, **kwargs):
+        payload = json.loads(Path(staging).read_text(encoding="utf-8"))
+        if replacement_complete:
+            events.append(
+                "metadata_rebuilding"
+                if payload["state"] == "rebuilding"
+                else "metadata_ready_pending"
+            )
+        return real_publish(metadata_path, staging, **kwargs)
+
+    def observed_verify(revision):
+        nonlocal verification
+        verification += 1
+        events.append(f"canonical_verify_{verification}")
+        return real_verify(revision)
+
+    def observed_refresh(*args, **kwargs):
+        events.append("timing_refresh")
+        return real_refresh(*args, **kwargs)
+
+    monkeypatch.setattr(store, "replace_staging", observed_replace)
+    monkeypatch.setattr(store, "publish_metadata", observed_publish)
+    monkeypatch.setattr(indexer, "_verify_published", observed_verify)
+    monkeypatch.setattr(store, "refresh_metadata_diagnostics", observed_refresh)
+
+    built = seed_runtime.index(force=True)
+
+    assert events == [
+        "replace",
+        "metadata_rebuilding",
+        "canonical_verify_1",
+        "metadata_ready_pending",
+        "canonical_verify_2",
+        "timing_refresh",
+    ]
+    assert built["pending_final_verify"] is True
+    assert built["phase_timings_ms"]["final_verification"] >= 0
+    status = seed_runtime.status()
+    assert status["pending_final_verify"] is True
+    assert status["phase_timings_ms"]["final_verification"] >= 0
+    assert built["counts"]["entity_kinds"]["file"] == 2
+    assert built["counts"]["entity_kinds"]["module"] == 2
+    assert built["module_warnings"] == 0
 
 
 def test_indexer_builds_noops_and_preserves_previous_revision_on_failure(
@@ -286,6 +420,57 @@ def test_base_symlink_fails_closed_without_outside_writes(
     assert list(outside.iterdir()) == []
 
 
+def test_read_lease_rejects_canonical_symlink_without_external_writes(
+    ready_runtime, tmp_path
+):
+    canonical = ready_runtime.paths.database
+    saved_canonical = canonical.with_name(f"{canonical.name}.saved")
+    external = tmp_path / "external-code-graph.sqlite3"
+    external.write_bytes(canonical.read_bytes())
+    external_wal = Path(f"{external}-wal")
+    external_shm = Path(f"{external}-shm")
+    external_before = {
+        path: (path.exists(), path.read_bytes() if path.exists() else None)
+        for path in (external, external_wal, external_shm)
+    }
+    canonical.rename(saved_canonical)
+    canonical.symlink_to(external)
+
+    with pytest.raises(CodeGraphStoreError, match="unsafe code graph"):
+        with ready_runtime.runtime._store.read_lease():
+            pass
+    status = ready_runtime.status()
+
+    assert status["fresh"] is False
+    assert status["state"] != "ready"
+    assert {
+        path: (path.exists(), path.read_bytes() if path.exists() else None)
+        for path in (external, external_wal, external_shm)
+    } == external_before
+
+
+@pytest.mark.parametrize("sidecar_name", ["wal", "shm"])
+def test_read_lease_rejects_sidecar_symlink_without_external_writes(
+    ready_runtime, tmp_path, sidecar_name
+):
+    sidecar = getattr(ready_runtime.paths, sidecar_name)
+    assert not sidecar.exists()
+    external = tmp_path / f"external-{sidecar_name}"
+    external.write_bytes(b"external sidecar sentinel")
+    external_before = external.read_bytes()
+    sidecar.symlink_to(external)
+
+    with pytest.raises(CodeGraphStoreError, match="unsafe code graph"):
+        with ready_runtime.runtime._store.read_lease():
+            pass
+    status = ready_runtime.status()
+
+    assert status["fresh"] is False
+    assert status["state"] != "ready"
+    assert sidecar.is_symlink()
+    assert external.read_bytes() == external_before
+
+
 def test_status_reads_metadata_and_schema_without_initializing_parser(
     ready_runtime, monkeypatch
 ):
@@ -423,15 +608,57 @@ def test_build_reports_observability_without_source_text(seed_runtime):
         "discovery",
         "fingerprint",
         "parsing",
+        "normalization",
         "resolution",
         "persistence",
         "validation",
+        "canonical_verification_1",
+        "final_verification",
         "publication",
     }
     assert out["parser_errors"] == 0
     assert "return str(value)" not in str(out)
     assert str(seed_runtime.project_dir) not in str(out)
     assert seed_runtime.status()["phase_timings_ms"] == out["phase_timings_ms"]
+
+
+def test_build_counts_only_file_exclusions_in_observability(
+    seed_runtime, monkeypatch
+):
+    from iwiki_mcp.codegraph.discovery import (
+        DiscoverySnapshot,
+        DiscoveryWarning,
+        discover_sources,
+    )
+
+    real_discover = discover_sources
+
+    def discover_with_mixed_warnings(*args, **kwargs):
+        snapshot = real_discover(*args, **kwargs)
+        return DiscoverySnapshot(
+            files=snapshot.files,
+            warnings=(
+                DiscoveryWarning("ignored", "src/ignored.py", "ignore_rule"),
+                DiscoveryWarning(
+                    "directory_unavailable", "src/private", "scan_failed"
+                ),
+                DiscoveryWarning(
+                    "file_limit_reached", "src/overflow.py", "max_total_files"
+                ),
+            ),
+            truncated=True,
+        )
+
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.indexer.discover_sources",
+        discover_with_mixed_warnings,
+    )
+
+    built = seed_runtime.index(force=True)
+
+    assert built["excluded_files"] == 2
+    assert built["truncated_files"] == 1
+    assert built["truncated"] is True
 
 
 def test_changed_source_triggers_full_rebuild(seed_runtime):
@@ -590,12 +817,12 @@ def test_crash_stale_metadata_recovers_without_writer(
         ready_runtime.paths.metadata.read_text(encoding="utf-8")
     )
 
-    assert recovered["state"] == "ready"
-    assert recovered["fresh"] is True
-    assert persisted["state"] == "ready"
+    assert recovered["state"] == "failed"
+    assert recovered["fresh"] is False
+    assert persisted["state"] == "failed"
     assert persisted["generation"] == 41
     assert persisted["revision"] == recovered["revision"]
-    assert "metadata_reconstructed" in recovered["warnings"]
+    assert "code_graph_failed" in recovered["warnings"]
     assert "metrics_incomplete" in recovered["warnings"]
     assert "duration_ms" not in recovered
     assert "phase_timings_ms" not in recovered
@@ -787,6 +1014,18 @@ def test_unsupported_index_language_returns_invalid_config(seed_runtime):
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+
+
+def test_index_validation_precedes_missing_primary_and_storage(
+    seed_without_primary, production_runtime_factory
+):
+    runtime = production_runtime_factory(seed_without_primary)
+
+    out = runtime.index(languages=["go"])
+
+    assert out["code"] == "invalid_config"
+    assert runtime.paths is None
+    assert not (Path(seed_without_primary.base) / ".iwiki").exists()
 
 
 def test_bounded_rebuild_checks_one_shared_deadline_before_publication(
@@ -1065,7 +1304,8 @@ def test_lifecycle_order_ends_with_final_verify_then_diagnostics_refresh(
     monkeypatch.setattr(store, "refresh_metadata_diagnostics", observed_refresh)
     monkeypatch.setattr(indexer, "_verify_published", observed_verify)
 
-    assert seed_runtime.index(force=True)["state"] == "ready"
+    built = seed_runtime.index(force=True)
+    assert built["state"] == "ready"
     assert events == [
         "replace_database",
         "publish_metadata:rebuilding",
@@ -1079,6 +1319,8 @@ def test_lifecycle_order_ends_with_final_verify_then_diagnostics_refresh(
     assert "metrics_incomplete" in stage_metadata[0]["warnings"]
     assert "duration_ms" not in stage_metadata[0]
     assert "phase_timings_ms" not in stage_metadata[0]
+    assert "storage_stamp" in stage_metadata[1]
+    assert "storage_stamp" not in built
 
 
 def test_failed_diagnostics_refresh_never_returns_ready_before_recovery(
@@ -1480,7 +1722,8 @@ def test_reconstructed_metadata_uses_sql_toolchain_fingerprint(
     status = changed.status()
     guarded = changed.query_guard()
 
-    assert matching["state"] == "ready"
+    assert matching["state"] == "failed"
+    assert matching["fresh"] is False
     assert "metadata_reconstructed" in matching["warnings"]
     for key in (
         "parser_version",
@@ -1492,10 +1735,10 @@ def test_reconstructed_metadata_uses_sql_toolchain_fingerprint(
     ):
         assert matching[key] is None
         assert status[key] is None
-    assert status["state"] == "dirty"
+    assert status["state"] == "failed"
     assert status["fresh"] is False
     assert "metadata_reconstructed" in status["warnings"]
-    assert guarded["state"] == "dirty"
+    assert guarded["state"] == "failed"
     assert guarded["fresh"] is False
     assert guarded["results"] == []
 
@@ -1668,11 +1911,796 @@ def test_missing_replace_dir_fd_support_fails_closed(monkeypatch):
 
 def test_noop_response_does_not_reuse_full_build_phase_timings(seed_runtime):
     built = seed_runtime.index(force=True)
+    metadata_before = seed_runtime.paths.metadata.read_bytes()
+    database_before = seed_runtime.paths.database.read_bytes()
+    sidecars_before = {
+        path.name: path.read_bytes()
+        for path in (seed_runtime.paths.wal, seed_runtime.paths.shm)
+        if path.exists()
+    }
     no_op = seed_runtime.index(force=False)
 
     assert built["phase_timings_ms"]
     assert no_op["no_op"] is True
+    assert no_op["pending_final_verify"] is True
+    assert no_op["module_warnings"] == built["module_warnings"]
     assert set(no_op["phase_timings_ms"]) <= {"no_op"}
+    assert seed_runtime.paths.metadata.read_bytes() == metadata_before
+    assert seed_runtime.paths.database.read_bytes() == database_before
+    sidecars_after = {
+        path.name: path.read_bytes()
+        for path in (seed_runtime.paths.wal, seed_runtime.paths.shm)
+        if path.exists()
+    }
+    assert {
+        name: sidecars_after[name] for name in sidecars_before
+    } == sidecars_before
+    assert sidecars_after.get(seed_runtime.paths.wal.name, b"") == b""
+
+
+def test_ready_status_search_and_noop_never_run_full_snapshot_validation(
+    ready_runtime, monkeypatch
+):
+    indexer = ready_runtime.runtime._indexer
+    metadata_before = ready_runtime.paths.metadata.read_bytes()
+    database_before = ready_runtime.paths.database.read_bytes()
+    sidecars_before = {
+        path.name: path.read_bytes()
+        for path in (ready_runtime.paths.wal, ready_runtime.paths.shm)
+        if path.exists()
+    }
+
+    def fail_full_validation(*_args, **_kwargs):
+        pytest.fail("ready probe loaded or validated full graph rows")
+
+    monkeypatch.setattr(indexer.store, "verify_canonical", fail_full_validation)
+    monkeypatch.setattr(codegraph_store, "_table_rows", fail_full_validation)
+
+    status = ready_runtime.status()
+    searched = ready_runtime.runtime.search("Service")
+    no_op = ready_runtime.index(force=False)
+
+    assert status["fresh"] is True
+    assert searched["fresh"] is True
+    assert no_op["no_op"] is True
+    assert ready_runtime.paths.metadata.read_bytes() == metadata_before
+    assert ready_runtime.paths.database.read_bytes() == database_before
+    sidecars_after = {
+        path.name: path.read_bytes()
+        for path in (ready_runtime.paths.wal, ready_runtime.paths.shm)
+        if path.exists()
+    }
+    assert {
+        name: sidecars_after[name] for name in sidecars_before
+    } == sidecars_before
+    assert sidecars_after.get(ready_runtime.paths.wal.name, b"") == b""
+
+
+def test_startup_status_search_and_noop_use_absolute_read_only_sqlite_paths(
+    ready_runtime, monkeypatch
+):
+    opened = []
+    real_connect = codegraph_store.sqlite3.connect
+
+    def observed_connect(database, *args, **kwargs):
+        opened.append(str(database))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(codegraph_store.sqlite3, "connect", observed_connect)
+    runtime = ready_runtime.with_config()
+
+    assert runtime.status()["fresh"] is True
+    assert runtime.runtime.search("Service")["fresh"] is True
+    assert runtime.index(force=False)["no_op"] is True
+
+    database_opens = [path for path in opened if "mode=ro" in path]
+    assert database_opens, opened
+    assert all("/proc/self/fd" not in path for path in database_opens)
+    assert all("/dev/fd" not in path for path in database_opens)
+    canonical_opens = [
+        path
+        for path in opened
+        if path.startswith(f"file:{ready_runtime.paths.database}?")
+    ]
+    writable_canonical = [
+        path for path in canonical_opens if "mode=rw" in path
+    ]
+    assert writable_canonical == []
+    assert all("immutable=1" in path for path in canonical_opens)
+    assert all(
+        path.startswith(f"file:{ready_runtime.paths.database}")
+        and "mode=ro" in path
+        for path in database_opens
+    )
+
+
+def test_read_only_fast_paths_do_not_leak_file_descriptors(ready_runtime):
+    descriptor_directory = Path("/proc/self/fd")
+    if not descriptor_directory.is_dir():
+        pytest.skip("descriptor accounting unavailable")
+    before = len(os.listdir(descriptor_directory))
+
+    for _attempt in range(10):
+        ready_runtime.status()
+        ready_runtime.runtime.search("Service")
+        ready_runtime.index(force=False)
+
+    assert len(os.listdir(descriptor_directory)) <= before
+
+
+@pytest.mark.parametrize("operation", ["status", "search", "no_op"])
+def test_read_only_fast_paths_preserve_preexisting_empty_sidecars(
+    ready_runtime, operation
+):
+    ready_runtime.paths.wal.write_bytes(b"")
+    ready_runtime.paths.shm.write_bytes(b"")
+    before = {
+        path: (path.exists(), path.read_bytes())
+        for path in (
+            ready_runtime.paths.database,
+            ready_runtime.paths.wal,
+        )
+    }
+
+    if operation == "status":
+        ready_runtime.status()
+    elif operation == "search":
+        ready_runtime.runtime.search("Service")
+    else:
+        ready_runtime.index(force=False)
+
+    assert {
+        path: (
+            path.exists(),
+            path.read_bytes() if path.exists() else None,
+        )
+        for path in before
+    } == before
+    assert ready_runtime.paths.shm.exists()
+
+
+@pytest.mark.parametrize("operation", ["status", "search", "no_op"])
+def test_clean_fast_paths_preserve_absent_sidecars(
+    ready_runtime, monkeypatch, operation
+):
+    ready_runtime.paths.wal.unlink(missing_ok=True)
+    ready_runtime.paths.shm.unlink(missing_ok=True)
+    opened = []
+    real_connect = codegraph_store.sqlite3.connect
+
+    def observed_connect(database, *args, **kwargs):
+        opened.append(str(database))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(codegraph_store.sqlite3, "connect", observed_connect)
+
+    if operation == "status":
+        ready_runtime.status()
+    elif operation == "search":
+        ready_runtime.runtime.search("Service")
+    else:
+        ready_runtime.index(force=False)
+
+    assert not ready_runtime.paths.wal.exists()
+    assert not ready_runtime.paths.shm.exists()
+    canonical_opens = [
+        path
+        for path in opened
+        if path.startswith(f"file:{ready_runtime.paths.database}?")
+    ]
+    assert canonical_opens
+    assert all("mode=ro" in path for path in canonical_opens)
+    assert all("immutable=1" in path for path in canonical_opens)
+
+
+@pytest.mark.parametrize("operation", ["status", "search", "no_op"])
+@pytest.mark.parametrize("race", ["writer", "empty_sidecar"])
+def test_immutable_fast_paths_reject_sidecar_creation_before_connect(
+    ready_runtime, monkeypatch, operation, race
+):
+    ready_runtime.paths.wal.unlink(missing_ok=True)
+    ready_runtime.paths.shm.unlink(missing_ok=True)
+    real_connect = codegraph_store.sqlite3.connect
+    injected = False
+    writer = None
+
+    def race_connect(database, *args, **kwargs):
+        nonlocal injected, writer
+        path = str(database)
+        if not injected and "mode=ro&immutable=1" in path:
+            injected = True
+            if race == "writer":
+                writer = sqlite3.connect(
+                    ready_runtime.paths.database,
+                    check_same_thread=False,
+                )
+                writer.execute("BEGIN IMMEDIATE")
+                writer.execute(
+                    "UPDATE symbols SET local_name = 'preconnect_race'"
+                )
+                writer.commit()
+            else:
+                ready_runtime.paths.wal.write_bytes(b"")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(codegraph_store.sqlite3, "connect", race_connect)
+    try:
+        if operation == "status":
+            result = ready_runtime.status()
+        elif operation == "search":
+            result = ready_runtime.runtime.search("Service")
+        else:
+            result = ready_runtime.index(force=False)
+    finally:
+        if writer is not None:
+            writer.rollback()
+            writer.close()
+
+    assert injected is True
+    if operation == "search":
+        assert result["fresh"] is False
+        assert result["results"] == []
+    elif operation == "no_op":
+        assert result.get("no_op") is not True
+    else:
+        assert result["fresh"] is False
+
+
+def test_external_sql_row_update_breaks_sealed_storage_stamp(
+    ready_runtime,
+):
+    original = ready_runtime.status()
+    with closing(sqlite3.connect(ready_runtime.paths.database)) as connection:
+        connection.execute(
+            "UPDATE symbols SET local_name = 'externally_mutated'"
+        )
+        connection.commit()
+        during_wal = ready_runtime.status()
+
+    status = ready_runtime.status()
+    searched = ready_runtime.runtime.search("externally_mutated")
+    rebuilt = ready_runtime.index(force=False)
+
+    assert original["fresh"] is True
+    assert during_wal["fresh"] is False
+    assert status["fresh"] is False
+    assert status["state"] != "ready"
+    assert searched["fresh"] is False
+    assert searched["results"] == []
+    assert rebuilt["state"] == "ready"
+    assert rebuilt.get("no_op") is False, rebuilt
+
+
+def test_read_lease_reads_committed_noncheckpointed_canonical_wal(
+    ready_runtime, monkeypatch
+):
+    opened = []
+    real_connect = codegraph_store.sqlite3.connect
+
+    def observed_connect(database, *args, **kwargs):
+        opened.append(str(database))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(codegraph_store.sqlite3, "connect", observed_connect)
+    with closing(sqlite3.connect(ready_runtime.paths.database)) as writer:
+        writer.execute(
+            "UPDATE symbols SET local_name = 'committed_in_wal'"
+        )
+        writer.commit()
+        assert ready_runtime.paths.wal.exists()
+        storage_before = {
+            path: (path.exists(), path.read_bytes())
+            for path in (
+                ready_runtime.paths.database,
+                ready_runtime.paths.wal,
+                ready_runtime.paths.shm,
+            )
+        }
+
+        with ready_runtime.runtime._store.read_lease() as connection:
+            observed = connection.execute(
+                "SELECT local_name FROM symbols"
+            ).fetchone()
+        status = ready_runtime.status()
+        storage_after = {
+            path: (path.exists(), path.read_bytes())
+            for path in (
+                ready_runtime.paths.database,
+                ready_runtime.paths.wal,
+            )
+        }
+        shm_exists_after = ready_runtime.paths.shm.exists()
+
+    assert observed == ("committed_in_wal",)
+    assert storage_after == {
+        path: storage_before[path]
+        for path in (
+            ready_runtime.paths.database,
+            ready_runtime.paths.wal,
+        )
+    }
+    assert shm_exists_after is storage_before[ready_runtime.paths.shm][0]
+    canonical_opens = [
+        path
+        for path in opened
+        if path.startswith(f"file:{ready_runtime.paths.database}?")
+    ]
+    assert canonical_opens
+    assert all("mode=ro" in path for path in canonical_opens)
+    assert all("immutable=1" not in path for path in canonical_opens)
+    assert status["fresh"] is False
+    assert status["state"] != "ready"
+
+
+def test_storage_stamp_retries_commit_between_database_and_wal_reads(
+    ready_runtime, monkeypatch
+):
+    store = ready_runtime.runtime._store
+    real_component = codegraph_store._storage_file_stamp
+    committed = False
+    database_reads = 0
+    wal_reads = 0
+
+    def commit_between_components(path, *, wal):
+        nonlocal committed, database_reads, wal_reads
+        value = real_component(path, wal=wal)
+        if wal:
+            wal_reads += 1
+        else:
+            database_reads += 1
+        if wal and wal_reads == 1 and not committed:
+            committed = True
+            with closing(sqlite3.connect(ready_runtime.paths.database)) as connection:
+                connection.execute(
+                    "UPDATE symbols SET local_name = 'between_components'"
+                )
+                connection.commit()
+        return value
+
+    monkeypatch.setattr(
+        codegraph_store, "_storage_file_stamp", commit_between_components
+    )
+
+    stamp = store.storage_stamp()
+
+    assert committed is True
+    assert database_reads >= 4
+    assert stamp != json.loads(
+        ready_runtime.paths.metadata.read_text(encoding="utf-8")
+    )["storage_stamp"]
+
+
+def test_storage_stamp_fails_closed_when_components_never_stabilize(
+    ready_runtime, monkeypatch
+):
+    store = ready_runtime.runtime._store
+    real_component = codegraph_store._storage_file_stamp
+    generation = 0
+
+    def unstable_database(path, *, wal):
+        nonlocal generation
+        value = real_component(path, wal=wal)
+        if not wal:
+            generation += 1
+            value = {**value, "change_counter": generation}
+        return value
+
+    monkeypatch.setattr(
+        codegraph_store, "_storage_file_stamp", unstable_database
+    )
+
+    with pytest.raises(CodeGraphStoreError, match="storage stamp"):
+        store.storage_stamp()
+
+
+@pytest.mark.parametrize("mutation_point", ["before_query", "after_query"])
+def test_search_rechecks_storage_seal_around_sql_read(
+    ready_runtime, monkeypatch, mutation_point
+):
+    store = ready_runtime.runtime._store
+    guarded = ready_runtime.query_guard()
+    assert guarded["fresh"] is True
+    monkeypatch.setattr(
+        ready_runtime.runtime,
+        "query_guard",
+        lambda **_kwargs: dict(guarded),
+    )
+    real_stamp = store.storage_stamp
+    calls = 0
+
+    def mutate_at_stamp_boundary():
+        nonlocal calls
+        calls += 1
+        if calls == (1 if mutation_point == "before_query" else 2):
+            with closing(sqlite3.connect(ready_runtime.paths.database)) as connection:
+                connection.execute(
+                    "UPDATE symbols SET local_name = 'query_race'"
+                )
+                connection.commit()
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        return real_stamp()
+
+    monkeypatch.setattr(store, "storage_stamp", mutate_at_stamp_boundary)
+
+    searched = ready_runtime.runtime.search("query_race")
+
+    assert searched["fresh"] is False
+    assert searched["results"] == []
+
+
+def test_search_revalidates_metadata_seal_after_query_guard(
+    ready_runtime, monkeypatch
+):
+    real_guard = ready_runtime.runtime.query_guard
+
+    def tamper_after_guard(*args, **kwargs):
+        guarded = real_guard(*args, **kwargs)
+        metadata = json.loads(
+            ready_runtime.paths.metadata.read_text(encoding="utf-8")
+        )
+        metadata["warnings"] = ["parse_error"]
+        ready_runtime.paths.metadata.write_text(
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        return guarded
+
+    monkeypatch.setattr(ready_runtime.runtime, "query_guard", tamper_after_guard)
+
+    searched = ready_runtime.runtime.search("Service")
+
+    assert searched["fresh"] is False
+    assert searched["results"] == []
+
+
+def test_external_writer_checkpoint_while_query_snapshot_is_active(
+    ready_runtime, monkeypatch
+):
+    real_search = CodeGraphQuery.search
+    real_connect = codegraph_store.sqlite3.connect
+    opened = []
+    query_read = False
+    checkpoint = None
+
+    def observed_connect(database, *args, **kwargs):
+        opened.append(str(database))
+        return real_connect(database, *args, **kwargs)
+
+    def mutate_after_graph_read(query_engine, connection, request):
+        nonlocal query_read, checkpoint
+        results = real_search(query_engine, connection, request)
+        query_read = connection.in_transaction
+        with closing(sqlite3.connect(ready_runtime.paths.database)) as writer:
+            writer.execute(
+                "UPDATE symbols SET local_name = 'active_query_race'"
+            )
+            writer.commit()
+            checkpoint = writer.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+        return results
+
+    monkeypatch.setattr(CodeGraphQuery, "search", mutate_after_graph_read)
+    monkeypatch.setattr(codegraph_store.sqlite3, "connect", observed_connect)
+
+    searched = ready_runtime.runtime.search("Service")
+
+    assert query_read is True
+    assert checkpoint is not None
+    assert searched["fresh"] is False
+    assert searched["results"] == []
+    canonical_opens = [
+        path
+        for path in opened
+        if path.startswith(f"file:{ready_runtime.paths.database}?")
+    ]
+    assert any("immutable=1" in path for path in canonical_opens)
+
+
+def test_noop_rechecks_storage_stamp_immediately_before_return(
+    ready_runtime, monkeypatch
+):
+    indexer = ready_runtime.runtime._indexer
+    real_ready = indexer._ready_metadata
+    calls = 0
+    lease_active = False
+    checkpoint = None
+
+    def mutate_after_first_ready_check(*args, **kwargs):
+        nonlocal calls, lease_active, checkpoint
+        calls += 1
+        ready = real_ready(*args, **kwargs)
+        if calls == 1 and ready is not None:
+            connection = kwargs.get("connection")
+            lease_active = bool(
+                connection is not None and connection.in_transaction
+            )
+            with closing(sqlite3.connect(ready_runtime.paths.database)) as connection:
+                connection.execute(
+                    "UPDATE symbols SET local_name = 'noop_race'"
+                )
+                connection.commit()
+                checkpoint = connection.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)"
+                ).fetchone()
+        return ready
+
+    monkeypatch.setattr(indexer, "_ready_metadata", mutate_after_first_ready_check)
+
+    rebuilt = ready_runtime.index(force=False)
+    ready_runtime.runtime.join_workers(timeout=10)
+    recovered = ready_runtime.index(force=False)
+    next_build = ready_runtime.index(force=False)
+
+    assert rebuilt.get("no_op") is not True
+    assert recovered.get("state") == "ready", recovered
+    assert next_build.get("no_op") is True, next_build
+    assert lease_active is True
+    assert checkpoint is not None
+
+
+@pytest.mark.parametrize(
+    ("metadata_path", "tampered_value"),
+    (
+        ("schema_version", SCHEMA_VERSION + 1),
+        ("fingerprints.source", "tampered-source"),
+        ("fingerprints.config", "tampered-config"),
+        ("fingerprints.parser", "tampered-parser"),
+        ("input_fingerprint", "tampered-input"),
+        ("git_commit", "tampered-commit"),
+        ("parser_version", "tampered-parser-version"),
+        ("grammar_version", "tampered-grammar-version"),
+        ("adapter_version", "tampered-adapter-version"),
+        ("resolver_version", "tampered-resolver-version"),
+        ("normalizer_version", "tampered-normalizer-version"),
+        ("unicode_data_version", "tampered-unicode-version"),
+        ("phase_timings_ms.final_verification", -1),
+        ("fresh", False),
+        ("counts.files", 999),
+        ("resolution_ratios.resolved", 999.0),
+        ("excluded_files", 999),
+        ("truncated", True),
+        ("parser_errors", 999),
+        ("module_warnings", 999),
+        ("warnings", ["parse_error"]),
+        ("generation", 999),
+        ("recovery_policy", "restore_prior"),
+        ("unexpected_key", "unexpected"),
+    ),
+)
+def test_noop_requires_exact_ready_metadata_and_rebuilds_after_tamper(
+    seed_runtime, metadata_path, tampered_value
+):
+    seed_runtime.index(force=True)
+    metadata = json.loads(
+        seed_runtime.paths.metadata.read_text(encoding="utf-8")
+    )
+    target = metadata
+    parts = metadata_path.split(".")
+    for part in parts[:-1]:
+        target = target[part]
+    target[parts[-1]] = tampered_value
+    seed_runtime.paths.metadata.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    tampered_bytes = seed_runtime.paths.metadata.read_bytes()
+
+    before = seed_runtime.status()
+    rebuilt = seed_runtime.index(force=False)
+    after = seed_runtime.status()
+
+    assert before["state"] != "ready"
+    assert before["fresh"] is False
+    assert rebuilt["state"] == "ready"
+    assert rebuilt["no_op"] is False
+    assert seed_runtime.paths.metadata.read_bytes() != tampered_bytes
+    assert after["state"] == "ready"
+    assert after["fresh"] is True
+
+
+def test_canonical_verification_runs_full_store_integrity_twice(
+    seed_runtime, monkeypatch
+):
+    store = seed_runtime.runtime._indexer.store
+    real_verify = store.verify_canonical
+    calls = []
+
+    def observed_verify(repository_id, expected_revision):
+        calls.append((repository_id, expected_revision))
+        return real_verify(repository_id, expected_revision)
+
+    monkeypatch.setattr(store, "verify_canonical", observed_verify)
+
+    built = seed_runtime.index(force=True)
+
+    assert calls == [
+        ("project", built["revision"]),
+        ("project", built["revision"]),
+    ]
+
+
+def test_matching_freshness_probes_share_reader_lock(
+    ready_runtime, monkeypatch
+):
+    first = ready_runtime.with_config()
+    second = ready_runtime.with_config()
+    barrier = threading.Barrier(2)
+    both_reading = threading.Event()
+    release = threading.Event()
+
+    def pause_ready_probe(indexer):
+        real_ready = indexer._ready_metadata
+
+        def paused(*args, **kwargs):
+            result = real_ready(*args, **kwargs)
+            barrier.wait(timeout=5)
+            both_reading.set()
+            assert release.wait(timeout=5)
+            return result
+
+        monkeypatch.setattr(indexer, "_ready_metadata", paused)
+
+    pause_ready_probe(first.runtime._indexer)
+    pause_ready_probe(second.runtime._indexer)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(runtime.runtime._indexer.mark_dirty_if_stale)
+            for runtime in (first, second)
+        ]
+        try:
+            assert both_reading.wait(timeout=5)
+            observed = ready_runtime.status()
+        finally:
+            release.set()
+        results = [future.result(timeout=5) for future in futures]
+
+    assert results == [False, False]
+    assert observed["state"] == "ready"
+    assert observed["fresh"] is True
+
+
+def test_stale_shared_probe_rechecks_after_concurrent_publication(
+    ready_runtime, monkeypatch
+):
+    stale_probe = ready_runtime.with_config()
+    publisher = ready_runtime.with_config()
+    ready_runtime.project_file("src/pkg/service.py").write_text(
+        "def concurrent_revision():\n    return None\n",
+        encoding="utf-8",
+    )
+    real_read_lock = code_graph_read_lock
+    shared_released = threading.Event()
+    publication_done = threading.Event()
+
+    @contextmanager
+    def pause_after_shared_probe(path):
+        with real_read_lock(path):
+            yield
+        shared_released.set()
+        assert publication_done.wait(timeout=5)
+
+    monkeypatch.setattr(
+        codegraph_indexer,
+        "code_graph_read_lock",
+        pause_after_shared_probe,
+        raising=False,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        probe = executor.submit(
+            stale_probe.runtime._indexer.mark_dirty_if_stale
+        )
+        assert shared_released.wait(timeout=5)
+        published = publisher.index(force=True)
+        publication_done.set()
+        became_dirty = probe.result(timeout=5)
+
+    assert published["state"] == "ready"
+    assert became_dirty is False
+    assert ready_runtime.status()["revision"] == published["revision"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "UPDATE files SET path_casefold = 'invalid' "
+        "WHERE file_id = (SELECT file_id FROM files ORDER BY file_id LIMIT 1)",
+        "UPDATE symbols SET name_tokens_casefold = 'invalid' "
+        "WHERE symbol_id = (SELECT symbol_id FROM symbols "
+        "ORDER BY symbol_id LIMIT 1)",
+    ),
+)
+def test_invalid_persisted_normalization_cannot_publish(
+    seed_runtime, monkeypatch, mutation
+):
+    real_finalize = CodeGraphStore.finalize_snapshot
+
+    def corrupt_after_finalize(store, **kwargs):
+        real_finalize(store, **kwargs)
+        with closing(sqlite3.connect(store.path)) as connection:
+            connection.execute(mutation)
+            connection.commit()
+
+    monkeypatch.setattr(
+        CodeGraphStore, "finalize_snapshot", corrupt_after_finalize
+    )
+
+    result = seed_runtime.index(force=True)
+
+    assert result["code"] == "store_failed"
+    assert not seed_runtime.paths.database.exists()
+    assert seed_runtime.status()["fresh"] is False
+
+
+def test_post_replace_row_mutation_fails_before_ready_metadata(
+    ready_runtime, monkeypatch
+):
+    ready_runtime.project_file("src/pkg/service.py").write_text(
+        "def changed_before_canonical_verification():\n    return None\n",
+        encoding="utf-8",
+    )
+    store = ready_runtime.runtime._indexer.store
+    real_replace = store.replace_staging
+    real_publish = store.publish_metadata
+    replacement_complete = False
+    published_states = []
+
+    def replace_then_corrupt(*args, **kwargs):
+        nonlocal replacement_complete
+        real_replace(*args, **kwargs)
+        replacement_complete = True
+        with closing(store.open_existing()) as connection:
+            connection.execute(
+                "UPDATE files SET content_hash = 'tampered' "
+                "WHERE path = 'src/pkg/service.py'"
+            )
+            connection.commit()
+
+    def observe_metadata(metadata_path, staging, **kwargs):
+        payload = json.loads(Path(staging).read_text(encoding="utf-8"))
+        if replacement_complete:
+            published_states.append(payload["state"])
+        return real_publish(metadata_path, staging, **kwargs)
+
+    monkeypatch.setattr(store, "replace_staging", replace_then_corrupt)
+    monkeypatch.setattr(store, "publish_metadata", observe_metadata)
+
+    result = ready_runtime.index(force=True)
+    status = ready_runtime.status()
+
+    assert result["code"] == "store_failed"
+    assert published_states == ["rebuilding"]
+    assert status["state"] == "failed"
+    assert status["fresh"] is False
+
+
+def test_revision_downgrade_cannot_bypass_snapshot_recomputation(seed_runtime):
+    seed_runtime.index(force=True)
+    with closing(seed_runtime.runtime._store.open_existing()) as connection:
+        connection.execute(
+            "UPDATE repositories SET revision = 'downgraded'"
+        )
+        connection.commit()
+    metadata = json.loads(
+        seed_runtime.paths.metadata.read_text(encoding="utf-8")
+    )
+    metadata["revision"] = "downgraded"
+    seed_runtime.paths.metadata.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    before = seed_runtime.status()
+    rebuilt = seed_runtime.index(force=False)
+    after = seed_runtime.status()
+
+    assert before["state"] != "ready"
+    assert before["fresh"] is False
+    assert rebuilt["state"] == "ready"
+    assert rebuilt["no_op"] is False
+    assert rebuilt["revision"].startswith("sha256:")
+    assert after["state"] == "ready"
+    assert after["fresh"] is True
 
 
 def test_slow_adapter_returns_by_deadline_and_cancels_before_publication(
@@ -1910,10 +2938,12 @@ def test_runtime_initialization_and_status_fail_soft(
     runtime = production_runtime_factory(seed_binding)
     assert runtime.index(force=True)["state"] == "ready"
 
+    @contextmanager
     def fail_status():
         raise RuntimeError(secret)
+        yield
 
-    monkeypatch.setattr(runtime._store, "open_existing", fail_status)
+    monkeypatch.setattr(runtime._store, "read_lease", fail_status)
     failed = runtime.status()
     assert failed["state"] == "failed"
     assert failed["code"] == "store_failed"
@@ -2060,11 +3090,14 @@ def test_status_and_noop_sanitize_tampered_metadata(seed_runtime):
     )
 
     status = seed_runtime.status()
-    no_op = seed_runtime.index(force=False)
+    rebuilt = seed_runtime.index(force=False)
 
-    assert no_op["no_op"] is True
+    assert status["state"] == "failed"
+    assert status["fresh"] is False
+    assert rebuilt["no_op"] is False
+    assert rebuilt["state"] == "ready"
     assert secret not in str(status)
-    assert secret not in str(no_op)
+    assert secret not in str(rebuilt)
 
 
 def test_metadata_failure_after_database_replace_keeps_sql_revision_authoritative(

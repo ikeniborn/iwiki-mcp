@@ -7,7 +7,14 @@ import stat
 
 import pytest
 
-from iwiki_mcp.codegraph.models import NORMALIZER_VERSION, UNICODE_DATA_VERSION
+from iwiki_mcp.codegraph.models import (
+    NORMALIZER_VERSION,
+    UNICODE_DATA_VERSION,
+    file_id as stable_file_id,
+    module_id as stable_module_id,
+    relation_id as stable_relation_id,
+    symbol_id as stable_symbol_id,
+)
 from iwiki_mcp.codegraph.schema import (
     BUSY_TIMEOUT_MS,
     INDEXES,
@@ -21,6 +28,7 @@ from iwiki_mcp.codegraph.store import (
     CodeGraphSchemaError,
     CodeGraphStore,
     CodeGraphStoreError,
+    _snapshot_revision,
 )
 from iwiki_mcp.engine.graph_store import GraphStore
 
@@ -160,6 +168,89 @@ def snapshot_with_symbol_file_and_wiki_links(
             },
         ),
     }
+
+
+def canonical_snapshot(*, repository_id="backend", variant="default"):
+    snapshot = snapshot_with_symbol_file_and_wiki_links(
+        repository_id=repository_id,
+    )
+    repository = snapshot["repositories"][0]
+    file_row = snapshot["files"][0]
+    symbol_row = snapshot["symbols"][0]
+    relation_row = snapshot["relations"][0]
+    file_identity = stable_file_id(
+        "python", "py", repository_id, file_row["path"]
+    )
+    module_identity = stable_module_id(
+        "python",
+        "py",
+        repository_id,
+        file_row["module_key"],
+        file_row["module_qualified_name"],
+    )
+    symbol_identity = stable_symbol_id(
+        "python",
+        "py",
+        repository_id,
+        file_row["module_key"],
+        symbol_row["qualified_name"],
+        symbol_row["signature"],
+    )
+    relation_identity = stable_relation_id(
+        "python",
+        "py",
+        repository_id,
+        symbol_identity,
+        relation_row["relation_type"],
+        relation_row["source_start_line"],
+        relation_row["source_end_line"],
+        relation_row["source_start_byte"],
+        relation_row["source_end_byte"],
+        symbol_identity,
+        None,
+        None,
+        None,
+    )
+
+    def digest(value):
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    repository.update({
+        "git_commit": digest(f"commit:{variant}")[:40],
+        "source_fingerprint": digest(f"source:{variant}"),
+        "config_fingerprint": digest(f"config:{variant}"),
+        "parser_fingerprint": digest(f"parser:{variant}"),
+    })
+    file_row.update({
+        "file_id": file_identity,
+        "module_id": module_identity,
+        "content_hash": digest(f"file:{variant}"),
+    })
+    symbol_row.update({
+        "symbol_id": symbol_identity,
+        "file_id": file_identity,
+        "content_hash": digest(f"symbol:{variant}"),
+    })
+    relation_row.update({
+        "relation_id": relation_identity,
+        "source_file_id": file_identity,
+        "source_symbol_id": symbol_identity,
+        "target_symbol_id": symbol_identity,
+    })
+    for link in snapshot["wiki_code_links"]:
+        link["domain"] = repository_id
+        if link["symbol_id"] is not None:
+            link["symbol_id"] = symbol_identity
+        if link["file_id"] is not None:
+            link["file_id"] = file_identity
+    repository["revision"] = _snapshot_revision(
+        repository,
+        snapshot["files"],
+        snapshot["symbols"],
+        snapshot["relations"],
+        snapshot["wiki_code_links"],
+    )
+    return snapshot
 
 
 def test_schema_v2_has_exact_five_tables_and_twenty_indexes(tmp_path):
@@ -303,9 +394,11 @@ def test_schema_v2_rejects_invalid_relation_ranges(tmp_path, column, value):
 
 def test_canonical_verification_reopens_and_checks_revision(tmp_path):
     store = CodeGraphStore(tmp_path / "canonical.sqlite3")
-    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links())
+    snapshot = canonical_snapshot()
+    revision = snapshot["repositories"][0]["revision"]
+    store.insert_snapshot(snapshot)
 
-    store.verify_canonical("backend", "revision-1")
+    store.verify_canonical("backend", revision)
     with closing(store.connect()) as connection:
         connection.execute(
             "UPDATE repositories SET revision = 'changed' "
@@ -314,7 +407,160 @@ def test_canonical_verification_reopens_and_checks_revision(tmp_path):
         connection.commit()
 
     with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
-        store.verify_canonical("backend", "revision-1")
+        store.verify_canonical("backend", revision)
+
+
+def test_prepare_staging_rejects_noncanonical_revision_and_corrupt_rows(
+    tmp_path,
+):
+    canonical = tmp_path / "canonical.sqlite3"
+    store = CodeGraphStore(canonical)
+    store.insert_snapshot(canonical_snapshot(variant="prior"))
+    prior = store.reconstruct_metadata("backend")
+    staging = store.create_staging_path()
+    corrupt = snapshot_with_symbol_file_and_wiki_links(revision="downgraded")
+    CodeGraphStore(staging).insert_snapshot(corrupt)
+    with closing(sqlite3.connect(staging)) as connection:
+        connection.execute(
+            "UPDATE files SET file_id = 'corrupt-file-id', "
+            "path_casefold = 'invalid', "
+            "content_hash = 'invalid'"
+        )
+        connection.execute(
+            "UPDATE symbols SET file_id = 'corrupt-file-id'"
+        )
+        connection.execute(
+            "UPDATE relations SET source_file_id = 'corrupt-file-id'"
+        )
+        connection.execute(
+            "UPDATE wiki_code_links SET file_id = 'corrupt-file-id' "
+            "WHERE file_id IS NOT NULL"
+        )
+        connection.commit()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with pytest.raises(CodeGraphStoreError, match="revision mismatch"):
+        store.prepare_staging(
+            staging,
+            repository_id="backend",
+            expected_revision="downgraded",
+        )
+
+    assert store.reconstruct_metadata("backend") == prior
+    assert prior["state"] == "ready"
+    assert not staging.exists()
+
+
+def test_verify_canonical_rejects_noncanonical_revision_and_corrupt_rows(
+    tmp_path,
+):
+    store = CodeGraphStore(tmp_path / "canonical.sqlite3")
+    store.insert_snapshot(
+        snapshot_with_symbol_file_and_wiki_links(revision="downgraded")
+    )
+    with closing(sqlite3.connect(store.path)) as connection:
+        connection.execute(
+            "UPDATE symbols SET symbol_id = 'corrupt-symbol-id', "
+            "name_tokens_casefold = 'invalid', "
+            "content_hash = 'invalid'"
+        )
+        connection.execute(
+            "UPDATE relations SET source_symbol_id = 'corrupt-symbol-id', "
+            "target_symbol_id = 'corrupt-symbol-id'"
+        )
+        connection.execute(
+            "UPDATE wiki_code_links SET symbol_id = 'corrupt-symbol-id' "
+            "WHERE symbol_id IS NOT NULL"
+        )
+        connection.commit()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
+        store.verify_canonical("backend", "downgraded")
+
+
+def test_persisted_real_relation_range_cannot_pass_integer_id_validation(
+    tmp_path,
+):
+    store = CodeGraphStore(tmp_path / "canonical.sqlite3")
+    snapshot = canonical_snapshot()
+    repository = snapshot["repositories"][0]
+    relation = snapshot["relations"][0]
+    file_row = snapshot["files"][0]
+    coerced_id = stable_relation_id(
+        file_row["language"],
+        "py",
+        "backend",
+        relation["source_symbol_id"],
+        relation["relation_type"],
+        2,
+        relation["source_end_line"],
+        relation["source_start_byte"],
+        relation["source_end_byte"],
+        relation["target_symbol_id"],
+        relation["target_reference"],
+        relation["binding_kind"],
+        relation["binding_name"],
+    )
+    relation["source_start_line"] = 2.5
+    relation["relation_id"] = coerced_id
+    revision = _snapshot_revision(
+        repository,
+        snapshot["files"],
+        snapshot["symbols"],
+        snapshot["relations"],
+        snapshot["wiki_code_links"],
+    )
+    repository["revision"] = revision
+    store.insert_snapshot(snapshot)
+    with closing(sqlite3.connect(store.path)) as connection:
+        stored_type = connection.execute(
+            "SELECT typeof(source_start_line) FROM relations"
+        ).fetchone()[0]
+
+    assert stored_type == "real"
+    with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
+        store.verify_canonical("backend", revision)
+
+
+@pytest.mark.parametrize(
+    "column",
+    ("size_bytes", "start_line", "end_line", "start_byte", "end_byte"),
+)
+def test_persisted_real_file_range_cannot_pass_integer_validation(
+    tmp_path, column
+):
+    store = CodeGraphStore(tmp_path / "canonical.sqlite3")
+    snapshot = canonical_snapshot()
+    repository = snapshot["repositories"][0]
+    snapshot["files"][0][column] = 3.5
+    revision = _snapshot_revision(
+        repository,
+        snapshot["files"],
+        snapshot["symbols"],
+        snapshot["relations"],
+        snapshot["wiki_code_links"],
+    )
+    repository["revision"] = revision
+    valid_snapshot = canonical_snapshot()
+    store.insert_snapshot(valid_snapshot)
+    with closing(sqlite3.connect(store.path)) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            f"UPDATE files SET {column} = 3.5"
+        )
+        connection.execute(
+            "UPDATE repositories SET revision = ?",
+            (revision,),
+        )
+        connection.commit()
+        stored_type = connection.execute(
+            f"SELECT typeof({column}) FROM files"
+        ).fetchone()[0]
+
+    assert stored_type == "real"
+    with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
+        store.verify_canonical("backend", revision)
 
 
 def test_file_and_repository_deletes_cascade_without_touching_wiki_store(tmp_path):
@@ -610,17 +856,17 @@ def test_atomic_staging_publication_preserves_prior_until_validation(tmp_path):
     assert not invalid_staging.exists()
 
     valid_staging = store.create_staging_path()
-    CodeGraphStore(valid_staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    valid_snapshot = canonical_snapshot(variant="new")
+    valid_revision = valid_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(valid_staging).insert_snapshot(valid_snapshot)
     store.publish_staging(
         valid_staging,
         repository_id="backend",
-        expected_revision="new",
+        expected_revision=valid_revision,
     )
 
     assert not valid_staging.exists()
-    assert store.reconstruct_metadata("backend")["revision"] == "new"
+    assert store.reconstruct_metadata("backend")["revision"] == valid_revision
 
 
 def test_publication_rejects_external_incompatible_database_without_deleting_it(
@@ -740,9 +986,9 @@ def test_publication_rejects_registered_staging_with_extra_hard_link(tmp_path):
     store = CodeGraphStore(canonical)
     store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
     staging = store.create_staging_path()
-    CodeGraphStore(staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    staged_snapshot = canonical_snapshot(variant="new")
+    staged_revision = staged_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(staging).insert_snapshot(staged_snapshot)
     retained_link = tmp_path / "retained-staging.sqlite3"
     os.link(staging, retained_link)
 
@@ -755,7 +1001,7 @@ def test_publication_rejects_registered_staging_with_extra_hard_link(tmp_path):
 
     assert not staging.exists()
     assert CodeGraphStore(retained_link).reconstruct_metadata("backend")["revision"] == (
-        "new"
+        staged_revision
     )
     assert store.reconstruct_metadata("backend")["revision"] == "old"
 
@@ -965,9 +1211,9 @@ def test_replace_failure_keeps_canonical_and_returns_sanitized_error(
     store = CodeGraphStore(canonical)
     store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
     staging = store.create_staging_path()
-    CodeGraphStore(staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    staged_snapshot = canonical_snapshot(variant="new")
+    staged_revision = staged_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(staging).insert_snapshot(staged_snapshot)
 
     def fail_replace(source, target, **kwargs):
         raise OSError("secret replacement diagnostic")
@@ -978,7 +1224,7 @@ def test_replace_failure_keeps_canonical_and_returns_sanitized_error(
         store.publish_staging(
             staging,
             repository_id="backend",
-            expected_revision="new",
+            expected_revision=staged_revision,
         )
 
     assert str(raised.value) == "cannot publish code graph staging"
@@ -994,9 +1240,9 @@ def test_staging_directory_cleanup_failure_keeps_publication_successful(
     store = CodeGraphStore(canonical)
     store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
     staging = store.create_staging_path()
-    CodeGraphStore(staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    staged_snapshot = canonical_snapshot(variant="new")
+    staged_revision = staged_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(staging).insert_snapshot(staged_snapshot)
     staging_directory = staging.parent
     real_rmdir = Path.rmdir
 
@@ -1010,10 +1256,10 @@ def test_staging_directory_cleanup_failure_keeps_publication_successful(
     store.publish_staging(
         staging,
         repository_id="backend",
-        expected_revision="new",
+        expected_revision=staged_revision,
     )
 
-    assert store.reconstruct_metadata("backend")["revision"] == "new"
+    assert store.reconstruct_metadata("backend")["revision"] == staged_revision
     assert not staging.exists()
     assert staging_directory.is_dir()
 
@@ -1025,13 +1271,13 @@ def test_database_replace_fsyncs_namespace_transitions_in_order(
     store = CodeGraphStore(canonical)
     store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
     staging = store.create_staging_path()
-    CodeGraphStore(staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    staged_snapshot = canonical_snapshot(variant="new")
+    staged_revision = staged_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(staging).insert_snapshot(staged_snapshot)
     store.prepare_staging(
         staging,
         repository_id="backend",
-        expected_revision="new",
+        expected_revision=staged_revision,
     )
     fsynced = []
     monkeypatch.setattr(
@@ -1053,13 +1299,13 @@ def test_database_fsync_failure_reports_snapshot_already_published(
     store = CodeGraphStore(canonical)
     store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
     staging = store.create_staging_path()
-    CodeGraphStore(staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    staged_snapshot = canonical_snapshot(variant="new")
+    staged_revision = staged_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(staging).insert_snapshot(staged_snapshot)
     store.prepare_staging(
         staging,
         repository_id="backend",
-        expected_revision="new",
+        expected_revision=staged_revision,
     )
 
     def fail_directory_fsync(_path):
@@ -1078,7 +1324,7 @@ def test_database_fsync_failure_reports_snapshot_already_published(
     assert getattr(raised.value, "published", False) is True
     assert CodeGraphStore(canonical).reconstruct_metadata("backend")[
         "revision"
-    ] == "new"
+    ] == staged_revision
 
 
 def test_metadata_replace_fsyncs_parent_directory(tmp_path, monkeypatch):
@@ -1176,9 +1422,9 @@ def test_publication_recheck_rejects_reserved_path_swapped_to_external_hardlink(
     store = CodeGraphStore(canonical)
     store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links(revision="old"))
     staging = store.create_staging_path()
-    CodeGraphStore(staging).insert_snapshot(
-        snapshot_with_symbol_file_and_wiki_links(revision="new")
-    )
+    staged_snapshot = canonical_snapshot(variant="new")
+    staged_revision = staged_snapshot["repositories"][0]["revision"]
+    CodeGraphStore(staging).insert_snapshot(staged_snapshot)
     external = tmp_path / "external.sqlite3"
     CodeGraphStore(external).insert_snapshot(
         snapshot_with_symbol_file_and_wiki_links(revision="external")
@@ -1205,7 +1451,7 @@ def test_publication_recheck_rejects_reserved_path_swapped_to_external_hardlink(
         store.publish_staging(
             staging,
             repository_id="backend",
-            expected_revision="new",
+            expected_revision=staged_revision,
         )
 
     assert calls == 2

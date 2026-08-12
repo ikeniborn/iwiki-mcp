@@ -6,7 +6,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import sqlite3
 import stat
 import time
@@ -17,6 +18,15 @@ import uuid
 from filelock import ReadWriteLock, Timeout
 
 from .location import CodeGraphLocationError, open_cache_directory
+from .models import (
+    compact_casefold,
+    file_id,
+    module_key as normalize_module_key,
+    module_id,
+    relation_id,
+    symbol_id,
+    token_key,
+)
 from .schema import (
     BUSY_TIMEOUT_MS,
     INDEXES,
@@ -39,6 +49,421 @@ _PRIMARY_KEYS = {
     "relations": "relation_id",
     "wiki_code_links": "link_id",
 }
+_CANONICAL_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SQLITE_HEADER = b"SQLite format 3\x00"
+
+
+@dataclass(frozen=True)
+class _SealedReadState:
+    storage_stamp: Mapping[str, object]
+    wal_exists: bool
+    shm_exists: bool
+
+
+def _is_canonical_revision(value: object) -> bool:
+    return isinstance(value, str) and _CANONICAL_REVISION.fullmatch(value) is not None
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+
+def _snapshot_revision(
+    repository: Mapping[str, object],
+    files: Sequence[Mapping[str, object]],
+    symbols: Sequence[Mapping[str, object]],
+    relations: Sequence[Mapping[str, object]],
+    wiki_code_links: Sequence[Mapping[str, object]],
+) -> str:
+    """Hash persisted deterministic inputs and normalized output rows."""
+    repository_inputs = {
+        key: repository[key]
+        for key in (
+            "repository_id",
+            "git_commit",
+            "source_fingerprint",
+            "config_fingerprint",
+            "parser_fingerprint",
+            "normalizer_version",
+            "unicode_data_version",
+        )
+    }
+    rows = {
+        "repository": repository_inputs,
+        "files": sorted(files, key=lambda row: str(row["file_id"])),
+        "symbols": sorted(symbols, key=lambda row: str(row["symbol_id"])),
+        "relations": sorted(
+            relations, key=lambda row: str(row["relation_id"])
+        ),
+        "wiki_code_links": sorted(
+            wiki_code_links, key=lambda row: str(row["link_id"])
+        ),
+    }
+    return "sha256:" + hashlib.sha256(_canonical_json(rows)).hexdigest()
+
+
+def _table_rows(
+    connection: sqlite3.Connection, table: str
+) -> tuple[dict[str, object], ...]:
+    columns = tuple(
+        row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+    )
+    primary_key = _PRIMARY_KEYS[table]
+    return tuple(
+        dict(zip(columns, row))
+        for row in connection.execute(
+            f'SELECT * FROM "{table}" ORDER BY "{primary_key}"'
+        )
+    )
+
+
+def _timestamp_ns(status: os.stat_result, name: str) -> int:
+    value = getattr(status, f"st_{name}_ns", None)
+    if type(value) is int:
+        return value
+    return int(getattr(status, f"st_{name}") * 1_000_000_000)
+
+
+@contextmanager
+def _held_regular_file(path: Path) -> Iterator[os.stat_result]:
+    """Hold and identify one final regular file without following symlinks."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_regular_file(path, opened):
+            raise OSError("unsafe code graph storage file")
+        yield opened
+    finally:
+        os.close(descriptor)
+
+
+def _validate_optional_sidecar(path: Path) -> None:
+    """Reject an existing non-regular or linked SQLite sidecar."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_regular_file(path, opened):
+            raise OSError("unsafe code graph storage sidecar")
+    finally:
+        os.close(descriptor)
+
+
+def _same_regular_file(path: Path, opened: os.stat_result) -> bool:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(opened.st_mode)
+        and opened.st_nlink == 1
+        and stat.S_ISREG(current.st_mode)
+        and current.st_nlink == 1
+        and (current.st_dev, current.st_ino)
+        == (opened.st_dev, opened.st_ino)
+    )
+
+
+def _storage_file_stamp(path: Path, *, wal: bool) -> dict[str, object] | None:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        if wal:
+            return None
+        raise
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            raise OSError("invalid code graph storage file")
+        header_size = 32 if wal else 100
+        header = os.read(descriptor, header_size)
+        stamp = {
+            "size": status.st_size,
+            "mtime_ns": _timestamp_ns(status, "mtime"),
+            "ctime_ns": _timestamp_ns(status, "ctime"),
+            "device": status.st_dev,
+            "inode": status.st_ino,
+        }
+        if wal:
+            if status.st_size == 0:
+                return None
+            if len(header) != 32:
+                raise OSError("invalid code graph WAL header")
+            page_size = int.from_bytes(header[8:12], "big")
+            frame_size = page_size + 24
+            payload_size = status.st_size - 32
+            if page_size <= 0 or payload_size < 0 or payload_size % frame_size:
+                raise OSError("invalid code graph WAL frames")
+            return {
+                **stamp,
+                "magic": int.from_bytes(header[0:4], "big"),
+                "version": int.from_bytes(header[4:8], "big"),
+                "page_size": page_size,
+                "salt_1": int.from_bytes(header[16:20], "big"),
+                "salt_2": int.from_bytes(header[20:24], "big"),
+                "frames": payload_size // frame_size,
+            }
+        if len(header) != 100 or header[:16] != _SQLITE_HEADER:
+            raise OSError("invalid code graph database header")
+        return {
+            **stamp,
+            "change_counter": int.from_bytes(header[24:28], "big"),
+            "page_count": int.from_bytes(header[28:32], "big"),
+            "schema_cookie": int.from_bytes(header[40:44], "big"),
+            "version_valid_for": int.from_bytes(header[92:96], "big"),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def _language_prefix(entity_id: object, kind: str) -> str:
+    if not isinstance(entity_id, str):
+        raise CodeGraphStoreError("code graph deterministic identity mismatch")
+    prefix, separator, stored_kind = entity_id.partition(":")
+    if not prefix or separator != ":" or not stored_kind.startswith(f"{kind}:"):
+        raise CodeGraphStoreError("code graph deterministic identity mismatch")
+    return prefix
+
+
+def _validate_normalized_rows(
+    repository_id: str,
+    files: Sequence[Mapping[str, object]],
+    symbols: Sequence[Mapping[str, object]],
+    relations: Sequence[Mapping[str, object]],
+) -> None:
+    files_by_id = {row["file_id"]: row for row in files}
+    for row in files:
+        path = row["path"]
+        language = row["language"]
+        ranges = (
+            row["size_bytes"],
+            row["start_line"],
+            row["end_line"],
+            row["start_byte"],
+            row["end_byte"],
+        )
+        if any(type(value) is not int or value < 0 for value in ranges):
+            raise CodeGraphStoreError("code graph file contract mismatch")
+        if not isinstance(path, str) or not isinstance(language, str):
+            raise CodeGraphStoreError("code graph normalized row mismatch")
+        prefix = _language_prefix(row["file_id"], "file")
+        normalized_path = normalize_module_key(path)
+        local_name = PurePosixPath(path).name
+        expected = (
+            file_id(language, prefix, repository_id, path),
+            compact_casefold(path),
+            local_name,
+            token_key(local_name),
+            normalized_path,
+        )
+        actual = (
+            row["file_id"],
+            row["path_casefold"],
+            row["file_local_name"],
+            row["file_name_tokens_casefold"],
+            row["module_key"],
+        )
+        if (
+            actual != expected
+            or path != normalized_path
+            or _CANONICAL_REVISION.fullmatch(
+                "sha256:" + str(row["content_hash"])
+            ) is None
+        ):
+            raise CodeGraphStoreError("code graph normalized row mismatch")
+        module_qualified_name = row["module_qualified_name"]
+        if module_qualified_name is not None:
+            if not isinstance(module_qualified_name, str):
+                raise CodeGraphStoreError("code graph normalized row mismatch")
+            module_local_name = module_qualified_name.rsplit(".", 1)[-1]
+            module_expected = (
+                module_id(
+                    language,
+                    prefix,
+                    repository_id,
+                    path,
+                    module_qualified_name,
+                ),
+                module_local_name,
+                token_key(module_qualified_name, module_local_name),
+            )
+            module_actual = (
+                row["module_id"],
+                row["module_local_name"],
+                row["module_name_tokens_casefold"],
+            )
+            if module_actual != module_expected:
+                raise CodeGraphStoreError("code graph normalized row mismatch")
+
+    symbols_by_id = {row["symbol_id"]: row for row in symbols}
+    for row in symbols:
+        file_row = files_by_id.get(row["file_id"])
+        if file_row is None:
+            raise CodeGraphStoreError("code graph deterministic identity mismatch")
+        qualified_name = row["qualified_name"]
+        local_name = row["local_name"]
+        signature = row["signature"]
+        if not isinstance(qualified_name, str) or not isinstance(local_name, str):
+            raise CodeGraphStoreError("code graph normalized row mismatch")
+        prefix = _language_prefix(file_row["file_id"], "file")
+        expected = (
+            symbol_id(
+                str(file_row["language"]),
+                prefix,
+                repository_id,
+                str(file_row["module_key"]),
+                qualified_name,
+                signature or "",
+            ),
+            token_key(qualified_name, local_name),
+            compact_casefold(signature if isinstance(signature, str) else None),
+        )
+        actual = (
+            row["symbol_id"],
+            row["name_tokens_casefold"],
+            row["signature_casefold"],
+        )
+        ranges = (
+            row["start_line"],
+            row["end_line"],
+            row["start_byte"],
+            row["end_byte"],
+        )
+        if (
+            actual != expected
+            or local_name != qualified_name.rsplit(".", 1)[-1]
+            or _CANONICAL_REVISION.fullmatch(
+                "sha256:" + str(row["content_hash"])
+            ) is None
+            or row["end_line"] > file_row["end_line"]
+            or row["end_byte"] > file_row["end_byte"]
+            or any(type(value) is not int for value in ranges)
+        ):
+            raise CodeGraphStoreError("code graph normalized row mismatch")
+        try:
+            metadata = json.loads(str(row["metadata_json"]))
+        except (TypeError, ValueError) as exc:
+            raise CodeGraphStoreError("code graph row contract mismatch") from exc
+        if _canonical_json(metadata).decode("utf-8") != row["metadata_json"]:
+            raise CodeGraphStoreError("code graph row contract mismatch")
+
+    for row in relations:
+        file_row = files_by_id.get(row["source_file_id"])
+        if file_row is None:
+            raise CodeGraphStoreError("code graph deterministic identity mismatch")
+        ranges = (
+            row["source_start_line"],
+            row["source_end_line"],
+            row["source_start_byte"],
+            row["source_end_byte"],
+        )
+        if any(type(value) is not int or value < 0 for value in ranges):
+            raise CodeGraphStoreError("code graph relation contract mismatch")
+        source_identity = (
+            row["source_symbol_id"]
+            or row["source_module_id"]
+            or row["source_file_id"]
+        )
+        target_identity = row["target_symbol_id"] or row["target_module_id"]
+        prefix = _language_prefix(file_row["file_id"], "file")
+        expected_id = relation_id(
+            str(file_row["language"]),
+            prefix,
+            repository_id,
+            str(source_identity),
+            str(row["relation_type"]),
+            row["source_start_line"],
+            row["source_end_line"],
+            row["source_start_byte"],
+            row["source_end_byte"],
+            str(target_identity) if target_identity is not None else None,
+            (
+                str(row["target_reference"])
+                if row["target_reference"] is not None else None
+            ),
+            str(row["binding_kind"]) if row["binding_kind"] is not None else None,
+            str(row["binding_name"]) if row["binding_name"] is not None else None,
+        )
+        expected_binding_tokens = (
+            token_key(str(row["binding_name"]))
+            if row["binding_name"] is not None else None
+        )
+        if (
+            row["relation_id"] != expected_id
+            or row["binding_name_tokens_casefold"] != expected_binding_tokens
+            or row["source_end_line"] > file_row["end_line"]
+            or row["source_end_byte"] > file_row["end_byte"]
+        ):
+            raise CodeGraphStoreError("code graph relation contract mismatch")
+        if row["source_symbol_id"] not in (None, *symbols_by_id):
+            raise CodeGraphStoreError("code graph relation contract mismatch")
+        try:
+            metadata = json.loads(str(row["metadata_json"]))
+        except (TypeError, ValueError) as exc:
+            raise CodeGraphStoreError("code graph row contract mismatch") from exc
+        if _canonical_json(metadata).decode("utf-8") != row["metadata_json"]:
+            raise CodeGraphStoreError("code graph row contract mismatch")
+
+
+def _validate_persisted_snapshot(
+    connection: sqlite3.Connection,
+    repository_id: str,
+    expected_revision: str,
+) -> None:
+    """Validate and recompute one complete persisted schema-v2 snapshot."""
+    validate_schema(connection)
+    validate_integrity(connection)
+    repositories = _table_rows(connection, "repositories")
+    if len(repositories) != 1:
+        raise CodeGraphStoreError("code graph staging snapshot mismatch")
+    repository = repositories[0]
+    if (
+        repository["repository_id"] != repository_id
+        or repository["state"] != "ready"
+        or repository["revision"] != expected_revision
+    ):
+        raise CodeGraphStoreError("code graph staging snapshot mismatch")
+    if not _is_canonical_revision(expected_revision):
+        raise CodeGraphStoreError("code graph revision mismatch")
+    if any(
+        _CANONICAL_REVISION.fullmatch("sha256:" + str(repository[key])) is None
+        for key in (
+            "source_fingerprint",
+            "config_fingerprint",
+            "parser_fingerprint",
+        )
+    ):
+        raise CodeGraphStoreError("code graph fingerprint mismatch")
+    files = _table_rows(connection, "files")
+    symbols = _table_rows(connection, "symbols")
+    relations = _table_rows(connection, "relations")
+    wiki_code_links = _table_rows(connection, "wiki_code_links")
+    try:
+        _validate_normalized_rows(repository_id, files, symbols, relations)
+        if any(row["domain"] != repository_id for row in wiki_code_links):
+            raise CodeGraphStoreError("code graph link contract mismatch")
+        recomputed = _snapshot_revision(
+            repository, files, symbols, relations, wiki_code_links
+        )
+    except CodeGraphStoreError:
+        raise
+    except (KeyError, OverflowError, TypeError, ValueError) as exc:
+        raise CodeGraphStoreError("code graph snapshot mismatch") from exc
+    if (
+        recomputed != expected_revision
+        or repository["revision"] != expected_revision
+    ):
+        raise CodeGraphStoreError("code graph revision mismatch")
 
 
 class CodeGraphPublishedError(CodeGraphStoreError):
@@ -333,21 +758,78 @@ class CodeGraphStore:
 
     def inspect_compatibility(self) -> str:
         """Inspect exact compatibility through a true read-only connection."""
-        connection = None
         try:
-            with self._secure_paths(self.path, create=False) as secured:
-                resolved = secured[0].resolve(strict=True).as_posix()
-                uri = (
-                    f"file:{quote(resolved, safe='/:')}"
-                    "?mode=ro&immutable=1"
-                )
-                connection = sqlite3.connect(uri, uri=True)
-            return inspect_schema_compatibility(connection)
+            with self._read_connection(validate=False) as connection:
+                return inspect_schema_compatibility(connection)
         except (CodeGraphStoreError, OSError, sqlite3.DatabaseError):
             return "incompatible"
-        finally:
-            if connection is not None:
-                connection.close()
+
+    def inspect_schema_version(self) -> int | None:
+        """Read only the canonical user version without creating or migrating it."""
+        try:
+            with self._read_connection(validate=False) as connection:
+                row = connection.execute("PRAGMA user_version").fetchone()
+                return (
+                    row[0]
+                    if row is not None and type(row[0]) is int
+                    else None
+                )
+        except (CodeGraphStoreError, OSError, sqlite3.DatabaseError):
+            return None
+
+    def storage_stamp(self) -> dict[str, object]:
+        """Return one stable bounded database/WAL mutation observation."""
+        wal_path = Path(f"{self.path}-wal")
+        try:
+            with self._secure_paths(
+                self.path, wal_path, create=False
+            ) as secured:
+                for _attempt in range(3):
+                    database_before = _storage_file_stamp(
+                        secured[0], wal=False
+                    )
+                    wal_before = _storage_file_stamp(secured[1], wal=True)
+                    database_after = _storage_file_stamp(
+                        secured[0], wal=False
+                    )
+                    wal_after = _storage_file_stamp(secured[1], wal=True)
+                    if (
+                        database_before == database_after
+                        and wal_before == wal_after
+                    ):
+                        return {
+                            "database": database_after,
+                            "wal": wal_after,
+                        }
+                raise CodeGraphStoreError(
+                    "code graph storage changed during inspection"
+                )
+        except (CodeGraphStoreError, OSError) as exc:
+            raise CodeGraphStoreError(
+                "cannot inspect code graph storage stamp"
+            ) from exc
+
+    def _sealed_read_state(self) -> _SealedReadState:
+        wal_path = Path(f"{self.path}-wal")
+        shm_path = Path(f"{self.path}-shm")
+        for _attempt in range(3):
+            wal_before = wal_path.exists()
+            shm_before = shm_path.exists()
+            stamp = self.storage_stamp()
+            wal_after = wal_path.exists()
+            shm_after = shm_path.exists()
+            if (
+                wal_before == wal_after
+                and shm_before == shm_after
+            ):
+                return _SealedReadState(
+                    storage_stamp=stamp,
+                    wal_exists=wal_after,
+                    shm_exists=shm_after,
+                )
+        raise CodeGraphStoreError(
+            "cannot inspect code graph read state"
+        )
 
     def verify_canonical(
         self,
@@ -358,17 +840,10 @@ class CodeGraphStore:
         connection = None
         try:
             connection = self.open_existing()
-            validate_integrity(connection)
-            row = connection.execute(
-                "SELECT revision, state FROM repositories "
-                "WHERE repository_id = ?",
-                (repository_id,),
-            ).fetchone()
-            if row != (expected_revision, "ready"):
-                raise CodeGraphStoreError(
-                    "code graph canonical verification failed"
-                )
-        except (CodeGraphStoreError, sqlite3.DatabaseError) as exc:
+            _validate_persisted_snapshot(
+                connection, repository_id, expected_revision
+            )
+        except (CodeGraphStoreError, sqlite3.DatabaseError, ValueError) as exc:
             raise CodeGraphStoreError(
                 "code graph canonical verification failed"
             ) from exc
@@ -855,6 +1330,132 @@ class CodeGraphStore:
         with self._secure_paths(self.path, create=False) as secured:
             return self._connect_existing(secured[0])
 
+    @contextmanager
+    def _read_connection(
+        self, *, validate: bool
+    ) -> Iterator[sqlite3.Connection]:
+        """Open one sealed ordinary-path read connection."""
+        connection = None
+        wal_path = Path(f"{self.path}-wal")
+        shm_path = Path(f"{self.path}-shm")
+        try:
+            with self._secure_paths(
+                self.path, wal_path, shm_path, create=False
+            ) as secured:
+                secure_database, secure_wal, secure_shm = secured
+                with _held_regular_file(
+                    secure_database
+                ) as database_identity:
+                    canonical_database = self._absolute(self.path)
+                    canonical_wal = Path(f"{canonical_database}-wal")
+                    canonical_shm = Path(f"{canonical_database}-shm")
+                    if not _same_regular_file(
+                        canonical_database, database_identity
+                    ):
+                        raise OSError("code graph storage file changed")
+                    _validate_optional_sidecar(secure_wal)
+                    _validate_optional_sidecar(secure_shm)
+                    _validate_optional_sidecar(canonical_wal)
+                    _validate_optional_sidecar(canonical_shm)
+                    pre_state = self._sealed_read_state()
+                    database_uri = quote(
+                        canonical_database.as_posix(), safe="/:"
+                    )
+                    immutable = (
+                        not pre_state.wal_exists
+                        and not pre_state.shm_exists
+                    )
+                    immutable_option = (
+                        "&immutable=1" if immutable else ""
+                    )
+                    if self._sealed_read_state() != pre_state:
+                        raise OSError("code graph storage changed")
+                    connection = sqlite3.connect(
+                        f"file:{database_uri}?mode=ro{immutable_option}",
+                        uri=True,
+                        timeout=BUSY_TIMEOUT_MS / 1000,
+                        isolation_level=None,
+                    )
+                    if (
+                        not _same_regular_file(
+                            secure_database, database_identity
+                        )
+                        or not _same_regular_file(
+                            canonical_database, database_identity
+                        )
+                    ):
+                        raise OSError("code graph storage file changed")
+                    _validate_optional_sidecar(secure_wal)
+                    _validate_optional_sidecar(secure_shm)
+                    _validate_optional_sidecar(canonical_wal)
+                    _validate_optional_sidecar(canonical_shm)
+                    if self._sealed_read_state() != pre_state:
+                        raise OSError("code graph storage changed")
+                    connection.execute("PRAGMA query_only = ON")
+                    connection.execute("PRAGMA foreign_keys = ON")
+                    connection.execute(
+                        f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}"
+                    )
+                    if validate:
+                        validate_schema(connection)
+                    connection.execute("BEGIN")
+                    if (
+                        not _same_regular_file(
+                            secure_database, database_identity
+                        )
+                        or not _same_regular_file(
+                            canonical_database, database_identity
+                        )
+                    ):
+                        raise OSError("code graph storage file changed")
+                    _validate_optional_sidecar(secure_wal)
+                    _validate_optional_sidecar(secure_shm)
+                    _validate_optional_sidecar(canonical_wal)
+                    _validate_optional_sidecar(canonical_shm)
+                    if self._sealed_read_state() != pre_state:
+                        raise OSError("code graph storage changed")
+                    try:
+                        yield connection
+                    finally:
+                        if connection.in_transaction:
+                            connection.execute("ROLLBACK")
+                        connection.close()
+                        connection = None
+                        if (
+                            not _same_regular_file(
+                                secure_database, database_identity
+                            )
+                            or not _same_regular_file(
+                                canonical_database, database_identity
+                            )
+                        ):
+                            raise CodeGraphStoreError(
+                                "cannot hold code graph read snapshot"
+                            )
+                        _validate_optional_sidecar(secure_wal)
+                        _validate_optional_sidecar(secure_shm)
+                        _validate_optional_sidecar(canonical_wal)
+                        _validate_optional_sidecar(canonical_shm)
+                        if self._sealed_read_state() != pre_state:
+                            raise CodeGraphStoreError(
+                                "cannot hold code graph read snapshot"
+                            )
+        except CodeGraphStoreError:
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise CodeGraphStoreError(
+                "cannot hold code graph read snapshot"
+            ) from exc
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @contextmanager
+    def read_lease(self) -> Iterator[sqlite3.Connection]:
+        """Hold one read-only SQLite snapshot until caller completes checks."""
+        with self._read_connection(validate=True) as connection:
+            yield connection
+
     def prepare_staging(
         self,
         staging: str | Path,
@@ -872,15 +1473,9 @@ class CodeGraphStore:
             with self._secure_paths(staging_path, create=False) as secured:
                 connection = self._connect_existing(secured[0])
             try:
-                validate_integrity(connection)
-                repositories = connection.execute(
-                    "SELECT repository_id, revision, state "
-                    "FROM repositories ORDER BY repository_id"
-                ).fetchall()
-                if repositories != [(repository_id, expected_revision, "ready")]:
-                    raise CodeGraphStoreError(
-                        "code graph staging snapshot mismatch"
-                    )
+                _validate_persisted_snapshot(
+                    connection, repository_id, expected_revision
+                )
                 checkpoint = connection.execute(
                     "PRAGMA wal_checkpoint(TRUNCATE)"
                 ).fetchone()
@@ -891,7 +1486,7 @@ class CodeGraphStore:
         except CodeGraphStoreError:
             self.discard_staging(staging_path)
             raise
-        except (OSError, sqlite3.DatabaseError) as exc:
+        except (OSError, sqlite3.DatabaseError, ValueError) as exc:
             self.discard_staging(staging_path)
             raise CodeGraphStoreError("cannot prepare code graph staging") from exc
 
@@ -900,8 +1495,44 @@ class CodeGraphStore:
         sidecars = tuple(
             Path(f"{self.path}{suffix}") for suffix in ("-wal", "-shm")
         )
-        with self._secure_paths(*sidecars, create=True) as secured:
-            return not any(path.exists() for path in secured)
+        with self._secure_paths(
+            self.path, *sidecars, create=True
+        ) as secured:
+            secure_database, *secure_sidecars = secured
+            if not any(path.exists() for path in secure_sidecars):
+                return True
+            connection = None
+            try:
+                with _held_regular_file(
+                    secure_database
+                ) as database_identity:
+                    canonical_database = self._absolute(self.path)
+                    if not _same_regular_file(
+                        canonical_database, database_identity
+                    ):
+                        return False
+                    for sidecar in secure_sidecars:
+                        _validate_optional_sidecar(sidecar)
+                    uri = (
+                        f"file:{quote(canonical_database.as_posix(), safe='/:')}"
+                        "?mode=rw"
+                    )
+                    connection = sqlite3.connect(
+                        uri,
+                        uri=True,
+                        timeout=BUSY_TIMEOUT_MS / 1000,
+                        isolation_level=None,
+                    )
+                    connection.execute("PRAGMA query_only = ON")
+                    connection.execute(
+                        "SELECT COUNT(*) FROM sqlite_master"
+                    ).fetchone()
+            except (OSError, sqlite3.DatabaseError):
+                return False
+            finally:
+                if connection is not None:
+                    connection.close()
+            return not any(path.exists() for path in secure_sidecars)
 
     def replace_staging(self, staging: str | Path) -> None:
         """Atomically replace the canonical database with prepared staging."""

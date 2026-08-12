@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import threading
 import time
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
@@ -35,16 +35,25 @@ from .models import (
 )
 from .resolver import SymbolIndex, sort_relations
 from .schema import SCHEMA_VERSION, TABLES, CodeGraphStoreError
-from .store import CodeGraphStore, code_graph_write_lock
+from .store import (
+    CodeGraphStore,
+    _is_canonical_revision,
+    _snapshot_revision,
+    code_graph_read_lock,
+    code_graph_write_lock,
+)
 
 
 _PHASE_NAMES = (
     "discovery",
     "fingerprint",
     "parsing",
+    "normalization",
     "resolution",
     "persistence",
     "validation",
+    "canonical_verification_1",
+    "final_verification",
     "publication",
 )
 KNOWN_WARNING_CODES = frozenset({
@@ -68,6 +77,75 @@ KNOWN_WARNING_CODES = frozenset({
     "parse_error",
     "secret_excluded",
     "symlink_excluded",
+})
+_FILE_EXCLUSION_CODES = frozenset({
+    "entry_excluded",
+    "file_changed",
+    "file_limit_reached",
+    "file_too_large",
+    "file_unavailable",
+    "ignored",
+    "secret_excluded",
+    "symlink_excluded",
+})
+_FILE_TRUNCATION_CODES = frozenset({"file_limit_reached"})
+_READY_METADATA_KEYS = frozenset({
+    "adapter_version",
+    "counts",
+    "domain",
+    "duration_ms",
+    "excluded_files",
+    "fingerprints",
+    "fresh",
+    "generation",
+    "git_commit",
+    "grammar_version",
+    "indexed_at",
+    "input_fingerprint",
+    "metadata_digest",
+    "module_warnings",
+    "normalizer_version",
+    "parser_errors",
+    "parser_version",
+    "pending_final_verify",
+    "phase_timings_ms",
+    "publication_phase",
+    "recovery_policy",
+    "resolution_ratios",
+    "resolver_version",
+    "revision",
+    "schema_version",
+    "state",
+    "storage_stamp",
+    "truncated",
+    "truncated_files",
+    "unicode_data_version",
+    "warnings",
+})
+
+_DATABASE_STAMP_KEYS = frozenset({
+    "change_counter",
+    "ctime_ns",
+    "device",
+    "inode",
+    "mtime_ns",
+    "page_count",
+    "schema_cookie",
+    "size",
+    "version_valid_for",
+})
+_WAL_STAMP_KEYS = frozenset({
+    "ctime_ns",
+    "device",
+    "frames",
+    "inode",
+    "magic",
+    "mtime_ns",
+    "page_size",
+    "salt_1",
+    "salt_2",
+    "size",
+    "version",
 })
 
 
@@ -196,9 +274,81 @@ def _lock_timeout(maximum: float, deadline: float | None) -> float:
     return max(0.0, min(maximum, deadline - time.monotonic()))
 
 
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
+def _metadata_digest(metadata: Mapping[str, object]) -> str:
+    payload = {
+        key: value for key, value in metadata.items()
+        if key not in {"duration_ms", "metadata_digest", "phase_timings_ms"}
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _seal_ready_metadata(metadata: dict[str, object]) -> None:
+    metadata["metadata_digest"] = _metadata_digest(metadata)
+
+
+def _valid_storage_stamp(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {"database", "wal"}:
+        return False
+    database = value.get("database")
+    if (
+        not isinstance(database, Mapping)
+        or set(database) != _DATABASE_STAMP_KEYS
+        or any(type(item) is not int or item < 0 for item in database.values())
+    ):
+        return False
+    wal = value.get("wal")
+    if wal is None:
+        return True
+    if not isinstance(wal, Mapping) or set(wal) != _WAL_STAMP_KEYS:
+        return False
+    if any(
+        key not in {"magic", "version", "page_size", "salt_1", "salt_2"}
+        and (type(item) is not int or item < 0)
+        for key, item in wal.items()
+    ):
+        return False
+    optional = tuple(
+        wal[key] for key in ("magic", "version", "page_size", "salt_1", "salt_2")
+    )
+    return all(item is None for item in optional) or all(
+        type(item) is int and item >= 0 for item in optional
+    )
+
+
+def exact_ready_metadata(metadata: Mapping[str, object]) -> bool:
+    """Validate the complete final metadata envelope and its diagnostics."""
+    timings = _safe_phase_timings(metadata.get("phase_timings_ms"))
+    warnings = metadata.get("warnings")
+    return (
+        set(metadata) == _READY_METADATA_KEYS
+        and metadata.get("state") == "ready"
+        and metadata.get("fresh") is True
+        and metadata.get("publication_phase") == "pending_final_verify"
+        and metadata.get("pending_final_verify") is True
+        and metadata.get("recovery_policy") == "failed"
+        and _valid_storage_stamp(metadata.get("storage_stamp"))
+        and type(metadata.get("generation")) is int
+        and metadata["generation"] >= 0
+        and isinstance(metadata.get("counts"), Mapping)
+        and isinstance(metadata.get("resolution_ratios"), Mapping)
+        and type(metadata.get("excluded_files")) is int
+        and metadata["excluded_files"] >= 0
+        and type(metadata.get("truncated_files")) is int
+        and metadata["truncated_files"] >= 0
+        and type(metadata.get("truncated")) is bool
+        and type(metadata.get("parser_errors")) is int
+        and metadata["parser_errors"] >= 0
+        and type(metadata.get("module_warnings")) is int
+        and metadata["module_warnings"] >= 0
+        and isinstance(warnings, list)
+        and warnings == sanitize_warning_codes(warnings)
+        and set(timings) == set(_PHASE_NAMES)
+        and type(metadata.get("duration_ms")) is int
+        and metadata["duration_ms"] >= 0
+        and metadata.get("metadata_digest") == _metadata_digest(metadata)
     )
 
 
@@ -342,13 +492,11 @@ class CodeGraphIndexer:
     def _quarantine_unusable_canonical(self) -> None:
         if not self.paths.database.exists():
             return
-        try:
-            with closing(self.store.open_existing()):
-                pass
-        except CodeGraphStoreError:
-            if not self.store.canonical_handles_available():
-                raise Timeout(str(self.paths.lock))
-            self.store.quarantine_corrupt()
+        if self.store.inspect_compatibility() == "compatible":
+            return
+        if not self.store.canonical_handles_available():
+            raise Timeout(str(self.paths.lock))
+        self.store.quarantine_corrupt()
 
     def _ready_metadata(
         self,
@@ -358,25 +506,53 @@ class CodeGraphIndexer:
         normalization_versions: tuple[str, str],
         *,
         persisted: Mapping[str, object] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, object] | None:
+        if connection is None:
+            try:
+                with self.store.read_lease() as leased:
+                    return self._ready_metadata(
+                        fingerprints,
+                        commit,
+                        config,
+                        normalization_versions,
+                        persisted=persisted,
+                        connection=leased,
+                    )
+            except (CodeGraphStoreError, OSError):
+                return None
         metadata = dict(
             persisted
             if persisted is not None
             else (_safe_metadata(self.paths.metadata) or {})
         )
         try:
-            with closing(self.store.open_existing()) as connection:
-                row = connection.execute(
-                    "SELECT source_fingerprint, config_fingerprint, "
-                    "parser_fingerprint, normalizer_version, "
-                    "unicode_data_version, git_commit, revision, state, "
-                    "indexed_at "
-                    "FROM repositories WHERE repository_id = ?",
-                    (self.domain,),
-                ).fetchone()
-                if row is not None:
-                    counts = self._stored_counts(connection)
-        except (CodeGraphStoreError, OSError):
+            data_version = connection.execute(
+                "PRAGMA data_version"
+            ).fetchone()
+            row = connection.execute(
+                "SELECT source_fingerprint, config_fingerprint, "
+                "parser_fingerprint, normalizer_version, "
+                "unicode_data_version, git_commit, revision, state, "
+                "indexed_at "
+                "FROM repositories WHERE repository_id = ?",
+                (self.domain,),
+            ).fetchone()
+            storage_stamp = self.store.storage_stamp()
+            row_after = connection.execute(
+                "SELECT source_fingerprint, config_fingerprint, "
+                "parser_fingerprint, normalizer_version, "
+                "unicode_data_version, git_commit, revision, state, "
+                "indexed_at "
+                "FROM repositories WHERE repository_id = ?",
+                (self.domain,),
+            ).fetchone()
+            data_version_after = connection.execute(
+                "PRAGMA data_version"
+            ).fetchone()
+        except (CodeGraphStoreError, OSError, sqlite3.DatabaseError):
+            return None
+        if row != row_after or data_version != data_version_after:
             return None
         expected = (
             fingerprints.source,
@@ -394,28 +570,40 @@ class CodeGraphIndexer:
             metadata.get("phase_timings_ms")
         )
         metadata_duration = metadata.get("duration_ms")
+        metadata_fingerprints = metadata.get("fingerprints")
         metadata_matches = (
-            metadata.get("state") == "ready"
+            exact_ready_metadata(metadata)
+            and metadata.get("domain") == self.domain
+            and metadata.get("state") == "ready"
             and metadata.get("revision") == row[6]
+            and metadata.get("schema_version") == SCHEMA_VERSION
+            and metadata_fingerprints == {
+                "source": fingerprints.source,
+                "config": fingerprints.config,
+                "parser": fingerprints.parser,
+            }
             and metadata.get("input_fingerprint") == fingerprints.inputs
             and metadata.get("git_commit") == commit
+            and metadata.get("indexed_at") == row[8]
+            and metadata.get("parser_version") == self._parser_version(config)
+            and metadata.get("grammar_version") == self._grammar_version(config)
+            and metadata.get("adapter_version") == self._adapter_version(config)
+            and metadata.get("resolver_version") == self.resolver_version
+            and metadata.get("publication_phase") == "pending_final_verify"
+            and metadata.get("pending_final_verify") is True
             and metadata.get("normalizer_version") == normalization_versions[0]
             and metadata.get("unicode_data_version") == normalization_versions[1]
-            and set(metadata_timings) == set(_PHASE_NAMES)
-            and type(metadata_duration) is int
-            and metadata_duration >= 0
+            and metadata.get("storage_stamp") == storage_stamp
         )
         if not metadata_matches:
-            metadata = {}
-        resolution_states = counts["resolution_states"]
-        resolution_total = sum(resolution_states.values())
-        resolution_ratios = {
-            state: count / resolution_total
-            for state, count in resolution_states.items()
-            if resolution_total
-        }
+            return None
+        if not _is_canonical_revision(row[6]):
+            return None
+        counts = dict(metadata["counts"])
+        resolution_ratios = dict(metadata["resolution_ratios"])
         excluded_files = metadata.get("excluded_files")
         parser_errors = metadata.get("parser_errors")
+        module_warnings = metadata.get("module_warnings")
         result = {
             "domain": self.domain,
             "state": "ready",
@@ -447,11 +635,18 @@ class CodeGraphIndexer:
                 if type(metadata.get("truncated")) is bool
                 else False
             ),
+            "truncated_files": metadata["truncated_files"],
             "parser_errors": (
                 parser_errors
                 if type(parser_errors) is int and parser_errors >= 0
                 else 0
             ),
+            "module_warnings": (
+                module_warnings
+                if type(module_warnings) is int and module_warnings >= 0
+                else max(0, counts["files"] - counts["modules"])
+            ),
+            "pending_final_verify": True,
             "indexed_at": row[8],
             "warnings": (
                 sanitize_warning_codes(metadata.get("warnings"))
@@ -463,35 +658,6 @@ class CodeGraphIndexer:
             result["phase_timings_ms"] = metadata_timings
             result["duration_ms"] = metadata_duration
         return result
-
-    @staticmethod
-    def _stored_counts(connection) -> dict[str, object]:
-        return {
-            "languages": dict(connection.execute(
-                "SELECT language, COUNT(*) FROM files "
-                "GROUP BY language ORDER BY language"
-            )),
-            "files": connection.execute(
-                "SELECT COUNT(*) FROM files"
-            ).fetchone()[0],
-            "symbols": connection.execute(
-                "SELECT COUNT(*) FROM symbols"
-            ).fetchone()[0],
-            "relations": connection.execute(
-                "SELECT COUNT(*) FROM relations"
-            ).fetchone()[0],
-            "symbol_kinds": dict(connection.execute(
-                "SELECT kind, COUNT(*) FROM symbols GROUP BY kind ORDER BY kind"
-            )),
-            "relation_types": dict(connection.execute(
-                "SELECT relation_type, COUNT(*) FROM relations "
-                "GROUP BY relation_type ORDER BY relation_type"
-            )),
-            "resolution_states": dict(connection.execute(
-                "SELECT resolution_state, COUNT(*) FROM relations "
-                "GROUP BY resolution_state ORDER BY resolution_state"
-            )),
-        }
 
     def _parse(
         self,
@@ -578,10 +744,7 @@ class CodeGraphIndexer:
     ) -> tuple[dict[str, object], ...]:
         rows = []
         for relation in relations:
-            row = asdict(relation)
-            row["source_line"] = relation.source_start_line
-            row["source_byte"] = relation.source_start_byte
-            rows.append(row)
+            rows.append(asdict(relation))
         return tuple(sorted(rows, key=lambda row: str(row["relation_id"])))
 
     def _unresolved_relations(
@@ -691,11 +854,10 @@ class CodeGraphIndexer:
     @staticmethod
     def _revision(
         *,
+        repository: Mapping[str, object],
         parsed_files: tuple[ParsedFile, ...],
         relations: tuple[RelationRecord, ...],
         wiki_code_links: Sequence[Mapping[str, object]],
-        fingerprints: FingerprintSet,
-        commit: str | None,
     ) -> str:
         files = tuple(asdict(item.file) for item in parsed_files)
         symbols = tuple(
@@ -703,19 +865,13 @@ class CodeGraphIndexer:
             for parsed in parsed_files
             for symbol in parsed.symbols
         )
-        rows_for_revision = {
-            "fingerprints": asdict(fingerprints),
-            "git_commit": commit,
-            "files": sorted(files, key=lambda row: str(row["file_id"])),
-            "symbols": sorted(symbols, key=lambda row: str(row["symbol_id"])),
-            "relations": list(CodeGraphIndexer._relation_rows(relations)),
-            "wiki_code_links": sorted(
-                wiki_code_links, key=lambda row: str(row["link_id"])
-            ),
-        }
-        return "sha256:" + hashlib.sha256(
-            _canonical_json(rows_for_revision)
-        ).hexdigest()
+        return _snapshot_revision(
+            repository,
+            files,
+            symbols,
+            CodeGraphIndexer._relation_rows(relations),
+            wiki_code_links,
+        )
 
     @staticmethod
     def _counts(
@@ -725,16 +881,24 @@ class CodeGraphIndexer:
         symbols = tuple(
             symbol for parsed in parsed_files for symbol in parsed.symbols
         )
+        symbol_kinds = dict(sorted(Counter(
+            item.kind for item in symbols
+        ).items()))
+        modules = sum(item.file.module_id is not None for item in parsed_files)
         return {
             "languages": dict(sorted(Counter(
                 item.file.language for item in parsed_files
             ).items())),
             "files": len(parsed_files),
+            "modules": modules,
             "symbols": len(symbols),
             "relations": len(relation_rows),
-            "symbol_kinds": dict(sorted(Counter(
-                item.kind for item in symbols
-            ).items())),
+            "entity_kinds": {
+                "file": len(parsed_files),
+                "module": modules,
+                **symbol_kinds,
+            },
+            "symbol_kinds": symbol_kinds,
             "relation_types": dict(sorted(Counter(
                 item.relation_type for item in relation_rows
             ).items())),
@@ -797,9 +961,19 @@ class CodeGraphIndexer:
             "unicode_data_version": normalization_versions[1],
             "counts": dict(counts),
             "resolution_ratios": resolution_ratios,
-            "excluded_files": len(discovered.warnings),
+            "excluded_files": sum(
+                warning.code in _FILE_EXCLUSION_CODES
+                for warning in discovered.warnings
+            ),
+            "truncated_files": sum(
+                warning.code in _FILE_TRUNCATION_CODES
+                for warning in discovered.warnings
+            ),
             "truncated": discovered.truncated,
             "parser_errors": parser_warnings.count("parse_error"),
+            "module_warnings": parser_warnings.count(
+                "module_name_unavailable"
+            ),
             "indexed_at": indexed_at,
             "phase_timings_ms": dict(timings),
             "duration_ms": duration_ms,
@@ -868,14 +1042,7 @@ class CodeGraphIndexer:
             raise
 
     def _verify_published(self, revision: str) -> None:
-        with closing(self.store.open_existing()) as connection:
-            row = connection.execute(
-                "SELECT revision, state FROM repositories "
-                "WHERE repository_id = ?",
-                (self.domain,),
-            ).fetchone()
-        if row != (revision, "ready"):
-            raise CodeGraphBuildError("code graph publication verification failed")
+        self.store.verify_canonical(self.domain, revision)
 
     def mark_dirty_if_stale(self, *, deadline: float | None = None) -> bool:
         """Discover fingerprints for a query and persist ready-to-dirty drift."""
@@ -883,30 +1050,37 @@ class CodeGraphIndexer:
         normalization_versions = self._normalization_versions()
         if deadline is None:
             deadline = time.monotonic() + config.max_rebuild_seconds
+
+        def ready_now() -> bool:
+            _check_deadline(deadline, self.paths.lock)
+            discovered = discover_sources(
+                self.project_dir,
+                config,
+                extensions=self._extensions(config),
+            )
+            _check_deadline(deadline, self.paths.lock)
+            fingerprints, commit, _dirty = self._fingerprints(
+                discovered,
+                config,
+                normalization_versions=normalization_versions,
+            )
+            _check_deadline(deadline, self.paths.lock)
+            return self._ready_metadata(
+                fingerprints,
+                commit,
+                config,
+                normalization_versions,
+            ) is not None
+
         try:
+            with code_graph_read_lock(self.paths.lock):
+                if ready_now():
+                    return False
             with code_graph_write_lock(
                 self.paths.lock,
                 timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
             ):
-                _check_deadline(deadline, self.paths.lock)
-                discovered = discover_sources(
-                    self.project_dir,
-                    config,
-                    extensions=self._extensions(config),
-                )
-                _check_deadline(deadline, self.paths.lock)
-                fingerprints, commit, _dirty = self._fingerprints(
-                    discovered,
-                    config,
-                    normalization_versions=normalization_versions,
-                )
-                _check_deadline(deadline, self.paths.lock)
-                if self._ready_metadata(
-                    fingerprints,
-                    commit,
-                    config,
-                    normalization_versions,
-                ) is not None:
+                if ready_now():
                     return False
                 self.store.set_repository_state(self.domain, "dirty")
                 return True
@@ -926,7 +1100,7 @@ class CodeGraphIndexer:
         restore_prior_on_abort: bool = False,
         control: BuildControl | None = None,
     ) -> dict[str, object]:
-        """Run the bounded 13-stage full-build/publication lifecycle."""
+        """Run the bounded eighteen-step full-build/publication lifecycle."""
         started = time.monotonic()
         staging = None
         generation = None
@@ -948,7 +1122,17 @@ class CodeGraphIndexer:
                 previous_metadata = _safe_metadata(self.paths.metadata) or {}
                 generation = self._generation(previous_metadata) + 1
                 try:
-                    authoritative = self.store.reconstruct_metadata(self.domain)
+                    with self.store.read_lease() as connection:
+                        row = connection.execute(
+                            "SELECT revision, state FROM repositories "
+                            "WHERE repository_id = ?",
+                            (self.domain,),
+                        ).fetchone()
+                    authoritative = (
+                        {"revision": row[0], "state": row[1]}
+                        if row is not None
+                        else {}
+                    )
                 except CodeGraphStoreError:
                     authoritative = {}
                 revision_value = authoritative.get("revision")
@@ -961,22 +1145,6 @@ class CodeGraphIndexer:
                     if state_value in {"missing", "ready", "dirty", "failed"}
                     else "missing"
                 )
-                self._publish_metadata_record(
-                    self._transition_metadata(
-                        state="rebuilding",
-                        generation=generation,
-                        revision=previous_revision,
-                        prior_state=prior_state,
-                        publication_phase="building",
-                        recovery_policy=(
-                            "restore_prior"
-                            if restore_prior_on_abort
-                            else "failed"
-                        ),
-                    ),
-                    deadline=deadline,
-                )
-                _check_deadline(deadline, self.paths.lock)
                 wiki_base.ensure_graph_store_excluded(self.cache_base)
                 _check_deadline(deadline, self.paths.lock)
                 self._quarantine_unusable_canonical()
@@ -999,29 +1167,50 @@ class CodeGraphIndexer:
                 timings["fingerprint"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
                 if not force:
-                    ready = self._ready_metadata(
-                        fingerprints,
-                        commit,
-                        config,
-                        normalization_versions,
-                        persisted=previous_metadata,
-                    )
-                    if ready is not None:
-                        persisted_ready = {
-                            **ready,
-                            "generation": generation,
-                        }
-                        self._publish_metadata_record(
-                            persisted_ready,
-                            deadline=deadline,
-                        )
-                        result = dict(ready)
-                        result["no_op"] = True
-                        result["duration_ms"] = _elapsed_ms(started)
-                        result["phase_timings_ms"] = {
-                            "no_op": result["duration_ms"]
-                        }
-                        return result
+                    try:
+                        with self.store.read_lease() as connection:
+                            ready = self._ready_metadata(
+                                fingerprints,
+                                commit,
+                                config,
+                                normalization_versions,
+                                persisted=previous_metadata,
+                                connection=connection,
+                            )
+                            final_ready = self._ready_metadata(
+                                fingerprints,
+                                commit,
+                                config,
+                                normalization_versions,
+                                connection=connection,
+                            ) if ready is not None else None
+                            if final_ready is not None:
+                                result = dict(final_ready)
+                                result["no_op"] = True
+                                result["duration_ms"] = _elapsed_ms(started)
+                                result["phase_timings_ms"] = {
+                                    "no_op": result["duration_ms"]
+                                }
+                                return result
+                    except CodeGraphStoreError:
+                        pass
+
+                self._publish_metadata_record(
+                    self._transition_metadata(
+                        state="rebuilding",
+                        generation=generation,
+                        revision=previous_revision,
+                        prior_state=prior_state,
+                        publication_phase="building",
+                        recovery_policy=(
+                            "restore_prior"
+                            if restore_prior_on_abort
+                            else "failed"
+                        ),
+                    ),
+                    deadline=deadline,
+                )
+                _check_deadline(deadline, self.paths.lock)
 
                 staging = self.store.create_staging_path()
                 _check_deadline(deadline, self.paths.lock)
@@ -1031,6 +1220,11 @@ class CodeGraphIndexer:
                     config,
                 )
                 timings["parsing"] = _elapsed_ms(phase)
+                normalization_started = time.monotonic()
+                parsed_files = tuple(parsed_files)
+                timings["normalization"] = _elapsed_ms(
+                    normalization_started
+                )
                 _check_deadline(deadline, self.paths.lock)
 
                 indexed_at = datetime.now(timezone.utc).isoformat().replace(
@@ -1074,11 +1268,10 @@ class CodeGraphIndexer:
                 ))
                 _check_deadline(deadline, self.paths.lock)
                 revision = self._revision(
+                    repository=snapshot["repositories"][0],
                     parsed_files=parsed_files,
                     relations=relations,
                     wiki_code_links=wiki_code_links,
-                    fingerprints=fingerprints,
-                    commit=commit,
                 )
                 persistence_phase = time.monotonic()
                 staging_store.finalize_snapshot(
@@ -1156,7 +1349,11 @@ class CodeGraphIndexer:
                     deadline=deadline,
                 )
                 _check_deadline(deadline, self.paths.lock)
+                canonical_verification_started = time.monotonic()
                 self._verify_published(revision)
+                timings["canonical_verification_1"] = _elapsed_ms(
+                    canonical_verification_started
+                )
                 _check_deadline(deadline, self.paths.lock)
                 ready_metadata = self._metadata(
                     revision=revision,
@@ -1176,15 +1373,22 @@ class CodeGraphIndexer:
                 ready_metadata["publication_phase"] = (
                     "pending_final_verify"
                 )
+                ready_metadata["pending_final_verify"] = True
                 ready_metadata["recovery_policy"] = "failed"
+                ready_metadata["storage_stamp"] = self.store.storage_stamp()
                 ready_metadata.pop("duration_ms", None)
                 ready_metadata.pop("phase_timings_ms", None)
+                _seal_ready_metadata(ready_metadata)
                 self._publish_metadata_record(
                     ready_metadata,
                     deadline=deadline,
                 )
                 _check_deadline(deadline, self.paths.lock)
+                final_verification_started = time.monotonic()
                 self._verify_published(revision)
+                timings["final_verification"] = _elapsed_ms(
+                    final_verification_started
+                )
                 _check_deadline(deadline, self.paths.lock)
                 timings["publication"] = _elapsed_ms(phase)
                 metadata = self._metadata(
@@ -1203,7 +1407,10 @@ class CodeGraphIndexer:
                 )
                 metadata["generation"] = generation
                 metadata["publication_phase"] = "pending_final_verify"
+                metadata["pending_final_verify"] = True
                 metadata["recovery_policy"] = "failed"
+                metadata["storage_stamp"] = ready_metadata["storage_stamp"]
+                _seal_ready_metadata(metadata)
                 diagnostics_staging = None
                 try:
                     _check_deadline(deadline, self.paths.lock)
@@ -1227,8 +1434,10 @@ class CodeGraphIndexer:
                     raise CodeGraphStoreFailure(
                         "code graph diagnostics publication failed"
                     ) from exc
-                metadata["no_op"] = False
-                return metadata
+                result = dict(metadata)
+                result.pop("storage_stamp", None)
+                result["no_op"] = False
+                return result
         except Timeout:
             if staging is not None:
                 try:

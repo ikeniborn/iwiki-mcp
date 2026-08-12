@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import atexit
-from contextlib import closing
 from dataclasses import asdict
 import json
 import logging
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Mapping
@@ -17,7 +17,7 @@ from iwiki_mcp.base import Binding
 
 from . import models as codegraph_models
 from .config import CodeGraphConfig, CodeGraphConfigError, load_code_graph_config
-from .fingerprint import parser_fingerprint
+from .fingerprint import config_fingerprint, parser_fingerprint
 from .indexer import (
     AdapterFactory,
     BuildControl,
@@ -25,6 +25,7 @@ from .indexer import (
     CodeGraphStaleError,
     CodeGraphStoreFailure,
     CodeGraphUnsafePathError,
+    exact_ready_metadata,
     sanitize_warning_codes,
 )
 from .location import CodeGraphLocationError, CodeGraphLocationResolver
@@ -37,6 +38,7 @@ from .query import (
 from .schema import SCHEMA_VERSION, CodeGraphStoreError
 from .store import (
     CodeGraphStore,
+    _is_canonical_revision,
     code_graph_read_lock,
     code_graph_write_lock,
 )
@@ -49,11 +51,15 @@ _PHASE_NAMES = (
     "discovery",
     "fingerprint",
     "parsing",
+    "normalization",
     "resolution",
     "persistence",
     "validation",
+    "canonical_verification_1",
+    "final_verification",
     "publication",
 )
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class _BuildJob:
@@ -382,13 +388,21 @@ class CodeGraphRuntime:
             "counts": {
                 "languages": {},
                 "files": 0,
+                "modules": 0,
                 "symbols": 0,
                 "relations": 0,
+                "entity_kinds": {},
                 "symbol_kinds": {},
                 "relation_types": {},
                 "resolution_states": {},
             },
             "duration_ms": 0,
+            "pending_final_verify": False,
+            "module_warnings": 0,
+            "excluded_files": 0,
+            "truncated_files": 0,
+            "truncated": False,
+            "parser_errors": 0,
             "warnings": ["code_graph_missing"],
         }
 
@@ -401,6 +415,12 @@ class CodeGraphRuntime:
             "revision": None,
             "fresh": False,
             "duration_ms": 0,
+            "pending_final_verify": False,
+            "module_warnings": 0,
+            "excluded_files": 0,
+            "truncated_files": 0,
+            "truncated": False,
+            "parser_errors": 0,
             "warnings": ["code_graph_store_failed"],
             "hint": _INDEX_HINT,
         }
@@ -445,37 +465,6 @@ class CodeGraphRuntime:
             "hint": _INDEX_HINT,
         }
 
-    @staticmethod
-    def _count_rows(connection) -> dict[str, object]:
-        languages = dict(connection.execute(
-            "SELECT language, COUNT(*) FROM files "
-            "GROUP BY language ORDER BY language"
-        ))
-        symbol_kinds = dict(connection.execute(
-            "SELECT kind, COUNT(*) FROM symbols GROUP BY kind ORDER BY kind"
-        ))
-        relation_types = dict(connection.execute(
-            "SELECT relation_type, COUNT(*) FROM relations "
-            "GROUP BY relation_type ORDER BY relation_type"
-        ))
-        resolution_states = dict(connection.execute(
-            "SELECT resolution_state, COUNT(*) FROM relations "
-            "GROUP BY resolution_state ORDER BY resolution_state"
-        ))
-        return {
-            "languages": languages,
-            "files": connection.execute("SELECT COUNT(*) FROM files").fetchone()[0],
-            "symbols": connection.execute(
-                "SELECT COUNT(*) FROM symbols"
-            ).fetchone()[0],
-            "relations": connection.execute(
-                "SELECT COUNT(*) FROM relations"
-            ).fetchone()[0],
-            "symbol_kinds": symbol_kinds,
-            "relation_types": relation_types,
-            "resolution_states": resolution_states,
-        }
-
     def _read_status(
         self,
         *,
@@ -490,8 +479,22 @@ class CodeGraphRuntime:
             return self._with_rebuilding_state(
                 self._missing_status(normalization_versions)
             )
+        schema_version = self._store.inspect_schema_version()
+        if schema_version is not None and schema_version != SCHEMA_VERSION:
+            incompatible = self._missing_status(normalization_versions)
+            incompatible["warnings"] = ["code_graph_incompatible"]
+            incompatible["hint"] = _INDEX_HINT
+            return self._with_rebuilding_state(incompatible)
+        persisted = (
+            persisted_metadata
+            if persisted_metadata is not None
+            else _metadata(self.paths.metadata)
+        )
         try:
-            with closing(self._store.open_existing()) as connection:
+            with self._store.read_lease() as connection:
+                data_version = connection.execute(
+                    "PRAGMA data_version"
+                ).fetchone()
                 row = connection.execute(
                     "SELECT repository_id, git_commit, source_fingerprint, "
                     "config_fingerprint, parser_fingerprint, "
@@ -503,27 +506,49 @@ class CodeGraphRuntime:
                     return self._with_rebuilding_state(
                         self._missing_status(normalization_versions)
                     )
-                counts = self._count_rows(connection)
+                storage_stamp = self._store.storage_stamp()
+                row_after = connection.execute(
+                    "SELECT repository_id, git_commit, source_fingerprint, "
+                    "config_fingerprint, parser_fingerprint, "
+                    "normalizer_version, unicode_data_version, revision, state, "
+                    "indexed_at FROM repositories WHERE repository_id = ?",
+                    (self.binding.primary,),
+                ).fetchone()
+                data_version_after = connection.execute(
+                    "PRAGMA data_version"
+                ).fetchone()
+                if row != row_after or data_version != data_version_after:
+                    raise CodeGraphStoreError(
+                        "code graph changed during readiness proof"
+                    )
         except Exception:
             return self._with_rebuilding_state(
                 self._store_failure_status()
             )
-        persisted = (
-            persisted_metadata
-            if persisted_metadata is not None
-            else _metadata(self.paths.metadata)
-        )
         state = str(row[8])
         persisted_timings = _safe_phase_timings(
             persisted.get("phase_timings_ms")
         )
         persisted_duration = persisted.get("duration_ms")
+        persisted_fingerprints = persisted.get("fingerprints")
+        persisted_input = persisted.get("input_fingerprint")
         metadata_matches = (
-            persisted.get("state") == "ready"
+            exact_ready_metadata(persisted)
+            and persisted.get("domain") == row[0]
+            and persisted.get("state") == "ready"
             and persisted.get("revision") == row[7]
-            and set(persisted_timings) == set(_PHASE_NAMES)
-            and type(persisted_duration) is int
-            and persisted_duration >= 0
+            and _is_canonical_revision(row[7])
+            and persisted.get("schema_version") == SCHEMA_VERSION
+            and persisted_fingerprints == {
+                "source": row[2],
+                "config": row[3],
+                "parser": row[4],
+            }
+            and isinstance(persisted_input, str)
+            and _SHA256.fullmatch(persisted_input) is not None
+            and persisted.get("git_commit") == row[1]
+            and persisted.get("indexed_at") == row[9]
+            and persisted.get("storage_stamp") == storage_stamp
         )
         persisted_parser_version = persisted.get("parser_version")
         persisted_grammar_version = persisted.get("grammar_version")
@@ -540,6 +565,7 @@ class CodeGraphRuntime:
                 or persisted_resolver_version != self._resolver_version
                 or persisted_normalizer_version != normalization_versions[0]
                 or persisted_unicode_data_version != normalization_versions[1]
+                or row[3] != config_fingerprint(self.config)
                 or row[5] != normalization_versions[0]
                 or row[6] != normalization_versions[1]
             )
@@ -555,13 +581,20 @@ class CodeGraphRuntime:
         )
         if not metadata_matches:
             persisted = {}
-        effective_state = (
-            "dirty"
-            if state == "ready" and toolchain_mismatch
-            else state
-        )
-        resolution_states = counts["resolution_states"]
-        resolution_total = sum(resolution_states.values())
+        if state == "ready" and not metadata_matches:
+            effective_state = "failed"
+        elif state == "ready" and toolchain_mismatch:
+            effective_state = "dirty"
+        else:
+            effective_state = state
+        if metadata_matches:
+            counts = dict(persisted["counts"])
+            resolution_ratios = dict(persisted["resolution_ratios"])
+        else:
+            counts = dict(
+                self._missing_status(normalization_versions)["counts"]
+            )
+            resolution_ratios = {}
         result = {
             "enabled": True,
             "domain": self.binding.primary,
@@ -606,11 +639,7 @@ class CodeGraphRuntime:
                 else None
             ),
             "counts": counts,
-            "resolution_ratios": {
-                resolution_state: count / resolution_total
-                for resolution_state, count in resolution_states.items()
-                if resolution_total
-            },
+            "resolution_ratios": resolution_ratios,
             "excluded_files": _safe_nonnegative(
                 persisted.get("excluded_files")
             ),
@@ -619,8 +648,17 @@ class CodeGraphRuntime:
                 if type(persisted.get("truncated")) is bool
                 else False
             ),
+            "truncated_files": _safe_nonnegative(
+                persisted.get("truncated_files")
+            ),
             "parser_errors": _safe_nonnegative(
                 persisted.get("parser_errors")
+            ),
+            "module_warnings": _safe_nonnegative(
+                persisted.get("module_warnings")
+            ),
+            "pending_final_verify": (
+                persisted.get("pending_final_verify") is True
             ),
             "indexed_at": row[9],
             "warnings": sanitize_warning_codes(persisted.get("warnings")),
@@ -938,18 +976,14 @@ class CodeGraphRuntime:
         force: bool = False,
         languages: list[str] | None = None,
     ) -> dict[str, object]:
+        if languages is not None and (
+            not languages or any(language != "python" for language in languages)
+        ):
+            return _invalid_config()
         unavailable = self._unavailable()
         if unavailable is not None:
             return unavailable
         assert self._indexer is not None and self.config is not None
-        if languages is not None and (
-            not languages
-            or any(
-                language not in self._indexer.adapter_factories
-                for language in languages
-            )
-        ):
-            return _invalid_config()
         deadline = time.monotonic() + self.config.max_rebuild_seconds
         return self._index_with_deadline(
             force=force,
@@ -1098,6 +1132,8 @@ class CodeGraphRuntime:
                 before = dict(_metadata(self.paths.metadata))
                 if (
                     _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    or not exact_ready_metadata(before)
+                    or before.get("domain") != self.binding.primary
                     or before.get("state") != "ready"
                     or before.get("revision") != guarded_revision
                 ):
@@ -1112,7 +1148,10 @@ class CodeGraphRuntime:
                         "results": [],
                         "hint": _INDEX_HINT,
                     }
-                with closing(self._store.open_existing()) as connection:
+                with self._store.read_lease() as connection:
+                    data_version = connection.execute(
+                        "PRAGMA data_version"
+                    ).fetchone()
                     repository = connection.execute(
                         "SELECT state, revision FROM repositories "
                         "WHERE repository_id = ?",
@@ -1125,21 +1164,51 @@ class CodeGraphRuntime:
                             "results": [],
                             "hint": _INDEX_HINT,
                         }
+                    sealed_stamp = before.get("storage_stamp")
+                    if (
+                        not isinstance(sealed_stamp, Mapping)
+                        or self._store.storage_stamp() != sealed_stamp
+                    ):
+                        return {
+                            **guarded,
+                            "fresh": False,
+                            "results": [],
+                            "hint": _INDEX_HINT,
+                        }
                     results = query_engine.search(
                         connection,
                         request,
                     )
-                after = dict(_metadata(self.paths.metadata))
-                if (
-                    before != after
-                    or _BUILD_WORKERS.is_active(self._worker_domain_key)
-                ):
-                    return {
-                        **guarded,
-                        "fresh": False,
-                        "results": [],
-                        "hint": _INDEX_HINT,
-                    }
+                    repository_after = connection.execute(
+                        "SELECT state, revision FROM repositories "
+                        "WHERE repository_id = ?",
+                        (self.binding.primary,),
+                    ).fetchone()
+                    data_version_after = connection.execute(
+                        "PRAGMA data_version"
+                    ).fetchone()
+                    if (
+                        self._store.storage_stamp() != sealed_stamp
+                        or repository_after != repository
+                        or data_version_after != data_version
+                    ):
+                        return {
+                            **guarded,
+                            "fresh": False,
+                            "results": [],
+                            "hint": _INDEX_HINT,
+                        }
+                    after = dict(_metadata(self.paths.metadata))
+                    if (
+                        before != after
+                        or _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    ):
+                        return {
+                            **guarded,
+                            "fresh": False,
+                            "results": [],
+                            "hint": _INDEX_HINT,
+                        }
         except CodeGraphQueryError:
             return _invalid_config()
         except Timeout:

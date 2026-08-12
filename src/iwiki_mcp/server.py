@@ -523,6 +523,14 @@ def _missing_code_primary() -> dict:
     }
 
 
+def _invalid_code_config() -> dict:
+    return {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
 @_safe
 @_code_safe
 def wiki_code_status() -> dict:
@@ -538,6 +546,10 @@ def wiki_code_index(
     force: bool = False,
     languages: list[str] | None = None,
 ) -> dict:
+    if languages is not None and (
+        not languages or any(language != "python" for language in languages)
+    ):
+        return _invalid_code_config()
     bind = base.resolve_binding()
     if bind.primary is None:
         return _missing_code_primary()

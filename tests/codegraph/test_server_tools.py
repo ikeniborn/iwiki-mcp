@@ -83,6 +83,19 @@ def test_unit_b_handlers_fail_soft_without_primary(seed_without_primary, monkeyp
         }
 
 
+def test_index_handler_validates_languages_before_binding(monkeypatch):
+    def fail_binding():
+        raise AssertionError("binding must not be resolved")
+
+    monkeypatch.setattr(server.base, "resolve_binding", fail_binding)
+
+    assert server.wiki_code_index(languages=["go"]) == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
 @pytest.mark.parametrize(
     "call",
     [
