@@ -31,6 +31,7 @@ from .codegraph import config as _codegraph_config  # noqa: F401
 from .codegraph import discovery as _codegraph_discovery  # noqa: F401
 from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
 from .codegraph import indexer as _codegraph_indexer
+from .codegraph import linking as _codegraph_linking
 from .codegraph import location as _codegraph_location  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
 from .codegraph import runtime as _codegraph_runtime  # noqa: F401
@@ -107,10 +108,15 @@ def _code_graph_adapter_factories(repository_id):
 
 def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
-    return _codegraph_runtime.CodeGraphRuntime(
+    runtime = _codegraph_runtime.CodeGraphRuntime(
         binding,
         adapter_factories=_code_graph_adapter_factories(binding.primary),
     )
+    if runtime._indexer is not None:
+        runtime._indexer.wiki_selector_resolver = (
+            _codegraph_linking.WikiSelectorResolver(binding.base)
+        )
+    return runtime
 
 
 class _ActivityReceiveStream:
@@ -857,6 +863,23 @@ def wiki_write_page(
             "hint": "create it with wiki_create_domain",
         }
     base.migrate_store_location(bind.base, valid_domain)
+    try:
+        authored_meta, authored_body = _fm.split(markdown, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "use only code.symbols, code.files, and code.source_globs",
+        }
+    authored_code = authored_meta.get("code") if "code" in authored_meta else None
+    if authored_code is not None:
+        try:
+            _codegraph_linking.validate_code_mapping(authored_code)
+        except _codegraph_linking.SelectorError as exc:
+            return {
+                "error": str(exc),
+                "hint": "use only code.symbols, code.files, and code.source_globs",
+            }
+        markdown = authored_body
     markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
@@ -888,7 +911,8 @@ def wiki_write_page(
         cfg, bind.base, valid_domain, _slug_parts(slug)[-1], markdown,
         source=source, explicit_type=type, explicit_tags=tags,
         explicit_description=description, explicit_status=status,
-        timestamp_path=f"{valid_domain}/{slug}.md")
+        timestamp_path=f"{valid_domain}/{slug}.md",
+        authored_code=authored_code)
     meta, _ = _fm.split(fm_block)
     resolved_type = meta.get("type")
     try:
@@ -1194,7 +1218,13 @@ def wiki_update_page(
         }
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     original_full = open(path, encoding="utf-8").read()
-    meta, original_body = _fm.split(original_full)
+    try:
+        meta, original_body = _fm.split(original_full, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before updating",
+        }
     new_body = to_markdown_links(new_body)
     try:
         new_body = replace_section(
@@ -1629,6 +1659,18 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     if not dom_path.is_dir():
         return {"error": f"domain '{target}' not found",
                 "hint": "create it with wiki_create_domain"}
+    try:
+        for page_path in sorted(dom_path.rglob("*.md")):
+            if page_path.relative_to(dom_path).as_posix() in RESERVED_OKF:
+                continue
+            _fm.split(
+                page_path.read_text(encoding="utf-8"), strict_code=True
+            )
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before migrating OKF",
+        }
     base.migrate_store_location(bind.base, target)
     cfg = Config.load()
     graph_mutation = indexer.prepare_graph_mutation(
@@ -1735,7 +1777,7 @@ def _apply_okf_page_move(
     new_file = f"{new_identity}.md"
     current_path = _page_path(bind.base, domain, current_identity)
     original = Path(current_path).read_text(encoding="utf-8")
-    existing_meta, _ = _fm.split(original)
+    existing_meta, _ = _fm.split(original, strict_code=True)
     target_edit = next(
         edit
         for edit in prepared.edits
@@ -1759,6 +1801,7 @@ def _apply_okf_page_move(
         explicit_description=existing_meta.get("description"),
         explicit_status=existing_meta.get("status"),
         timestamp_path=f"{domain}/{current_file}",
+        authored_code=existing_meta.get("code"),
     )
 
     edits = {(edit.domain, edit.file): edit for edit in prepared.edits}
@@ -1878,6 +1921,15 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     if not os.path.isfile(current_path):
         return {"error": f"page '{valid_domain}/{current_identity}' not found",
                 "hint": "list pages with wiki_list_pages"}
+    try:
+        _fm.split(
+            Path(current_path).read_text(encoding="utf-8"), strict_code=True
+        )
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before applying OKF",
+        }
     new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
     move_change = okf.MoveChange((), ())
     if current_identity != new_identity:
@@ -1904,7 +1956,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     page_file = identity + ".md"
     path = _page_path(bind.base, valid_domain, identity)
     original = open(path, encoding="utf-8").read()
-    existing_meta, body = _fm.split(original)
+    existing_meta, body = _fm.split(original, strict_code=True)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
     apply_desc = existing_meta.get("description")
     apply_status = existing_meta.get("status")
@@ -1920,7 +1972,8 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         # git has no history yet at the NEW (just-moved) path -- look up the
         # PRE-move identity so an existing page's original timestamp survives
         # a type change instead of resetting to today.
-        timestamp_path=f"{valid_domain}/{current_identity}.md")
+        timestamp_path=f"{valid_domain}/{current_identity}.md",
+        authored_code=existing_meta.get("code"))
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(fm_block + body)
@@ -1969,7 +2022,13 @@ def wiki_export_okf(domain: str | None = None) -> dict:
     graph_mutation = indexer.prepare_graph_mutation(
         bind.base, valid_domain, whole_domain=True
     )
-    swept = okf.batch_sweep(cfg, bind.base, valid_domain)
+    try:
+        swept = okf.batch_sweep(cfg, bind.base, valid_domain)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before exporting OKF",
+        }
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: export okf {valid_domain}",

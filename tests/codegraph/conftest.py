@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
@@ -17,6 +17,7 @@ from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.context import CodeGraphContext, validate_context_request
 from iwiki_mcp.codegraph import models as models_module
 from iwiki_mcp.codegraph.indexer import AdapterFactory
+from iwiki_mcp.codegraph.linking import WikiSelectorResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.runtime import (
@@ -25,6 +26,14 @@ from iwiki_mcp.codegraph.runtime import (
 )
 from iwiki_mcp.codegraph.schema import CodeGraphStoreError
 from iwiki_mcp.codegraph.store import code_graph_write_lock
+
+
+@dataclass(frozen=True)
+class LinkFixture:
+    markdown: str
+    snapshot: dict[str, tuple[dict[str, object], ...]]
+    service_file_id: str
+    service_symbol_id: str
 
 
 def _distribution_version(name: str) -> str:
@@ -59,7 +68,7 @@ def _runtime(
             parser_version=parser_version,
         )
 
-    return CodeGraphRuntime(
+    runtime = CodeGraphRuntime(
         binding,
         adapter_factories={
             "python": AdapterFactory(
@@ -72,6 +81,9 @@ def _runtime(
         },
         resolver_version=resolver_version,
     )
+    if runtime._indexer is not None:
+        runtime._indexer.wiki_selector_resolver = WikiSelectorResolver(binding.base)
+    return runtime
 
 
 def _git(directory: Path, *arguments: str) -> str:
@@ -526,3 +538,40 @@ def fake_runtime_factory():
 @pytest.fixture
 def production_runtime_factory():
     return _runtime
+
+
+@pytest.fixture
+def link_fixture():
+    service_file_id = "py:file:" + "1" * 64
+    init_file_id = "py:file:" + "2" * 64
+    service_symbol_id = "py:symbol:" + "3" * 64
+    return LinkFixture(
+        markdown=(
+            "---\n"
+            "type: concept\n"
+            "code:\n"
+            "  symbols:\n"
+            "    - qualified_name: pkg.service.Service.run\n"
+            "  files:\n"
+            "    - src/pkg/service.py\n"
+            "  source_globs:\n"
+            "    - src/pkg/**\n"
+            "---\n"
+            "# Service\n\n## Notes\nHuman-authored selectors.\n"
+        ),
+        snapshot={
+            "files": (
+                {"file_id": init_file_id, "path": "src/pkg/__init__.py"},
+                {"file_id": service_file_id, "path": "src/pkg/service.py"},
+            ),
+            "symbols": (
+                {
+                    "symbol_id": service_symbol_id,
+                    "file_id": service_file_id,
+                    "qualified_name": "pkg.service.Service.run",
+                },
+            ),
+        },
+        service_file_id=service_file_id,
+        service_symbol_id=service_symbol_id,
+    )

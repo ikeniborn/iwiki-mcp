@@ -1856,6 +1856,7 @@ def test_process_worker_registry_caps_four_domains_at_one(
     for index in range(4):
         base = tmp_path / f"worker-base-{index}"
         base.mkdir()
+        base.joinpath(f"project-{index}").mkdir()
         binding = replace(
             seed_binding,
             base=str(base),

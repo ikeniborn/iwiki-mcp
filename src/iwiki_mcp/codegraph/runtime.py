@@ -20,6 +20,7 @@ from .config import CodeGraphConfig, CodeGraphConfigError, load_code_graph_confi
 from .context import (
     CodeGraphContext,
     CodeGraphContextError,
+    ContextRequest,
     capture_project_root,
     validate_context_request,
 )
@@ -31,9 +32,11 @@ from .indexer import (
     CodeGraphStaleError,
     CodeGraphStoreFailure,
     CodeGraphUnsafePathError,
+    _wiki_read_lock,
     exact_ready_metadata,
     sanitize_warning_codes,
 )
+from .linking import selector_capture_budget
 from .location import CodeGraphLocationError, CodeGraphLocationResolver
 from .models import CodeGraphError
 from .query import (
@@ -1004,6 +1007,8 @@ class CodeGraphRuntime:
         self,
         *,
         remaining_seconds: float | None = None,
+        _selector_lock_held: bool = False,
+        _selector_snapshot: object | None = None,
     ) -> dict[str, object]:
         """Prevent non-ready callers from observing rows from an old snapshot."""
         status = self.status()
@@ -1023,7 +1028,9 @@ class CodeGraphRuntime:
             freshness_started = time.monotonic()
             try:
                 became_dirty = self._indexer.mark_dirty_if_stale(
-                    deadline=freshness_deadline
+                    deadline=freshness_deadline,
+                    selector_lock_held=_selector_lock_held,
+                    selector_snapshot=_selector_snapshot,
                 )
             except Timeout:
                 return {
@@ -1260,6 +1267,36 @@ class CodeGraphRuntime:
             "results": [asdict(item) for item in results],
         }
 
+    def _empty_context_response(
+        self,
+        request: ContextRequest,
+        guard: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Return the exact empty Section 13.5 context response shape."""
+        response = {
+            "domain": guard.get("domain", self.binding.primary),
+            "state": guard.get("state"),
+            "revision": guard.get("revision"),
+            "seeds": list(request.seeds),
+            "nodes": [],
+            "relations": [],
+            "files": [],
+            "wiki_pages": [],
+            "limits": {
+                "depth": request.depth,
+                "max_nodes": request.max_nodes,
+                "max_files": request.max_files,
+                "max_source_bytes": request.max_source_bytes,
+            },
+            "truncated": False,
+            "warnings": list(guard.get("warnings", [])),
+            "fresh": False,
+        }
+        for key in ("error", "code", "hint"):
+            if key in guard:
+                response[key] = guard[key]
+        return response
+
     def context(
         self,
         seeds: list[str],
@@ -1273,45 +1310,120 @@ class CodeGraphRuntime:
         max_files: int = 20,
         max_source_bytes: int = 200_000,
     ) -> dict[str, object]:
-        """Compose context under one coherent ready-revision read lease."""
+        """Hold Wiki selector generation stable while hydrating Wiki links."""
+        arguments = {
+            "direction": direction,
+            "depth": depth,
+            "relations": relations,
+            "include_source": include_source,
+            "include_wiki": include_wiki,
+            "max_nodes": max_nodes,
+            "max_files": max_files,
+            "max_source_bytes": max_source_bytes,
+        }
+        if not include_wiki or self._indexer is None or self.config is None:
+            return self._context_unleased(seeds, **arguments)
         try:
-            request = validate_context_request(
-                seeds,
-                direction=direction,
-                depth=depth,
-                relations=relations,
-                include_source=include_source,
-                include_wiki=include_wiki,
-                max_nodes=max_nodes,
-                max_files=max_files,
-                max_source_bytes=max_source_bytes,
-            )
+            request = validate_context_request(seeds, **arguments)
         except CodeGraphContextError:
             return _invalid_config()
-        guarded = self.query_guard()
+        resolver = self._indexer.wiki_selector_resolver
+        capture = getattr(resolver, "capture", None)
+        verify = getattr(resolver, "verify_snapshot", None)
+        if not callable(capture) or not callable(verify):
+            return self._context_unleased(seeds, **arguments)
+        timeout = self.config.max_rebuild_seconds
+        deadline = time.monotonic() + timeout
+
+        def selector_control() -> None:
+            if time.monotonic() >= deadline:
+                raise Timeout(str(self.paths.lock if self.paths else "code graph"))
+
+        snapshot = None
+        try:
+            with _wiki_read_lock(self.binding.base, timeout):
+                snapshot = capture(
+                    domain=self.binding.primary or "",
+                    check_control=selector_control,
+                    max_bytes=selector_capture_budget(
+                        self.config.max_file_bytes,
+                        self.config.max_total_files,
+                    ),
+                )
+                verify(snapshot, check_control=selector_control)
+                response = self._context_unleased(
+                    seeds,
+                    _request=request,
+                    _selector_lock_held=True,
+                    _selector_snapshot=snapshot,
+                    _deadline=deadline,
+                    **arguments,
+                )
+                verify(snapshot, check_control=selector_control)
+                return response
+        except Timeout:
+            return self._empty_context_response(
+                request, {**self.status(), **self._busy_response()}
+            )
+        except Exception:
+            return self._empty_context_response(
+                request,
+                {**self.status(), **_typed_failure(CodeGraphStaleError())},
+            )
+        finally:
+            if snapshot is not None:
+                close_snapshot = getattr(resolver, "close_snapshot", None)
+                if callable(close_snapshot):
+                    close_snapshot(snapshot)
+
+    def _context_unleased(
+        self,
+        seeds: list[str],
+        *,
+        direction: str = "both",
+        depth: int = 1,
+        relations: list[str] | None = None,
+        include_source: bool = False,
+        include_wiki: bool = True,
+        max_nodes: int = 50,
+        max_files: int = 20,
+        max_source_bytes: int = 200_000,
+        _request: ContextRequest | None = None,
+        _selector_lock_held: bool = False,
+        _selector_snapshot: object | None = None,
+        _deadline: float | None = None,
+    ) -> dict[str, object]:
+        """Compose context under one coherent ready-revision read lease."""
+        if _request is None:
+            try:
+                request = validate_context_request(
+                    seeds,
+                    direction=direction,
+                    depth=depth,
+                    relations=relations,
+                    include_source=include_source,
+                    include_wiki=include_wiki,
+                    max_nodes=max_nodes,
+                    max_files=max_files,
+                    max_source_bytes=max_source_bytes,
+                )
+            except CodeGraphContextError:
+                return _invalid_config()
+        else:
+            request = _request
+        remaining = (
+            None if _deadline is None else max(0.0, _deadline - time.monotonic())
+        )
+        guarded = self.query_guard(
+            remaining_seconds=remaining,
+            _selector_lock_held=_selector_lock_held,
+            _selector_snapshot=_selector_snapshot,
+        )
         context_guarded = {
             key: value for key, value in guarded.items() if key != "results"
         }
-        empty = {
-            "seeds": list(request.seeds),
-            "nodes": [],
-            "relations": [],
-            "files": [],
-            "wiki_pages": [],
-            "limits": {
-                "depth": request.depth,
-                "max_nodes": request.max_nodes,
-                "max_files": request.max_files,
-                "max_source_bytes": request.max_source_bytes,
-            },
-            "truncated": False,
-        }
         if guarded.get("fresh") is not True:
-            return {
-                **context_guarded,
-                **empty,
-                "warnings": list(guarded.get("warnings", [])),
-            }
+            return self._empty_context_response(request, context_guarded)
         assert (
             self.paths is not None
             and self._store is not None
@@ -1334,17 +1446,15 @@ class CodeGraphRuntime:
                     or before.get("state") != "ready"
                     or before.get("revision") != guarded_revision
                 ):
-                    return {
-                        **self._with_rebuilding_state(
+                    return self._empty_context_response(
+                        request,
+                        self._with_rebuilding_state(
                             context_guarded,
                             shared_writer=_BUILD_WORKERS.is_active(
                                 self._worker_domain_key
                             ),
                         ),
-                        **empty,
-                        "fresh": False,
-                        "hint": _INDEX_HINT,
-                    }
+                    )
                 with self._store.read_lease() as connection:
                     data_version = connection.execute(
                         "PRAGMA data_version"
@@ -1358,12 +1468,10 @@ class CodeGraphRuntime:
                         or not isinstance(sealed_stamp, Mapping)
                         or self._store.storage_stamp() != sealed_stamp
                     ):
-                        return {
-                            **context_guarded,
-                            **empty,
-                            "fresh": False,
-                            "hint": _INDEX_HINT,
-                        }
+                        return self._empty_context_response(
+                            request,
+                            {**context_guarded, "hint": _INDEX_HINT},
+                        )
                     response = engine.context(connection, request)
                     repository_after = self._store.repository_state(
                         connection, self.binding.primary or ""
@@ -1379,29 +1487,32 @@ class CodeGraphRuntime:
                         or before != after
                         or _BUILD_WORKERS.is_active(self._worker_domain_key)
                     ):
-                        return {
-                            **context_guarded,
-                            **empty,
-                            "fresh": False,
-                            "hint": _INDEX_HINT,
-                        }
+                        return self._empty_context_response(
+                            request,
+                            {**context_guarded, "hint": _INDEX_HINT},
+                        )
         except Timeout:
-            return {**self._busy_response(), **empty, "fresh": False}
+            return self._empty_context_response(
+                request, {**context_guarded, **self._busy_response()}
+            )
         except CodeGraphStoreError:
-            return {
-                **_typed_failure(CodeGraphStoreFailure()),
-                **empty,
-                "fresh": False,
-            }
+            return self._empty_context_response(
+                request,
+                {**context_guarded, **_typed_failure(CodeGraphStoreFailure())},
+            )
         except CodeGraphError as exc:
-            return {**sanitized_error(exc), **empty, "fresh": False}
+            return self._empty_context_response(
+                request, {**context_guarded, **sanitized_error(exc)}
+            )
         except Exception:
             duration_ms = max(0, int((time.monotonic() - started) * 1000))
             LOGGER.error(
                 "code_graph_context code=rebuild_failed count=1 duration_ms=%d",
                 duration_ms,
             )
-            return {**_rebuild_failed(), **empty, "fresh": False}
+            return self._empty_context_response(
+                request, {**context_guarded, **_rebuild_failed()}
+            )
         source_unavailable = bool(
             {"source_unavailable", "source_changed"} & set(response["warnings"])
         )

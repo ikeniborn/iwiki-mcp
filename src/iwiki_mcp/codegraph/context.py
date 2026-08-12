@@ -639,12 +639,56 @@ class CodeGraphContext:
                 for file_row in accepted_files.values():
                     file_row.pop("source", None)
 
+        wiki_pages: list[dict[str, object]] = []
+        if request.include_wiki and accepted:
+            symbol_ids = tuple(sorted(
+                node.symbol_id for node in accepted.values()
+                if node.symbol_id is not None
+            ))
+            file_ids = tuple(sorted(accepted_files))
+            arms: list[str] = []
+            parameters: list[object] = [self.domain]
+            if symbol_ids:
+                arms.append(
+                    "symbol_id IN (" + ",".join("?" for _ in symbol_ids) + ")"
+                )
+                parameters.extend(symbol_ids)
+            if file_ids:
+                arms.append(
+                    "file_id IN (" + ",".join("?" for _ in file_ids) + ")"
+                )
+                parameters.extend(file_ids)
+            if arms:
+                rows = connection.execute(
+                    "SELECT domain, page_id, selector_kind, relation_type, source "
+                    "FROM wiki_code_links WHERE domain = ? AND ("
+                    + " OR ".join(arms)
+                    + ") ORDER BY page_id, selector_kind, source",
+                    parameters,
+                )
+                specificity = {"source_glob": 0, "file": 1, "symbol": 2}
+                selected_pages: dict[str, dict[str, object]] = {}
+                for row in rows:
+                    item = {
+                        "domain": str(row[0]),
+                        "page_id": str(row[1]),
+                        "relation_type": str(row[3]),
+                        "selector_kind": str(row[2]),
+                        "source": str(row[4]),
+                    }
+                    current = selected_pages.get(item["page_id"])
+                    if current is None or specificity[item["selector_kind"]] > (
+                        specificity[str(current["selector_kind"])]
+                    ):
+                        selected_pages[str(item["page_id"])] = item
+                wiki_pages = [selected_pages[key] for key in sorted(selected_pages)]
+
         return {
             "seeds": list(request.seeds),
             "nodes": [asdict(node) for node in accepted.values()],
             "relations": [asdict(item) for item in accepted_relations.values()],
             "files": list(accepted_files.values()),
-            "wiki_pages": [],
+            "wiki_pages": wiki_pages,
             "limits": {
                 "depth": request.depth,
                 "max_nodes": request.max_nodes,

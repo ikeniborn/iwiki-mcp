@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -15,6 +17,7 @@ from typing import Callable, Iterable, Mapping, Protocol, Sequence
 from filelock import Timeout
 
 from iwiki_mcp import base as wiki_base
+from iwiki_mcp.lock import mutation_lock
 
 from . import models as codegraph_models
 from .config import CodeGraphConfig
@@ -26,6 +29,7 @@ from .fingerprint import (
     git_dirty_marker,
 )
 from .languages.base import LanguageAdapter
+from .linking import SelectorError, SelectorSnapshotChanged, selector_capture_budget
 from .location import CodeGraphPaths
 from .models import (
     CodeGraphError,
@@ -147,6 +151,7 @@ _WAL_STAMP_KEYS = frozenset({
     "size",
     "version",
 })
+_UNCAPTURED = object()
 
 
 class CodeGraphBuildError(CodeGraphError):
@@ -272,6 +277,55 @@ def _lock_timeout(maximum: float, deadline: float | None) -> float:
     if deadline is None:
         return maximum
     return max(0.0, min(maximum, deadline - time.monotonic()))
+
+
+@contextmanager
+def _wiki_read_lock(base: str, timeout: float):
+    """Share the Wiki mutation lock while proving selector freshness."""
+    if os.name != "posix":
+        with mutation_lock(base, timeout=timeout):
+            yield
+        return
+    import fcntl
+
+    lock_dir = Path(base) / ".iwiki"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = lock_dir / "lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise Timeout(str(lock_path))
+                time.sleep(0.01)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@contextmanager
+def _selector_read_lock(base: str, graph_lock: Path, timeout: float):
+    """Acquire base-shared then graph-shared; release base before graph exit."""
+    wiki_guard = _wiki_read_lock(base, timeout)
+    graph_guard = code_graph_read_lock(graph_lock)
+    wiki_guard.__enter__()
+    try:
+        graph_guard.__enter__()
+    except BaseException:
+        wiki_guard.__exit__(None, None, None)
+        raise
+    try:
+        yield
+    finally:
+        try:
+            wiki_guard.__exit__(None, None, None)
+        finally:
+            graph_guard.__exit__(None, None, None)
 
 
 def _metadata_digest(metadata: Mapping[str, object]) -> str:
@@ -470,7 +524,9 @@ class CodeGraphIndexer:
         config: CodeGraphConfig,
         *,
         normalization_versions: tuple[str, str],
-    ) -> tuple[FingerprintSet, str | None, str]:
+        check_control: Callable[[], None] | None = None,
+        selector_snapshot: object = _UNCAPTURED,
+    ) -> tuple[FingerprintSet, str | None, str, object | None]:
         commit = current_git_commit(self.project_dir)
         dirty = git_dirty_marker(self.project_dir)
         fingerprints = compose_fingerprints(
@@ -487,7 +543,50 @@ class CodeGraphIndexer:
             normalizer_version=normalization_versions[0],
             unicode_data_version=normalization_versions[1],
         )
-        return fingerprints, commit, dirty
+        capture_selectors = getattr(
+            self.wiki_selector_resolver, "capture", None
+        )
+        selector_fingerprint = getattr(
+            self.wiki_selector_resolver, "fingerprint", None
+        )
+        owns_selector_snapshot = selector_snapshot is _UNCAPTURED
+        if owns_selector_snapshot and callable(capture_selectors):
+            selector_snapshot = capture_selectors(
+                domain=self.domain,
+                check_control=check_control,
+                max_bytes=selector_capture_budget(
+                    config.max_file_bytes, config.max_total_files
+                ),
+            )
+        elif owns_selector_snapshot:
+            selector_snapshot = None
+        try:
+            if callable(selector_fingerprint):
+                selector_digest = (
+                    selector_fingerprint(
+                        domain=self.domain, snapshot=selector_snapshot
+                    )
+                    if selector_snapshot is not None
+                    else selector_fingerprint(domain=self.domain)
+                )
+                inputs = hashlib.sha256(json.dumps(
+                    {
+                        "code_selectors": selector_digest,
+                        "inputs": fingerprints.inputs,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                fingerprints = replace(fingerprints, inputs=inputs)
+        except BaseException:
+            if owns_selector_snapshot and selector_snapshot is not None:
+                close_snapshot = getattr(
+                    self.wiki_selector_resolver, "close_snapshot", None
+                )
+                if callable(close_snapshot):
+                    close_snapshot(selector_snapshot)
+            raise
+        return fingerprints, commit, dirty, selector_snapshot
 
     def _quarantine_unusable_canonical(self) -> None:
         if not self.paths.database.exists():
@@ -1013,6 +1112,37 @@ class CodeGraphIndexer:
             metadata["recovery_policy"] = recovery_policy
         return metadata
 
+    def _mark_selector_snapshot_dirty(
+        self, *, generation: int, maximum: float
+    ) -> None:
+        """Fence stale cleanup against a newer writer generation."""
+        with mutation_lock(self.cache_base, timeout=maximum), code_graph_write_lock(
+            self.paths.lock, timeout=maximum
+        ):
+            current = _safe_metadata(self.paths.metadata) or {}
+            if self._generation(current) != generation:
+                return
+            with self.store.read_lease() as connection:
+                row = connection.execute(
+                    "SELECT revision FROM repositories "
+                    "WHERE repository_id = ?",
+                    (self.domain,),
+                ).fetchone()
+            revision = (
+                row[0]
+                if row is not None and isinstance(row[0], str)
+                else None
+            )
+            self.store.set_repository_state(self.domain, "dirty")
+            self._publish_metadata_record(
+                self._transition_metadata(
+                    state="dirty",
+                    generation=generation,
+                    revision=revision,
+                ),
+                deadline=None,
+            )
+
     def _publish_metadata_record(
         self,
         metadata: Mapping[str, object],
@@ -1044,7 +1174,13 @@ class CodeGraphIndexer:
     def _verify_published(self, revision: str) -> None:
         self.store.verify_canonical(self.domain, revision)
 
-    def mark_dirty_if_stale(self, *, deadline: float | None = None) -> bool:
+    def mark_dirty_if_stale(
+        self,
+        *,
+        deadline: float | None = None,
+        selector_lock_held: bool = False,
+        selector_snapshot: object | None = None,
+    ) -> bool:
         """Discover fingerprints for a query and persist ready-to-dirty drift."""
         config = self.config
         normalization_versions = self._normalization_versions()
@@ -1059,24 +1195,63 @@ class CodeGraphIndexer:
                 extensions=self._extensions(config),
             )
             _check_deadline(deadline, self.paths.lock)
-            fingerprints, commit, _dirty = self._fingerprints(
-                discovered,
-                config,
-                normalization_versions=normalization_versions,
-            )
-            _check_deadline(deadline, self.paths.lock)
-            return self._ready_metadata(
-                fingerprints,
-                commit,
-                config,
-                normalization_versions,
-            ) is not None
+            owned_snapshot = selector_snapshot is None
+            captured = None
+            try:
+                fingerprints, commit, _dirty, captured = self._fingerprints(
+                    discovered,
+                    config,
+                    normalization_versions=normalization_versions,
+                    check_control=lambda: _check_deadline(
+                        deadline, self.paths.lock
+                    ),
+                    selector_snapshot=(
+                        selector_snapshot
+                        if selector_snapshot is not None
+                        else _UNCAPTURED
+                    ),
+                )
+                _check_deadline(deadline, self.paths.lock)
+                return self._ready_metadata(
+                    fingerprints,
+                    commit,
+                    config,
+                    normalization_versions,
+                ) is not None
+            finally:
+                if owned_snapshot and captured is not None:
+                    close_snapshot = getattr(
+                        self.wiki_selector_resolver,
+                        "close_snapshot",
+                        None,
+                    )
+                    if callable(close_snapshot):
+                        close_snapshot(captured)
 
         try:
-            with code_graph_read_lock(self.paths.lock):
+            if selector_lock_held:
+                with code_graph_read_lock(self.paths.lock):
+                    if ready_now():
+                        return False
+                with code_graph_write_lock(
+                    self.paths.lock,
+                    timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
+                ):
+                    if ready_now():
+                        return False
+                    self.store.set_repository_state(self.domain, "dirty")
+                    return True
+            with _selector_read_lock(
+                self.cache_base,
+                self.paths.lock,
+                _lock_timeout(config.max_rebuild_seconds, deadline),
+            ):
                 if ready_now():
                     return False
-            with code_graph_write_lock(
+            with mutation_lock(
+                self.cache_base,
+                timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
+            ), code_graph_write_lock(
                 self.paths.lock,
                 timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
             ):
@@ -1107,6 +1282,8 @@ class CodeGraphIndexer:
         previous_revision = None
         prior_state = None
         publication_entered = False
+        selector_guard = None
+        selector_snapshot = None
         timings = {phase: 0 for phase in _PHASE_NAMES}
         try:
             config = self._config_for_languages(self.config, languages)
@@ -1114,11 +1291,34 @@ class CodeGraphIndexer:
             if deadline is None:
                 deadline = started + config.max_rebuild_seconds
             _check_deadline(deadline, self.paths.lock)
+            capture_selectors = getattr(
+                self.wiki_selector_resolver, "capture", None
+            )
+            if callable(capture_selectors):
+                with _wiki_read_lock(
+                    self.cache_base,
+                    _lock_timeout(config.max_rebuild_seconds, deadline),
+                ):
+                    selector_snapshot = capture_selectors(
+                        domain=self.domain,
+                        check_control=lambda: _check_deadline(
+                            deadline, self.paths.lock
+                        ),
+                        max_bytes=selector_capture_budget(
+                            config.max_file_bytes, config.max_total_files
+                        ),
+                    )
             with code_graph_write_lock(
                 self.paths.lock,
                 timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
             ):
                 _check_deadline(deadline, self.paths.lock)
+
+                def selector_control() -> None:
+                    if control is not None and control.cancelled.is_set():
+                        raise Timeout(str(self.paths.lock))
+                    _check_deadline(deadline, self.paths.lock)
+
                 previous_metadata = _safe_metadata(self.paths.metadata) or {}
                 generation = self._generation(previous_metadata) + 1
                 try:
@@ -1159,10 +1359,12 @@ class CodeGraphIndexer:
                 _check_deadline(deadline, self.paths.lock)
 
                 phase = time.monotonic()
-                fingerprints, commit, _dirty = self._fingerprints(
+                fingerprints, commit, _dirty, selector_snapshot = self._fingerprints(
                     discovered,
                     config,
                     normalization_versions=normalization_versions,
+                    check_control=selector_control,
+                    selector_snapshot=selector_snapshot,
                 )
                 timings["fingerprint"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
@@ -1185,6 +1387,31 @@ class CodeGraphIndexer:
                                 connection=connection,
                             ) if ready is not None else None
                             if final_ready is not None:
+                                verify_selectors = getattr(
+                                    self.wiki_selector_resolver,
+                                    "verify_snapshot",
+                                    None,
+                                )
+                                if (
+                                    selector_snapshot is not None
+                                    and callable(verify_selectors)
+                                ):
+                                    try:
+                                        with _wiki_read_lock(
+                                            self.cache_base,
+                                            0,
+                                        ):
+                                            verify_selectors(
+                                                selector_snapshot,
+                                                check_control=selector_control,
+                                            )
+                                    except Timeout:
+                                        raise
+                                    except Exception:
+                                        self.store.set_repository_state(
+                                            self.domain, "dirty"
+                                        )
+                                        raise
                                 result = dict(final_ready)
                                 result["no_op"] = True
                                 result["duration_ms"] = _elapsed_ms(started)
@@ -1260,12 +1487,36 @@ class CodeGraphIndexer:
                 staging_store.replace_relations(self._relation_rows(relations))
                 timings["persistence"] += _elapsed_ms(persistence_phase)
                 _check_deadline(deadline, self.paths.lock)
-                wiki_code_links = tuple(self.wiki_selector_resolver.resolve(
-                    domain=self.domain,
-                    project_dir=self.project_dir,
-                    parsed_files=parsed_files,
-                    relations=relations,
-                ))
+                resolve_snapshot = getattr(
+                    self.wiki_selector_resolver, "resolve_snapshot", None
+                )
+                verify_selectors = getattr(
+                    self.wiki_selector_resolver, "verify_snapshot", None
+                )
+                if selector_snapshot is not None and callable(verify_selectors):
+                    verify_selectors(
+                        selector_snapshot, check_control=selector_control
+                    )
+                if selector_snapshot is not None and callable(resolve_snapshot):
+                    wiki_code_links = tuple(resolve_snapshot(
+                        selector_snapshot,
+                        domain=self.domain,
+                        project_dir=self.project_dir,
+                        parsed_files=parsed_files,
+                        relations=relations,
+                        check_control=selector_control,
+                    ))
+                else:
+                    wiki_code_links = tuple(self.wiki_selector_resolver.resolve(
+                        domain=self.domain,
+                        project_dir=self.project_dir,
+                        parsed_files=parsed_files,
+                        relations=relations,
+                    ))
+                if selector_snapshot is not None and callable(verify_selectors):
+                    verify_selectors(
+                        selector_snapshot, check_control=selector_control
+                    )
                 _check_deadline(deadline, self.paths.lock)
                 revision = self._revision(
                     repository=snapshot["repositories"][0],
@@ -1286,6 +1537,20 @@ class CodeGraphIndexer:
                 _check_deadline(deadline, self.paths.lock)
 
                 phase = time.monotonic()
+                while not self.store.canonical_handles_available():
+                    if time.monotonic() >= deadline:
+                        raise Timeout(str(self.paths.lock))
+                    time.sleep(0.01)
+                _check_deadline(deadline, self.paths.lock)
+                selector_guard = _wiki_read_lock(
+                    self.cache_base,
+                    0,
+                )
+                selector_guard.__enter__()
+                if selector_snapshot is not None and callable(verify_selectors):
+                    verify_selectors(
+                        selector_snapshot, check_control=selector_control
+                    )
                 self.store.prepare_staging(
                     staging,
                     repository_id=self.domain,
@@ -1295,11 +1560,10 @@ class CodeGraphIndexer:
                 _check_deadline(deadline, self.paths.lock)
 
                 phase = time.monotonic()
-                while not self.store.canonical_handles_available():
-                    if time.monotonic() >= deadline:
-                        raise Timeout(str(self.paths.lock))
-                    time.sleep(0.01)
-                _check_deadline(deadline, self.paths.lock)
+                if selector_snapshot is not None and callable(verify_selectors):
+                    verify_selectors(
+                        selector_snapshot, check_control=selector_control
+                    )
                 if control is not None:
                     assert deadline is not None
                     control.enter_publication(
@@ -1315,6 +1579,8 @@ class CodeGraphIndexer:
                         "code graph publication failed"
                     ) from exc
                 staging = None
+                if selector_snapshot is not None and callable(verify_selectors):
+                    verify_selectors(selector_snapshot)
                 _check_deadline(deadline, self.paths.lock)
 
                 incomplete_metadata = self._metadata(
@@ -1434,6 +1700,8 @@ class CodeGraphIndexer:
                     raise CodeGraphStoreFailure(
                         "code graph diagnostics publication failed"
                     ) from exc
+                if selector_snapshot is not None and callable(verify_selectors):
+                    verify_selectors(selector_snapshot)
                 result = dict(metadata)
                 result.pop("storage_stamp", None)
                 result["no_op"] = False
@@ -1461,6 +1729,43 @@ class CodeGraphIndexer:
                 except CodeGraphError:
                     pass
             raise CodeGraphStoreFailure("code graph store failed") from exc
+        except SelectorSnapshotChanged as exc:
+            if selector_guard is not None:
+                selector_guard.__exit__(None, None, None)
+                selector_guard = None
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            if generation is not None:
+                try:
+                    self._mark_selector_snapshot_dirty(
+                        generation=generation,
+                        maximum=config.max_rebuild_seconds,
+                    )
+                except (CodeGraphError, Timeout):
+                    pass
+            raise CodeGraphStaleError(
+                "code graph inputs changed during rebuild"
+            ) from exc
+        except SelectorError as exc:
+            if staging is not None:
+                try:
+                    self.store.discard_staging(staging)
+                except CodeGraphError:
+                    pass
+            try:
+                with code_graph_write_lock(
+                    self.paths.lock,
+                    timeout=config.max_rebuild_seconds,
+                ):
+                    self.store.set_repository_state(self.domain, "dirty")
+            except (CodeGraphError, Timeout):
+                pass
+            raise CodeGraphStaleError(
+                "Wiki selector authority is unavailable"
+            ) from exc
         except CodeGraphError:
             if staging is not None:
                 try:
@@ -1476,6 +1781,14 @@ class CodeGraphIndexer:
                     pass
             raise CodeGraphBuildError("code graph rebuild failed") from exc
         finally:
+            if selector_guard is not None:
+                selector_guard.__exit__(None, None, None)
+            if selector_snapshot is not None:
+                close_snapshot = getattr(
+                    self.wiki_selector_resolver, "close_snapshot", None
+                )
+                if callable(close_snapshot):
+                    close_snapshot(selector_snapshot)
             if publication_entered and control is not None:
                 control.leave_publication()
 

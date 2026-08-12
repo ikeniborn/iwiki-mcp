@@ -151,7 +151,7 @@ def snapshot_with_symbol_file_and_wiki_links(
                 "symbol_id": symbol_id,
                 "file_id": None,
                 "selector_kind": "symbol",
-                "relation_type": "documents",
+                "relation_type": "DOCUMENTED_BY",
                 "confidence": 1.0,
                 "source": "frontmatter",
             },
@@ -162,7 +162,7 @@ def snapshot_with_symbol_file_and_wiki_links(
                 "symbol_id": None,
                 "file_id": file_id,
                 "selector_kind": "file",
-                "relation_type": "documents",
+                "relation_type": "DOCUMENTED_BY",
                 "confidence": 1.0,
                 "source": "frontmatter",
             },
@@ -477,6 +477,37 @@ def test_verify_canonical_rejects_noncanonical_revision_and_corrupt_rows(
 
     with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
         store.verify_canonical("backend", "downgraded")
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("relation_type", "documents"),
+        ("domain", "other"),
+        ("source", ""),
+        ("page_id", ""),
+    ],
+)
+def test_canonical_verification_rejects_invalid_wiki_link_contract(
+    tmp_path, column, value
+):
+    store = CodeGraphStore(tmp_path / "canonical.sqlite3")
+    snapshot = canonical_snapshot()
+    repository = snapshot["repositories"][0]
+    snapshot["wiki_code_links"][0][column] = value
+    revision = _snapshot_revision(
+        repository,
+        snapshot["files"],
+        snapshot["symbols"],
+        snapshot["relations"],
+        snapshot["wiki_code_links"],
+    )
+    repository["revision"] = revision
+
+    store.insert_snapshot(snapshot)
+
+    with pytest.raises(CodeGraphStoreError, match="canonical verification failed"):
+        store.verify_canonical("backend", revision)
 
 
 def test_persisted_real_relation_range_cannot_pass_integer_id_validation(

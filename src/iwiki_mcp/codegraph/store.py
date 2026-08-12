@@ -450,7 +450,19 @@ def _validate_persisted_snapshot(
     wiki_code_links = _table_rows(connection, "wiki_code_links")
     try:
         _validate_normalized_rows(repository_id, files, symbols, relations)
-        if any(row["domain"] != repository_id for row in wiki_code_links):
+        if any(
+            row["domain"] != repository_id
+            or row["relation_type"] != "DOCUMENTED_BY"
+            or row["selector_kind"] not in {"symbol", "file", "source_glob"}
+            or not isinstance(row["page_id"], str)
+            or not row["page_id"]
+            or not isinstance(row["source"], str)
+            or not row["source"]
+            or (row["selector_kind"] == "symbol") != (
+                row["symbol_id"] is not None
+            )
+            for row in wiki_code_links
+        ):
             raise CodeGraphStoreError("code graph link contract mismatch")
         recomputed = _snapshot_revision(
             repository, files, symbols, relations, wiki_code_links
