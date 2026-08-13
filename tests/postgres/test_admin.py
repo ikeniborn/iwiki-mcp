@@ -107,6 +107,27 @@ def test_server_main_routes_admin_without_starting_stdio(monkeypatch):
     assert caught.value.code == 7
 
 
+def test_serve_dispatches_streamable_http_runtime(monkeypatch):
+    from iwiki_mcp import http
+
+    called = {}
+
+    def run_server(config_path, *, environ):
+        called.update(config_path=config_path, environ=environ)
+
+    monkeypatch.setattr(http, "run_server", run_server)
+    environ = RedactedEnv({})
+
+    code, output, error = _run(
+        ["serve", "--config", "server.toml"], environ
+    )
+
+    assert code == 0
+    assert output == ""
+    assert error == ""
+    assert called == {"config_path": "server.toml", "environ": environ}
+
+
 def test_admin_commands_require_config_or_environment(admin_runtime):
     _config, environ = admin_runtime
     environ = RedactedEnv(environ)

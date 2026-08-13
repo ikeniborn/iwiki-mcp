@@ -1,9 +1,11 @@
 """Tenant-scoped PostgreSQL page, vector, and link storage."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import contextmanager
 import hashlib
 import json
-from typing import Callable
+from typing import Any, ContextManager
 
 import numpy as np
 import psycopg
@@ -49,6 +51,7 @@ class PostgresStore:
         *,
         embedder: Callable = embed_texts,
         auth_context: AuthContext | None = None,
+        connection_factory: Callable[[], ContextManager[Any]] | None = None,
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = _validate_identifier(iwiki_id, "iwiki id")
@@ -57,6 +60,9 @@ class PostgresStore:
         self.cfg = cfg
         self._embedder = embedder
         self._auth_context = auth_context
+        self._connection_factory = connection_factory or (
+            lambda: psycopg.connect(self._dsn)
+        )
 
     def with_embedder(self, embedder: Callable) -> "PostgresStore":
         return PostgresStore(
@@ -65,6 +71,7 @@ class PostgresStore:
             self.cfg,
             embedder=embedder,
             auth_context=self._auth_context,
+            connection_factory=self._connection_factory,
         )
 
     def _require_read(self, domain: str) -> None:
@@ -79,10 +86,11 @@ class PostgresStore:
         if self._auth_context is not None:
             raise AccessError(403)
 
+    @contextmanager
     def _connect(self):
-        connection = psycopg.connect(self._dsn)
-        register_vector(connection)
-        return connection
+        with self._connection_factory() as connection:
+            register_vector(connection)
+            yield connection
 
     def create_wiki(self, slug: str) -> None:
         self._require_admin()

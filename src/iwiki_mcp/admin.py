@@ -499,13 +499,15 @@ def run(
     if args.command is not None and args.project is not None:
         print("iwiki-mcp: --project is accepted only for stdio", file=err)
         return 2
-    if args.command == "serve":
-        print("iwiki-mcp: serve is implemented by the HTTP runtime", file=err)
-        return 2
     if args.command is None:
         print("iwiki-mcp: administration command is required", file=err)
         return 2
     try:
+        if args.command == "serve":
+            from .http import run_server
+
+            run_server(_config_path(args, env), environ=env)
+            return 0
         dry_run = (
             args.command == "base"
             and args.base_command in {"import-git", "export-git"}

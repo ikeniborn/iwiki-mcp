@@ -285,6 +285,53 @@ def test_postgres_bind_can_only_narrow_session_scope(
     assert expanded["error"] == "read scope is protected"
 
 
+def test_hosted_concurrent_bind_narrowing_is_atomic(
+    postgres_server, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+
+    binding, fake = postgres_server
+    broader = replace(
+        binding,
+        read=("docs", "private"),
+        write=("docs", "private"),
+    )
+    state = server._HostedBindingState(broader)
+    gate = threading.Barrier(2)
+    activity_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def list_domains():
+        nonlocal active, maximum_active
+        with activity_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        with activity_lock:
+            active -= 1
+        return ["docs", "private"]
+
+    monkeypatch.setattr(fake, "list_domains", list_domains)
+
+    def narrow(domain):
+        gate.wait()
+        token = server._SESSION_BINDING.set(state)
+        try:
+            return server.wiki_bind(read=[domain], write=[])
+        finally:
+            server._SESSION_BINDING.reset(token)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(narrow, ("docs", "private")))
+
+    assert maximum_active == 1
+    assert sum("error" not in result for result in results) == 1
+    assert len(state.get().read) == 1
+
+
 @pytest.mark.postgres_integration
 def test_real_postgres_handlers_preserve_revision_and_conflict(
     clean_postgres, monkeypatch

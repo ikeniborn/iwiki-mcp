@@ -170,13 +170,14 @@ def _allowed_origins(value: Any) -> tuple[str, ...]:
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise ConfigError("server.allowed_origins must contain non-empty strings")
-        origins.append(_normalize_origin(item.strip()))
+        origins.append(normalize_origin(item.strip()))
     if len(origins) != len(set(origins)):
         raise ConfigError("server.allowed_origins must not contain duplicates")
     return tuple(origins)
 
 
-def _normalize_origin(origin: str) -> str:
+def normalize_origin(origin: str) -> str:
+    """Return the canonical form used for hosted Origin comparisons."""
     try:
         parsed = urlsplit(origin)
         host = parsed.hostname

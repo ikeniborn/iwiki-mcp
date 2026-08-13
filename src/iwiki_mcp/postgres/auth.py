@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import secrets
+from typing import Any, ContextManager
 
 import psycopg
 
@@ -103,11 +105,22 @@ class AuthContext:
 class AuthStore:
     """Transaction-safe token administration and authentication store."""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        connection_factory: Callable[[], ContextManager[Any]] | None = None,
+    ) -> None:
         self.dsn = dsn
+        self._connection_factory = connection_factory or (
+            lambda: psycopg.connect(self.dsn)
+        )
+
+    def _connect(self):
+        return self._connection_factory()
 
     def create_wiki(self, iwiki_id: str, slug: str) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO iwiki.iwikis (iwiki_id, slug) VALUES (%s, %s) "
@@ -116,7 +129,7 @@ class AuthStore:
                 )
 
     def create_domain(self, iwiki_id: str, domain: str) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "INSERT INTO iwiki.domains (iwiki_id, slug) VALUES (%s, %s) "
@@ -161,7 +174,7 @@ class AuthStore:
         secret = secrets.token_urlsafe(32)
         token = f"{_TOKEN_PREFIX}_{token_id}_{secret}"
         digest = hashlib.sha256(token.encode()).digest()
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT slug, domain_id FROM iwiki.domains "
@@ -202,7 +215,7 @@ class AuthStore:
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             raise ValueError("authentication time must be timezone-aware")
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT t.iwiki_id, t.token_digest "
@@ -250,7 +263,7 @@ class AuthStore:
         )
 
     def list_tokens(self, iwiki_id: str) -> list[dict]:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT t.token_id, t.owner, t.created_at, t.last_used_at, "
@@ -294,7 +307,7 @@ class AuthStore:
         return list(tokens.values())
 
     def revoke_token(self, token_id: str) -> bool:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE iwiki.tokens SET revoked_at = CURRENT_TIMESTAMP "
@@ -304,7 +317,7 @@ class AuthStore:
                 return cursor.rowcount == 1
 
     def set_wiki_active(self, iwiki_id: str, active: bool) -> None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE iwiki.iwikis SET active = %s, "
@@ -313,7 +326,7 @@ class AuthStore:
                 )
 
     def last_used_at(self, token_id: str) -> datetime | None:
-        with psycopg.connect(self.dsn) as connection:
+        with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT last_used_at FROM iwiki.tokens WHERE token_id = %s",

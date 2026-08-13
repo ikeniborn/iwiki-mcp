@@ -323,7 +323,7 @@ wheels = [
 
 [[package]]
 name = "iwiki-mcp"
-version = "0.7.102"
+version = "0.7.103"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },
@@ -340,6 +340,7 @@ dependencies = [
     { name = "tree-sitter" },
     { name = "tree-sitter-language-pack" },
     { name = "tree-sitter-python" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -366,6 +367,7 @@ requires-dist = [
     { name = "tree-sitter", specifier = ">=0.26.0" },
     { name = "tree-sitter-language-pack", specifier = ">=1.13.3" },
     { name = "tree-sitter-python", specifier = ">=0.25.0" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 provides-extras = ["dev"]
 

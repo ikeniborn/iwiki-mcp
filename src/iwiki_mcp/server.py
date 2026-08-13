@@ -1,4 +1,4 @@
-"""iwiki MCP server (stdio).
+"""iwiki MCP server.
 
 Tools are fail-soft: every handler returns a JSON-serializable dict, and
 exceptions become {"error","hint"} structures.
@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import sys
+from threading import RLock
 import time
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -27,6 +28,7 @@ from mcp.server.stdio import stdio_server
 
 from . import admin as _admin  # noqa: F401
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
+from . import http as _http  # noqa: F401
 from .postgres import migrations as _postgres_migrations  # noqa: F401
 from .postgres import auth as _postgres_auth  # noqa: F401
 from .postgres import store as _postgres_store  # noqa: F401
@@ -228,16 +230,57 @@ _DELETE_REMEDIATION_TOOLS = ["wiki_delete_page", "wiki_lint"]
 _MUTATION_BINDING: ContextVar[base.Binding | base.PostgresBinding | None] = ContextVar(
     "iwiki_mutation_binding", default=None
 )
-_SESSION_BINDING: ContextVar[base.PostgresBinding | None] = ContextVar(
+
+
+class _HostedBindingState:
+    """Mutable session holder whose values remain immutable bindings."""
+
+    def __init__(self, binding: base.PostgresBinding) -> None:
+        self._binding = binding
+        self._lock = RLock()
+
+    def locked(self):
+        return self._lock
+
+    def get(self) -> base.PostgresBinding:
+        with self._lock:
+            return self._binding
+
+    def set(self, binding: base.PostgresBinding) -> None:
+        with self._lock:
+            self._binding = binding
+
+
+_SESSION_BINDING: ContextVar[
+    base.PostgresBinding | _HostedBindingState | None
+] = ContextVar(
     "iwiki_postgres_session_binding", default=None
 )
 _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
+_HOSTED_POOL = None
+_HOSTED_CONFIG: Config | None = None
+
+
+def _install_hosted_runtime(pool, cfg: Config) -> None:
+    global _HOSTED_POOL, _HOSTED_CONFIG
+    _HOSTED_POOL = pool
+    _HOSTED_CONFIG = cfg
+
+
+def _clear_hosted_runtime(pool) -> None:
+    global _HOSTED_POOL, _HOSTED_CONFIG
+    if _HOSTED_POOL is pool:
+        _HOSTED_POOL = None
+        _HOSTED_CONFIG = None
 
 
 def _resolved_binding() -> base.Binding | base.PostgresBinding:
+    session = _SESSION_BINDING.get()
+    if isinstance(session, _HostedBindingState):
+        session = session.get()
     return (
         _MUTATION_BINDING.get()
-        or _SESSION_BINDING.get()
+        or session
         or _LOCAL_POSTGRES_BINDING
         or base.resolve_binding()
     )
@@ -258,8 +301,11 @@ def _postgres_store_for_binding(binding: base.PostgresBinding):
     return _postgres_store.PostgresStore(
         binding.connection_dsn(),
         binding.iwiki_id,
-        Config.load(),
+        _HOSTED_CONFIG or Config.load(),
         auth_context=auth_context,
+        connection_factory=(
+            _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
+        ),
     )
 
 
@@ -315,6 +361,11 @@ def _safe(fn):
         except base.BaseError as e:
             return {"error": str(e), "hint": "set IWIKI_BASE_DIR or run wiki_bind"}
         except (ConfigError, EmbedError) as e:
+            if _SESSION_BINDING.get() is not None:
+                return {
+                    "error": "model operation failed",
+                    "hint": "retry or inspect sanitized server diagnostics",
+                }
             return {
                 "error": f"HALT: {e}",
                 "hint": "set IWIKI_LLM_BASE_URL / IWIKI_LLM_KEY",
@@ -344,6 +395,11 @@ def _safe(fn):
                 result["rolled_back"] = True
             return result
         except Exception as e:
+            if _SESSION_BINDING.get() is not None:
+                return {
+                    "error": "operation failed",
+                    "hint": "retry or inspect sanitized server diagnostics",
+                }
             return {"error": str(e), "hint": "unexpected error; see server logs"}
 
     return wrap
@@ -586,15 +642,21 @@ def wiki_status() -> dict:
             for domain in _postgres_store_for_binding(bind).list_domains()
             if domain in bind.read
         ]
-        return {
+        result = {
             "storage": "postgres",
-            "transport": "stdio",
+            "transport": (
+                "streamable-http"
+                if _SESSION_BINDING.get() is not None
+                else "stdio"
+            ),
             "read": list(bind.read),
             "write": list(bind.write),
             "primary": bind.primary,
-            "project_dir": bind.project_dir,
             "domains": domains,
         }
+        if _SESSION_BINDING.get() is None:
+            result["project_dir"] = bind.project_dir
+        return result
     return {
         "base": bind.base,
         "read": list(bind.read),
@@ -624,7 +686,7 @@ def _invalid_code_config() -> dict:
 @_safe
 @_code_safe
 def wiki_code_status() -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     if _is_postgres(bind):
         return _unsupported_storage()
     if bind.primary is None:
@@ -642,7 +704,7 @@ def wiki_code_index(
         not languages or any(language != "python" for language in languages)
     ):
         return _invalid_code_config()
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     if _is_postgres(bind):
         return _unsupported_storage()
     if bind.primary is None:
@@ -666,7 +728,7 @@ def wiki_code_search(
         languages=languages,
         limit=limit,
     )
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     if _is_postgres(bind):
         return _unsupported_storage()
     if bind.primary is None:
@@ -704,7 +766,7 @@ def wiki_code_context(
         max_files=max_files,
         max_source_bytes=max_source_bytes,
     )
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     if _is_postgres(bind):
         return _unsupported_storage()
     if bind.primary is None:
@@ -892,6 +954,11 @@ def wiki_search(
                 page_cache=page_cache,
             )
     except EmbedError as exc:
+        if _SESSION_BINDING.get() is not None:
+            return {
+                "error": "model operation failed",
+                "hint": "retry or inspect sanitized server diagnostics",
+            }
         return {"error": str(exc)}
     results = candidates[:requested_top_k]
     response = {"results": results}
@@ -1844,8 +1911,7 @@ def wiki_create_domain(name: str) -> dict:
             "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
 
 
-@_safe
-def wiki_bind(
+def _wiki_bind(
     read: list[str] | None = None,
     write: list[str] | None = None,
     primary: str | None = None,
@@ -1911,16 +1977,21 @@ def wiki_bind(
             write=tuple(dict.fromkeys(valid_write)),
             primary=valid_primary,
         )
-        if _SESSION_BINDING.get() is not None:
+        session = _SESSION_BINDING.get()
+        if isinstance(session, _HostedBindingState):
+            session.set(narrowed)
+        elif session is not None:
             _SESSION_BINDING.set(narrowed)
         else:
             _LOCAL_POSTGRES_BINDING = narrowed
-        return {
+        result = {
             "read": list(narrowed.read),
             "write": list(narrowed.write),
             "primary": narrowed.primary,
-            "project_dir": narrowed.project_dir,
         }
+        if session is None:
+            result["project_dir"] = narrowed.project_dir
+        return result
     current_domain = _validate_domain(base.current_project_domain(bind.project_dir))
     valid_read = None if read is None else [_validate_domain(d) for d in read]
     valid_write = None if write is None else [_validate_domain(d) for d in write]
@@ -1991,6 +2062,19 @@ def wiki_bind(
         "primary": new.primary,
         "project_dir": new.project_dir,
     }
+
+
+@_safe
+def wiki_bind(
+    read: list[str] | None = None,
+    write: list[str] | None = None,
+    primary: str | None = None,
+) -> dict:
+    session = _SESSION_BINDING.get()
+    if isinstance(session, _HostedBindingState):
+        with session.locked():
+            return _wiki_bind(read=read, write=write, primary=primary)
+    return _wiki_bind(read=read, write=write, primary=primary)
 
 
 @_safe
