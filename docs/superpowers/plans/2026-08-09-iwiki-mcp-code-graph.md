@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 7d017ab119a3f336
+  plan_hash: 37e82c1f41542dee
   last_run: 2026-08-13
   phases:
     structure: { status: passed }
@@ -26,18 +26,18 @@ chain:
 
 **Approved spec:** `docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md` (`3625b9f571db61f1`)
 
-**Execution baseline:** commit `62d213fc400d067344122b4977c829689bab50b3`, package version `0.7.84`. Commits for Tasks 1–12 are present and preserved, but final chain completion is not claimed before result reconciliation. The first Task 13 benchmark stopped with durable failed evidence, so only Task 7 search execution, Task 13 methodology/evidence, and downstream Task 14 are reopened below.
+**Execution baseline:** commit `b8b8f164235b40789edd5567a99857a0eaf88693`, package version `0.7.86`. Tasks 1–12, the first benchmark-remediation approval, and the first Task 7R implementation are preserved. The corrected Task 13 runner then stopped on the sole remaining `search_ms` gate with evidence SHA-256 `b338bf088984c6c9d30d9d10cedd3410351a4c37db690a055a1113aab6b2890c`, so branch-local search execution, Task 13 completion, and Task 14 are reopened below.
 
-**Plan status:** draft benchmark-remediation revision; execution remains blocked until this body passes `check-chain plan`, receives human approval, and is committed.
+**Plan status:** draft predicate-pushdown remediation revision; execution remains blocked until this body passes `check-chain plan`, receives human approval, and is committed.
 
-**Resume point:** Tasks 1–12 and the original Schema-v2 Remediation Gate are historical committed inputs. New execution starts at Task 7R; unchecked boxes in earlier task sections describe preserved delivery history and MUST NOT be replayed. Task 14 result reconciliation still verifies those inputs.
+**Resume point:** Tasks 1–12, the original Schema-v2 Remediation Gate, approval commit `14c9f66`, and Task 7R commit `b8b8f16` are historical committed inputs. New execution resumes at Task 7R-P Step 1 below; unchecked boxes in earlier task sections describe preserved delivery history and MUST NOT be replayed. Task 14 result reconciliation still verifies those inputs.
 
 ---
 
 ## Non-negotiable execution contract
 
 - Preserve the approved sequential ownership: Unit A owns R-001–R-009; Unit B owns R-010–R-015, R-017, R-018, R-025, and the status/index/search portion of R-016; Unit C owns context completion, Wiki links, lint, regression evidence, benchmarks, docs, and debt tracking.
-- Preserve all completed Tasks 1–12 commits. Task 7R is a forward remediation commit over baseline `62d213fc400d067344122b4977c829689bab50b3`; do not amend, rewrite, or replay completed history.
+- Preserve all completed Tasks 1–12 commits plus approval commit `14c9f66` and Task 7R commit `b8b8f16`. Task 7R-P is a forward remediation commit; do not amend, rewrite, or replay completed history.
 - Task 8 MUST NOT begin until the Schema-v2 Remediation Gate after Task 7 records every command as passing.
 - Schema v2 has exactly five authoritative tables and exactly twenty named explicit indexes. It has no `modules` table, FTS/shadow table, persisted search projection, trigger-maintained copy, Python SQLite UDF, or hidden candidate cap.
 - Canonical public entities are a query-time discriminated union of `file`, `module`, and `symbol`. A module is an optional occurrence facet of a file row and is never a synthetic symbol.
@@ -54,7 +54,9 @@ chain:
 
 **HUMAN CHECKPOINT — CLOSED 2026-08-13:** Revised spec hash `3625b9f571db61f1` fixes sequential exclusive-rank queries with public-limit early-stop; separate search and production corpora; production-only DB/source measurement; canonical semantic determinism; independent Unicode/lexical truth; and one cold plus one warm-up plus ten warm samples. Thresholds, schema, indexes, public contracts, and Unit ownership remain unchanged.
 
-No user choice remains before execution. Reopen design review and stop if implementation would weaken a hard constraint, add another authoritative/search table or index-backed projection, apply NFC/NFKC, add FTS/UDF/candidate caps, expose incremental/TypeScript behavior, change the four tools or `wiki_search`, allow module/alias selectors, change publication order, or move requirement ownership across units.
+**HUMAN CHECKPOINT — OPEN 2026-08-13:** The corrected Task 13 benchmark passed every quality and production-corpus gate but measured lower search ranks at `261–445 ms` against `<150 ms`. Review traced the miss to incomplete Task 7R execution: canonical SQL still materializes a broad three-arm union and applies kind/path/rank predicates outside each arm, while the approved plan required branch-local predicates and existing-index `EXPLAIN` proof. This revision adds only that missing implementation and verification detail. It does not change the checked spec, threshold, schema, twenty indexes, ranking, public contract, FTS/UDF/projection prohibition, or candidate-cap prohibition.
+
+No design fork remains beyond approval of this checked revision. Reopen design review and stop if implementation would weaken a hard constraint, add another authoritative/search table or index-backed projection, apply NFC/NFKC, add FTS/UDF/candidate caps, expose incremental/TypeScript behavior, change the four tools or `wiki_search`, allow module/alias selectors, change publication order, or move requirement ownership across units.
 
 ## Release sequence
 
@@ -75,14 +77,23 @@ No user choice remains before execution. Reopen design review and stop if implem
 | Task 12 | `0.7.84` | recovery and concurrency evidence |
 | Checked and human-approved benchmark-remediation plan | `0.7.85` | `docs(codegraph): approve benchmark remediation plan` |
 | Task 7R | `0.7.86` | sequential exclusive-rank search execution |
-| Task 13 | `0.7.87` | corrected quality and split-corpus benchmark |
-| Task 14 | `0.7.88` | docs, debt, and final gates |
+| Checked and human-approved predicate-pushdown plan | `0.7.87` | `docs(codegraph): approve predicate-pushdown remediation plan` |
+| Task 7R-P | `0.7.88` | branch-local search predicate execution |
+| Task 13 | `0.7.89` | corrected quality and split-corpus benchmark |
+| Task 14 | `0.7.90` | docs, debt, and final gates |
 
 Before Task 7R, validate this file with `$check-chain plan docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md`, obtain human approval, bump `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` from `0.7.84` to `0.7.85`, run `uv lock`, and commit only the approved spec, checked plan, `docs/TODO.md`, package-version test, and three version artifacts. Do not stage the untracked `eval/code_graph/` scaffold or Task 13 tests in the approval commit. Execution resumes only from that committed state.
 
 ```bash
 git add docs/TODO.md docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "docs(codegraph): approve benchmark remediation plan"
+```
+
+Before Task 7R-P, validate this revised body with `$check-chain plan`, obtain human approval, bump the package and package-test version from `0.7.86` to `0.7.87`, run `uv lock`, and commit only this checked plan, `docs/TODO.md`, the package-version test, and the three version artifacts. Preserve the stopped untracked Task 13 runner and tests without staging them in the approval commit.
+
+```bash
+git add docs/TODO.md docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
+git commit -m "docs(codegraph): approve predicate-pushdown remediation plan"
 ```
 
 ## File map
@@ -1218,7 +1229,7 @@ git commit -m "test(codegraph): prove recovery and concurrency"
 
 ## Benchmark remediation — reopened Unit B search ownership
 
-### Task 7R: Execute exact search ranks sequentially with safe public-limit early-stop
+### Task 7R (historical): Execute exact search ranks sequentially with safe public-limit early-stop
 
 **Closes reopened evidence:** R-018/AC-18 query execution and the search-latency owner for R-028/AC-28. This is a forward fix after completed Task 12; it changes no schema, index, identity, normalization, public result, or MCP contract.
 
@@ -1420,6 +1431,140 @@ Set package and package-test versions to `0.7.86`, run `uv lock`, rerun `tests/t
 ```bash
 git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock src/iwiki_mcp/codegraph/query.py tests/codegraph/test_query.py tests/test_package.py
 git commit -m "fix(codegraph): execute search ranks sequentially"
+```
+
+### Task 7R-P: Push every rank predicate into only the required typed branches
+
+**Closes reopened evidence:** the missing Task 7R Step 3 branch-local execution and Step 4 query-plan proof. Preserve commit `b8b8f16`; this is a forward fix over version `0.7.87` after the second checked-plan approval.
+
+**Files:**
+- Modify: `src/iwiki_mcp/codegraph/query.py`
+- Modify: `tests/codegraph/test_query.py`
+- Modify: `tests/test_package.py`
+- Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `uv.lock`
+
+- [ ] **Step 1: Add failing branch-selection, predicate-placement, and EXPLAIN tests**
+
+Add explicit entity-branch comments to generated SQL so tests can inspect the query contract without depending on whitespace:
+
+```python
+def _rank_sql(request, name):
+    sql, parameters = _rank_query("backend", request, name, ())
+    return sql, (*parameters, request.limit)
+
+
+@pytest.mark.parametrize(
+    ("kind", "present", "absent"),
+    [
+        ("file", "iwiki-entity:file", ("iwiki-entity:module", "iwiki-entity:symbol")),
+        ("module", "iwiki-entity:module", ("iwiki-entity:file", "iwiki-entity:symbol")),
+        ("method", "iwiki-entity:symbol", ("iwiki-entity:file", "iwiki-entity:module")),
+    ],
+)
+def test_rank_sql_emits_only_requested_entity_branches(kind, present, absent):
+    sql, _parameters = _rank_sql(
+        validate_search_request("needle", kinds=[kind]),
+        "canonical_lexical",
+    )
+    assert present in sql
+    assert all(marker not in sql for marker in absent)
+
+
+def test_rank_predicates_and_filters_are_inside_each_union_branch():
+    request = validate_search_request(
+        "needle", kinds=["file", "module", "method"], path="src/pkg"
+    )
+    sql, _parameters = _rank_sql(request, "canonical_lexical")
+    branches, outer = sql.split("/* iwiki-after-branches */", 1)
+    assert branches.count("f.repository_id = ?") == 3
+    assert branches.count("f.language = ?") == 3
+    assert branches.count("substr(f.path, 1, length(?)) = ?") == 3
+    assert branches.count("name_tokens_casefold") >= 3
+    assert "repository_id" not in outer
+    assert "language" not in outer
+    assert "kind IN" not in outer
+    assert "path" not in outer
+    assert "name_tokens_casefold" not in outer
+
+
+def _query_plan(connection, request, name):
+    sql, parameters = _rank_sql(request, name)
+    return "\n".join(
+        str(row[3])
+        for row in connection.execute(
+            "EXPLAIN QUERY PLAN " + sql, parameters
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "rank", "expected_index"),
+    [
+        ("file", "qualified_exact", "idx_files_repository_path"),
+        ("file", "local_exact", "idx_files_repository_local"),
+        ("module", "qualified_exact", "idx_files_repository_module_qualified"),
+        ("module", "local_exact", "idx_files_repository_module_local"),
+        ("method", "qualified_exact", "idx_symbols_qualified"),
+        ("method", "local_exact", "idx_symbols_local"),
+    ],
+)
+def test_exact_rank_query_plan_uses_existing_endpoint_index(
+    schema_v2_search_connection, kind, rank, expected_index
+):
+    plan = _query_plan(
+        schema_v2_search_connection,
+        validate_search_request("needle", kinds=[kind]),
+        rank,
+    )
+    assert expected_index in plan
+```
+
+Keep the existing sequential trace, complete-order, adjacent-tier overlap, alias fan-out/count, partially-resolved alias, Unicode, literal wildcard, lazy cursor error, and public-limit-only tests. Add a regression that generated SQL contains no numeric or parameterized `LIMIT` except the one final public remaining-limit placeholder.
+
+- [ ] **Step 2: Run the focused RED and capture the current plan**
+
+```bash
+uv run pytest -q tests/codegraph/test_query.py -k 'only_requested_entity_branches or predicates_and_filters_are_inside or query_plan_uses_existing_endpoint_index'
+```
+
+Expected: branch-selection and predicate-placement tests FAIL because `b8b8f16` always emits the broad file/module/symbol CTE and applies kind/path/rank predicates outside it; exact symbol EXPLAIN may use a file join plan instead of the endpoint index.
+
+- [ ] **Step 3: Generate direct branch-local SQL without new storage or hidden bounds**
+
+Build each canonical rank from zero to three direct `SELECT` branches selected from `request.kinds`: file kinds read only `files`; module reads only non-null module facets in `files`; symbol kinds read `symbols JOIN files`. Put repository, language, kind, target-path, exact/prefix/lexical/signature/path predicate, stronger-rank negation, and returned-entity exclusion inside each selected branch before `UNION ALL`. Mark branches `/* iwiki-entity:file */`, `/* iwiki-entity:module */`, or `/* iwiki-entity:symbol */`, and put `/* iwiki-after-branches */` immediately before the single final deterministic `ORDER BY qualified_name, entity_id LIMIT ?`.
+
+For qualified/local exact, structure direct branches so Section 7.8 endpoint indexes are visible to SQLite. For canonical prefix, split qualified and local name endpoints inside each entity branch and use deterministic binary prefix bounds when an upper bound exists; de-duplicate the same entity before the final public limit. Lexical, signature, and path remain persisted-field scans but execute only for relevant entity kinds and with branch-local filters. Alias ranks continue to start from filtered explicit-alias `IMPORTS`, but push target kind/path/language and rank predicates into their module/symbol target branches before aggregation. Preserve distinct filtered target counts and the lowest-code-point public alias.
+
+Do not change schema, add an index/table/projection/FTS/UDF/cache, add a candidate bound, normalize with NFC/NFKC, or move validation into the timed query.
+
+- [ ] **Step 4: Run unit/integration gates and the unchanged authoritative benchmark**
+
+```bash
+uv run pytest -q tests/codegraph/test_query.py
+uv run pytest -q tests/codegraph/test_server_tools.py tests/codegraph/test_indexer_runtime.py
+uv run pytest -q --ignore=tests/eval/test_code_graph_runner.py --ignore=tests/eval/test_code_graph_report.py
+uv run flake8 src tests/codegraph tests/test_package.py
+uv run python -m compileall -q src/iwiki_mcp/codegraph tests/codegraph
+uv lock --check
+git diff --check
+uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
+```
+
+Expected: unit and static gates exit zero; exact/local EXPLAIN plans name only existing Section 7.8 indexes; requested kinds emit no unused typed branch; early-stop and public-limit-only assertions remain green. The benchmark reports the same independent expected ranks/IDs, one cold plus one warm-up plus ten warm samples, and every search-case warm maximum `<150 ms`. All non-search gates remain green. The CLI must exit `0` before Task 13 resumes.
+
+If the unchanged benchmark still misses, preserve both evidence files, stop before version/commit/Task 13, and reopen spec §13.4/§16.4. Do not attempt a second query strategy under this task without a new checked human decision.
+
+Update `concept/code-graph-search`, headings `Candidate retrieval` and `Ranking and result contract`, source `src/iwiki_mcp/codegraph/query.py`; run `wiki_lint(domain="iwiki-mcp")` and require no new broken, missing-source, or stale finding for the changed page.
+
+- [ ] **Step 5: Bump version and commit only after the benchmark passes**
+
+Set package and package-test versions to `0.7.88`, run `uv lock`, rerun `tests/test_package.py`, and commit only Task 7R-P files:
+
+```bash
+git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock src/iwiki_mcp/codegraph/query.py tests/codegraph/test_query.py tests/test_package.py
+git commit -m "fix(codegraph): push search predicates into typed branches"
 ```
 
 ## Unit C — resumed benchmark and final evidence
@@ -1682,7 +1827,7 @@ Create `reference/code-graph-benchmark` with `wiki_write_page`, document corpus,
 
 - [ ] **Step 6: Bump version and commit only after the actual gate passes**
 
-Set package and package-test versions to `0.7.87`, run `uv lock`, rerun `tests/test_package.py`, and commit the benchmark only after the real CLI exits zero.
+Set package and package-test versions to `0.7.89`, run `uv lock`, rerun `tests/test_package.py`, and commit the benchmark only after the real CLI exits zero.
 
 ```bash
 git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock tests/test_package.py eval/code_graph tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py docs/superpowers/evidence/code-graph-benchmark-method.md
@@ -1752,7 +1897,7 @@ Expected: full suite, scoped lint, compile, CLI, benchmark, and diff checks pass
 
 - [ ] **Step 5: Bump version, reconcile result, and create the final commit**
 
-Set `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` to `0.7.88`, run `uv lock`, rerun `tests/test_package.py`, `uv lock --check`, and `git diff --check`, then reconcile the complete branch diff before committing:
+Set `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` to `0.7.90`, run `uv lock`, rerun `tests/test_package.py`, `uv lock --check`, and `git diff --check`, then reconcile the complete branch diff before committing:
 
 ```bash
 uv run pytest -q tests/test_package.py
@@ -1800,7 +1945,7 @@ Expected: `$check-chain result` writes `result_check: OK` against the current pl
 
 Execution result must provide:
 
-- Release history from original plan version `0.7.72` through completed Task 12 version `0.7.84`, then benchmark-remediation plan `0.7.85`, Task 7R `0.7.86`, Task 13 `0.7.87`, and final Task 14 `0.7.88`.
+- Release history from original plan version `0.7.72` through completed Task 12 version `0.7.84`, benchmark-remediation plan `0.7.85`, Task 7R `0.7.86`, predicate-pushdown plan `0.7.87`, Task 7R-P `0.7.88`, Task 13 `0.7.89`, and final Task 14 `0.7.90`.
 - Task-level RED failure and GREEN success output for original Tasks 1–14 plus reopened Task 7R.
 - Schema inspection proving exact five tables, exact twenty named indexes, required implicit uniques, and absence of forbidden modules/FTS/projection/UDF structures.
 - Typed union and exact nine-rank search results, alias aggregation/fan-out, no hidden candidate cap, invalid-input-before-I/O traces, and stable tie evidence.
