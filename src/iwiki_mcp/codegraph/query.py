@@ -141,64 +141,402 @@ def _lexical_expression(column: str, tokens: tuple[str, ...]) -> tuple[str, list
     )
 
 
-def _rank_query(
+def _path_filter(
+    request: ValidatedSearchRequest,
+    column: str,
+) -> tuple[str, list[object]]:
+    if request.path is None:
+        return "", []
+    return (
+        f"AND substr({column}, 1, length(?)) = ?",
+        [request.path, request.path],
+    )
+
+
+def _excluded_filter(
+    excluded_ids: tuple[str, ...],
+    column: str,
+) -> tuple[str, list[object]]:
+    if not excluded_ids:
+        return "", []
+    placeholders = ", ".join("?" for _item in excluded_ids)
+    return f"AND {column} NOT IN ({placeholders})", list(excluded_ids)
+
+
+def _canonical_predicate(
+    request: ValidatedSearchRequest,
+    name: str,
+    *,
+    qualified: str,
+    local: str,
+    tokens: str,
+    signature: str,
+    raw_signature: str,
+    path: str,
+    raw_path: str,
+) -> tuple[str, list[object]]:
+    upper = request.query + "\U0010ffff"
+    prefix = (
+        f"({qualified} >= ? AND {qualified} < ?) OR "
+        f"({local} >= ? AND {local} < ?)"
+    )
+    exact = f"{qualified} = ? OR {local} = ?"
+    if name == "qualified_exact":
+        return f"{qualified} = ?", [request.query]
+    if name == "local_exact":
+        return f"{local} = ? AND {qualified} != ?", [
+            request.query,
+            request.query,
+        ]
+    if name == "canonical_lexical":
+        lexical, parameters = _lexical_expression(tokens, request.tokens)
+        return (
+            f"({lexical}) AND NOT ({prefix}) AND NOT ({exact})",
+            [
+                *parameters,
+                request.query,
+                upper,
+                request.query,
+                upper,
+                request.query,
+                request.query,
+            ],
+        )
+    if name == "signature":
+        return (
+            f"{raw_signature} IS NOT NULL AND "
+            f"instr(COALESCE({signature}, lower({raw_signature})), ?) > 0 "
+            f"AND NOT ({prefix}) AND NOT ({exact})",
+            [
+                request.query.casefold(),
+                request.query,
+                upper,
+                request.query,
+                upper,
+                request.query,
+                request.query,
+            ],
+        )
+    if name == "path":
+        return (
+            f"instr(COALESCE({path}, lower({raw_path})), ?) > 0 "
+            f"AND NOT ({prefix}) AND NOT ({exact})",
+            [
+                request.query.casefold(),
+                request.query,
+                upper,
+                request.query,
+                upper,
+                request.query,
+                request.query,
+            ],
+        )
+    raise AssertionError(f"unsupported canonical rank: {name}")
+
+
+def _prefix_predicates(
+    request: ValidatedSearchRequest,
+    *,
+    qualified: str,
+    local: str,
+) -> tuple[tuple[str, list[object]], tuple[str, list[object]]]:
+    upper = request.query + "\U0010ffff"
+    qualified_predicate = (
+        f"{qualified} >= ? AND {qualified} < ? "
+        f"AND {qualified} != ? AND {local} != ?"
+    )
+    local_predicate = (
+        f"{local} >= ? AND {local} < ? "
+        f"AND {local} != ? AND {qualified} != ? "
+        f"AND NOT ({qualified} >= ? AND {qualified} < ?)"
+    )
+    return (
+        (
+            qualified_predicate,
+            [request.query, upper, request.query, request.query],
+        ),
+        (
+            local_predicate,
+            [
+                request.query,
+                upper,
+                request.query,
+                request.query,
+                request.query,
+                upper,
+            ],
+        ),
+    )
+
+
+def _empty_entity_branch() -> str:
+    return (
+        "SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL WHERE 0"
+    )
+
+
+def _canonical_rank_query(
     domain: str,
     request: ValidatedSearchRequest,
     name: str,
     excluded_ids: tuple[str, ...],
 ) -> tuple[str, list[object]]:
-    placeholders = ", ".join("?" for _kind in request.kinds)
-    path_filter = ""
-    path_parameters: list[object] = []
-    if request.path is not None:
-        path_filter = "AND substr(path, 1, length(?)) = ?"
-        path_parameters.extend((request.path, request.path))
-    excluded_sql = ""
-    if excluded_ids:
-        excluded_sql = "AND entity_id NOT IN (" + ", ".join(
-            "?" for _item in excluded_ids
-        ) + ")"
     rank = MATCH_RANK[name]
-    if name.startswith("alias_"):
-        if name == "alias_exact":
-            predicate, rank_parameters = "binding_name = ?", [request.query]
-        elif name == "alias_prefix":
-            predicate = "substr(binding_name, 1, length(?)) = ? AND binding_name != ?"
-            rank_parameters = [request.query, request.query, request.query]
+    symbol_kinds = tuple(
+        kind for kind in request.kinds if kind not in {"file", "module"}
+    )
+    branch_specs = []
+    if "file" in request.kinds and name != "signature":
+        branch_specs.append({
+            "marker": "file",
+            "select": (
+                "f.file_id, 'file', f.file_id, NULL, NULL, 'file', "
+                "f.path, f.file_local_name, f.file_name_tokens_casefold, "
+                "NULL, NULL, f.path, f.path_casefold, f.start_line, "
+                "f.end_line, f.start_byte, f.end_byte"
+            ),
+            "from": "files AS f",
+            "common": "f.repository_id = ? AND f.language = ?",
+            "common_parameters": [domain, request.language],
+            "qualified": "f.path",
+            "local": "f.file_local_name",
+            "tokens": "f.file_name_tokens_casefold",
+            "signature": "NULL",
+            "raw_signature": "NULL",
+            "path": "f.path_casefold",
+            "raw_path": "f.path",
+            "entity_id": "f.file_id",
+            "qualified_index": "idx_files_repository_path",
+            "local_index": "idx_files_repository_local",
+        })
+    if "module" in request.kinds and name != "signature":
+        branch_specs.append({
+            "marker": "module",
+            "select": (
+                "f.module_id, 'module', f.file_id, f.module_id, NULL, "
+                "'module', f.module_qualified_name, f.module_local_name, "
+                "f.module_name_tokens_casefold, NULL, NULL, f.path, "
+                "f.path_casefold, f.start_line, f.end_line, f.start_byte, "
+                "f.end_byte"
+            ),
+            "from": "files AS f",
+            "common": (
+                "f.repository_id = ? AND f.language = ? "
+                "AND f.module_id IS NOT NULL"
+            ),
+            "common_parameters": [domain, request.language],
+            "qualified": "f.module_qualified_name",
+            "local": "f.module_local_name",
+            "tokens": "f.module_name_tokens_casefold",
+            "signature": "NULL",
+            "raw_signature": "NULL",
+            "path": "f.path_casefold",
+            "raw_path": "f.path",
+            "entity_id": "f.module_id",
+            "qualified_index": "idx_files_repository_module_qualified",
+            "local_index": "idx_files_repository_module_local",
+        })
+    if symbol_kinds:
+        placeholders = ", ".join("?" for _kind in symbol_kinds)
+        branch_specs.append({
+            "marker": "symbol",
+            "select": (
+                "s.symbol_id, 'symbol', f.file_id, f.module_id, s.symbol_id, "
+                "s.kind, s.qualified_name, s.local_name, "
+                "s.name_tokens_casefold, s.signature, "
+                "s.signature_casefold, f.path, f.path_casefold, "
+                "s.start_line, s.end_line, s.start_byte, s.end_byte"
+            ),
+            "from": "symbols AS s JOIN files AS f ON f.file_id = s.file_id",
+            "common": (
+                f"f.repository_id = ? AND f.language = ? "
+                f"AND s.kind IN ({placeholders})"
+            ),
+            "common_parameters": [domain, request.language, *symbol_kinds],
+            "qualified": "s.qualified_name",
+            "local": "s.local_name",
+            "tokens": "s.name_tokens_casefold",
+            "signature": "s.signature_casefold",
+            "raw_signature": "s.signature",
+            "path": "f.path_casefold",
+            "raw_path": "f.path",
+            "entity_id": "s.symbol_id",
+            "qualified_index": "idx_symbols_qualified",
+            "local_index": "idx_symbols_local",
+        })
+
+    branches: list[str] = []
+    parameters: list[object] = []
+    for spec in branch_specs:
+        path_sql, path_parameters = _path_filter(request, "f.path")
+        excluded_sql, excluded_parameters = _excluded_filter(
+            excluded_ids, str(spec["entity_id"])
+        )
+        predicates: tuple[tuple[str, list[object]], ...]
+        if name == "canonical_prefix":
+            predicates = _prefix_predicates(
+                request,
+                qualified=str(spec["qualified"]),
+                local=str(spec["local"]),
+            )
         else:
-            lexical, lexical_parameters = _lexical_expression(
-                "binding_name_tokens_casefold", request.tokens
+            predicates = (_canonical_predicate(
+                request,
+                name,
+                qualified=str(spec["qualified"]),
+                local=str(spec["local"]),
+                tokens=str(spec["tokens"]),
+                signature=str(spec["signature"]),
+                raw_signature=str(spec["raw_signature"]),
+                path=str(spec["path"]),
+                raw_path=str(spec["raw_path"]),
+            ),)
+        for predicate_offset, (predicate, predicate_parameters) in enumerate(
+            predicates
+        ):
+            source = str(spec["from"])
+            endpoint = None
+            if name == "qualified_exact":
+                endpoint = "qualified"
+            elif name == "local_exact":
+                endpoint = "local"
+            elif name == "canonical_prefix":
+                endpoint = "qualified" if predicate_offset == 0 else "local"
+            if endpoint is not None:
+                index = spec[f"{endpoint}_index"]
+                if spec["marker"] == "symbol":
+                    source = source.replace(
+                        "symbols AS s",
+                        f"symbols AS s INDEXED BY {index}",
+                    )
+                else:
+                    source = source.replace(
+                        "files AS f",
+                        f"files AS f INDEXED BY {index}",
+                    )
+            branches.append(
+                f"/* iwiki-entity:{spec['marker']} */\n"
+                f"SELECT {spec['select']}\n"
+                f"FROM {source}\n"
+                f"WHERE {spec['common']} {path_sql}\n"
+                f"  AND {predicate} {excluded_sql}"
             )
-            predicate = (
-                f"({lexical}) AND binding_name != ? "
-                "AND NOT (substr(binding_name, 1, length(?)) = ?)"
-            )
-            rank_parameters = [
-                *lexical_parameters, request.query, request.query, request.query
-            ]
-        sql = f"""/* iwiki-rank:{name} */
-WITH alias_targets AS (
-    SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold,
-           f.module_id AS entity_id, 'module' AS entity_type, f.file_id,
-           f.module_id, NULL AS symbol_id, 'module' AS kind,
-           f.module_qualified_name AS qualified_name, f.module_local_name AS local_name,
-           f.module_name_tokens_casefold AS name_tokens_casefold, NULL AS signature,
-           NULL AS signature_casefold, f.path, f.path_casefold, f.start_line,
-           f.end_line, f.start_byte, f.end_byte
-    FROM relations AS r JOIN files AS f ON f.module_id = r.target_module_id
-    WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
-      AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
-      AND f.repository_id = ? AND f.language = ? AND 'module' IN ({placeholders}) {path_filter}
-    UNION ALL
-    SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold, s.symbol_id,
-           'symbol', f.file_id, f.module_id, s.symbol_id, s.kind, s.qualified_name,
-           s.local_name, s.name_tokens_casefold, s.signature, s.signature_casefold,
-           f.path, f.path_casefold, s.start_line, s.end_line, s.start_byte, s.end_byte
-    FROM relations AS r JOIN symbols AS s ON s.symbol_id = r.target_symbol_id
-    JOIN files AS f ON f.file_id = s.file_id
-    WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
-      AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
-      AND f.repository_id = ? AND f.language = ? AND s.kind IN ({placeholders}) {path_filter}
+            parameters.extend(spec["common_parameters"])
+            parameters.extend(path_parameters)
+            parameters.extend(predicate_parameters)
+            parameters.extend(excluded_parameters)
+    if not branches:
+        branches.append(_empty_entity_branch())
+    branch_sql = "\n    UNION ALL\n    ".join(branches)
+    sql = f"""/* iwiki-rank:{name} */
+WITH candidates ({_ENTITY_COLUMNS}) AS (
+    {branch_sql}
+)
+SELECT {_ENTITY_COLUMNS}, {rank} AS match_rank, NULL AS matched_alias,
+       0 AS alias_target_count
+FROM candidates
+/* iwiki-after-branches */
+ORDER BY qualified_name, entity_id LIMIT ?"""
+    return sql, parameters
+
+
+def _alias_predicate(
+    request: ValidatedSearchRequest,
+    name: str,
+) -> tuple[str, list[object]]:
+    if name == "alias_exact":
+        return "r.binding_name = ?", [request.query]
+    if name == "alias_prefix":
+        return (
+            "substr(r.binding_name, 1, length(?)) = ? "
+            "AND r.binding_name != ?",
+            [request.query, request.query, request.query],
+        )
+    lexical, parameters = _lexical_expression(
+        "r.binding_name_tokens_casefold", request.tokens
+    )
+    return (
+        f"({lexical}) AND r.binding_name != ? "
+        "AND NOT (substr(r.binding_name, 1, length(?)) = ?)",
+        [*parameters, request.query, request.query, request.query],
+    )
+
+
+def _empty_alias_branch() -> str:
+    return (
+        "SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL WHERE 0"
+    )
+
+
+def _alias_rank_query(
+    domain: str,
+    request: ValidatedSearchRequest,
+    name: str,
+    excluded_ids: tuple[str, ...],
+) -> tuple[str, list[object]]:
+    rank = MATCH_RANK[name]
+    symbol_kinds = tuple(
+        kind for kind in request.kinds if kind not in {"file", "module"}
+    )
+    predicate, predicate_parameters = _alias_predicate(request, name)
+    branches: list[str] = []
+    parameters: list[object] = []
+    if "module" in request.kinds:
+        path_sql, path_parameters = _path_filter(request, "f.path")
+        excluded_sql, excluded_parameters = _excluded_filter(
+            excluded_ids, "f.module_id"
+        )
+        branches.append(f"""/* iwiki-entity:module */
+SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold,
+       f.module_id, 'module', f.file_id, f.module_id, NULL, 'module',
+       f.module_qualified_name, f.module_local_name,
+       f.module_name_tokens_casefold, NULL, NULL, f.path, f.path_casefold,
+       f.start_line, f.end_line, f.start_byte, f.end_byte
+FROM relations AS r JOIN files AS f ON f.module_id = r.target_module_id
+WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
+  AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
+  AND f.repository_id = ? AND f.language = ? {path_sql}
+  AND {predicate} {excluded_sql}""")
+        parameters.extend([domain, request.language, *path_parameters])
+        parameters.extend(predicate_parameters)
+        parameters.extend(excluded_parameters)
+    if symbol_kinds:
+        placeholders = ", ".join("?" for _kind in symbol_kinds)
+        path_sql, path_parameters = _path_filter(request, "f.path")
+        excluded_sql, excluded_parameters = _excluded_filter(
+            excluded_ids, "s.symbol_id"
+        )
+        branches.append(f"""/* iwiki-entity:symbol */
+SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold,
+       s.symbol_id, 'symbol', f.file_id, f.module_id, s.symbol_id, s.kind,
+       s.qualified_name, s.local_name, s.name_tokens_casefold, s.signature,
+       s.signature_casefold, f.path, f.path_casefold, s.start_line,
+       s.end_line, s.start_byte, s.end_byte
+FROM relations AS r JOIN symbols AS s ON s.symbol_id = r.target_symbol_id
+JOIN files AS f ON f.file_id = s.file_id
+WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
+  AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
+  AND f.repository_id = ? AND f.language = ?
+  AND s.kind IN ({placeholders}) {path_sql}
+  AND {predicate} {excluded_sql}""")
+        parameters.extend([
+            domain,
+            request.language,
+            *symbol_kinds,
+            *path_parameters,
+        ])
+        parameters.extend(predicate_parameters)
+        parameters.extend(excluded_parameters)
+    if not branches:
+        branches.append(_empty_alias_branch())
+    branch_sql = "\n    UNION ALL\n    ".join(branches)
+    sql = f"""/* iwiki-rank:{name} */
+WITH alias_targets (
+    binding_name, binding_name_tokens_casefold, {_ENTITY_COLUMNS}
+) AS (
+    {branch_sql}
 ), alias_counts AS (
     SELECT binding_name, COUNT(DISTINCT entity_id) AS target_count
     FROM alias_targets GROUP BY binding_name
@@ -207,83 +545,24 @@ WITH alias_targets AS (
         PARTITION BY a.entity_id ORDER BY a.binding_name
     ) AS row_number
     FROM alias_targets AS a JOIN alias_counts AS c USING (binding_name)
-    WHERE {predicate} {excluded_sql}
 )
 SELECT {_ENTITY_COLUMNS}, {rank} AS match_rank, binding_name AS matched_alias,
        target_count AS alias_target_count
-FROM ranked WHERE row_number = 1 ORDER BY qualified_name, entity_id, matched_alias LIMIT ?"""
-        return sql, [
-            domain, request.language, *request.kinds, *path_parameters,
-            domain, request.language, *request.kinds, *path_parameters,
-            *rank_parameters, *excluded_ids,
-        ]
-    prefix = (
-        "substr(qualified_name, 1, length(?)) = ? "
-        "OR substr(local_name, 1, length(?)) = ?"
-    )
-    exact = "qualified_name = ? OR local_name = ?"
-    if name == "qualified_exact":
-        predicate, rank_parameters = "qualified_name = ?", [request.query]
-    elif name == "local_exact":
-        predicate = "local_name = ? AND qualified_name != ?"
-        rank_parameters = [request.query, request.query]
-    elif name == "canonical_prefix":
-        predicate = f"({prefix}) AND NOT ({exact})"
-        rank_parameters = [request.query] * 6
-    elif name == "canonical_lexical":
-        lexical, lexical_parameters = _lexical_expression("name_tokens_casefold", request.tokens)
-        predicate = f"({lexical}) AND NOT ({prefix}) AND NOT ({exact})"
-        rank_parameters = [*lexical_parameters, *([request.query] * 6)]
-    elif name == "signature":
-        predicate = (
-            "signature IS NOT NULL AND instr(COALESCE(signature_casefold, "
-            f"lower(signature)), ?) > 0 AND NOT ({prefix}) AND NOT ({exact})"
-        )
-        rank_parameters = [request.query.casefold(), *([request.query] * 6)]
-    else:
-        predicate = (
-            "instr(COALESCE(path_casefold, lower(path)), ?) > 0 "
-            f"AND NOT ({prefix}) AND NOT ({exact})"
-        )
-        rank_parameters = [request.query.casefold(), *([request.query] * 6)]
-    sql = f"""/* iwiki-rank:{name} */
-WITH entities ({_ENTITY_COLUMNS}) AS (
-            SELECT
-                f.file_id, 'file', f.file_id, NULL, NULL, 'file',
-                f.path, f.file_local_name, f.file_name_tokens_casefold,
-                NULL, NULL, f.path, f.path_casefold,
-                f.start_line, f.end_line, f.start_byte, f.end_byte
-            FROM files AS f
-            WHERE f.repository_id = ? AND f.language = ?
-            UNION ALL
-            SELECT
-                f.module_id, 'module', f.file_id, f.module_id, NULL, 'module',
-                f.module_qualified_name, f.module_local_name,
-                f.module_name_tokens_casefold,
-                NULL, NULL, f.path, f.path_casefold,
-                f.start_line, f.end_line, f.start_byte, f.end_byte
-            FROM files AS f
-            WHERE f.repository_id = ? AND f.language = ?
-              AND f.module_id IS NOT NULL
-            UNION ALL
-            SELECT
-                s.symbol_id, 'symbol', f.file_id, f.module_id, s.symbol_id,
-                s.kind, s.qualified_name, s.local_name,
-                s.name_tokens_casefold, s.signature, s.signature_casefold,
-                f.path, f.path_casefold,
-                s.start_line, s.end_line, s.start_byte, s.end_byte
-            FROM symbols AS s
-            JOIN files AS f ON f.file_id = s.file_id
-            WHERE f.repository_id = ? AND f.language = ?
-)
-SELECT {_ENTITY_COLUMNS}, {rank} AS match_rank, NULL AS matched_alias,
-       0 AS alias_target_count
-FROM entities WHERE kind IN ({placeholders}) {path_filter} AND {predicate} {excluded_sql}
-ORDER BY qualified_name, entity_id LIMIT ?"""
-    return sql, [
-        *(value for _arm in range(3) for value in (domain, request.language)),
-        *request.kinds, *path_parameters, *rank_parameters, *excluded_ids,
-    ]
+FROM ranked WHERE row_number = 1
+/* iwiki-after-branches */
+ORDER BY qualified_name, entity_id, matched_alias LIMIT ?"""
+    return sql, parameters
+
+
+def _rank_query(
+    domain: str,
+    request: ValidatedSearchRequest,
+    name: str,
+    excluded_ids: tuple[str, ...],
+) -> tuple[str, list[object]]:
+    if name.startswith("alias_"):
+        return _alias_rank_query(domain, request, name, excluded_ids)
+    return _canonical_rank_query(domain, request, name, excluded_ids)
 
 
 class CodeGraphQuery:

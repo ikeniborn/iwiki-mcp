@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sqlite3
 
 import pytest
@@ -524,6 +525,106 @@ def test_rank_queries_are_branch_specific_and_begin_with_rank_tag():
     assert "name_tokens_casefold" in queries["canonical_lexical"][0]
     assert "signature_casefold" in queries["signature"][0]
     assert "path_casefold" in queries["path"][0]
+
+
+def _rank_sql(request, name):
+    sql, parameters = query_module._rank_query("backend", request, name, ())
+    return sql, (*parameters, request.limit)
+
+
+@pytest.mark.parametrize(
+    ("kind", "present", "absent"),
+    [
+        (
+            "file",
+            "iwiki-entity:file",
+            ("iwiki-entity:module", "iwiki-entity:symbol"),
+        ),
+        (
+            "module",
+            "iwiki-entity:module",
+            ("iwiki-entity:file", "iwiki-entity:symbol"),
+        ),
+        (
+            "method",
+            "iwiki-entity:symbol",
+            ("iwiki-entity:file", "iwiki-entity:module"),
+        ),
+    ],
+)
+def test_rank_sql_emits_only_requested_entity_branches(kind, present, absent):
+    sql, _parameters = _rank_sql(
+        validate_search_request("needle", kinds=[kind]),
+        "canonical_lexical",
+    )
+
+    assert present in sql
+    assert all(marker not in sql for marker in absent)
+
+
+def test_rank_predicates_and_filters_are_inside_each_union_branch():
+    request = validate_search_request(
+        "needle", kinds=["file", "module", "method"], path="src/pkg"
+    )
+    sql, _parameters = _rank_sql(request, "canonical_lexical")
+
+    branches, outer = sql.split("/* iwiki-after-branches */", 1)
+    assert branches.count("f.repository_id = ?") == 3
+    assert branches.count("f.language = ?") == 3
+    assert branches.count("substr(f.path, 1, length(?)) = ?") == 3
+    assert branches.count("name_tokens_casefold") >= 3
+    assert "repository_id" not in outer
+    assert "language" not in outer
+    assert "kind IN" not in outer
+    assert "path" not in outer
+    assert "name_tokens_casefold" not in outer
+
+
+def _query_plan(connection, request, name):
+    sql, parameters = _rank_sql(request, name)
+    return "\n".join(
+        str(row[3])
+        for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "rank", "expected_index"),
+    [
+        ("file", "qualified_exact", "idx_files_repository_path"),
+        ("file", "local_exact", "idx_files_repository_local"),
+        (
+            "module",
+            "qualified_exact",
+            "idx_files_repository_module_qualified",
+        ),
+        ("module", "local_exact", "idx_files_repository_module_local"),
+        ("method", "qualified_exact", "idx_symbols_qualified"),
+        ("method", "local_exact", "idx_symbols_local"),
+    ],
+)
+def test_exact_rank_query_plan_uses_existing_endpoint_index(
+    schema_v2_search_connection, kind, rank, expected_index
+):
+    plan = _query_plan(
+        schema_v2_search_connection,
+        validate_search_request("needle", kinds=[kind]),
+        rank,
+    )
+
+    assert expected_index in plan
+
+
+@pytest.mark.parametrize("name", EXPECTED_MATCHES)
+def test_only_public_remaining_limit_is_bound(name):
+    sql, _parameters = _rank_sql(
+        validate_search_request("needle"),
+        name,
+    )
+
+    assert re.findall(r"\bLIMIT\s+(?:\?|\d+)", sql, re.IGNORECASE) == [
+        "LIMIT ?"
+    ]
 
 
 def test_alias_path_filter_counts_and_returns_target_entities(
