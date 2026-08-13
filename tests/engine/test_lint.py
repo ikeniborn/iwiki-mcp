@@ -24,6 +24,15 @@ def test_absent_wiki_is_noop(tmp_path):
     assert lint(str(tmp_path / "nope")) == {"wiki_present": False}
 
 
+def test_engine_lint_remains_markdown_only_composition_input(tmp_path):
+    wd = _wiki(tmp_path, {"a.md": "## A\nbody\n"})
+
+    report = lint(wd)
+
+    assert "broken" in report
+    assert "code_graph" not in report
+
+
 def test_detects_broken_ref(tmp_path):
     wd = _wiki(tmp_path, {"a.md": "## A\nlink to [[missing]] here\n"})
     out = lint(wd)

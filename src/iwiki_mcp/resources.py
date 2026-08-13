@@ -41,6 +41,11 @@ AUTHORING_RULES: str = """\
 - Every page carries a YAML frontmatter block above the `# Title` H1. The write
   tools fill it. Fields: `type` (required), `title`, `description`, `resource`,
   `tags`, `status`, `timestamp`.
+- Optional code selectors use only nested `code.symbols`, `code.files`, and
+  `code.source_globs`. Each symbol item contains exactly `qualified_name`; file
+  and glob items are project-relative strings. `modules`, `module_id`, `aliases`,
+  and import bindings are forbidden selectors. These fields remain human-authored;
+  derived links never rewrite them.
 - `description` is the authored article summary and the single source of it. It is
   indexed as its own **summary-level vector that seeds retrieval** (two-level:
   summary seed -> graph-expanded pool -> section vectors ranked inside it), NOT

@@ -8,6 +8,15 @@ def test_authoring_rules_mention_frontmatter_and_types():
         assert t in AUTHORING_RULES
 
 
+def test_authoring_rules_define_exact_code_selector_grammar():
+    rules = AUTHORING_RULES.casefold()
+    for key in ("code.symbols", "code.files", "code.source_globs"):
+        assert key in rules
+    for forbidden in ("modules", "module_id", "aliases", "import bindings"):
+        assert forbidden in rules
+    assert "qualified_name" in rules
+
+
 def test_authoring_rules_keep_generated_artifacts_out_of_graph_links():
     assert "never link to `index.md` or `log.md`" in AUTHORING_RULES.casefold()
     assert "SQLite graph cache" in AUTHORING_RULES

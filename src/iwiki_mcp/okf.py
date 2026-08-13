@@ -57,7 +57,8 @@ def domain_tag_vocab(base_dir: str, domain: str) -> list:
 
 def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
                       explicit_type, explicit_tags, timestamp_path,
-                      explicit_description=None, explicit_status=None, tag_vocab=None):
+                      explicit_description=None, explicit_status=None, tag_vocab=None,
+                      authored_code=None):
     """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default.
     description: explicit param -> transitional ## Overview derive -> empty (+warning).
     status: explicit param -> DEFAULT_STATUS. type: stored as authored (open, normalized)."""
@@ -89,6 +90,8 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
     if mtags:
         meta["tags"] = mtags
     meta["status"] = fm.normalize_status(explicit_status) if explicit_status else fm.DEFAULT_STATUS
+    if authored_code is not None:
+        meta["code"] = authored_code
     meta["timestamp"] = (git_last_commit_date(base_dir, timestamp_path)
                          or _dt.date.today().isoformat())
     return fm.render(meta), ("; ".join(warnings) or None)
@@ -362,7 +365,13 @@ def batch_sweep(cfg, base_dir, domain) -> dict:
     from .engine.links import to_markdown_links
     dom = Path(base_dir) / domain
     fixed_links, added_frontmatter = [], []
-    for slug in _page_slugs(dom):
+    slugs = _page_slugs(dom)
+    for slug in slugs:
+        fm.split(
+            (dom / f"{slug}.md").read_text(encoding="utf-8"),
+            strict_code=True,
+        )
+    for slug in slugs:
         page_file = f"{slug}.md"
         p = dom / page_file
         original = p.read_text(encoding="utf-8")

@@ -39,6 +39,77 @@ uv run pytest -q
 
 `uv run iwiki-mcp` then runs the server from the checkout without a global install.
 
+## Python code graph MVP
+
+The optional code graph is a separate, local SQLite cache for the project bound to
+the primary wiki domain. It indexes Python source only and does not change
+`wiki_search` or the Markdown/vector wiki indexes. The cache paths are derived from
+the wiki base and primary domain:
+
+```text
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3-wal
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3-shm
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.lock
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.metadata.json
+```
+
+Configure it in the bound project's `.iwiki.toml`. All values are optional; these
+are the defaults. `languages` accepts only `python`. `exclude` entries must be safe
+relative paths.
+
+```toml
+[code_graph]
+enabled = true
+languages = ["python"]
+auto_rebuild = "bounded"
+max_rebuild_seconds = 10
+max_file_bytes = 1000000
+max_total_files = 20000
+include_tests = true
+exclude = []
+```
+
+The supported environment overrides are `IWIKI_CODE_GRAPH_ENABLED`,
+`IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES`, and
+`IWIKI_CODE_GRAPH_AUTO_REBUILD`. The server never builds the code graph at startup.
+Use `wiki_code_index` to request a full build; a bounded query-time rebuild is only
+attempted when configured. A missing, incompatible, stale, or failed cache returns
+typed diagnostics and leaves normal wiki operations available. A schema-v1 cache is
+incompatible and is replaced by a deterministic full rebuild.
+
+The MCP server exposes exactly four code-graph tools:
+
+| Tool | Contract |
+| --- | --- |
+| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics. |
+| `wiki_code_index` | Requests a full Python rebuild; `force` may rebuild an otherwise current cache. |
+| `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
+| `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
+
+`wiki_code_context` accepts only exact file/module/symbol entity IDs returned by the
+code graph. Its default direction is `both`, depth is `1`, and its bounded defaults
+are 50 nodes, 20 files, and 200,000 source bytes. `include_source` is `false` by
+default. Source discovery rejects unsafe paths and symlink escapes; query and context
+calls fail safely if the local cache cannot be used.
+
+Incremental indexing is not part of the Python MVP.
+TypeScript is not part of the Python MVP.
+Each needs a separate specification and delivery.
+
+### Code graph benchmark
+
+Run the offline release evidence from the repository root:
+
+```bash
+uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
+```
+
+It writes JSON and Markdown reports to the output directory. Every search case must
+have a warm maximum below `<500 ms`; this is the blocking first-release gate. The
+strict `<150 ms` comparison is reported as a non-blocking post-v1 target. Any other
+blocking gate miss writes evidence and exits nonzero.
+
 ## Search pipeline benchmark
 
 The bounded fusion benchmark under `eval/search_pipeline/` is evaluation-only: it does not change production search behavior, production fusion weights, or production rerank settings. Rerank-budget changes are deferred.

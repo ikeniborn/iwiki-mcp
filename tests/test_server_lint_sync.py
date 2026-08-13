@@ -24,6 +24,31 @@ def test_lint_one_domain(tmp_path, monkeypatch):
     assert "backend" in out["domains"]
 
 
+def test_code_lint_failure_does_not_replace_markdown_report(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server._codegraph_linking,
+        "lint_domain",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected code lint failure")
+        ),
+        raising=False,
+    )
+
+    report = server.wiki_lint("backend")["reports"]["backend"]
+
+    assert report["wiki_present"] is True
+    assert report["code_graph"] == {
+        "available": False,
+        "state": "failed",
+        "revision": None,
+        "findings": [],
+        "hint": "inspect wiki_code_status and retry",
+    }
+
+
 def test_lint_resolves_only_visible_cross_domain_targets_without_migration(
     tmp_path, monkeypatch
 ):

@@ -8,11 +8,14 @@ from __future__ import annotations
 import datetime as _dt
 import functools
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
 import json
+import logging
 import os
 import re
 import secrets
 import sys
+import time
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
@@ -22,6 +25,20 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
+# Code graph adapters join the full startup import closure; their grammar and
+# parser initialization remains lazy until an adapter parses source.
+from .codegraph import config as _codegraph_config  # noqa: F401
+from .codegraph import discovery as _codegraph_discovery  # noqa: F401
+from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
+from .codegraph import indexer as _codegraph_indexer
+from .codegraph import linking as _codegraph_linking
+from .codegraph import location as _codegraph_location  # noqa: F401
+from .codegraph import models as _codegraph_models  # noqa: F401
+from .codegraph import runtime as _codegraph_runtime  # noqa: F401
+from .codegraph import schema as _codegraph_schema  # noqa: F401
+from .codegraph import store as _codegraph_store  # noqa: F401
+from .codegraph import languages as _codegraph_languages  # noqa: F401
+from .codegraph.languages import python as _codegraph_python  # noqa: F401
 from .lock import mutation_lock
 from .engine import rerank
 from .engine import frontmatter as _fm
@@ -48,6 +65,58 @@ from .engine.section import SectionError, replace_section
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unavailable"
+
+
+_PYTHON_PARSER_VERSION = (
+    "tree-sitter-python:" + _distribution_version("tree-sitter-python")
+)
+
+
+def _code_graph_adapter_factories(repository_id):
+    def create_python_adapter(source_paths):
+        return _codegraph_python.PythonAdapter(
+            repository_id,
+            source_paths,
+            parser_version=_PYTHON_PARSER_VERSION,
+        )
+
+    return {
+        "python": _codegraph_indexer.AdapterFactory(
+            create=create_python_adapter,
+            extensions=(".py",),
+            parser_version=_PYTHON_PARSER_VERSION,
+            grammar_version=";".join((
+                "tree-sitter:" + _distribution_version("tree-sitter"),
+                "tree-sitter-language-pack:"
+                + _distribution_version("tree-sitter-language-pack"),
+                _PYTHON_PARSER_VERSION,
+            )),
+            adapter_version="python-adapter-v2",
+        )
+    }
+
+
+def _code_runtime(binding: base.Binding):
+    """Compose configured language adapters without initializing parsers."""
+    runtime = _codegraph_runtime.CodeGraphRuntime(
+        binding,
+        adapter_factories=_code_graph_adapter_factories(binding.primary),
+    )
+    if runtime._indexer is not None:
+        runtime._indexer.wiki_selector_resolver = (
+            _codegraph_linking.WikiSelectorResolver(binding.base)
+        )
+    return runtime
 
 
 class _ActivityReceiveStream:
@@ -188,6 +257,8 @@ def _safe(fn):
     def wrap(*a, **k):
         try:
             return fn(*a, **k)
+        except _codegraph_models.CodeGraphError as e:
+            return _codegraph_runtime.sanitized_error(e)
         except base.BaseError as e:
             return {"error": str(e), "hint": "set IWIKI_BASE_DIR or run wiki_bind"}
         except (ConfigError, EmbedError) as e:
@@ -211,6 +282,34 @@ def _safe(fn):
             return result
         except Exception as e:
             return {"error": str(e), "hint": "unexpected error; see server logs"}
+
+    return wrap
+
+
+def _code_safe(fn):
+    """Sanitize unexpected code-tool failures without changing Wiki tools."""
+    @functools.wraps(fn)
+    def wrap(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return fn(*args, **kwargs)
+        except _codegraph_models.CodeGraphError as exc:
+            return _codegraph_runtime.sanitized_error(exc)
+        except base.BaseError:
+            return _missing_code_primary()
+        except (ConfigError, EmbedError):
+            raise
+        except Exception:
+            duration_ms = max(0, int((time.monotonic() - started) * 1000))
+            LOGGER.error(
+                "code_graph_handler code=rebuild_failed count=1 duration_ms=%d",
+                duration_ms,
+            )
+            return {
+                "error": "code graph rebuild failed",
+                "code": "rebuild_failed",
+                "hint": "inspect wiki_code_status and retry",
+            }
 
     return wrap
 
@@ -420,6 +519,115 @@ def wiki_status() -> dict:
         "project_dir": bind.project_dir,
         "domains": base.list_domains(bind.base),
     }
+
+
+def _missing_code_primary() -> dict:
+    return {
+        "error": "code graph is not configured",
+        "code": "not_configured",
+        "hint": "configure a primary domain and enable code_graph",
+    }
+
+
+def _invalid_code_config() -> dict:
+    return {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
+@_safe
+@_code_safe
+def wiki_code_status() -> dict:
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).status()
+
+
+@_safe
+@_code_safe
+def wiki_code_index(
+    force: bool = False,
+    languages: list[str] | None = None,
+) -> dict:
+    if languages is not None and (
+        not languages or any(language != "python" for language in languages)
+    ):
+        return _invalid_code_config()
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).index(force=force, languages=languages)
+
+
+@_safe
+@_code_safe
+def wiki_code_search(
+    query: str,
+    kinds: list[str] | None = None,
+    path: str | None = None,
+    languages: list[str] | None = None,
+    limit: int = 20,
+) -> dict:
+    _codegraph_runtime.validate_search_request(
+        query,
+        kinds=kinds,
+        path=path,
+        languages=languages,
+        limit=limit,
+    )
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).search(
+        query,
+        kinds=kinds,
+        path=path,
+        languages=languages,
+        limit=limit,
+    )
+
+
+@_safe
+@_code_safe
+def wiki_code_context(
+    seeds: list[str],
+    direction: Literal["in", "out", "both"] = "both",
+    depth: int = 1,
+    relations: list[str] | None = None,
+    include_source: bool = False,
+    include_wiki: bool = True,
+    max_nodes: int = 50,
+    max_files: int = 20,
+    max_source_bytes: int = 200_000,
+) -> dict:
+    _codegraph_runtime.validate_context_request(
+        seeds,
+        direction=direction,
+        depth=depth,
+        relations=relations,
+        include_source=include_source,
+        include_wiki=include_wiki,
+        max_nodes=max_nodes,
+        max_files=max_files,
+        max_source_bytes=max_source_bytes,
+    )
+    bind = base.resolve_binding()
+    if bind.primary is None:
+        return _missing_code_primary()
+    return _code_runtime(bind).context(
+        seeds,
+        direction=direction,
+        depth=depth,
+        relations=relations,
+        include_source=include_source,
+        include_wiki=include_wiki,
+        max_nodes=max_nodes,
+        max_files=max_files,
+        max_source_bytes=max_source_bytes,
+    )
 
 
 @_safe
@@ -695,6 +903,23 @@ def wiki_write_page(
             "hint": "create it with wiki_create_domain",
         }
     base.migrate_store_location(bind.base, valid_domain)
+    try:
+        authored_meta, authored_body = _fm.split(markdown, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "use only code.symbols, code.files, and code.source_globs",
+        }
+    authored_code = authored_meta.get("code") if "code" in authored_meta else None
+    if authored_code is not None:
+        try:
+            _codegraph_linking.validate_code_mapping(authored_code)
+        except _codegraph_linking.SelectorError as exc:
+            return {
+                "error": str(exc),
+                "hint": "use only code.symbols, code.files, and code.source_globs",
+            }
+        markdown = authored_body
     markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
@@ -726,7 +951,8 @@ def wiki_write_page(
         cfg, bind.base, valid_domain, _slug_parts(slug)[-1], markdown,
         source=source, explicit_type=type, explicit_tags=tags,
         explicit_description=description, explicit_status=status,
-        timestamp_path=f"{valid_domain}/{slug}.md")
+        timestamp_path=f"{valid_domain}/{slug}.md",
+        authored_code=authored_code)
     meta, _ = _fm.split(fm_block)
     resolved_type = meta.get("type")
     try:
@@ -1032,7 +1258,13 @@ def wiki_update_page(
         }
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     original_full = open(path, encoding="utf-8").read()
-    meta, original_body = _fm.split(original_full)
+    try:
+        meta, original_body = _fm.split(original_full, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before updating",
+        }
     new_body = to_markdown_links(new_body)
     try:
         new_body = replace_section(
@@ -1310,13 +1542,39 @@ def wiki_lint(domain: str | None = None) -> dict:
     }
     reports = {}
     for target in valid_targets:
-        reports[target] = lint(
+        report = lint(
             visible_domains[target],
             project_dir=bind.project_dir,
             domain=target,
             base_dir=bind.base,
             visible_domains=visible_domains,
         )
+        try:
+            if target != bind.primary:
+                code_report = {
+                    "available": False,
+                    "state": "disabled",
+                    "revision": None,
+                    "findings": [],
+                    "hint": "code graph follows the bound primary domain",
+                }
+            else:
+                runtime = _code_runtime(bind)
+                code_report = _codegraph_linking.lint_domain(
+                    visible_domains[target],
+                    domain=target,
+                    runtime=runtime,
+                )
+        except Exception:
+            code_report = {
+                "available": False,
+                "state": "failed",
+                "revision": None,
+                "findings": [],
+                "hint": "inspect wiki_code_status and retry",
+            }
+        report["code_graph"] = code_report
+        reports[target] = report
     return {"domains": list(reports.keys()), "reports": reports}
 
 
@@ -1467,6 +1725,18 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     if not dom_path.is_dir():
         return {"error": f"domain '{target}' not found",
                 "hint": "create it with wiki_create_domain"}
+    try:
+        for page_path in sorted(dom_path.rglob("*.md")):
+            if page_path.relative_to(dom_path).as_posix() in RESERVED_OKF:
+                continue
+            _fm.split(
+                page_path.read_text(encoding="utf-8"), strict_code=True
+            )
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before migrating OKF",
+        }
     base.migrate_store_location(bind.base, target)
     cfg = Config.load()
     graph_mutation = indexer.prepare_graph_mutation(
@@ -1573,7 +1843,7 @@ def _apply_okf_page_move(
     new_file = f"{new_identity}.md"
     current_path = _page_path(bind.base, domain, current_identity)
     original = Path(current_path).read_text(encoding="utf-8")
-    existing_meta, _ = _fm.split(original)
+    existing_meta, _ = _fm.split(original, strict_code=True)
     target_edit = next(
         edit
         for edit in prepared.edits
@@ -1597,6 +1867,7 @@ def _apply_okf_page_move(
         explicit_description=existing_meta.get("description"),
         explicit_status=existing_meta.get("status"),
         timestamp_path=f"{domain}/{current_file}",
+        authored_code=existing_meta.get("code"),
     )
 
     edits = {(edit.domain, edit.file): edit for edit in prepared.edits}
@@ -1716,6 +1987,15 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     if not os.path.isfile(current_path):
         return {"error": f"page '{valid_domain}/{current_identity}' not found",
                 "hint": "list pages with wiki_list_pages"}
+    try:
+        _fm.split(
+            Path(current_path).read_text(encoding="utf-8"), strict_code=True
+        )
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before applying OKF",
+        }
     new_identity = _resolve_identity(_slug_parts(slug)[-1], _fm.normalize_type(type))
     move_change = okf.MoveChange((), ())
     if current_identity != new_identity:
@@ -1742,7 +2022,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     page_file = identity + ".md"
     path = _page_path(bind.base, valid_domain, identity)
     original = open(path, encoding="utf-8").read()
-    existing_meta, body = _fm.split(original)
+    existing_meta, body = _fm.split(original, strict_code=True)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
     apply_desc = existing_meta.get("description")
     apply_status = existing_meta.get("status")
@@ -1758,7 +2038,8 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         # git has no history yet at the NEW (just-moved) path -- look up the
         # PRE-move identity so an existing page's original timestamp survives
         # a type change instead of resetting to today.
-        timestamp_path=f"{valid_domain}/{current_identity}.md")
+        timestamp_path=f"{valid_domain}/{current_identity}.md",
+        authored_code=existing_meta.get("code"))
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(fm_block + body)
@@ -1807,7 +2088,13 @@ def wiki_export_okf(domain: str | None = None) -> dict:
     graph_mutation = indexer.prepare_graph_mutation(
         bind.base, valid_domain, whole_domain=True
     )
-    swept = okf.batch_sweep(cfg, bind.base, valid_domain)
+    try:
+        swept = okf.batch_sweep(cfg, bind.base, valid_domain)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before exporting OKF",
+        }
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     art_warn = okf.refresh_artifacts(bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: export okf {valid_domain}",
@@ -1853,6 +2140,10 @@ wiki_sync = _mutation_guard(wiki_sync)
 
 # Thin MCP wrappers; implementation functions above stay unit-testable.
 mcp.tool()(wiki_status)
+mcp.tool()(wiki_code_status)
+mcp.tool()(wiki_code_index)
+mcp.tool()(wiki_code_search)
+mcp.tool()(wiki_code_context)
 mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)
@@ -1922,7 +2213,10 @@ def main() -> None:
         _print_startup_failure(str(exc), cfg)
         raise SystemExit(1) from None
     mcp.set_idle_timeout(cfg.idle_timeout_seconds)
-    mcp.run()
+    try:
+        mcp.run()
+    finally:
+        _codegraph_runtime.shutdown_code_graph_workers()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 plus the governed type/tag vocabulary. Importable by validate/lint (config-free).
 """
 from __future__ import annotations
+import json
 import os
 import re
 
@@ -21,51 +22,203 @@ _H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 _FM = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 
+class FrontmatterError(ValueError):
+    """Raised when supported nested frontmatter is malformed."""
+
+
+class _OpaqueCode(tuple):
+    """Retain malformed authored code lines for fail-soft ordinary Wiki paths."""
+
+
+class _OpaqueMeta(dict):
+    """Retain a whole ambiguous frontmatter block for fail-soft read paths."""
+
+    def __init__(self, values: dict, raw_frontmatter: str):
+        super().__init__(values)
+        self.raw_frontmatter = raw_frontmatter
+
+
 def _needs_quote(s: str) -> bool:
-    return (s == "" or s != s.strip() or s[:1] in ("[", "{", '"')
+    return (s == "" or s != s.strip() or s[:1] in "-?:,[]{}#&*!|>'\"%@`"
             or "," in s or ": " in s or s.endswith(":"))
 
 
-def split(content: str) -> tuple[dict, str]:
+def _scalar(value: str):
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        return parsed if isinstance(parsed, str) else value
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if value.startswith("[") and value.endswith("]"):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list) and all(type(item) is str for item in parsed):
+            return parsed
+        items = [item.strip() for item in value[1:-1].split(",")]
+        return [_scalar(item) for item in items if item]
+    return value
+
+
+def _nested_code(lines: list[str]) -> dict:
+    code: dict = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+        match = re.fullmatch(r"  ([^:\s][^:]*):\s*(.*)", line)
+        if match is None:
+            raise FrontmatterError("invalid nested code frontmatter")
+        key, inline = match.group(1).strip(), match.group(2).strip()
+        if key in code:
+            raise FrontmatterError("duplicate nested code frontmatter key")
+        if inline:
+            code[key] = _scalar(inline)
+            index += 1
+            continue
+        values: list = []
+        index += 1
+        while index < len(lines):
+            item = lines[index]
+            if item.startswith("  ") and not item.startswith("    "):
+                break
+            continuation = re.fullmatch(
+                r"      ([^:\s][^:]*):\s*(.*)", item
+            )
+            if continuation is not None and values and isinstance(values[-1], dict):
+                nested_key = continuation.group(1).strip()
+                if nested_key in values[-1]:
+                    raise FrontmatterError(
+                        "duplicate nested code frontmatter key"
+                    )
+                values[-1][nested_key] = _scalar(
+                    continuation.group(2).strip()
+                )
+                index += 1
+                continue
+            item_match = re.fullmatch(r"    -(?:\s+(.*))?", item)
+            if item_match is None:
+                raise FrontmatterError("invalid nested code frontmatter")
+            payload = (item_match.group(1) or "").strip()
+            mapping_match = re.fullmatch(r"([^:\s][^:]*):\s*(.*)", payload)
+            if mapping_match is not None:
+                values.append({
+                    mapping_match.group(1).strip(): _scalar(
+                        mapping_match.group(2).strip()
+                    )
+                })
+            else:
+                values.append(_scalar(payload))
+            index += 1
+        code[key] = values
+    return code
+
+
+def split(content: str, *, strict_code: bool = False) -> tuple[dict, str]:
     """Strip a leading ``---\\n…\\n---\\n`` block. Fail-soft: no/broken block -> ({}, content)."""
     m = _FM.match(content)
     if not m:
         return {}, content
     meta: dict = {}
-    for line in m.group(1).splitlines():
+    lines = m.group(1).splitlines()
+    index = 0
+    seen_code = False
+    while index < len(lines):
+        line = lines[index]
         line = line.rstrip()
-        if not line or ":" not in line:
+        if not line or line.startswith((" ", "\t")) or ":" not in line:
+            index += 1
             continue
         key, _, val = line.partition(":")
         key, val = key.strip(), val.strip()
-        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
-            meta[key] = val[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif val.startswith("[") and val.endswith("]"):
-            items = [x.strip() for x in val[1:-1].split(",")]
-            meta[key] = [x for x in items if x]
+        if key == "code":
+            if seen_code:
+                if strict_code:
+                    raise FrontmatterError("duplicate code frontmatter key")
+                return _OpaqueMeta(meta, content[:m.end()]), content[m.end():]
+            seen_code = True
+        if key == "code" and not val:
+            nested: list[str] = []
+            index += 1
+            while index < len(lines) and (
+                not lines[index].strip()
+                or lines[index].startswith((" ", "\t"))
+            ):
+                nested.append(lines[index])
+                index += 1
+            try:
+                meta[key] = _nested_code(nested)
+            except FrontmatterError:
+                if strict_code:
+                    raise
+                meta[key] = _OpaqueCode(nested)
+            continue
         else:
-            meta[key] = val
+            meta[key] = _scalar(val)
+        index += 1
     return meta, content[m.end():]
+
+
+def _render_scalar(value: object) -> str:
+    if type(value) is not str:
+        raise TypeError("frontmatter values must be strings, lists, or mappings")
+    if _needs_quote(value):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _render_code(value: object) -> list[str]:
+    if isinstance(value, _OpaqueCode):
+        return ["code:", *value]
+    if not isinstance(value, dict):
+        raise TypeError("code frontmatter must be a mapping")
+    lines = ["code:"]
+    for key, items in value.items():
+        if type(key) is not str or type(items) is not list:
+            raise TypeError("code frontmatter must contain list values")
+        lines.append(f"  {key}:")
+        for item in items:
+            if isinstance(item, dict):
+                if not item:
+                    raise TypeError("nested selector mappings must not be empty")
+                for index, (nested_key, nested_value) in enumerate(item.items()):
+                    if type(nested_key) is not str:
+                        raise TypeError("selector keys must be strings")
+                    prefix = "    - " if index == 0 else "      "
+                    lines.append(
+                        f"{prefix}{nested_key}: {_render_scalar(nested_value)}"
+                    )
+            else:
+                lines.append(f"    - {_render_scalar(item)}")
+    return lines
 
 
 def render(meta: dict) -> str:
     """Emit a frontmatter block in a stable key order. Lists render inline;
     scalar strings are double-quoted (with escaping) when bare emission would
     be ambiguous or invalid YAML (see ``_needs_quote``)."""
-    order = ["type", "title", "description", "resource", "tags", "status", "timestamp"]
+    if isinstance(meta, _OpaqueMeta):
+        return meta.raw_frontmatter
+    order = [
+        "type", "title", "description", "resource", "tags", "status",
+        "code", "timestamp",
+    ]
     keys = [k for k in order if k in meta] + [k for k in meta if k not in order]
     lines = ["---"]
     for k in keys:
         v = meta[k]
-        if isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(v)}]")
+        if k == "code":
+            lines.extend(_render_code(v))
+        elif isinstance(v, list):
+            lines.append(f"{k}: [{', '.join(_render_scalar(item) for item in v)}]")
         else:
-            v = str(v)
-            if _needs_quote(v):
-                esc = v.replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'{k}: "{esc}"')
-            else:
-                lines.append(f"{k}: {v}")
+            lines.append(f"{k}: {_render_scalar(v)}")
     lines.append("---\n")
     return "\n".join(lines)
 

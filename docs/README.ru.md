@@ -39,6 +39,77 @@ uv run pytest -q
 
 После этого `uv run iwiki-mcp` запускает сервер из копии без глобальной установки.
 
+## Python code graph MVP
+
+Опциональный code graph — отдельный локальный SQLite-кэш проекта, привязанного к
+primary wiki-домену. Он индексирует только Python-исходники и не меняет
+`wiki_search` или Markdown/vector индексы wiki. Пути кэша выводятся из wiki-base и
+primary domain:
+
+```text
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3-wal
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3-shm
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.lock
+<IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.metadata.json
+```
+
+Настройте его в `.iwiki.toml` привязанного проекта. Все значения необязательны;
+ниже приведены defaults. `languages` принимает только `python`; значения `exclude`
+должны быть безопасными относительными путями.
+
+```toml
+[code_graph]
+enabled = true
+languages = ["python"]
+auto_rebuild = "bounded"
+max_rebuild_seconds = 10
+max_file_bytes = 1000000
+max_total_files = 20000
+include_tests = true
+exclude = []
+```
+
+Поддерживаемые environment overrides: `IWIKI_CODE_GRAPH_ENABLED`,
+`IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES` и
+`IWIKI_CODE_GRAPH_AUTO_REBUILD`. Сервер не строит code graph при startup.
+`wiki_code_index` запрашивает полный rebuild; ограниченный rebuild во время запроса
+возможен только при соответствующей настройке. Missing, incompatible, stale или
+failed кэш возвращает typed diagnostics, не ломая обычные wiki-операции. Кэш
+schema-v1 несовместим и заменяется детерминированным полным rebuild.
+
+Сервер MCP предоставляет ровно четыре code-graph инструмента:
+
+| Инструмент | Контракт |
+| --- | --- |
+| `wiki_code_status` | Возвращает настройку, состояние, freshness и diagnostics локального кэша. |
+| `wiki_code_index` | Запрашивает полный Python rebuild; `force` может перестроить уже current кэш. |
+| `wiki_code_search` | Ищет typed file, module и symbol entities с optional kind, path, language и limit filters. |
+| `wiki_code_context` | Расширяет точные typed entity-ID `seeds` через bounded relations; source по умолчанию выключен. |
+
+`wiki_code_context` принимает только точные file/module/symbol entity IDs, возвращённые
+code graph. Default: direction `both`, depth `1`, максимум 50 nodes, 20 files и
+200000 source bytes. `include_source` по умолчанию `false`. Source discovery
+отклоняет unsafe paths и symlink escapes; query и context безопасно завершаются,
+если локальный кэш нельзя использовать.
+
+Incremental indexing is not part of the Python MVP.
+TypeScript is not part of the Python MVP.
+Для каждого нужна отдельная specification и delivery.
+
+### Code graph benchmark
+
+Запустите offline release evidence из корня репозитория:
+
+```bash
+uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
+```
+
+Команда записывает JSON и Markdown reports в output directory. Warm maximum каждого
+search case должен быть ниже `<500 ms`; это blocking first-release gate. Сравнение
+с `<150 ms` только reportится как non-blocking post-v1 target. Иной blocking miss
+записывает evidence и завершается nonzero.
+
 ## Бенчмарк search pipeline
 
 Bounded fusion benchmark в `eval/search_pipeline/` предназначен только для evaluation: он не меняет production-поиск, production fusion weights и production rerank settings. Изменение rerank-budget отложено.
