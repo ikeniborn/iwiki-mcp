@@ -409,7 +409,7 @@ def test_search_handler_maps_lazy_cursor_failure_without_leaking_text(
             self.connection = connection
 
         def execute(self, statement, parameters=()):
-            if statement.lstrip().startswith("WITH entities"):
+            if statement.startswith("/* iwiki-rank:"):
                 return LazyFailureCursor()
             return self.connection.execute(statement, parameters)
 

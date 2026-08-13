@@ -141,62 +141,11 @@ def _lexical_expression(column: str, tokens: tuple[str, ...]) -> tuple[str, list
     )
 
 
-def _canonical_rank_sql(request: ValidatedSearchRequest) -> tuple[str, list[str]]:
-    lexical_sql, lexical_parameters = _lexical_expression(
-        "name_tokens_casefold", request.tokens
-    )
-    folded = request.query.casefold()
-    sql = f"""
-        CASE
-            WHEN qualified_name = ? THEN {MATCH_RANK['qualified_exact']}
-            WHEN local_name = ? THEN {MATCH_RANK['local_exact']}
-            WHEN substr(qualified_name, 1, length(?)) = ?
-              OR substr(local_name, 1, length(?)) = ?
-                THEN {MATCH_RANK['canonical_prefix']}
-            WHEN {lexical_sql} THEN {MATCH_RANK['canonical_lexical']}
-            WHEN signature IS NOT NULL
-             AND instr(COALESCE(signature_casefold, lower(signature)), ?) > 0
-                THEN {MATCH_RANK['signature']}
-            WHEN instr(COALESCE(path_casefold, lower(path)), ?) > 0
-                THEN {MATCH_RANK['path']}
-        END
-    """
-    return sql, [
-        request.query,
-        request.query,
-        request.query,
-        request.query,
-        request.query,
-        request.query,
-        *lexical_parameters,
-        folded,
-        folded,
-    ]
-
-
-def _alias_rank_sql(request: ValidatedSearchRequest) -> tuple[str, list[str]]:
-    lexical_sql, lexical_parameters = _lexical_expression(
-        "binding_name_tokens_casefold", request.tokens
-    )
-    sql = f"""
-        CASE
-            WHEN binding_name = ? THEN {MATCH_RANK['alias_exact']}
-            WHEN substr(binding_name, 1, length(?)) = ?
-                THEN {MATCH_RANK['alias_prefix']}
-            WHEN {lexical_sql} THEN {MATCH_RANK['alias_lexical']}
-        END
-    """
-    return sql, [
-        request.query,
-        request.query,
-        request.query,
-        *lexical_parameters,
-    ]
-
-
-def _query_sql(
+def _rank_query(
     domain: str,
     request: ValidatedSearchRequest,
+    name: str,
+    excluded_ids: tuple[str, ...],
 ) -> tuple[str, list[object]]:
     placeholders = ", ".join("?" for _kind in request.kinds)
     path_filter = ""
@@ -204,10 +153,101 @@ def _query_sql(
     if request.path is not None:
         path_filter = "AND substr(path, 1, length(?)) = ?"
         path_parameters.extend((request.path, request.path))
-    canonical_rank, canonical_parameters = _canonical_rank_sql(request)
-    alias_rank, alias_parameters = _alias_rank_sql(request)
-    sql = f"""
-        WITH entities ({_ENTITY_COLUMNS}) AS (
+    excluded_sql = ""
+    if excluded_ids:
+        excluded_sql = "AND entity_id NOT IN (" + ", ".join(
+            "?" for _item in excluded_ids
+        ) + ")"
+    rank = MATCH_RANK[name]
+    if name.startswith("alias_"):
+        if name == "alias_exact":
+            predicate, rank_parameters = "binding_name = ?", [request.query]
+        elif name == "alias_prefix":
+            predicate = "substr(binding_name, 1, length(?)) = ? AND binding_name != ?"
+            rank_parameters = [request.query, request.query, request.query]
+        else:
+            lexical, lexical_parameters = _lexical_expression(
+                "binding_name_tokens_casefold", request.tokens
+            )
+            predicate = (
+                f"({lexical}) AND binding_name != ? "
+                "AND NOT (substr(binding_name, 1, length(?)) = ?)"
+            )
+            rank_parameters = [
+                *lexical_parameters, request.query, request.query, request.query
+            ]
+        sql = f"""/* iwiki-rank:{name} */
+WITH alias_targets AS (
+    SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold,
+           f.module_id AS entity_id, 'module' AS entity_type, f.file_id,
+           f.module_id, NULL AS symbol_id, 'module' AS kind,
+           f.module_qualified_name AS qualified_name, f.module_local_name AS local_name,
+           f.module_name_tokens_casefold AS name_tokens_casefold, NULL AS signature,
+           NULL AS signature_casefold, f.path, f.path_casefold, f.start_line,
+           f.end_line, f.start_byte, f.end_byte
+    FROM relations AS r JOIN files AS f ON f.module_id = r.target_module_id
+    WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
+      AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
+      AND f.repository_id = ? AND f.language = ? AND 'module' IN ({placeholders}) {path_filter}
+    UNION ALL
+    SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold, s.symbol_id,
+           'symbol', f.file_id, f.module_id, s.symbol_id, s.kind, s.qualified_name,
+           s.local_name, s.name_tokens_casefold, s.signature, s.signature_casefold,
+           f.path, f.path_casefold, s.start_line, s.end_line, s.start_byte, s.end_byte
+    FROM relations AS r JOIN symbols AS s ON s.symbol_id = r.target_symbol_id
+    JOIN files AS f ON f.file_id = s.file_id
+    WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
+      AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
+      AND f.repository_id = ? AND f.language = ? AND s.kind IN ({placeholders}) {path_filter}
+), alias_counts AS (
+    SELECT binding_name, COUNT(DISTINCT entity_id) AS target_count
+    FROM alias_targets GROUP BY binding_name
+), ranked AS (
+    SELECT a.*, c.target_count, ROW_NUMBER() OVER (
+        PARTITION BY a.entity_id ORDER BY a.binding_name
+    ) AS row_number
+    FROM alias_targets AS a JOIN alias_counts AS c USING (binding_name)
+    WHERE {predicate} {excluded_sql}
+)
+SELECT {_ENTITY_COLUMNS}, {rank} AS match_rank, binding_name AS matched_alias,
+       target_count AS alias_target_count
+FROM ranked WHERE row_number = 1 ORDER BY qualified_name, entity_id, matched_alias LIMIT ?"""
+        return sql, [
+            domain, request.language, *request.kinds, *path_parameters,
+            domain, request.language, *request.kinds, *path_parameters,
+            *rank_parameters, *excluded_ids,
+        ]
+    prefix = (
+        "substr(qualified_name, 1, length(?)) = ? "
+        "OR substr(local_name, 1, length(?)) = ?"
+    )
+    exact = "qualified_name = ? OR local_name = ?"
+    if name == "qualified_exact":
+        predicate, rank_parameters = "qualified_name = ?", [request.query]
+    elif name == "local_exact":
+        predicate = "local_name = ? AND qualified_name != ?"
+        rank_parameters = [request.query, request.query]
+    elif name == "canonical_prefix":
+        predicate = f"({prefix}) AND NOT ({exact})"
+        rank_parameters = [request.query] * 6
+    elif name == "canonical_lexical":
+        lexical, lexical_parameters = _lexical_expression("name_tokens_casefold", request.tokens)
+        predicate = f"({lexical}) AND NOT ({prefix}) AND NOT ({exact})"
+        rank_parameters = [*lexical_parameters, *([request.query] * 6)]
+    elif name == "signature":
+        predicate = (
+            "signature IS NOT NULL AND instr(COALESCE(signature_casefold, "
+            f"lower(signature)), ?) > 0 AND NOT ({prefix}) AND NOT ({exact})"
+        )
+        rank_parameters = [request.query.casefold(), *([request.query] * 6)]
+    else:
+        predicate = (
+            "instr(COALESCE(path_casefold, lower(path)), ?) > 0 "
+            f"AND NOT ({prefix}) AND NOT ({exact})"
+        )
+        rank_parameters = [request.query.casefold(), *([request.query] * 6)]
+    sql = f"""/* iwiki-rank:{name} */
+WITH entities ({_ENTITY_COLUMNS}) AS (
             SELECT
                 f.file_id, 'file', f.file_id, NULL, NULL, 'file',
                 f.path, f.file_local_name, f.file_name_tokens_casefold,
@@ -235,85 +275,14 @@ def _query_sql(
             FROM symbols AS s
             JOIN files AS f ON f.file_id = s.file_id
             WHERE f.repository_id = ? AND f.language = ?
-        ),
-        filtered_entities AS (
-            SELECT {_ENTITY_COLUMNS}
-            FROM entities
-            WHERE kind IN ({placeholders}) {path_filter}
-        ),
-        ranked_canonical AS (
-            SELECT {_ENTITY_COLUMNS}, {canonical_rank} AS match_rank
-            FROM filtered_entities
-        ),
-        canonical_matches AS (
-            SELECT {_ENTITY_COLUMNS}, match_rank, NULL AS matched_alias,
-                   0 AS alias_target_count
-            FROM ranked_canonical
-            WHERE match_rank IS NOT NULL
-        ),
-        alias_targets AS (
-            SELECT DISTINCT
-                r.binding_name, r.binding_name_tokens_casefold,
-                e.{_ENTITY_COLUMNS.replace(', ', ', e.')}
-            FROM relations AS r
-            JOIN filtered_entities AS e
-              ON e.entity_type = 'module'
-             AND e.module_id = r.target_module_id
-            WHERE r.relation_type = 'IMPORTS'
-              AND r.binding_kind = 'explicit_alias'
-              AND r.resolution_state IN (
-                  'resolved', 'ambiguous', 'partially_resolved'
-              )
-            UNION ALL
-            SELECT DISTINCT
-                r.binding_name, r.binding_name_tokens_casefold,
-                e.{_ENTITY_COLUMNS.replace(', ', ', e.')}
-            FROM relations AS r
-            JOIN filtered_entities AS e
-              ON e.entity_type = 'symbol'
-             AND e.symbol_id = r.target_symbol_id
-            WHERE r.relation_type = 'IMPORTS'
-              AND r.binding_kind = 'explicit_alias'
-              AND r.resolution_state IN (
-                  'resolved', 'ambiguous', 'partially_resolved'
-              )
-        ),
-        alias_counts AS (
-            SELECT binding_name, COUNT(DISTINCT entity_id) AS target_count
-            FROM alias_targets
-            GROUP BY binding_name
-        ),
-        ranked_aliases AS (
-            SELECT a.*, c.target_count, {alias_rank} AS match_rank
-            FROM alias_targets AS a
-            JOIN alias_counts AS c USING (binding_name)
-        ),
-        alias_matches AS (
-            SELECT {_ENTITY_COLUMNS}, match_rank,
-                   binding_name AS matched_alias,
-                   target_count AS alias_target_count
-            FROM ranked_aliases
-            WHERE match_rank IS NOT NULL
-        ),
-        matches AS (
-            SELECT * FROM canonical_matches
-            UNION ALL
-            SELECT * FROM alias_matches
-        )
-        SELECT * FROM matches
-        ORDER BY match_rank, qualified_name, entity_id, matched_alias
-    """
-    entity_parameters: list[object] = [
-        value
-        for _arm in range(3)
-        for value in (domain, request.language)
-    ]
+)
+SELECT {_ENTITY_COLUMNS}, {rank} AS match_rank, NULL AS matched_alias,
+       0 AS alias_target_count
+FROM entities WHERE kind IN ({placeholders}) {path_filter} AND {predicate} {excluded_sql}
+ORDER BY qualified_name, entity_id LIMIT ?"""
     return sql, [
-        *entity_parameters,
-        *request.kinds,
-        *path_parameters,
-        *canonical_parameters,
-        *alias_parameters,
+        *(value for _arm in range(3) for value in (domain, request.language)),
+        *request.kinds, *path_parameters, *rank_parameters, *excluded_ids,
     ]
 
 
@@ -329,47 +298,53 @@ class CodeGraphQuery:
         request: ValidatedSearchRequest,
     ) -> tuple[SearchResult, ...]:
         """Search one ready repository without reading project source."""
-        sql, parameters = _query_sql(self.domain, request)
         try:
-            rows = connection.execute(sql, parameters)
             results: dict[str, SearchResult] = {}
             winner_keys: dict[str, tuple[int, str, str, str]] = {}
-            for row in rows:
-                rank = int(row[17])
-                matched_alias = row[18]
-                item = SearchResult(
-                    entity_id=str(row[0]),
-                    entity_type=str(row[1]),
-                    file_id=None if row[2] is None else str(row[2]),
-                    module_id=None if row[3] is None else str(row[3]),
-                    symbol_id=None if row[4] is None else str(row[4]),
-                    kind=str(row[5]),
-                    qualified_name=str(row[6]),
-                    local_name=str(row[7]),
-                    signature=None if row[9] is None else str(row[9]),
-                    path=str(row[11]),
-                    start_line=int(row[13]),
-                    end_line=int(row[14]),
-                    start_byte=int(row[15]),
-                    end_byte=int(row[16]),
-                    match=_MATCH_BY_RANK[rank],
-                    matched_alias=(
-                        None if matched_alias is None else str(matched_alias)
-                    ),
-                    alias_ambiguous=int(row[19]) > 1,
-                    alias_target_count=int(row[19]),
+            for name in _MATCH_BY_RANK.values():
+                remaining = request.limit - len(results)
+                if remaining == 0:
+                    break
+                sql, parameters = _rank_query(
+                    self.domain, request, name, tuple(results)
                 )
-                winner_key = (
-                    rank,
-                    item.qualified_name,
-                    item.entity_id,
-                    item.matched_alias or "",
-                )
-                if winner_key < winner_keys.get(
-                    item.entity_id, (10, "", "", "")
-                ):
-                    results[item.entity_id] = item
-                    winner_keys[item.entity_id] = winner_key
+                rows = connection.execute(sql, [*parameters, remaining])
+                for row in rows:
+                    rank = int(row[17])
+                    matched_alias = row[18]
+                    item = SearchResult(
+                        entity_id=str(row[0]),
+                        entity_type=str(row[1]),
+                        file_id=None if row[2] is None else str(row[2]),
+                        module_id=None if row[3] is None else str(row[3]),
+                        symbol_id=None if row[4] is None else str(row[4]),
+                        kind=str(row[5]),
+                        qualified_name=str(row[6]),
+                        local_name=str(row[7]),
+                        signature=None if row[9] is None else str(row[9]),
+                        path=str(row[11]),
+                        start_line=int(row[13]),
+                        end_line=int(row[14]),
+                        start_byte=int(row[15]),
+                        end_byte=int(row[16]),
+                        match=_MATCH_BY_RANK[rank],
+                        matched_alias=(
+                            None if matched_alias is None else str(matched_alias)
+                        ),
+                        alias_ambiguous=int(row[19]) > 1,
+                        alias_target_count=int(row[19]),
+                    )
+                    winner_key = (
+                        rank,
+                        item.qualified_name,
+                        item.entity_id,
+                        item.matched_alias or "",
+                    )
+                    if winner_key < winner_keys.get(
+                        item.entity_id, (10, "", "", "")
+                    ):
+                        results[item.entity_id] = item
+                        winner_keys[item.entity_id] = winner_key
         except sqlite3.DatabaseError as exc:
             raise CodeGraphStoreError("code graph search failed") from exc
         return tuple(sorted(results.values(), key=result_key)[:request.limit])

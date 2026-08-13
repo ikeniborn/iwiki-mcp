@@ -8,4 +8,4 @@ def test_package_version_matches_distribution_metadata():
 
 
 def test_benchmark_remediation_plan_package_version():
-    assert iwiki_mcp.__version__ == "0.7.85"
+    assert iwiki_mcp.__version__ == "0.7.86"

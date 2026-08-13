@@ -423,6 +423,17 @@ def test_search_returns_typed_union_in_exact_rank_order(
 
     typed_results = [item for item in results if ":typed:" in item.entity_id]
     assert [row.match for row in typed_results] == EXPECTED_MATCHES
+    assert [row.entity_id for row in typed_results] == [
+        "file:typed:qualified-file",
+        "module:typed:local-module",
+        "symbol:typed:alias-exact-target",
+        "symbol:typed:canonical-prefix",
+        "symbol:typed:alias-prefix-target",
+        "symbol:typed:canonical-lexical",
+        "module:typed:alias-lexical-target",
+        "symbol:typed:signature",
+        "file:typed:path",
+    ]
     assert {row.entity_type for row in typed_results} == {
         "file", "module", "symbol",
     }
@@ -431,8 +442,14 @@ def test_search_returns_typed_union_in_exact_rank_order(
         for row in typed_results
     )
 
+    limited = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request("needle", limit=7),
+    )
+    assert limited == results[:7]
 
-def test_alias_aggregation_deduplicates_before_limit_without_candidate_cap(
+
+def test_alias_aggregation_binds_remaining_public_limit_after_deduplication(
     schema_v2_search_connection,
 ):
     statements = []
@@ -447,13 +464,66 @@ def test_alias_aggregation_deduplicates_before_limit_without_candidate_cap(
     assert results[0].matched_alias == "svc"
     assert results[0].alias_target_count == 2
     assert results[0].alias_ambiguous is True
-    selects = [
+    rank_selects = [
         statement
         for statement in statements
-        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+        if "/* iwiki-rank:" in statement
     ]
-    assert selects
-    assert all(" LIMIT " not in statement.upper() for statement in selects)
+    assert len(rank_selects) == 3
+    assert all("LIMIT 1" in statement.upper() for statement in rank_selects)
+
+
+def test_search_stops_after_first_filled_rank(schema_v2_search_connection):
+    statements = []
+    schema_v2_search_connection.set_trace_callback(statements.append)
+
+    results = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request("needle", limit=1),
+    )
+
+    assert [item.match for item in results] == ["qualified_exact"]
+    assert [
+        statement.split("*/", 1)[0].split(":", 1)[1].strip()
+        for statement in statements
+        if "/* iwiki-rank:" in statement
+    ] == ["qualified_exact"]
+
+
+def test_search_runs_all_ranks_once_when_no_rank_hits(search_connection):
+    statements = []
+    search_connection.set_trace_callback(statements.append)
+
+    assert CodeGraphQuery("backend").search(
+        search_connection,
+        validate_search_request("no-such-result", limit=1),
+    ) == ()
+
+    assert [
+        statement.split("*/", 1)[0].split(":", 1)[1].strip()
+        for statement in statements
+        if "/* iwiki-rank:" in statement
+    ] == EXPECTED_MATCHES
+
+
+def test_rank_queries_are_branch_specific_and_begin_with_rank_tag():
+    request = validate_search_request("needle", kinds=["method"])
+
+    queries = {
+        name: query_module._rank_query("backend", request, name, ())
+        for name in EXPECTED_MATCHES
+    }
+
+    for name, (sql, _parameters) in queries.items():
+        assert sql.startswith(f"/* iwiki-rank:{name} */")
+        assert "CASE" not in sql
+    assert "relations AS r" not in queries["qualified_exact"][0]
+    assert "relations AS r" in queries["alias_exact"][0]
+    assert "qualified_name = ?" in queries["qualified_exact"][0]
+    assert "local_name = ?" in queries["local_exact"][0]
+    assert "name_tokens_casefold" in queries["canonical_lexical"][0]
+    assert "signature_casefold" in queries["signature"][0]
+    assert "path_casefold" in queries["path"][0]
 
 
 def test_alias_path_filter_counts_and_returns_target_entities(
@@ -518,6 +588,21 @@ def test_canonical_winner_deduplicates_alias_and_implicit_binding_is_hidden(
         schema_v2_search_connection,
         validate_search_request("hidden_alias", kinds=["method"], limit=20),
     ) == ()
+
+
+def test_lower_alias_tiers_exclude_stronger_canonical_matches(
+    schema_v2_search_connection,
+):
+    results = CodeGraphQuery("backend").search(
+        schema_v2_search_connection,
+        validate_search_request(
+            "canonical_winner", kinds=["method"], limit=20
+        ),
+    )
+
+    assert [(item.entity_id, item.match, item.matched_alias) for item in results] == [
+        ("symbol:typed:canonical-winner", "qualified_exact", None),
+    ]
 
 
 @pytest.mark.parametrize(
