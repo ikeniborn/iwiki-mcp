@@ -1,7 +1,7 @@
 ---
 review:
-  intent_hash: 903aa221b6c8a82f
-  last_run: 2026-08-09
+  intent_hash: c2669a8a5b2d205b
+  last_run: 2026-08-13
   phases:
     structure: { status: passed }
     completeness: { status: passed }
@@ -38,7 +38,7 @@ Give MCP clients precise, bounded structural context about a bound project's sou
 - Startup overhead without rebuild remains below `100 ms`; no-op freshness check remains below `200 ms`.
 - Python top-level declaration and method extraction each reach at least `98%`; local import resolution reaches at least `95%`; statically resolvable calls reach at least `75%`; falsely resolved calls remain below `5%` on the approved benchmark corpus.
 - Repeated full builds from identical source, configuration, schema, adapters, and resolver inputs produce identical graph content and fingerprint in `100%` of benchmark runs.
-- Symbol search remains below `150 ms`, depth-1 traversal of at most 50 nodes remains below `300 ms`, indexing 1,000 Python files remains below `15 s`, database size remains below three times source text size, and indexing 10,000 files remains below `1 GiB` memory on the documented benchmark environment.
+- For the first release, every unified-search case remains below `500 ms` warm maximum on the documented 100,000-entity benchmark environment. The prior `<150 ms` value remains a non-blocking post-v1 optimization target. Depth-1 traversal of at most 50 nodes remains below `300 ms`, indexing 1,000 Python files remains below `15 s`, database size remains below three times source text size, and indexing 10,000 files remains below `1 GiB` memory.
 - Source text, credentials, and secret-like files appear in `0` external embedding requests and `0` logs.
 
 ## Strategic Context
