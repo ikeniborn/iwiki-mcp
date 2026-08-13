@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import ignore
+from .postgres.config import ConfigError as PostgresConfigError
+from .postgres.config import load_model_config, load_postgres_config
+from .storage import GitBinding, PostgresBinding
 
 try:
     import tomllib
@@ -19,18 +22,8 @@ class BaseError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class Binding:
-    base: str
-    read: tuple[str, ...]
-    write: tuple[str, ...] | str | None
-    project_dir: str
-    primary: str | None = None
-
-    def __post_init__(self) -> None:
-        domains = _unique_str_tuple(self.write)
-        object.__setattr__(self, "write", domains)
-        if self.primary is None and domains:
-            object.__setattr__(self, "primary", domains[0])
+class Binding(GitBinding):
+    """Backward-compatible name for the Git storage binding."""
 
 
 def resolve_project_dir(explicit: str | None = None) -> str:
@@ -45,9 +38,23 @@ def load_project_config(project_dir: str) -> dict[str, Any]:
     try:
         with open(config_path, "rb") as fh:
             data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _load_storage_project_config(project_dir: str) -> dict[str, Any]:
+    config_path = os.path.join(project_dir, ".iwiki.toml")
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise BaseError("project configuration could not be loaded") from exc
+    if not isinstance(data, dict):
+        raise BaseError("project configuration must be a TOML table")
+    return data
 
 
 def _as_str_tuple(value: Any) -> tuple[str, ...]:
@@ -89,11 +96,11 @@ def _resolved_write_domains(
     return write
 
 
-def writable_domains(binding: Binding) -> tuple[str, ...]:
+def writable_domains(binding: Binding | PostgresBinding) -> tuple[str, ...]:
     return binding.write
 
 
-def write_scope_error(binding: Binding, domain: str) -> dict | None:
+def write_scope_error(binding: Binding | PostgresBinding, domain: str) -> dict | None:
     if domain in writable_domains(binding):
         return None
     return {
@@ -128,9 +135,74 @@ def merge_read_scope(
     return existing_read, None
 
 
-def resolve_binding(project_dir: str | None = None) -> Binding:
+def _postgres_binding(
+    cfg: dict[str, Any], resolved_project_dir: str, storage: dict[str, Any]
+) -> PostgresBinding:
+    for name in ("read", "write"):
+        if not isinstance(cfg.get(name), list) or not cfg[name]:
+            raise BaseError(f"{name} must be a non-empty array for postgres storage")
+        if any(not isinstance(domain, str) for domain in cfg[name]):
+            raise BaseError(f"{name} elements must be strings for postgres storage")
+    read = _unique_str_tuple(cfg["read"])
+    write = _unique_str_tuple(cfg["write"])
+    if not read:
+        raise BaseError("read must be a non-empty array for postgres storage")
+    if not write:
+        raise BaseError("write must be a non-empty array for postgres storage")
+    primary_value = cfg.get("primary")
+    if primary_value is None or (
+        isinstance(primary_value, str) and not primary_value.strip()
+    ):
+        raise BaseError("primary is required for postgres storage")
+    if not isinstance(primary_value, str):
+        raise BaseError("primary must be a string for postgres storage")
+    primary = primary_value.strip()
+    if any(domain not in read for domain in write):
+        raise BaseError("write scope must be a subset of read scope")
+    if primary not in write:
+        raise BaseError("primary domain must belong to write scope")
+    iwiki_id = storage.get("iwiki_id")
+    if not isinstance(iwiki_id, str) or not iwiki_id.strip():
+        raise BaseError("storage.iwiki_id is required for local postgres storage")
+    try:
+        database = load_postgres_config(storage)
+        models = load_model_config()
+    except PostgresConfigError as exc:
+        raise BaseError(str(exc)) from exc
+    return PostgresBinding(
+        host=database.host,
+        port=database.port,
+        database=database.database,
+        user=database.user,
+        sslmode=database.sslmode,
+        password=database.password,
+        iwiki_id=iwiki_id.strip(),
+        read=read,
+        write=write,
+        primary=primary,
+        project_dir=resolved_project_dir,
+        embed_model=models.embed_model,
+        embed_dimensions=models.embed_dimensions,
+        rerank_model=models.rerank_model,
+    )
+
+
+def resolve_storage_binding(
+    project_dir: str | None = None,
+) -> Binding | PostgresBinding:
     resolved_project_dir = resolve_project_dir(project_dir)
-    cfg = load_project_config(resolved_project_dir)
+    cfg = _load_storage_project_config(resolved_project_dir)
+    storage = cfg.get("storage")
+    if storage is not None and not isinstance(storage, dict):
+        raise BaseError("storage must be a table")
+    storage_type = "git" if storage is None else storage.get("type")
+    if storage_type == "postgres":
+        if set(cfg) - {"read", "write", "primary", "storage"}:
+            raise BaseError("project configuration contains keys that are not allowed")
+        return _postgres_binding(cfg, resolved_project_dir, storage)
+    if storage_type != "git":
+        raise BaseError(f"unsupported storage type: {storage_type!r}")
+
     raw_base = cfg.get("base") or os.environ.get("IWIKI_BASE_DIR", "")
     wiki_base = str(raw_base).strip()
     if not wiki_base:
@@ -158,6 +230,10 @@ def resolve_binding(project_dir: str | None = None) -> Binding:
         primary=primary,
         project_dir=resolved_project_dir,
     )
+
+
+def resolve_binding(project_dir: str | None = None) -> Binding | PostgresBinding:
+    return resolve_storage_binding(project_dir)
 
 
 def domain_dir(base: str, domain: str) -> str:
