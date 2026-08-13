@@ -65,7 +65,7 @@ class PostgresBinding:
     iwiki_id: str
     read: tuple[str, ...]
     write: tuple[str, ...]
-    primary: str
+    primary: str | None
     project_dir: str
     embed_model: str
     embed_dimensions: int

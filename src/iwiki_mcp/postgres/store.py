@@ -17,6 +17,7 @@ from ..engine.related import related
 from ..engine.store import Record, dequantize
 from ..engine.validate import validate_page
 from ..storage import expected_revision_required, revision_conflict
+from .auth import AccessError, AuthContext
 
 
 _BLOCKING_FINDINGS = {"deep_heading", "pre_h2_text"}
@@ -45,11 +46,15 @@ class PostgresStore:
         cfg: Config,
         *,
         embedder: Callable = embed_texts,
+        auth_context: AuthContext | None = None,
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = _validate_identifier(iwiki_id, "iwiki id")
+        if auth_context is not None and auth_context.iwiki_id != self.iwiki_id:
+            raise AccessError(403)
         self.cfg = cfg
         self._embedder = embedder
+        self._auth_context = auth_context
 
     def with_embedder(self, embedder: Callable) -> "PostgresStore":
         return PostgresStore(
@@ -57,7 +62,20 @@ class PostgresStore:
             self.iwiki_id,
             self.cfg,
             embedder=embedder,
+            auth_context=self._auth_context,
         )
+
+    def _require_read(self, domain: str) -> None:
+        if self._auth_context is not None:
+            self._auth_context.require_read(domain)
+
+    def _require_write(self, domain: str) -> None:
+        if self._auth_context is not None:
+            self._auth_context.require_write(domain)
+
+    def _require_admin(self) -> None:
+        if self._auth_context is not None:
+            raise AccessError(403)
 
     def _connect(self):
         connection = psycopg.connect(self._dsn)
@@ -65,6 +83,7 @@ class PostgresStore:
         return connection
 
     def create_wiki(self, slug: str) -> None:
+        self._require_admin()
         slug = _validate_identifier(slug, "wiki slug")
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -75,6 +94,7 @@ class PostgresStore:
                 )
 
     def create_domain(self, domain: str) -> None:
+        self._require_admin()
         domain = _validate_identifier(domain, "domain")
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -92,10 +112,14 @@ class PostgresStore:
                     "ORDER BY slug",
                     (self.iwiki_id,),
                 )
-                return [row[0] for row in cursor.fetchall()]
+                domains = [row[0] for row in cursor.fetchall()]
+        if self._auth_context is None:
+            return domains
+        return [domain for domain in domains if self._auth_context.can_read(domain)]
 
     def list_pages(self, domain: str) -> list[str]:
         domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -109,6 +133,7 @@ class PostgresStore:
 
     def read_page(self, domain: str, slug: str) -> dict | None:
         domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
         slug = _validate_identifier(slug, "page slug")
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -205,14 +230,19 @@ class PostgresStore:
                 ),
             )
         for target in targets:
-            cursor.execute(
-                "SELECT p.page_id FROM iwiki.pages p "
-                "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
-                "AND d.domain_id = p.domain_id "
-                "WHERE p.iwiki_id = %s AND d.slug = %s AND p.slug = %s",
-                (self.iwiki_id, target.target_domain, target.target_page),
-            )
-            target_row = cursor.fetchone()
+            target_row = None
+            if (
+                self._auth_context is None
+                or self._auth_context.can_read(target.target_domain)
+            ):
+                cursor.execute(
+                    "SELECT p.page_id FROM iwiki.pages p "
+                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                    "AND d.domain_id = p.domain_id "
+                    "WHERE p.iwiki_id = %s AND d.slug = %s AND p.slug = %s",
+                    (self.iwiki_id, target.target_domain, target.target_page),
+                )
+                target_row = cursor.fetchone()
             cursor.execute(
                 "INSERT INTO iwiki.links ("
                 "iwiki_id, source_page_id, target_page_id, target_domain, target_slug"
@@ -229,6 +259,7 @@ class PostgresStore:
             )
 
     def write_page(self, domain: str, slug: str, markdown: str) -> dict:
+        self._require_write(_validate_identifier(domain, "domain"))
         domain, slug, markdown, chunks, records, targets = self._prepare_page(
             domain, slug, markdown
         )
@@ -269,6 +300,7 @@ class PostgresStore:
         markdown: str,
         expected_revision: int | None,
     ) -> dict:
+        self._require_write(_validate_identifier(domain, "domain"))
         if expected_revision is None:
             return expected_revision_required()
         domain, slug, markdown, chunks, records, targets = self._prepare_page(
@@ -309,6 +341,7 @@ class PostgresStore:
         slug: str,
         expected_revision: int | None,
     ) -> dict:
+        self._require_write(_validate_identifier(domain, "domain"))
         if expected_revision is None:
             return expected_revision_required()
         domain = _validate_identifier(domain, "domain")
@@ -428,6 +461,8 @@ class PostgresStore:
         tags: list | None = None,
     ) -> list[dict]:
         domains = [_validate_identifier(domain, "domain") for domain in domains]
+        for domain in domains:
+            self._require_read(domain)
         query_vector = self._embedder(self.cfg, [query])[0]
         if len(query_vector) != self.cfg.dimensions:
             raise ValueError("embedding dimension mismatch")
@@ -472,6 +507,8 @@ class PostgresStore:
 
     def hydrate_candidates(self, candidates: list[dict]) -> list[dict]:
         """Attach current chunk text for the shared reranking pipeline."""
+        for domain in {item["domain"] for item in candidates}:
+            self._require_read(_validate_identifier(domain, "domain"))
         wanted = {
             (
                 item["domain"],
@@ -524,6 +561,8 @@ class PostgresStore:
         self, domains: list[str], page: str, *, depth: int
     ) -> list[str]:
         domains = [_validate_identifier(domain, "domain") for domain in domains]
+        for domain in domains:
+            self._require_read(domain)
         records, markdown, _scores, adjacency = self._search_material(
             domains, [1.0] + [0.0] * (self.cfg.dimensions - 1)
         )
@@ -544,6 +583,7 @@ class PostgresStore:
 
     def related(self, domain: str, section_id: str) -> dict:
         domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
         records, _markdown, _scores, _adjacency = self._search_material(
             [domain], [1.0] + [0.0] * (self.cfg.dimensions - 1)
         )
@@ -584,6 +624,7 @@ class PostgresStore:
 
     def index_domain(self, domain: str) -> dict:
         domain = _validate_identifier(domain, "domain")
+        self._require_write(domain)
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -618,6 +659,9 @@ class PostgresStore:
 
     def lint_domain(self, domain: str, visible_domains: list[str]) -> dict:
         domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
+        for visible_domain in visible_domains:
+            self._require_read(_validate_identifier(visible_domain, "domain"))
         visible = {
             visible_domain: set(self.list_pages(visible_domain))
             for visible_domain in visible_domains

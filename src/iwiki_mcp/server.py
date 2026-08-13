@@ -27,6 +27,7 @@ from mcp.server.stdio import stdio_server
 
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from .postgres import migrations as _postgres_migrations  # noqa: F401
+from .postgres import auth as _postgres_auth  # noqa: F401
 from .postgres import store as _postgres_store  # noqa: F401
 # Code graph adapters join the full startup import closure; their grammar and
 # parser initialization remains lazy until an adapter parses source.
@@ -246,10 +247,18 @@ def _is_postgres(binding) -> bool:
 
 
 def _postgres_store_for_binding(binding: base.PostgresBinding):
+    auth_context = _postgres_auth.AuthContext(
+        iwiki_id=binding.iwiki_id,
+        token_id="",
+        read_domains=tuple(binding.read),
+        write_domains=tuple(binding.write),
+        primary=binding.primary,
+    )
     return _postgres_store.PostgresStore(
         binding.connection_dsn(),
         binding.iwiki_id,
         Config.load(),
+        auth_context=auth_context,
     )
 
 
@@ -313,6 +322,11 @@ def _safe(fn):
             return {
                 "error": "PostgreSQL operation failed",
                 "hint": "retry or inspect sanitized server diagnostics",
+            }
+        except _postgres_auth.AccessError:
+            return {
+                "error": "access_denied",
+                "hint": "the authenticated context does not allow this operation",
             }
         except cross_domain.CrossDomainError as e:
             hint = {
@@ -1871,7 +1885,10 @@ def wiki_bind(
                 "error": "write scope must be a subset of read scope",
                 "hint": "include every write domain in read scope",
             }
-        if valid_primary is None or valid_primary not in valid_write:
+        if (
+            (valid_write and valid_primary not in valid_write)
+            or (not valid_write and valid_primary is not None)
+        ):
             return {
                 "error": "primary domain must belong to write scope",
                 "hint": "select a primary from the narrowed write scope",

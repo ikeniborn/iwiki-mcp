@@ -339,13 +339,18 @@ def test_real_postgres_handlers_preserve_revision_and_conflict(
         "embed_texts",
         lambda _cfg, texts: [[1.0, 0.0, 0.0] for _text in texts],
     )
+    admin_store = server._postgres_store.PostgresStore(
+        clean_postgres,
+        "wiki-a",
+        cfg,
+    )
+    admin_store.create_wiki("wiki-a")
+    admin_store.create_domain("docs")
     store = server._postgres_store_for_binding(binding)
     store._embedder = lambda _cfg, texts: [
         [1.0, 0.0, 0.0] for _text in texts
     ]
     monkeypatch.setattr(server, "_postgres_store_for_binding", lambda _binding: store)
-    store.create_wiki("wiki-a")
-    store.create_domain("docs")
     session_token = server._SESSION_BINDING.set(None)
     try:
         created = server.wiki_write_page(
