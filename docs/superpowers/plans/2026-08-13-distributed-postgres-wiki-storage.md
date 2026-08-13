@@ -12,6 +12,13 @@ review:
 chain:
   intent: docs/superpowers/intents/2026-08-12-distributed-postgres-wiki-storage-intent.md
   spec: docs/superpowers/specs/2026-08-13-distributed-postgres-wiki-storage-design.md
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: 81a9b87672ad37e7
+  last_run: 2026-08-14
+  reviewed: true
+  docs_checked: true
 ---
 # Distributed PostgreSQL Wiki Storage Implementation Plan
 

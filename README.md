@@ -665,5 +665,7 @@ wiki_search(query="how does auth work?")
 
 - Within one domain use `[Heading](<type>/<slug>.md#heading)`; across domains use `iwiki://<domain>/<page-id>#<anchor>`.
 - `.iwiki/graph.sqlite3` is a local derived cache, not a portable vector/log replacement and not a code-dependency graph.
-- Vector search uses numpy brute force, not an external vector database.
+- Git storage uses numpy brute-force vector search over portable JSONL indexes;
+  PostgreSQL storage uses tenant/domain-scoped pgvector cosine candidates before the
+  shared lexical fusion, deduplication, and optional reranking stages.
 - Staleness checks are project-local and depend on available source paths and ingest logs.

@@ -661,5 +661,7 @@ wiki_search(query="how does auth work?")
 
 - Внутри домена используйте `[Heading](<type>/<slug>.md#heading)`; между доменами — `iwiki://<domain>/<page-id>#<anchor>`.
 - `.iwiki/graph.sqlite3` — локальный производный кэш, а не переносимая замена векторам/логам и не граф code-dependencies.
-- Векторный поиск использует numpy brute force, а не внешнюю векторную БД.
+- Git storage использует numpy brute-force поиск по переносимым JSONL-индексам;
+  PostgreSQL storage получает tenant/domain-scoped cosine-кандидатов через pgvector,
+  затем применяет общие lexical fusion, deduplication и опциональный reranking.
 - Проверки устаревания локальны для проекта и зависят от доступных путей к исходникам и логов ingest.
