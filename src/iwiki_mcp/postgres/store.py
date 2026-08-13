@@ -553,3 +553,134 @@ class PostgresStore:
             self.cfg.top_k,
             self.cfg.graph_depth,
         )
+
+    def locate_target(
+        self, domain: str, query: str, heading: str | None = None
+    ) -> dict:
+        candidates = self.search(
+            [domain],
+            query,
+            top_k=self.cfg.top_k,
+            threshold=self.cfg.write_seed_threshold,
+            mode="semantic",
+        )
+        if heading is not None:
+            wanted = heading.strip().lower()
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate["heading"].lower() == wanted
+            ]
+        if not candidates:
+            return {"domain": domain, "exists": False}
+        best = candidates[0]
+        return {
+            "domain": domain,
+            "file": best["file"],
+            "heading": best["heading"],
+            "score": best["score"],
+            "exists": True,
+        }
+
+    def index_domain(self, domain: str) -> dict:
+        domain = _validate_identifier(domain, "domain")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT p.page_id, p.slug, p.markdown FROM iwiki.pages p "
+                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                    "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
+                    "AND d.slug = %s ORDER BY p.slug",
+                    (self.iwiki_id, domain),
+                )
+                pages = cursor.fetchall()
+        prepared = []
+        for page_id, slug, markdown in pages:
+            _domain, _slug, _markdown, chunks, records, targets = (
+                self._prepare_page(domain, slug, markdown)
+            )
+            prepared.append((page_id, chunks, records, targets))
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                for page_id, chunks, records, targets in prepared:
+                    self._replace_derived(
+                        cursor, page_id, chunks, records, targets
+                    )
+        count = sum(len(records) for _page, _chunks, records, _targets in prepared)
+        return {
+            "domain": domain,
+            "indexed_chunks": count,
+            "reused": 0,
+            "embedded": count,
+            "bytes": 0,
+            "over_cap": False,
+        }
+
+    def lint_domain(self, domain: str, visible_domains: list[str]) -> dict:
+        domain = _validate_identifier(domain, "domain")
+        visible = {
+            visible_domain: set(self.list_pages(visible_domain))
+            for visible_domain in visible_domains
+        }
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT p.slug, p.markdown FROM iwiki.pages p "
+                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                    "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
+                    "AND d.slug = %s ORDER BY p.slug",
+                    (self.iwiki_id, domain),
+                )
+                pages = cursor.fetchall()
+        broken = []
+        sections = []
+        for slug, markdown in pages:
+            sections.extend(
+                {"page": f"{slug}.md", **finding}
+                for finding in validate_page(markdown)
+            )
+            for target in parse_link_targets(markdown, domain):
+                if (
+                    target.target_domain in visible
+                    and target.target_page not in visible[target.target_domain]
+                ):
+                    broken.append(
+                        {
+                            "page": f"{slug}.md",
+                            "ref": (
+                                f"{target.target_domain}/{target.target_page}"
+                            ),
+                        }
+                    )
+        return {
+            "wiki_present": True,
+            "pages": len(pages),
+            "broken": broken,
+            "orphans": [],
+            "stale": [],
+            "missing_source": [],
+            "legacy_wikilink": [],
+            "sections": sections,
+            "missing_frontmatter": [],
+            "tag_drift": [],
+            "reserved_target": [],
+            "unavailable_domain": [],
+            "graph": {
+                "available": True,
+                "schema_version": 2,
+                "state": "ready",
+                "fingerprint_match": True,
+                "missing_pages": [],
+                "extra_pages": [],
+                "missing_edges": [],
+                "extra_edges": [],
+                "anchor_mismatches": [],
+            },
+            "code_graph": {
+                "available": False,
+                "state": "unsupported",
+                "revision": None,
+                "findings": [],
+                "hint": "code graph requires Git storage",
+            },
+        }

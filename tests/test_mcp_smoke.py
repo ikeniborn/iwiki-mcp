@@ -150,6 +150,11 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 update_schema = tools["wiki_update_page"].inputSchema
                 assert "new_heading" in update_schema["properties"]
                 assert "new_heading" not in update_schema.get("required", [])
+                assert "expected_revision" in update_schema["properties"]
+                assert "expected_revision" not in update_schema.get("required", [])
+                delete_schema = tools["wiki_delete_page"].inputSchema
+                assert "expected_revision" in delete_schema["properties"]
+                assert "expected_revision" not in delete_schema.get("required", [])
                 res = await session.call_tool("wiki_status", {})
                 assert not res.isError
                 assert res.content
