@@ -4,6 +4,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def expected_revision_required() -> dict:
+    """Stable PostgreSQL response when optimistic-lock input is omitted."""
+    return {
+        "error": "expected_revision_required",
+        "hint": "read the page and retry with its revision",
+    }
+
+
+def revision_conflict(current_revision: int | None) -> dict:
+    """Stable PostgreSQL response when optimistic locking loses a race."""
+    return {
+        "error": "conflict",
+        "current_revision": current_revision,
+        "hint": "read the page and retry against the current revision",
+    }
+
+
 @dataclass(frozen=True)
 class GitBinding:
     """Resolved local Git wiki binding."""
@@ -58,3 +75,16 @@ class PostgresBinding:
     @property
     def storage(self) -> str:
         return "postgres"
+
+    def connection_dsn(self) -> str:
+        """Build an internal libpq connection string without exposing it in repr."""
+        from psycopg.conninfo import make_conninfo
+
+        return make_conninfo(
+            host=self.host,
+            port=self.port,
+            dbname=self.database,
+            user=self.user,
+            password=self.password,
+            sslmode=self.sslmode,
+        )

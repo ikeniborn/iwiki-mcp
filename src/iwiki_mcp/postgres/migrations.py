@@ -201,6 +201,22 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=2,
+        statements=(
+            """
+            ALTER TABLE iwiki.links
+                DROP CONSTRAINT links_iwiki_target_page_fk
+            """,
+            """
+            ALTER TABLE iwiki.links
+                ADD CONSTRAINT links_iwiki_target_page_fk
+                FOREIGN KEY (iwiki_id, target_page_id)
+                REFERENCES iwiki.pages (iwiki_id, page_id)
+                ON DELETE NO ACTION
+            """,
+        ),
+    ),
 )
 
 

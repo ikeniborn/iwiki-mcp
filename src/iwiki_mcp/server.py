@@ -25,6 +25,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
+from .postgres import migrations as _postgres_migrations  # noqa: F401
+from .postgres import store as _postgres_store  # noqa: F401
 # Code graph adapters join the full startup import closure; their grammar and
 # parser initialization remains lazy until an adapter parses source.
 from .codegraph import config as _codegraph_config  # noqa: F401

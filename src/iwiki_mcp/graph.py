@@ -703,6 +703,25 @@ def scoped_graph(
         return None
 
 
+def rank_storage_graph(
+    seeds,
+    neighbor_provider,
+    depth: int,
+    cap: int,
+    allowed_pages,
+):
+    """Rank an injected backend graph without consulting local wiki state."""
+    from .engine.hier import rank_neighbor_pages
+
+    return rank_neighbor_pages(
+        seeds,
+        neighbor_provider,
+        depth,
+        cap,
+        allowed_pages=allowed_pages,
+    )
+
+
 def _path_domain(path: str) -> str | None:
     parts = Path(path).parts
     if len(parts) < 2 or parts[0].startswith("."):
