@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 3625b9f571db61f1
+  spec_hash: aa4913d5457d7806
   last_run: 2026-08-13
   phases:
     structure: { status: passed }
@@ -104,7 +104,7 @@ chain:
 # iwiki-mcp Python Code Graph Design
 
 **Date:** 2026-08-09
-**Status:** draft
+**Status:** approved
 **Topic:** `iwiki-mcp-code-graph`
 **Intent:** `docs/superpowers/intents/2026-08-09-iwiki-mcp-code-graph-intent.md`
 **Requirements source:** `docs/superpowers/intents/iwiki-mcp-code-graph-technical-requirements-final.md`
@@ -213,7 +213,7 @@ The following outcomes and completion rule are copied verbatim from the approved
 
 - **R-026 — Regression protection:** Existing Wiki tests and contracts MUST pass unchanged; code-graph failures MUST block zero Wiki calls. **Acceptance:** AC-26.
 - **R-027 — Quality benchmark:** The benchmark MUST measure extraction/resolution quality, module-occurrence ambiguity, alias behavior, Unicode normalization behavior, and deterministic rebuilds against approved golden fixtures. **Acceptance:** AC-27.
-- **R-028 — Performance benchmark:** The benchmark MUST record environment, corpus, command, startup/no-op/build/search/context latency, memory, and database size, including a 100,000-entity unified-search corpus with ASCII names, Unicode names, Unicode signatures, and shared Unicode paths. **Acceptance:** AC-28.
+- **R-028 — Performance benchmark:** The benchmark MUST record environment, corpus, command, startup/no-op/build/search/context latency, memory, and database size, including a 100,000-entity unified-search corpus with ASCII names, Unicode names, Unicode signatures, and shared Unicode paths. The first-release unified-search gate MUST be `<500 ms` warm maximum for every case; `<150 ms` MUST remain a reported, non-blocking post-v1 optimization target. **Acceptance:** AC-28.
 - **R-029 — Sequential delivery:** Implementation planning MUST preserve the three ordered delivery units in Section 17, remediate Tasks 1–7 to schema v2 before Task 8 begins, and prevent later units from being treated as prerequisites of earlier units. **Acceptance:** AC-29.
 - **R-030 — Deferred debt:** Incremental indexing and TypeScript MUST remain excluded from Python MVP claims and linked to separate future specifications. **Acceptance:** AC-30.
 
@@ -1100,11 +1100,11 @@ The production corpus is a generated source tree processed through production di
 
 Golden truth is independent of query output. Unicode cases prove the specified no-NFC/NFKC behavior and Python casefold semantics. Canonical and alias lexical fixtures persist every expected query token as a complete U+001F-bounded token. Deterministic rebuild compares revision, all entity/relation/link IDs, and canonical normalized semantic columns. It excludes operational `indexed_at`, repository lifecycle state, phase timings, and transient metadata diagnostics; raw SQLite bytes need not be identical.
 
-For each search rank, the report records one cold sample separately, performs one untimed warm-up, and then records ten warm samples through production query code on one connection/snapshot without a prepared-result cache. It publishes cold, median, p95, and maximum warm latency per stratum. The `<150 ms` gate applies to the maximum of those ten warm samples, not the separately reported cold sample.
+For each search rank, the report records one cold sample separately, performs one untimed warm-up, and then records ten warm samples through production query code on one connection/snapshot without a prepared-result cache. It publishes cold, median, p95, and maximum warm latency per stratum. The first-release `<500 ms` gate applies to the maximum of those ten warm samples, not the separately reported cold sample. The report also compares every warm maximum with the non-blocking `<150 ms` post-v1 target, but that comparison does not change the first-release pass/fail verdict.
 
-Initial targets remain those from the approved intent: startup `<100 ms`, no-op `<200 ms`, 1,000 Python files `<15 s`, every unified-search case on the 100,000-entity corpus `<150 ms`, depth-1/50-node context `<300 ms`, DB `<3x` source text, 10,000-file memory `<1 GiB`, declarations/methods `>=98%`, local imports `>=95%`, statically resolvable calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`, and Wiki search regressions `0`.
+First-release targets are those from the revised approved intent: startup `<100 ms`, no-op `<200 ms`, 1,000 Python files `<15 s`, every unified-search case on the 100,000-entity corpus `<500 ms` warm maximum, depth-1/50-node context `<300 ms`, DB `<3x` source text, 10,000-file memory `<1 GiB`, declarations/methods `>=98%`, local imports `>=95%`, statically resolvable calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`, and Wiki search regressions `0`. Search warm maxima `<150 ms` remain a non-blocking post-v1 optimization target.
 
-A benchmark miss or contradictory result is a stop condition: implementation MUST return to specification/planning review instead of relaxing the gate, truncating candidates, or introducing an unapproved index/projection.
+A benchmark miss or contradictory result is a stop condition: implementation MUST return to specification/planning review instead of silently relaxing the gate, truncating candidates, or introducing an unapproved index/projection. A threshold may change only through a checked human-approved intent, specification, and plan revision.
 
 ## 17. Sequential delivery units
 
@@ -1180,7 +1180,7 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 - **AC-25:** Status/build results contain required typed-entity, schema/normalizer/Unicode-version, module-warning, resolution, timing, and two-verification metrics; sanitized logs contain no fixture source or credentials.
 - **AC-26:** Full existing pytest suite passes and comparison confirms no `wiki_search` contract/result regression.
 - **AC-27:** Benchmark report records all quality metrics, duplicate-module/alias/Unicode behavior against independent golden truth, and canonical semantic determinism excluding only documented operational fields; it reaches the approved extraction/resolution and `100%` deterministic-rebuild gates on the production corpus.
-- **AC-28:** Benchmark report separates a schema-v2 search corpus from a production-built Python corpus. Search evidence covers at least 100,000 unified entities across ASCII-name, Unicode-name, Unicode-signature, and shared-Unicode-path strata without new indexes/FTS/UDF/projection/candidate cap; every case reports a cold sample plus ten post-warm-up samples whose warm maximum is `<150 ms`. Production-corpus evidence proves DB is `<3x` actual accepted source bytes and the existing startup/no-op/build/context/memory targets pass on the documented environment.
+- **AC-28:** Benchmark report separates a schema-v2 search corpus from a production-built Python corpus. Search evidence covers at least 100,000 unified entities across ASCII-name, Unicode-name, Unicode-signature, and shared-Unicode-path strata without new indexes/FTS/UDF/projection/candidate cap; every case reports a cold sample plus ten post-warm-up samples whose warm maximum is `<500 ms` for the first release. The same report shows whether each case meets the non-blocking `<150 ms` post-v1 target without using that comparison in the first-release verdict. Production-corpus evidence proves DB is `<3x` actual accepted source bytes and the existing startup/no-op/build/context/memory targets pass on the documented environment.
 - **AC-29:** Implementation plan keeps Units A/B/C and their ownership unchanged, remediates each Task 1–7 schema-v2 delta with measurable output and verification before Task 8, and preserves dependency order.
 - **AC-30:** Product docs and Wiki identify incremental indexing and TypeScript as separate technical debt; Python MVP output makes no claim that either exists.
 
@@ -1191,7 +1191,7 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 - **Duplicate or unprovable modules:** multiple source roots can expose the same dotted name and namespace layouts can lack reliable evidence. Mitigation: occurrence-aware `module_key`, distinct IDs, all-target ambiguity, file-only fallback with warning, and no path-order winner.
 - **Alias multiplicity:** repeated and ambiguous aliases can multiply relation rows and result candidates. Mitigation: retain full relation provenance, aggregate import sites by target entity for search, deterministic lowest-code-point public alias, de-duplicate before limit, and benchmark fan-out cases.
 - **Unicode size and semantic surprises:** casefold can expand text, Unicode tables change between runtimes, and no NFC/NFKC means canonically equivalent spellings remain different. Mitigation: compact ASCII scalar deltas, persisted token keys, versioned normalizer and Unicode data, explicit no-normalization contract, query bounds, deterministic rebuild, and Unicode golden fixtures.
-- **Projection-free search latency:** lexical/signature/path tiers may scan normalized columns because no FTS/UDF/projection/candidate cap is allowed. Mitigation: sequential exclusive-rank queries, existing raw endpoint indexes for exact/prefix/resolution, safe early-stop only at the public limit, compact persisted normalization, literal `instr` checks, and the separate 100,000-entity `<150 ms` search gate. The `<3x` storage gate is measured independently on a production-built source corpus.
+- **Projection-free search latency:** lexical/signature/path tiers may scan normalized columns because no FTS/UDF/projection/candidate cap is allowed. Mitigation: sequential exclusive-rank queries, branch-local kind/path/rank predicates, existing raw endpoint indexes for exact/prefix/resolution, safe early-stop only at the public limit, compact persisted normalization, literal `instr` checks, and the separate 100,000-entity `<500 ms` first-release search gate. The report retains `<150 ms` as a non-blocking post-v1 target, and the `<3x` storage gate is measured independently on a production-built source corpus.
 - **Dynamic Python false certainty:** syntactic calls cannot model runtime dispatch. Mitigation: conservative resolver states, preserved references/candidates, and false-resolution quality gates.
 - **Tree-sitter startup cost:** mandatory dependencies could affect ordinary Wiki startup. Mitigation: lazy grammar/parser initialization and measured startup gate.
 - **Selector expansion cost:** broad globs can create excessive links. Mitigation: materialize file links only, reuse file limits, report truncation/conflicts, and avoid per-symbol expansion.
@@ -1203,6 +1203,8 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 The schema-v2 decisions approved on 2026-08-11 remain unchanged inputs: five authoritative tables, twenty named indexes, file-backed module occurrences, occurrence-aware IDs, typed module/symbol relations, alias semantics, projection-free Unicode search, bounded validation, incompatible-cache rebuild, unified MCP entities, and unchanged A/B/C units.
 
 The first Task 13 benchmark on 2026-08-12 stopped as required after search latency, DB/source, determinism-method, Unicode-truth, and lexical-fixture contradictions. The reopened human checkpoint fixed sequential exclusive-rank query execution with public-limit early-stop; separate search and production corpora; production-only DB/source measurement; canonical semantic determinism; independent Unicode/lexical truth; and the cold plus one-warm-up plus ten-warm-sample policy. It did not relax any threshold or approve a new table, index, projection, FTS, UDF, normalization, candidate cap, public contract, or ownership change. This revised specification requires a fresh `check-chain spec`, checked-spec approval, revised checked plan, and plan approval before remediation resumes.
+
+The second authoritative benchmark on 2026-08-13 ran after branch-local predicate pushdown and passed the full tracked suite, correctness, determinism, resource, build, startup, no-op, and context gates. Search improved from `444.799033 ms` to `246.256735 ms`; signature measured `176.583796 ms` and path measured `246.256735 ms`, so the former `<150 ms` gate still failed. The user approved a threshold-only first-release decision: every case MUST remain below `<500 ms` warm maximum, while `<150 ms` remains visible as a non-blocking post-v1 target. This decision changes no schema, index, rank, search semantics, corpus, sampling policy, storage bound, safety rule, or correctness gate. It requires a fresh `check-chain spec`, checked-spec approval, revised checked plan, and plan approval before benchmark execution resumes.
 
 Tasks 1–7 MUST be remediated and re-verified against this specification before Task 8 begins. Implementation MUST stop and return to design review if it needs to weaken a hard constraint, add a sixth authoritative/search table, add NFC/NFKC/FTS/UDF/candidate caps, add incremental/TypeScript scope, change the four MCP contracts, add module/alias selectors, change `wiki_search`, replace the approved storage/identity/publication model, or move work across the approved unit boundaries.
 
