@@ -42,6 +42,26 @@ def _write_config(tmp_path: Path, text: str) -> Path:
     return path
 
 
+def test_postgres_test_dsn_repr_redacts_credentials():
+    from tests.postgres.conftest import validated_test_dsn
+
+    dsn = validated_test_dsn(
+        "postgresql://test-user:test-secret@example.test/example_test"
+    )
+
+    assert repr(dsn) == "<redacted PostgreSQL test DSN>"
+    assert "test-secret" not in repr(dsn)
+
+
+def test_postgres_test_dsn_rejects_non_test_database_before_connection():
+    from tests.postgres.conftest import validated_test_dsn
+
+    with pytest.raises(ValueError, match="must end in _test"):
+        validated_test_dsn(
+            "postgresql://test-user:test-secret@example.test/production"
+        )
+
+
 def _server_toml_with_origins(origins):
     values = ", ".join(f'"{origin}"' for origin in origins)
     return _server_toml().replace(
