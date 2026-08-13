@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 37e82c1f41542dee
+  plan_hash: ac09f48051707d73
   last_run: 2026-08-13
   phases:
     structure: { status: passed }
@@ -24,13 +24,13 @@ chain:
 
 **Tech Stack:** Python 3.10+, SQLite WAL, `filelock`, `pathspec`, Tree-sitter, FastMCP, `pytest`, and `pytest-asyncio`.
 
-**Approved spec:** `docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md` (`3625b9f571db61f1`)
+**Approved spec:** `docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md` (`aa4913d5457d7806`)
 
-**Execution baseline:** commit `b8b8f164235b40789edd5567a99857a0eaf88693`, package version `0.7.86`. Tasks 1–12, the first benchmark-remediation approval, and the first Task 7R implementation are preserved. The corrected Task 13 runner then stopped on the sole remaining `search_ms` gate with evidence SHA-256 `b338bf088984c6c9d30d9d10cedd3410351a4c37db690a055a1113aab6b2890c`, so branch-local search execution, Task 13 completion, and Task 14 are reopened below.
+**Execution baseline:** commit `c87ccb0`, package version `0.7.89`. Tasks 1–12, both prior benchmark-remediation approvals, Task 7R, the approved v1 latency intent, and the threshold-only approved specification are preserved. The uncommitted Task 7R-P query diff passed `1749` tracked tests and improved the authoritative search warm maximum to `246.256735 ms`, then stopped on the former `<150 ms` gate with evidence SHA-256 `a472e90074868fee39516973eb551b2adb5838b017baafb966607118d06a4d24`.
 
-**Plan status:** draft predicate-pushdown remediation revision; execution remains blocked until this body passes `check-chain plan`, receives human approval, and is committed.
+**Plan status:** checked and human-approved threshold-only release-gate revision; execution remains blocked until the approval commit is complete.
 
-**Resume point:** Tasks 1–12, the original Schema-v2 Remediation Gate, approval commit `14c9f66`, and Task 7R commit `b8b8f16` are historical committed inputs. New execution resumes at Task 7R-P Step 1 below; unchecked boxes in earlier task sections describe preserved delivery history and MUST NOT be replayed. Task 14 result reconciliation still verifies those inputs.
+**Resume point:** Tasks 1–12, the original Schema-v2 Remediation Gate, approval commits through `c87ccb0`, and Task 7R commit `b8b8f16` are historical committed inputs. Task 7R-P Steps 1–3 are preserved uncommitted work and MUST NOT be replayed. New execution resumes with the Task 13 threshold seam described before Task 7R-P Step 4, then returns to Task 7R-P Step 4. Task 14 result reconciliation still verifies every historical input.
 
 ---
 
@@ -42,6 +42,7 @@ chain:
 - Schema v2 has exactly five authoritative tables and exactly twenty named explicit indexes. It has no `modules` table, FTS/shadow table, persisted search projection, trigger-maintained copy, Python SQLite UDF, or hidden candidate cap.
 - Canonical public entities are a query-time discriminated union of `file`, `module`, and `symbol`. A module is an optional occurrence facet of a file row and is never a synthetic symbol.
 - Search implements the exact nine ranks as sequential exclusive queries: qualified exact, local exact, explicit-alias exact, canonical prefix, explicit-alias prefix, canonical lexical, explicit-alias lexical, signature, and path. Stop only after the public limit is full; do not add a hidden cap.
+- The first-release search gate is `<500 ms` for the maximum of ten warm samples for every 100,000-entity case. The report also records whether each case meets `<150 ms` as a non-blocking post-v1 target; that comparison MUST NOT affect the first-release verdict.
 - Context accepts `seeds`, not symbol-only inputs, and every seed is an exact file/module/symbol `entity_id`.
 - `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, and `wiki_code_context` are the complete code-tool surface. None accepts `domain`; `wiki_search` is unchanged.
 - Incremental indexing and TypeScript remain separate technical debt. No task may add an incremental parameter, TypeScript adapter, or claim either capability.
@@ -54,7 +55,9 @@ chain:
 
 **HUMAN CHECKPOINT — CLOSED 2026-08-13:** Revised spec hash `3625b9f571db61f1` fixes sequential exclusive-rank queries with public-limit early-stop; separate search and production corpora; production-only DB/source measurement; canonical semantic determinism; independent Unicode/lexical truth; and one cold plus one warm-up plus ten warm samples. Thresholds, schema, indexes, public contracts, and Unit ownership remain unchanged.
 
-**HUMAN CHECKPOINT — OPEN 2026-08-13:** The corrected Task 13 benchmark passed every quality and production-corpus gate but measured lower search ranks at `261–445 ms` against `<150 ms`. Review traced the miss to incomplete Task 7R execution: canonical SQL still materializes a broad three-arm union and applies kind/path/rank predicates outside each arm, while the approved plan required branch-local predicates and existing-index `EXPLAIN` proof. This revision adds only that missing implementation and verification detail. It does not change the checked spec, threshold, schema, twenty indexes, ranking, public contract, FTS/UDF/projection prohibition, or candidate-cap prohibition.
+**HUMAN CHECKPOINT — CLOSED 2026-08-13:** The corrected Task 13 benchmark passed every quality and production-corpus gate but measured lower search ranks at `261–445 ms` against the former `<150 ms` gate. Review traced the miss to incomplete Task 7R execution: canonical SQL still materialized a broad three-arm union and applied kind/path/rank predicates outside each arm. The checked predicate-pushdown plan added only that missing implementation and verification detail without changing the then-current contract.
+
+**HUMAN CHECKPOINT — CLOSED 2026-08-13:** Task 7R-P branch-local predicate pushdown passed the full tracked suite and every non-search benchmark gate, improved search from `444.799033 ms` to `246.256735 ms`, and still missed only the former `<150 ms` release gate. The user approved a threshold-only first-release contract: `<500 ms` warm maximum is blocking, while `<150 ms` remains reported and non-blocking after v1. Approved intent `42d4d324998d40e3` and spec `aa4913d5457d7806` change no schema, index, corpus, sample policy, rank, query semantics, correctness, safety, or resource gate.
 
 No design fork remains beyond approval of this checked revision. Reopen design review and stop if implementation would weaken a hard constraint, add another authoritative/search table or index-backed projection, apply NFC/NFKC, add FTS/UDF/candidate caps, expose incremental/TypeScript behavior, change the four tools or `wiki_search`, allow module/alias selectors, change publication order, or move requirement ownership across units.
 
@@ -78,9 +81,12 @@ No design fork remains beyond approval of this checked revision. Reopen design r
 | Checked and human-approved benchmark-remediation plan | `0.7.85` | `docs(codegraph): approve benchmark remediation plan` |
 | Task 7R | `0.7.86` | sequential exclusive-rank search execution |
 | Checked and human-approved predicate-pushdown plan | `0.7.87` | `docs(codegraph): approve predicate-pushdown remediation plan` |
-| Task 7R-P | `0.7.88` | branch-local search predicate execution |
-| Task 13 | `0.7.89` | corrected quality and split-corpus benchmark |
-| Task 14 | `0.7.90` | docs, debt, and final gates |
+| Checked and human-approved v1 latency intent | `0.7.88` | `docs(codegraph): approve v1 search latency gate` |
+| Checked and human-approved threshold-only spec | `0.7.89` | `docs(codegraph): approve v1 search latency spec` |
+| Checked and human-approved threshold-only plan | `0.7.90` | `docs(codegraph): approve v1 search latency plan` |
+| Task 7R-P | `0.7.91` | branch-local search predicate execution |
+| Task 13 | `0.7.92` | corrected quality and split-corpus benchmark |
+| Task 14 | `0.7.93` | docs, debt, and final gates |
 
 Before Task 7R, validate this file with `$check-chain plan docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md`, obtain human approval, bump `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` from `0.7.84` to `0.7.85`, run `uv lock`, and commit only the approved spec, checked plan, `docs/TODO.md`, package-version test, and three version artifacts. Do not stage the untracked `eval/code_graph/` scaffold or Task 13 tests in the approval commit. Execution resumes only from that committed state.
 
@@ -94,6 +100,13 @@ Before Task 7R-P, validate this revised body with `$check-chain plan`, obtain hu
 ```bash
 git add docs/TODO.md docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "docs(codegraph): approve predicate-pushdown remediation plan"
+```
+
+Before resuming Task 7R-P, validate this threshold-only revision with `$check-chain plan`, obtain human approval, bump the package and package-test version from `0.7.89` to `0.7.90`, run `uv lock`, and commit only this checked plan, `docs/TODO.md`, the package-version test, and the three version artifacts. Preserve both the uncommitted Task 7R-P query diff and the untracked Task 13 scaffold/tests without staging them in the approval commit.
+
+```bash
+git add docs/TODO.md docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
+git commit -m "docs(codegraph): approve v1 search latency plan"
 ```
 
 ## File map
@@ -1435,7 +1448,7 @@ git commit -m "fix(codegraph): execute search ranks sequentially"
 
 ### Task 7R-P: Push every rank predicate into only the required typed branches
 
-**Closes reopened evidence:** the missing Task 7R Step 3 branch-local execution and Step 4 query-plan proof. Preserve commit `b8b8f16`; this is a forward fix over version `0.7.87` after the second checked-plan approval.
+**Closes reopened evidence:** the missing Task 7R Step 3 branch-local execution and Step 4 query-plan proof. Preserve commit `b8b8f16`; this is a forward fix resumed from approved threshold-only plan version `0.7.90`. Steps 1–3 below are preserved evidence and MUST NOT be replayed.
 
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/query.py`
@@ -1539,7 +1552,65 @@ For qualified/local exact, structure direct branches so Section 7.8 endpoint ind
 
 Do not change schema, add an index/table/projection/FTS/UDF/cache, add a candidate bound, normalize with NFC/NFKC, or move validation into the timed query.
 
-- [ ] **Step 4: Run unit/integration gates and the unchanged authoritative benchmark**
+- [ ] **Step 3A: Implement the threshold-only benchmark seam before rerunning Task 7R-P evidence**
+
+Task 7R-P owns the next authoritative benchmark run, but the stopped Task 13 scaffold owns the benchmark threshold and report schema. Make this one bounded interleaving before Task 7R-P Step 4; keep all Task 13 files untracked and unstaged until Task 13 resumes.
+
+Extend the runner-test imports with `DEFAULT_THRESHOLDS`, `SEARCH_POST_V1_TARGET_MS`, `_OPERATORS`, and `_meets_search_post_v1_target`. Add tests first in `tests/eval/test_code_graph_runner.py` and `tests/eval/test_code_graph_report.py`:
+
+```python
+def test_search_release_gate_and_post_v1_target_are_distinct():
+    assert DEFAULT_THRESHOLDS["search_ms"] == 500.0
+    assert SEARCH_POST_V1_TARGET_MS == 150.0
+    operator, comparator = _OPERATORS["search_ms"]
+    assert operator == "<"
+    assert comparator(499.999, DEFAULT_THRESHOLDS["search_ms"]) is True
+    assert comparator(500.0, DEFAULT_THRESHOLDS["search_ms"]) is False
+
+
+def test_search_case_reports_nonblocking_post_v1_target():
+    assert _meets_search_post_v1_target(149.999) is True
+    assert _meets_search_post_v1_target(150.0) is False
+
+
+def test_markdown_distinguishes_release_gate_from_post_v1_target():
+    markdown = render_markdown(_report())
+    assert "Release gate: <500 ms" in markdown
+    assert "Post-v1 target: <150 ms (non-blocking)" in markdown
+```
+
+Add `"meets_post_v1_target": False` to the report test's existing `246.0 ms` search-case fixture so its expected evidence is explicit rather than inferred by the renderer.
+
+Adapt fixture/helper names to the existing scaffold without weakening assertions. Run RED:
+
+```bash
+uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py -k 'release_gate_and_post_v1 or reports_nonblocking_post_v1 or distinguishes_release_gate'
+```
+
+Expected: tests FAIL because `DEFAULT_THRESHOLDS["search_ms"]` is `150.0`, cases have no post-v1 comparison, and Markdown does not distinguish the two numbers.
+
+Then make only these behavior changes in `eval/code_graph/runner.py` and `eval/code_graph/report.py`:
+
+```python
+SEARCH_POST_V1_TARGET_MS = 150.0
+
+DEFAULT_THRESHOLDS = {
+    # Existing unchanged gates omitted.
+    "search_ms": 500.0,
+}
+
+def _meets_search_post_v1_target(warm_max_ms: float) -> bool:
+    return warm_max_ms < SEARCH_POST_V1_TARGET_MS
+
+
+case["meets_post_v1_target"] = _meets_search_post_v1_target(
+    case["warm_max_ms"]
+)
+```
+
+Keep the release comparator strict `<`; exactly `500.0 ms` fails. Preserve one cold sample, one untimed warm-up, exactly ten warm samples, maximum aggregation, corpus, environment, all ranks/IDs, and every non-search gate. JSON and Markdown must expose both thresholds; only the `<500 ms` gate contributes to overall `passed`. Run the focused tests again and require GREEN. Do not version, stage, commit, update Wiki, or claim Task 13 complete at this seam.
+
+- [ ] **Step 4: Run unit/integration gates and the threshold-only authoritative benchmark**
 
 ```bash
 uv run pytest -q tests/codegraph/test_query.py
@@ -1552,15 +1623,15 @@ git diff --check
 uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
 ```
 
-Expected: unit and static gates exit zero; exact/local EXPLAIN plans name only existing Section 7.8 indexes; requested kinds emit no unused typed branch; early-stop and public-limit-only assertions remain green. The benchmark reports the same independent expected ranks/IDs, one cold plus one warm-up plus ten warm samples, and every search-case warm maximum `<150 ms`. All non-search gates remain green. The CLI must exit `0` before Task 13 resumes.
+Expected: unit and static gates exit zero; exact/local EXPLAIN plans name only existing Section 7.8 indexes; requested kinds emit no unused typed branch; early-stop and public-limit-only assertions remain green. The benchmark reports the same independent expected ranks/IDs, one cold plus one warm-up plus ten warm samples, and every search-case warm maximum `<500 ms`. Each case also reports whether it meets the non-blocking `<150 ms` post-v1 target. All non-search gates remain green. The CLI must exit `0` before Task 13 resumes.
 
-If the unchanged benchmark still misses, preserve both evidence files, stop before version/commit/Task 13, and reopen spec §13.4/§16.4. Do not attempt a second query strategy under this task without a new checked human decision.
+If the benchmark misses `<500 ms` or any unchanged gate, preserve both evidence files and stop before version/commit/Task 13. Do not change the threshold, query strategy, corpus, sampling, or another contract without a new checked human decision. A case that misses only `<150 ms` is reported as post-v1 debt and does not stop first-release execution.
 
 Update `concept/code-graph-search`, headings `Candidate retrieval` and `Ranking and result contract`, source `src/iwiki_mcp/codegraph/query.py`; run `wiki_lint(domain="iwiki-mcp")` and require no new broken, missing-source, or stale finding for the changed page.
 
 - [ ] **Step 5: Bump version and commit only after the benchmark passes**
 
-Set package and package-test versions to `0.7.88`, run `uv lock`, rerun `tests/test_package.py`, and commit only Task 7R-P files:
+Set package and package-test versions to `0.7.91`, run `uv lock`, rerun `tests/test_package.py`, and commit only Task 7R-P files. Do not stage the Task 13 scaffold/tests whose threshold seam remains untracked for Task 13:
 
 ```bash
 git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock src/iwiki_mcp/codegraph/query.py tests/codegraph/test_query.py tests/test_package.py
@@ -1572,6 +1643,8 @@ git commit -m "fix(codegraph): push search predicates into typed branches"
 ### Task 13: Correct quality evidence and split search from production benchmark gates
 
 **Closes:** R-027 and R-028; produces AC-27 and AC-28.
+
+**Resume state:** Steps 1–4 below are preserved untracked implementation/evidence from the stopped Task 13 run, including the split corpora, real production path, semantic determinism, corrected truth, and ten-sample policy. Task 7R-P Step 3A adds only the approved threshold/report seam. After Task 7R-P commits, Task 13 MUST NOT replay the old failed design; it resumes at Step 5, runs the focused and authoritative gates, writes method/Wiki evidence, then performs Step 6.
 
 **Files:**
 - Create: `eval/code_graph/__init__.py`
@@ -1634,7 +1707,10 @@ def test_search_records_cold_warmup_and_ten_warm_samples(benchmark_report):
         assert case["warmup_runs"] == 1
         assert len(case["warm_samples_ms"]) == 10
         assert case["warm_max_ms"] == max(case["warm_samples_ms"])
-        assert case["warm_max_ms"] < 150
+        assert case["warm_max_ms"] < 500
+        assert case["meets_post_v1_target"] is (
+            case["warm_max_ms"] < 150
+        )
 
 
 def test_golden_truth_is_independent_and_casefold_only(benchmark_report):
@@ -1791,10 +1867,11 @@ case = {
     "warm_median_ms": statistics.median(warm_samples),
     "warm_p95_ms": _nearest_rank_p95(warm_samples),
     "warm_max_ms": max(warm_samples),
+    "meets_post_v1_target": max(warm_samples) < 150.0,
 }
 ```
 
-Render `corpora.search`, `corpora.production`, `golden_truth`, revised determinism, and per-case warm distribution in both JSON and Markdown. Reports must be written before raising `BenchmarkGateError`.
+Render `corpora.search`, `corpora.production`, `golden_truth`, revised determinism, the blocking `<500 ms` release gate, the non-blocking `<150 ms` post-v1 target, and per-case warm distribution in both JSON and Markdown. Reports must be written before raising `BenchmarkGateError`. Exactly `500.0 ms` fails the strict release comparator; exactly `150.0 ms` misses only the post-v1 target.
 
 ```bash
 uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py -k 'search_records_cold or determinism_excludes or threshold_miss or markdown'
@@ -1802,14 +1879,14 @@ uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph
 
 Expected: ten-sample search distribution, semantic determinism, split-corpus Markdown, and write-before-fail evidence pass.
 
-- [ ] **Step 5: Run focused GREEN and the actual unchanged benchmark gates**
+- [ ] **Step 5: Run focused GREEN and the actual threshold-only benchmark gates**
 
 ```bash
 uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py
 uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
 ```
 
-Expected: CLI exits `0`. Declarations/methods `>=98%`, local imports `>=95%`, static calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`; startup `<100 ms`, no-op `<200 ms`, 1,000-file production build `<15 s`, every search case warm maximum `<150 ms`, production context `<300 ms`, checkpointed production DB/source `<3x`, and 10,000-file production-path memory `<1 GiB` on the recorded environment. Every search case reports correct independent expected rank/result, including canonical lexical and Unicode.
+Expected: CLI exits `0`. Declarations/methods `>=98%`, local imports `>=95%`, static calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`; startup `<100 ms`, no-op `<200 ms`, 1,000-file production build `<15 s`, every search case warm maximum `<500 ms`, production context `<300 ms`, checkpointed production DB/source `<3x`, and 10,000-file production-path memory `<1 GiB` on the recorded environment. Every search case reports correct independent expected rank/result, including canonical lexical and Unicode, plus its non-blocking `<150 ms` post-v1-target result.
 
 ```bash
 uv run pytest -q
@@ -1823,11 +1900,11 @@ Expected: full tests and static gates exit zero. The intentional syntax-error fi
 
 Create `reference/code-graph-benchmark` with `wiki_write_page`, document corpus, environment, warm/cold policy, quality/performance gates, report locations, and stop behavior with source `eval/code_graph/runner.py`; link it from `reference/code-graph-schema-v2-design`, then run iwiki lint. Expected: the benchmark page is not orphan/stale and adds no broken/missing-source finding.
 
-**Benchmark-miss stop rule:** Any threshold miss or contradictory result stops execution before Task 14. Write the failed evidence without suppressing it, reopen the earliest affected spec/plan section and HUMAN CHECKPOINT, rerun `$check-chain spec` and `$check-chain plan`, obtain approval of the revised checked artifacts, then return to the owning implementation task. Never relax a threshold, truncate candidates, add FTS/UDF/projection/candidate caps, or continue to final acceptance on a miss.
+**Benchmark-miss stop rule:** Any blocking threshold miss or contradictory result stops execution before Task 14. Write the failed evidence without suppressing it, reopen the earliest affected spec/plan section and HUMAN CHECKPOINT, rerun the required chain checks, obtain approval of revised checked artifacts, then return to the owning implementation task. A miss of only the reported `<150 ms` post-v1 target does not fail or stop the first release. Never change the approved `<500 ms` release gate, truncate candidates, add FTS/UDF/projection/candidate caps, or continue on another blocking miss without a new checked human decision.
 
 - [ ] **Step 6: Bump version and commit only after the actual gate passes**
 
-Set package and package-test versions to `0.7.89`, run `uv lock`, rerun `tests/test_package.py`, and commit the benchmark only after the real CLI exits zero.
+Set package and package-test versions to `0.7.92`, run `uv lock`, rerun `tests/test_package.py`, and commit the benchmark only after the real CLI exits zero.
 
 ```bash
 git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock tests/test_package.py eval/code_graph tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py docs/superpowers/evidence/code-graph-benchmark-method.md
@@ -1897,7 +1974,7 @@ Expected: full suite, scoped lint, compile, CLI, benchmark, and diff checks pass
 
 - [ ] **Step 5: Bump version, reconcile result, and create the final commit**
 
-Set `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` to `0.7.90`, run `uv lock`, rerun `tests/test_package.py`, `uv lock --check`, and `git diff --check`, then reconcile the complete branch diff before committing:
+Set `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` to `0.7.93`, run `uv lock`, rerun `tests/test_package.py`, `uv lock --check`, and `git diff --check`, then reconcile the complete branch diff before committing:
 
 ```bash
 uv run pytest -q tests/test_package.py
@@ -1945,7 +2022,7 @@ Expected: `$check-chain result` writes `result_check: OK` against the current pl
 
 Execution result must provide:
 
-- Release history from original plan version `0.7.72` through completed Task 12 version `0.7.84`, benchmark-remediation plan `0.7.85`, Task 7R `0.7.86`, predicate-pushdown plan `0.7.87`, Task 7R-P `0.7.88`, Task 13 `0.7.89`, and final Task 14 `0.7.90`.
+- Release history from original plan version `0.7.72` through completed Task 12 version `0.7.84`, benchmark-remediation plan `0.7.85`, Task 7R `0.7.86`, predicate-pushdown plan `0.7.87`, v1 latency intent `0.7.88`, threshold-only spec `0.7.89`, threshold-only plan `0.7.90`, Task 7R-P `0.7.91`, Task 13 `0.7.92`, and final Task 14 `0.7.93`.
 - Task-level RED failure and GREEN success output for original Tasks 1–14 plus reopened Task 7R.
 - Schema inspection proving exact five tables, exact twenty named indexes, required implicit uniques, and absence of forbidden modules/FTS/projection/UDF structures.
 - Typed union and exact nine-rank search results, alias aggregation/fan-out, no hidden candidate cap, invalid-input-before-I/O traces, and stable tie evidence.
@@ -1953,7 +2030,7 @@ Execution result must provide:
 - Full build/no-op, schema-v1 incompatible rebuild, corrupt-cache recovery, ordered two-verification publication, cancellation, concurrent reader/writer, and fail-soft Wiki-continuation evidence.
 - Real stdio registration proving exactly four code tools with no `domain`, `seeds` on context, default `include_source=false`, and unchanged `wiki_search`.
 - Selector round trips, file/symbol-only derived links, code-aware lint matrix, and proof that no path mutates authored selectors.
-- Quality and performance reports with environment, separate search/production corpus identities, versions, every stratum, cold plus ten warm search samples, every unchanged threshold, production DB/source bytes, independent golden truth, and canonical semantic deterministic rebuild comparison.
+- Quality and performance reports with environment, separate search/production corpus identities, versions, every stratum, cold plus ten warm search samples, blocking `<500 ms` release-gate evidence, non-blocking `<150 ms` post-v1-target evidence, every unchanged non-search threshold, production DB/source bytes, independent golden truth, and canonical semantic deterministic rebuild comparison.
 - Repository docs and iwiki pages current; separate incremental and TypeScript debt preserved; iwiki lint result recorded.
 - Final full pytest, flake8, compileall, CLI, benchmark, diff-check, and `$check-chain result` outputs.
 
