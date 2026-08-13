@@ -1,7 +1,7 @@
 ---
 review:
-  plan_hash: e6dbd327b4cfc2b2
-  last_run: 2026-08-11
+  plan_hash: 7d017ab119a3f336
+  last_run: 2026-08-13
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -24,22 +24,24 @@ chain:
 
 **Tech Stack:** Python 3.10+, SQLite WAL, `filelock`, `pathspec`, Tree-sitter, FastMCP, `pytest`, and `pytest-asyncio`.
 
-**Approved spec:** `docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md` (`e088e3b41fbfeba3`)
+**Approved spec:** `docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md` (`3625b9f571db61f1`)
 
-**Execution baseline:** commit `f64b93c`, package version `0.7.71`. This commit contains the implementation produced by the earlier Tasks 1–7, but it is schema v1 and is only the starting point for the remediation below. No later behavior is claimed present until its task and verification gate pass.
+**Execution baseline:** commit `62d213fc400d067344122b4977c829689bab50b3`, package version `0.7.84`. Commits for Tasks 1–12 are present and preserved, but final chain completion is not claimed before result reconciliation. The first Task 13 benchmark stopped with durable failed evidence, so only Task 7 search execution, Task 13 methodology/evidence, and downstream Task 14 are reopened below.
 
-**Plan status:** approved for execution after `check-chain plan` returned `OK` and human approval on 2026-08-11.
+**Plan status:** draft benchmark-remediation revision; execution remains blocked until this body passes `check-chain plan`, receives human approval, and is committed.
+
+**Resume point:** Tasks 1–12 and the original Schema-v2 Remediation Gate are historical committed inputs. New execution starts at Task 7R; unchecked boxes in earlier task sections describe preserved delivery history and MUST NOT be replayed. Task 14 result reconciliation still verifies those inputs.
 
 ---
 
 ## Non-negotiable execution contract
 
 - Preserve the approved sequential ownership: Unit A owns R-001–R-009; Unit B owns R-010–R-015, R-017, R-018, R-025, and the status/index/search portion of R-016; Unit C owns context completion, Wiki links, lint, regression evidence, benchmarks, docs, and debt tracking.
-- Tasks 1–7 are forward remediation commits over baseline `f64b93c`; do not rewrite or replay Git history.
+- Preserve all completed Tasks 1–12 commits. Task 7R is a forward remediation commit over baseline `62d213fc400d067344122b4977c829689bab50b3`; do not amend, rewrite, or replay completed history.
 - Task 8 MUST NOT begin until the Schema-v2 Remediation Gate after Task 7 records every command as passing.
 - Schema v2 has exactly five authoritative tables and exactly twenty named explicit indexes. It has no `modules` table, FTS/shadow table, persisted search projection, trigger-maintained copy, Python SQLite UDF, or hidden candidate cap.
 - Canonical public entities are a query-time discriminated union of `file`, `module`, and `symbol`. A module is an optional occurrence facet of a file row and is never a synthetic symbol.
-- Search implements the exact nine ranks: qualified exact, local exact, explicit-alias exact, canonical prefix, explicit-alias prefix, canonical lexical, explicit-alias lexical, signature, and path.
+- Search implements the exact nine ranks as sequential exclusive queries: qualified exact, local exact, explicit-alias exact, canonical prefix, explicit-alias prefix, canonical lexical, explicit-alias lexical, signature, and path. Stop only after the public limit is full; do not add a hidden cap.
 - Context accepts `seeds`, not symbol-only inputs, and every seed is an exact file/module/symbol `entity_id`.
 - `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, and `wiki_code_context` are the complete code-tool surface. None accepts `domain`; `wiki_search` is unchanged.
 - Incremental indexing and TypeScript remain separate technical debt. No task may add an incremental parameter, TypeScript adapter, or claim either capability.
@@ -50,7 +52,7 @@ chain:
 
 ## Closed human checkpoints
 
-**HUMAN CHECKPOINT — CLOSED:** The approved spec Sections 2.3, 7–14, 17, and 20 close all decisions needed by this plan: mandatory parser dependencies; five-table schema; twenty-index set; occurrence-aware identity; casefold-only normalization; typed module/symbol relations; alias semantics; incompatible-cache rebuild; publication order; typed MCP contracts; selector grammar; and Unit A/B/C ownership.
+**HUMAN CHECKPOINT — CLOSED 2026-08-13:** Revised spec hash `3625b9f571db61f1` fixes sequential exclusive-rank queries with public-limit early-stop; separate search and production corpora; production-only DB/source measurement; canonical semantic determinism; independent Unicode/lexical truth; and one cold plus one warm-up plus ten warm samples. Thresholds, schema, indexes, public contracts, and Unit ownership remain unchanged.
 
 No user choice remains before execution. Reopen design review and stop if implementation would weaken a hard constraint, add another authoritative/search table or index-backed projection, apply NFC/NFKC, add FTS/UDF/candidate caps, expose incremental/TypeScript behavior, change the four tools or `wiki_search`, allow module/alias selectors, change publication order, or move requirement ownership across units.
 
@@ -71,10 +73,17 @@ No user choice remains before execution. Reopen design review and stop if implem
 | Task 10 | `0.7.82` | exact four-tool registration |
 | Task 11 | `0.7.83` | code-aware Wiki lint |
 | Task 12 | `0.7.84` | recovery and concurrency evidence |
-| Task 13 | `0.7.85` | quality and 100,000-entity benchmark |
-| Task 14 | `0.7.86` | docs, debt, and final gates |
+| Checked and human-approved benchmark-remediation plan | `0.7.85` | `docs(codegraph): approve benchmark remediation plan` |
+| Task 7R | `0.7.86` | sequential exclusive-rank search execution |
+| Task 13 | `0.7.87` | corrected quality and split-corpus benchmark |
+| Task 14 | `0.7.88` | docs, debt, and final gates |
 
-Before Task 1, validate this file with `$check-chain plan docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md`, obtain human approval, bump `pyproject.toml` and `src/iwiki_mcp/__init__.py` from `0.7.71` to `0.7.72`, run `uv lock`, and commit only the checked plan, its `docs/TODO.md` stage update, and the three version files. Execution starts only from that committed approval state.
+Before Task 7R, validate this file with `$check-chain plan docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md`, obtain human approval, bump `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` from `0.7.84` to `0.7.85`, run `uv lock`, and commit only the approved spec, checked plan, `docs/TODO.md`, package-version test, and three version artifacts. Do not stage the untracked `eval/code_graph/` scaffold or Task 13 tests in the approval commit. Execution resumes only from that committed state.
+
+```bash
+git add docs/TODO.md docs/superpowers/specs/2026-08-09-iwiki-mcp-code-graph-design.md docs/superpowers/plans/2026-08-09-iwiki-mcp-code-graph.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
+git commit -m "docs(codegraph): approve benchmark remediation plan"
+```
 
 ## File map
 
@@ -92,7 +101,7 @@ Before Task 1, validate this file with `$check-chain plan docs/superpowers/plans
 | `src/iwiki_mcp/codegraph/resolver.py` | Typed project-local conservative resolution | B/5 |
 | `src/iwiki_mcp/codegraph/indexer.py` | Deterministic full rebuild/no-op and selector seam | B/6, C/9, C/12 |
 | `src/iwiki_mcp/codegraph/runtime.py` | Binding/config/state facade, validation precedence, sanitized diagnostics | B/6–7, C/8, C/10–12 |
-| `src/iwiki_mcp/codegraph/query.py` | Projection-free typed-union search and nine ranks | B/7 |
+| `src/iwiki_mcp/codegraph/query.py` | Projection-free typed-union search and sequential exclusive rank execution | B/7, B/7R |
 | `src/iwiki_mcp/codegraph/context.py` | Deterministic bounded BFS and guarded source reads | C/8 |
 | `src/iwiki_mcp/codegraph/linking.py` | Selector parsing, file/symbol link materialization, lint inputs | C/9, C/11 |
 | `src/iwiki_mcp/engine/frontmatter.py` | Nested `code` mapping parse/render round trip | C/9 |
@@ -100,7 +109,7 @@ Before Task 1, validate this file with `$check-chain plan docs/superpowers/plans
 | `src/iwiki_mcp/server.py` | Thin FastMCP registration and Wiki-lint composition | B/7, C/9–11 |
 | `tests/codegraph/` | Focused contract, fixture, security, integration, and concurrency tests | all |
 | `tests/fixtures/codegraph/` | Golden Python, duplicate-module, Unicode, and unsafe-path corpora | B/3–5, C/13 |
-| `eval/code_graph/` | Non-production benchmark runner and reports | C/13 |
+| `eval/code_graph/` | Non-production split-corpus benchmark runner and reports | C/13 |
 | `README.md`, `docs/README.ru.md`, `docs/architecture.md` | User and architecture documentation | C/14 |
 
 ## Unit A — contracts, storage, and lifecycle primitives
@@ -757,6 +766,8 @@ git commit -m "feat(codegraph): publish schema v2 snapshots"
 
 **Closes:** R-018 and the search portion of R-016; produces AC-16 and AC-18 focused conformance evidence. Unit C retains the 100,000-entity performance gate.
 
+**Historical delivery input:** the version `0.7.79` commit is present. Task 7R below retains its public contract and replaces only the all-rank execution strategy after the required Task 13 benchmark stop; Task 14 result reconciliation decides final completion.
+
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/models.py`
 - Modify: `src/iwiki_mcp/codegraph/query.py`
@@ -847,6 +858,8 @@ git commit -m "feat(codegraph): search typed schema v2 entities"
 ## Schema-v2 Remediation Gate — required before Task 8
 
 This gate is part of Unit B completion, not a new unit and not a substitute for Tasks 1–7. Run from version `0.7.79` after all seven commits:
+
+**Historical gate record:** this gate preceded Task 8 in the preserved commit sequence. Task 7R must rerun its focused query, integration, full-suite, and static gates; Task 14 result reconciliation determines final compliance.
 
 ```bash
 uv run pytest -q tests/codegraph/test_config_location_models.py tests/codegraph/test_store.py tests/codegraph/test_discovery_fingerprint.py tests/codegraph/test_python_adapter.py tests/codegraph/test_resolver.py tests/codegraph/test_indexer_runtime.py tests/codegraph/test_query.py tests/codegraph/test_server_tools.py
@@ -1203,7 +1216,215 @@ git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock src/iwiki_mcp/codegraph
 git commit -m "test(codegraph): prove recovery and concurrency"
 ```
 
-### Task 13: Add quality and 100,000-entity projection-free benchmark gates
+## Benchmark remediation — reopened Unit B search ownership
+
+### Task 7R: Execute exact search ranks sequentially with safe public-limit early-stop
+
+**Closes reopened evidence:** R-018/AC-18 query execution and the search-latency owner for R-028/AC-28. This is a forward fix after completed Task 12; it changes no schema, index, identity, normalization, public result, or MCP contract.
+
+**Files:**
+- Modify: `src/iwiki_mcp/codegraph/query.py`
+- Modify: `tests/codegraph/test_query.py`
+- Modify: `tests/test_package.py`
+- Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `uv.lock`
+
+- [ ] **Step 1: Add failing sequential-rank and equivalence tests**
+
+```python
+def _executed_ranks(connection, request):
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        results = CodeGraphQuery("backend").search(connection, request)
+    finally:
+        connection.set_trace_callback(None)
+    ranks = [
+        name
+        for statement in statements
+        for name in MATCH_RANK
+        if f"iwiki-rank:{name}" in statement
+    ]
+    return results, ranks
+
+
+def test_exact_rank_fills_public_limit_and_stops(schema_v2_search_connection):
+    results, ranks = _executed_ranks(
+        schema_v2_search_connection,
+        validate_search_request("needle", kinds=["file"], limit=1),
+    )
+    assert [item.match for item in results] == ["qualified_exact"]
+    assert ranks == ["qualified_exact"]
+
+
+def test_no_hit_executes_each_rank_once(schema_v2_search_connection):
+    results, ranks = _executed_ranks(
+        schema_v2_search_connection,
+        validate_search_request("definitely absent", limit=20),
+    )
+    assert results == ()
+    assert ranks == list(MATCH_RANK)
+
+
+EXPECTED_NEEDLE_RESULTS = [
+    ("file:typed:qualified-file", "qualified_exact"),
+    ("module:typed:local-module", "local_exact"),
+    ("symbol:typed:alias-exact-target", "alias_exact"),
+    ("symbol:typed:canonical-prefix", "canonical_prefix"),
+    ("symbol:typed:alias-prefix-target", "alias_prefix"),
+    ("symbol:typed:canonical-lexical", "canonical_lexical"),
+    ("module:typed:alias-lexical-target", "alias_lexical"),
+    ("symbol:typed:signature", "signature"),
+    ("file:typed:path", "path"),
+]
+
+
+def test_sequential_result_equals_complete_expected_order(
+    schema_v2_search_connection,
+):
+    query = CodeGraphQuery("backend")
+    complete = query.search(
+        schema_v2_search_connection,
+        validate_search_request("needle", limit=20),
+    )
+    limited = query.search(
+        schema_v2_search_connection,
+        validate_search_request("needle", limit=7),
+    )
+    assert [(item.entity_id, item.match) for item in complete] == (
+        EXPECTED_NEEDLE_RESULTS
+    )
+    assert limited == complete[:7]
+
+
+def test_only_public_remaining_limit_is_bound(schema_v2_search_connection):
+    statements = []
+    schema_v2_search_connection.set_trace_callback(statements.append)
+    try:
+        CodeGraphQuery("backend").search(
+            schema_v2_search_connection,
+            validate_search_request("svc", limit=1),
+        )
+    finally:
+        schema_v2_search_connection.set_trace_callback(None)
+    assert all(
+        "LIMIT 1" in sql
+        for sql in statements
+        if "iwiki-rank:" in sql
+    )
+```
+
+Replace the old assertion that forbids every SQL `LIMIT` with `test_only_public_remaining_limit_is_bound`; it permits only the current remaining public limit. Keep existing typed-union, six-kind, alias aggregation/fan-out, partially-resolved alias, Unicode, literal `%`/`_`, path-filter, lazy-database-error, validation-precedence, and strongest-tier overlap tests. Add one overlap fixture per adjacent canonical tier and alias tier so every lower predicate proves exclusion of stronger matches.
+
+- [ ] **Step 2: Run the focused RED**
+
+```bash
+uv run pytest -q tests/codegraph/test_query.py -k 'fills_public_limit_and_stops or no_hit_executes_each_rank_once or sequential_result_equals_complete_expected_order or only_public_remaining_limit_is_bound'
+```
+
+Expected: focused tests FAIL because current search emits one all-rank CTE statement. The task-page and approved spec retain the prior approximately one-second benchmark-stop evidence; Task 13 produces fresh JSON/Markdown after its runner exists.
+
+- [ ] **Step 3: Replace the all-rank CTE with nine exclusive query specifications**
+
+```python
+@dataclass(frozen=True)
+class _RankQuery:
+    name: str
+    sql: str
+    parameters: tuple[object, ...]
+
+
+_RANK_ORDER = tuple(MATCH_RANK)
+
+
+def _remaining_limit(request, results):
+    return request.limit - len(results)
+
+
+def _search_result(row, rank_name):
+    matched_alias = None if row[17] is None else str(row[17])
+    alias_target_count = int(row[18])
+    return SearchResult(
+        entity_id=str(row[0]),
+        entity_type=str(row[1]),
+        file_id=None if row[2] is None else str(row[2]),
+        module_id=None if row[3] is None else str(row[3]),
+        symbol_id=None if row[4] is None else str(row[4]),
+        kind=str(row[5]),
+        qualified_name=str(row[6]),
+        local_name=str(row[7]),
+        signature=None if row[9] is None else str(row[9]),
+        path=str(row[11]),
+        start_line=int(row[13]),
+        end_line=int(row[14]),
+        start_byte=int(row[15]),
+        end_byte=int(row[16]),
+        match=rank_name,
+        matched_alias=matched_alias,
+        alias_ambiguous=alias_target_count > 1,
+        alias_target_count=alias_target_count,
+    )
+
+
+def _append_rank(rows, rank_name, results, seen_ids):
+    for row in rows:
+        item = _search_result(row, rank_name)
+        if item.entity_id in seen_ids:
+            continue
+        results.append(item)
+        seen_ids.add(item.entity_id)
+```
+
+Build `_rank_queries(domain, request)` in `_RANK_ORDER`. Every query begins with comment `/* iwiki-rank:<name> */`, constructs only required file/module/symbol branches, applies language/kind/path filters inside those branches, and ends with `ORDER BY qualified_name, entity_id LIMIT ?`. Bind `remaining_limit` only after the tier has completed all semantics.
+
+Exact and prefix SQL use existing qualified/local/path indexes where applicable. Lexical SQL requires every U+001F-bounded query token via `instr`; signature/path SQL uses persisted casefold expressions. Alias SQL starts from filtered explicit-alias `IMPORTS` rows in `resolved`, `ambiguous`, or `partially_resolved`, calculates distinct filtered target count before ordering/limit, and chooses the lowest code-point alias. Each tier predicate includes the negation of every stronger canonical/alias condition. Do not add an index, projection, FTS, UDF, result cache, temporary persisted structure, or non-public candidate bound.
+
+```python
+results = []
+seen_ids = set()
+try:
+    for rank in _rank_queries(self.domain, request):
+        remaining = _remaining_limit(request, results)
+        if remaining == 0:
+            break
+        rows = connection.execute(
+            rank.sql, (*rank.parameters, remaining)
+        )
+        _append_rank(rows, rank.name, results, seen_ids)
+except sqlite3.DatabaseError as exc:
+    raise CodeGraphStoreError("code graph search failed") from exc
+return tuple(results)
+```
+
+- [ ] **Step 4: Run focused GREEN, query-plan inspection, and full gates**
+
+```bash
+uv run pytest -q tests/codegraph/test_query.py
+uv run pytest -q tests/codegraph/test_server_tools.py tests/codegraph/test_indexer_runtime.py
+uv run pytest -q
+uv run flake8 src tests
+uv run python -m compileall -q src/iwiki_mcp/codegraph tests/codegraph
+uv lock --check
+git diff --check
+```
+
+Expected: sequential/expected-order/overlap tests pass; exact/prefix `EXPLAIN QUERY PLAN` assertions name only existing Section 7.8 indexes; early-stop trace contains no lower tier after the public limit fills; no-hit trace contains all nine ranks once; full suite and static gates exit zero.
+
+Update `concept/code-graph-search`, headings `Candidate retrieval` and `Ranking and result contract`, source `src/iwiki_mcp/codegraph/query.py`. Run `wiki_lint(domain="iwiki-mcp")`; the changed page must be current with no broken or missing-source finding.
+
+- [ ] **Step 5: Bump version and commit**
+
+Set package and package-test versions to `0.7.86`, run `uv lock`, rerun `tests/test_package.py`, and commit only Task 7R files:
+
+```bash
+git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock src/iwiki_mcp/codegraph/query.py tests/codegraph/test_query.py tests/test_package.py
+git commit -m "fix(codegraph): execute search ranks sequentially"
+```
+
+## Unit C — resumed benchmark and final evidence
+
+### Task 13: Correct quality evidence and split search from production benchmark gates
 
 **Closes:** R-027 and R-028; produces AC-27 and AC-28.
 
@@ -1215,57 +1436,256 @@ git commit -m "test(codegraph): prove recovery and concurrency"
 - Create: `tests/eval/test_code_graph_runner.py`
 - Create: `tests/eval/test_code_graph_report.py`
 - Create: `docs/superpowers/evidence/code-graph-benchmark-method.md`
+- Modify: `tests/test_package.py`
 - Modify: `pyproject.toml`
 - Modify: `src/iwiki_mcp/__init__.py`
 - Modify: `uv.lock`
 
-- [ ] **Step 1: Add failing report/corpus/gate tests**
+- [ ] **Step 1: Add failing split-corpus and truth tests**
 
 ```python
-def test_report_has_quality_versions_environment_and_strata(tmp_path):
-    report = run_benchmark(output=tmp_path, fixture_root="tests/fixtures/codegraph")
-    assert set(report) >= {"environment", "corpus", "versions", "quality", "performance", "strata"}
-    assert report["corpus"]["entity_count"] >= 100_000
-    assert {"ascii_name", "unicode_name", "unicode_signature", "shared_unicode_path"} <= set(report["strata"])
+from eval.code_graph.runner import (
+    BenchmarkGateError,
+    _create_search_corpus,
+    _write_production_tree,
+    run_benchmark,
+)
+
+
+@pytest.fixture(scope="module")
+def benchmark_report(tmp_path_factory):
+    return run_benchmark(
+        output=tmp_path_factory.mktemp("code-graph-benchmark"),
+        fixture_root="tests/fixtures/codegraph",
+    )
+
+
+def test_report_separates_search_and_production_corpora(benchmark_report):
+    corpora = benchmark_report["corpora"]
+    assert corpora["search"]["entity_count"] >= 100_000
+    assert corpora["production"]["accepted_source_bytes"] > 0
+    assert corpora["search"]["sha256"] != corpora["production"]["sha256"]
+    assert {"ascii_name", "unicode_name", "unicode_signature", "shared_unicode_path"} <= set(benchmark_report["strata"])
+
+
+def test_corpus_builders_keep_search_and_source_bytes_separate(tmp_path):
+    search = _create_search_corpus(tmp_path / "search.sqlite3")
+    try:
+        production = _write_production_tree(tmp_path / "project", 3)
+        assert search["entity_count"] >= 100_000
+        assert "source_bytes" not in search
+        assert production.accepted_source_bytes == sum(
+            (production.project / path).stat().st_size
+            for path in production.accepted_paths
+        )
+        assert production.sha256 != search["sha256"]
+    finally:
+        search["connection"].close()
+
+
+def test_search_records_cold_warmup_and_ten_warm_samples(benchmark_report):
+    for case in benchmark_report["performance"]["search_cases"]:
+        assert case["cold_ms"] >= 0
+        assert case["warmup_runs"] == 1
+        assert len(case["warm_samples_ms"]) == 10
+        assert case["warm_max_ms"] == max(case["warm_samples_ms"])
+        assert case["warm_max_ms"] < 150
+
+
+def test_golden_truth_is_independent_and_casefold_only(benchmark_report):
+    truth = benchmark_report["golden_truth"]
+    assert truth["unicode_token_key"] == "\x1fpkg\x1fstrasse\x1f"
+    assert truth["normalization"] == "none"
+    assert truth["canonical_lexical_query"] == "some token target"
+    assert benchmark_report["quality"]["unicode_correctness"] == 1.0
+
+
+def test_determinism_excludes_only_operational_fields(benchmark_report):
+    determinism = benchmark_report["determinism"]
+    assert determinism["revision_equal"] is True
+    assert determinism["semantic_row_hash_equal"] is True
+    assert determinism["entity_relation_link_ids_equal"] is True
+    assert determinism["excluded_fields"] == [
+        "repositories.indexed_at",
+        "repositories.state",
+        "metadata.phase_timings",
+        "metadata.transient_diagnostics",
+    ]
 
 
 def test_threshold_miss_writes_evidence_and_exits_nonzero(tmp_path):
     with pytest.raises(BenchmarkGateError):
-        run_benchmark(output=tmp_path, thresholds={"declarations": 1.01})
+        run_benchmark(
+            output=tmp_path,
+            fixture_root="tests/fixtures/codegraph",
+            thresholds={"declarations": 1.01},
+        )
     assert (tmp_path / "code-graph-benchmark.json").is_file()
+    assert (tmp_path / "code-graph-benchmark.md").is_file()
 ```
 
-- [ ] **Step 2: Run RED**
+- [ ] **Step 2: Run RED against the preserved failed scaffold and evidence**
 
 ```bash
 uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py
 ```
 
-Expected: collection FAIL because `eval.code_graph` does not exist.
+Expected: on a clean checkout, collection FAILS because `eval.code_graph` is absent. When the stopped local scaffold is still present, tests instead FAIL on its single mixed corpus, three warm samples, raw-row hash, Unicode expected token, and lexical fixture. Either RED is valid; no Task 7R step depends on these uncommitted files.
 
-- [ ] **Step 3: Implement isolated reproducible measurement**
+- [ ] **Step 3: Build two deterministic corpora with separate ownership**
 
-Generate at least 100,000 total file/module/symbol entities with fixed ASCII-name, Unicode-name, Unicode-signature, shared-Unicode-path, duplicate-module, repeated-alias, and ambiguous-alias strata. Exercise all nine ranks through production query code with no FTS, UDF, projection, or candidate cap. Record exact command, warm/cold policy, environment, corpus hash/count/bytes, schema/parser/resolver/normalizer/Unicode versions, startup/no-op/build/search/context latency, peak memory, DB/source ratio, extraction/import/call accuracy, false resolutions, ambiguity/alias correctness, and forced-build row/revision determinism.
+Implement `_create_search_corpus()` as deterministic SQL-only schema-v2 setup. Canonical lexical data persists `models.token_key("lexical.some_token_target", "some_token_target")`; hard-code expected query/rank separately. Include fixed ASCII, Unicode name, Unicode signature, shared Unicode path, duplicate module, repeated alias, and ambiguous alias strata. Return no `source_bytes` from this corpus and never use its file size for storage gates.
 
-- [ ] **Step 4: Run GREEN benchmark gate and update iwiki**
+```python
+def _hash_corpus(parts):
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(len(part).to_bytes(8, "big"))
+        digest.update(part)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class ProductionCorpus:
+    project: Path
+    accepted_paths: tuple[str, ...]
+    accepted_source_bytes: int
+    sha256: str
+
+
+def _write_production_tree(project: Path, count: int) -> ProductionCorpus:
+    project.mkdir(parents=True, exist_ok=True)
+    parts = []
+    paths = []
+    total = 0
+    for index in range(count):
+        relative = f"pkg_{index:05d}.py"
+        source = (
+            f'"""benchmark source {index:05d} ' + ("x" * 2048) + '\n"""\n'
+            f"def symbol_{index:05d}(value: int) -> int:\n"
+            f"    return value + {index}\n"
+        ).encode("ascii")
+        target = project / relative
+        target.write_bytes(source)
+        paths.append(relative)
+        total += len(source)
+        parts.append(relative.encode("utf-8") + b"\0" + source)
+    return ProductionCorpus(
+        project=project,
+        accepted_paths=tuple(paths),
+        accepted_source_bytes=total,
+        sha256=_hash_corpus(parts),
+    )
+```
+
+Use this real tree through production discovery, `PythonAdapter`, resolver, `CodeGraphIndexer`, store, and publication. Use 1,000 files for build/no-op/forced rebuild/context/DB ratio and 10,000 files through the same discovery/parser/resolver path under `tracemalloc` for memory. Do not monkeypatch `discover_sources` or count invented source sizes.
+
+```bash
+uv run pytest -q tests/eval/test_code_graph_runner.py -k 'corpus_builders_keep_search_and_source_bytes_separate'
+```
+
+Expected: deterministic search corpus has at least 100,000 entities and no source denominator; production accepted bytes equal actual generated files; corpus identities differ.
+
+- [ ] **Step 4: Implement canonical measurement and report semantics**
+
+```python
+_SEMANTIC_SELECTS = {
+    "repositories": (
+        "repository_id, root_path, git_remote, git_commit, "
+        "source_fingerprint, config_fingerprint, parser_fingerprint, "
+        "normalizer_version, unicode_data_version, revision"
+    ),
+    "files": "*",
+    "symbols": "*",
+    "relations": "*",
+    "wiki_code_links": "*",
+}
+
+
+def _semantic_snapshot(connection):
+    rows = {}
+    for table, columns in _SEMANTIC_SELECTS.items():
+        rows[table] = tuple(
+            connection.execute(
+                f"SELECT {columns} FROM {table} ORDER BY 1"
+            )
+        )
+    return rows
+```
+
+Compare both revisions, `_semantic_snapshot()` hashes, and exact file/module/symbol/relation/link ID sets after two forced production builds. Exclude only the four documented operational groups; do not compare raw DB bytes.
+
+Before measuring storage, open the canonical production DB under benchmark ownership, run `PRAGMA wal_checkpoint(TRUNCATE)`, close every connection, assert WAL is absent or zero bytes, and divide the main SQLite file bytes by `ProductionCorpus.accepted_source_bytes`. Measure cold startup inside a fresh Python subprocess with the timer around the code-graph import, excluding interpreter launch.
+
+For each rank, create and validate the request before timing, take one cold production-query sample, execute one untimed warm-up, then take exactly ten warm samples through the same `CodeGraphQuery`, connection, and snapshot. Record cold, warm-up count, median, p95, maximum, all ten samples, observed rank, result IDs, and independent expected rank/IDs. Gate only `warm_max_ms`. Do not add a prepared-result or Python result cache.
+
+```python
+def _timed_search(engine, connection, request):
+    started = time.perf_counter_ns()
+    matched = engine.search(connection, request)
+    elapsed = (time.perf_counter_ns() - started) / 1_000_000
+    return round(elapsed, 6), matched
+
+
+def _nearest_rank_p95(values):
+    ordered = sorted(values)
+    return ordered[math.ceil(len(ordered) * 0.95) - 1]
+
+
+cold_ms, cold_matches = _timed_search(engine, connection, request)
+warmup_matches = engine.search(connection, request)
+warm_runs = [
+    _timed_search(engine, connection, request)
+    for _sample in range(10)
+]
+warm_samples = [elapsed for elapsed, _matched in warm_runs]
+case = {
+    "cold_ms": cold_ms,
+    "warmup_runs": 1,
+    "warm_samples_ms": warm_samples,
+    "warm_median_ms": statistics.median(warm_samples),
+    "warm_p95_ms": _nearest_rank_p95(warm_samples),
+    "warm_max_ms": max(warm_samples),
+}
+```
+
+Render `corpora.search`, `corpora.production`, `golden_truth`, revised determinism, and per-case warm distribution in both JSON and Markdown. Reports must be written before raising `BenchmarkGateError`.
+
+```bash
+uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py -k 'search_records_cold or determinism_excludes or threshold_miss or markdown'
+```
+
+Expected: ten-sample search distribution, semantic determinism, split-corpus Markdown, and write-before-fail evidence pass.
+
+- [ ] **Step 5: Run focused GREEN and the actual unchanged benchmark gates**
 
 ```bash
 uv run pytest -q tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py
 uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
 ```
 
-Expected: quality gates meet declarations/methods `>=98%`, local imports `>=95%`, static calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`; startup `<100 ms`, no-op `<200 ms`, 1,000-file build `<15 s`, every 100,000-entity search case `<150 ms`, context `<300 ms`, DB `<3x`, and 10,000-file peak memory `<1 GiB` on the recorded environment.
+Expected: CLI exits `0`. Declarations/methods `>=98%`, local imports `>=95%`, static calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`; startup `<100 ms`, no-op `<200 ms`, 1,000-file production build `<15 s`, every search case warm maximum `<150 ms`, production context `<300 ms`, checkpointed production DB/source `<3x`, and 10,000-file production-path memory `<1 GiB` on the recorded environment. Every search case reports correct independent expected rank/result, including canonical lexical and Unicode.
+
+```bash
+uv run pytest -q
+uv run flake8 src tests eval/code_graph
+uv run python -m compileall -q src eval tests/eval tests/codegraph
+uv lock --check
+git diff --check
+```
+
+Expected: full tests and static gates exit zero. The intentional syntax-error fixture is outside the explicit compile paths.
 
 Create `reference/code-graph-benchmark` with `wiki_write_page`, document corpus, environment, warm/cold policy, quality/performance gates, report locations, and stop behavior with source `eval/code_graph/runner.py`; link it from `reference/code-graph-schema-v2-design`, then run iwiki lint. Expected: the benchmark page is not orphan/stale and adds no broken/missing-source finding.
 
 **Benchmark-miss stop rule:** Any threshold miss or contradictory result stops execution before Task 14. Write the failed evidence without suppressing it, reopen the earliest affected spec/plan section and HUMAN CHECKPOINT, rerun `$check-chain spec` and `$check-chain plan`, obtain approval of the revised checked artifacts, then return to the owning implementation task. Never relax a threshold, truncate candidates, add FTS/UDF/projection/candidate caps, or continue to final acceptance on a miss.
 
-- [ ] **Step 5: Bump version and commit only after the gate passes**
+- [ ] **Step 6: Bump version and commit only after the actual gate passes**
 
-Set `pyproject.toml` and `src/iwiki_mcp/__init__.py` to `0.7.85`, run `uv lock`, then run the mandatory per-task verification gate with `uv run flake8 src tests eval/code_graph`.
+Set package and package-test versions to `0.7.87`, run `uv lock`, rerun `tests/test_package.py`, and commit the benchmark only after the real CLI exits zero.
 
 ```bash
-git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock eval/code_graph tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py docs/superpowers/evidence/code-graph-benchmark-method.md
+git add pyproject.toml src/iwiki_mcp/__init__.py uv.lock tests/test_package.py eval/code_graph tests/eval/test_code_graph_runner.py tests/eval/test_code_graph_report.py docs/superpowers/evidence/code-graph-benchmark-method.md
 git commit -m "test(codegraph): gate quality and performance"
 ```
 
@@ -1322,7 +1742,7 @@ Use iwiki MCP to update the four named pages with their changed source paths; th
 ```bash
 uv run pytest -q
 uv run flake8 src tests eval/code_graph
-uv run python -m compileall -q src tests eval
+uv run python -m compileall -q src eval tests/eval tests/codegraph
 uv run iwiki-mcp --help
 uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --output /tmp/iwiki-code-graph-evidence
 git diff --check
@@ -1332,7 +1752,7 @@ Expected: full suite, scoped lint, compile, CLI, benchmark, and diff checks pass
 
 - [ ] **Step 5: Bump version, reconcile result, and create the final commit**
 
-Set `pyproject.toml` and `src/iwiki_mcp/__init__.py` to `0.7.86`, run `uv lock`, rerun `tests/test_package.py`, `uv lock --check`, and `git diff --check`, then reconcile the complete branch diff before committing:
+Set `pyproject.toml`, `src/iwiki_mcp/__init__.py`, and `tests/test_package.py` to `0.7.88`, run `uv lock`, rerun `tests/test_package.py`, `uv lock --check`, and `git diff --check`, then reconcile the complete branch diff before committing:
 
 ```bash
 uv run pytest -q tests/test_package.py
@@ -1366,29 +1786,29 @@ Expected: `$check-chain result` writes `result_check: OK` against the current pl
 | R-013 | AC-13 | Task 4 |
 | R-014, R-015 | AC-14, AC-15 | Tasks 4–5 |
 | R-016 | AC-16 | Tasks 6–8 and 10 |
-| R-017, R-018 | AC-17, AC-18 | Tasks 6–7, 10, 12 |
+| R-017, R-018 | AC-17, AC-18 | Tasks 6–7, 7R, 10, 12 |
 | R-019, R-020 | AC-19, AC-20 | Task 8 |
 | R-021, R-022 | AC-21, AC-22 | Task 9 |
 | R-023, R-024 | AC-23, AC-24 | Tasks 9–11 |
 | R-025 | AC-25 | Tasks 6 and 12 |
 | R-026 | AC-26 | Tasks 10–12 and 14 |
-| R-027, R-028 | AC-27, AC-28 | Task 13 |
-| R-029 | AC-29 | Checked plan structure and Schema-v2 Remediation Gate after Task 7 |
+| R-027, R-028 | AC-27, AC-28 | Tasks 7R and 13 |
+| R-029 | AC-29 | Checked plan structure, historical Schema-v2 Remediation Gate, and forward Task 7R → Task 13 → Task 14 order |
 | R-030 | AC-30 | Task 14 |
 
 ## Final evidence inventory
 
 Execution result must provide:
 
-- Release history from approved plan version `0.7.72` through final `0.7.86`, one version per listed gate/task.
-- Task-level RED failure and GREEN success output for all fourteen tasks.
+- Release history from original plan version `0.7.72` through completed Task 12 version `0.7.84`, then benchmark-remediation plan `0.7.85`, Task 7R `0.7.86`, Task 13 `0.7.87`, and final Task 14 `0.7.88`.
+- Task-level RED failure and GREEN success output for original Tasks 1–14 plus reopened Task 7R.
 - Schema inspection proving exact five tables, exact twenty named indexes, required implicit uniques, and absence of forbidden modules/FTS/projection/UDF structures.
 - Typed union and exact nine-rank search results, alias aggregation/fan-out, no hidden candidate cap, invalid-input-before-I/O traces, and stable tie evidence.
 - File/module/symbol context-seed coverage, deterministic BFS/budget evidence, and explicit-source safety evidence.
 - Full build/no-op, schema-v1 incompatible rebuild, corrupt-cache recovery, ordered two-verification publication, cancellation, concurrent reader/writer, and fail-soft Wiki-continuation evidence.
 - Real stdio registration proving exactly four code tools with no `domain`, `seeds` on context, default `include_source=false`, and unchanged `wiki_search`.
 - Selector round trips, file/symbol-only derived links, code-aware lint matrix, and proof that no path mutates authored selectors.
-- Quality and 100,000-entity performance reports with environment, corpus, versions, every stratum, every threshold, and deterministic rebuild comparison.
+- Quality and performance reports with environment, separate search/production corpus identities, versions, every stratum, cold plus ten warm search samples, every unchanged threshold, production DB/source bytes, independent golden truth, and canonical semantic deterministic rebuild comparison.
 - Repository docs and iwiki pages current; separate incremental and TypeScript debt preserved; iwiki lint result recorded.
 - Final full pytest, flake8, compileall, CLI, benchmark, diff-check, and `$check-chain result` outputs.
 

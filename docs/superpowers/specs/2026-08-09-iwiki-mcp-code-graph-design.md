@@ -1,7 +1,7 @@
 ---
 review:
-  spec_hash: e088e3b41fbfeba3
-  last_run: 2026-08-11
+  spec_hash: 3625b9f571db61f1
+  last_run: 2026-08-13
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -104,7 +104,7 @@ chain:
 # iwiki-mcp Python Code Graph Design
 
 **Date:** 2026-08-09
-**Status:** approved
+**Status:** draft
 **Topic:** `iwiki-mcp-code-graph`
 **Intent:** `docs/superpowers/intents/2026-08-09-iwiki-mcp-code-graph-intent.md`
 **Requirements source:** `docs/superpowers/intents/iwiki-mcp-code-graph-technical-requirements-final.md`
@@ -958,7 +958,11 @@ Violation returns `invalid_config`; input is never truncated. Casefolding does n
 
 Canonical name tiers query the file/module/symbol union directly. Alias tiers query only `IMPORTS` relations with `binding_kind = 'explicit_alias'`, then project each typed module/symbol target into that same union. Implicit bindings never enter search tiers. Repeated import sites for the same explicit alias and target are aggregated by target `entity_id`; an ambiguous alias retains every distinct target. If multiple aliases match the same entity at its strongest alias tier, `matched_alias` is the lowest alias by Unicode code-point order. `alias_target_count` is the distinct target count for that selected alias after requested language/kind/target-path filters and before output `limit`; `alias_ambiguous` is `alias_target_count > 1`. Canonical-tier winners set `matched_alias=null`, `alias_target_count=0`, and `alias_ambiguous=false`.
 
-Each lexical tier requires every distinct query token to occur as a complete U+001F-bounded token in the persisted key; zero tokens cannot produce a lexical match. Signature/path tiers use `instr(persisted_casefold_expression, query.casefold()) > 0`. Candidates from all tiers are de-duplicated by `entity_id`, keeping the lowest internal rank, before `limit` is applied. Public `match` names that winning tier (`qualified_exact`, `local_exact`, `alias_exact`, `canonical_prefix`, `alias_prefix`, `canonical_lexical`, `alias_lexical`, `signature`, or `path`). Final order is exactly `(match_rank, qualified_name, entity_id)` using the internal rank. There is no hidden pre-limit candidate cap, FTS projection, or wildcard interpretation of `%`/`_`.
+Each lexical tier requires every distinct query token to occur as a complete U+001F-bounded token in the persisted key; zero tokens cannot produce a lexical match. Signature/path tiers use `instr(persisted_casefold_expression, query.casefold()) > 0`. Public `match` names the winning tier (`qualified_exact`, `local_exact`, `alias_exact`, `canonical_prefix`, `alias_prefix`, `canonical_lexical`, `alias_lexical`, `signature`, or `path`). Final order is exactly `(match_rank, qualified_name, entity_id)` using the internal rank.
+
+The query executes the nine ranks sequentially rather than materializing one all-rank entity CTE. Each canonical rank uses branch-specific file, module, and symbol SQL over the authoritative tables; exact and prefix branches use the existing Section 7.8 indexes, while lexical, signature, and path branches remain projection-free scans over persisted normalized columns. Each alias rank starts from filtered `IMPORTS` rows, completes target aggregation and `alias_target_count` calculation, and only then orders typed targets. A rank predicate is exclusive of all stronger ranks. Rows already returned by a stronger rank are excluded by their bounded public `entity_id` set.
+
+Within a rank, filtering, target aggregation, exact rank semantics, de-duplication, and ordering are complete before SQLite applies the remaining public `limit`. Execution stops only when the accumulated result contains the requested public `limit`; lower ranks cannot displace any returned entity and need not execute. If the result is not full, the next rank runs without any hidden candidate bound. This is observationally equivalent to evaluating and de-duplicating every rank before the final public limit, but avoids mandatory whole-corpus materialization for queries whose strongest ranks already satisfy the request. There is no hidden pre-limit candidate cap, new index, FTS projection, Python SQLite UDF, or wildcard interpretation of `%`/`_`.
 
 ### 13.5 `wiki_code_context`
 
@@ -1088,9 +1092,15 @@ tests/fixtures/codegraph/security_paths
 
 ### 16.4 Benchmark
 
-`eval/code_graph/` owns a non-production benchmark runner and report. Every report records environment, corpus identity, command, schema/parser/resolver/normalizer/Unicode-data versions, startup/no-op/build/search/context latency, peak memory, DB/source size, declaration/import/call quality, false resolutions, module ambiguity, alias correctness, and deterministic rebuild comparison.
+`eval/code_graph/` owns a non-production benchmark runner and report. Every report records environment, corpus identities, command, schema/parser/resolver/normalizer/Unicode-data versions, startup/no-op/build/search/context latency, peak memory, DB/source size, declaration/import/call quality, false resolutions, module ambiguity, alias correctness, and deterministic rebuild comparison.
 
-The unified-search performance corpus contains at least 100,000 total file/module/symbol entities and fixed strata for ASCII names, Unicode names, Unicode signatures, shared Unicode path prefixes, duplicate dotted modules, repeated aliases, and ambiguous aliases. It exercises every rank without FTS, UDFs, projection tables, or candidate caps. Reports must identify warm/cold policy and publish per-stratum as well as aggregate latency.
+The benchmark uses two explicit corpus classes. The unified-search corpus is a deterministic schema-v2 SQL corpus with at least 100,000 total file/module/symbol entities and fixed strata for ASCII names, Unicode names, Unicode signatures, shared Unicode path prefixes, duplicate dotted modules, repeated aliases, and ambiguous aliases. It exercises every rank through production `CodeGraphQuery` without FTS, UDFs, projection tables, new indexes, or candidate caps. It is authoritative only for search correctness and latency.
+
+The production corpus is a generated source tree processed through production discovery, Python parsing, resolution, storage, and publication. It is authoritative for startup, fingerprint no-op, build latency, context latency, peak memory, extraction/resolution quality, deterministic rebuild, and database/source ratio. The source denominator is the sum of actual accepted source-file bytes. The database numerator is the canonical main SQLite file size after a benchmark-owned WAL checkpoint and close; transient WAL/SHM files and the synthetic search corpus do not enter this ratio.
+
+Golden truth is independent of query output. Unicode cases prove the specified no-NFC/NFKC behavior and Python casefold semantics. Canonical and alias lexical fixtures persist every expected query token as a complete U+001F-bounded token. Deterministic rebuild compares revision, all entity/relation/link IDs, and canonical normalized semantic columns. It excludes operational `indexed_at`, repository lifecycle state, phase timings, and transient metadata diagnostics; raw SQLite bytes need not be identical.
+
+For each search rank, the report records one cold sample separately, performs one untimed warm-up, and then records ten warm samples through production query code on one connection/snapshot without a prepared-result cache. It publishes cold, median, p95, and maximum warm latency per stratum. The `<150 ms` gate applies to the maximum of those ten warm samples, not the separately reported cold sample.
 
 Initial targets remain those from the approved intent: startup `<100 ms`, no-op `<200 ms`, 1,000 Python files `<15 s`, every unified-search case on the 100,000-entity corpus `<150 ms`, depth-1/50-node context `<300 ms`, DB `<3x` source text, 10,000-file memory `<1 GiB`, declarations/methods `>=98%`, local imports `>=95%`, statically resolvable calls `>=75%`, false resolved calls `<5%`, deterministic rebuild `100%`, and Wiki search regressions `0`.
 
@@ -1160,7 +1170,7 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 - **AC-15:** Static dependency inspection shows core modules import only `LanguageAdapter` and normalized models, not Python grammar rules.
 - **AC-16:** MCP registration exposes exactly the four code tools, unified search returns the typed result contract, context accepts `seeds` for all three entity types, and the `wiki_search` schema remains unchanged.
 - **AC-17:** Injected binding/parser/store/lock/build/query failures return diagnostics and permit a succeeding Wiki tool call.
-- **AC-18:** Search fixtures prove the exact nine ranks and six kinds; nonblank input; case-sensitive raw exact/prefix; casefold-only all-token lexical and literal signature/path behavior; target-path filtering; public match/alias fields; lowest-code-point alias choice; repeated-site aggregation; ambiguous fan-out; entity de-duplication before limit; `(match_rank, qualified_name, entity_id)` ties; literal `%`/`_`; no candidate cap; and `invalid_config` before binding/I/O for NUL, lone surrogate, `>4096` UTF-8 bytes, or `>64` distinct tokens.
+- **AC-18:** Search fixtures prove the exact nine ranks and six kinds; nonblank input; case-sensitive raw exact/prefix; casefold-only all-token lexical and literal signature/path behavior; target-path filtering; public match/alias fields; lowest-code-point alias choice; repeated-site aggregation; ambiguous fan-out; sequential exclusive-rank execution; safe early-stop only after the public limit is filled; entity de-duplication before limit; `(match_rank, qualified_name, entity_id)` ties; literal `%`/`_`; no hidden candidate cap; and `invalid_config` before binding/I/O for NUL, lone surrogate, `>4096` UTF-8 bytes, or `>64` distinct tokens.
 - **AC-19:** Context fixtures seed file, module, and symbol IDs and prove depth-0 file/module activation, entity-specific relation expansion, file-only relations, full binding provenance, direction/depth/relation filters, all budgets, deterministic BFS, unresolved evidence, and truncation reporting.
 - **AC-20:** Omitted or false `include_source` returns no source. Changed/outside/secret source is never returned; an explicit true request for valid current source obeys the aggregate byte budget.
 - **AC-21:** Selector fixtures prove provenance and specificity for only symbol, file, and glob selectors and reject module/alias selectors.
@@ -1169,8 +1179,8 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 - **AC-24:** No MVP path mutates Wiki `code` selectors or produces authoritative automatic links.
 - **AC-25:** Status/build results contain required typed-entity, schema/normalizer/Unicode-version, module-warning, resolution, timing, and two-verification metrics; sanitized logs contain no fixture source or credentials.
 - **AC-26:** Full existing pytest suite passes and comparison confirms no `wiki_search` contract/result regression.
-- **AC-27:** Benchmark report records all quality metrics, duplicate-module/alias/Unicode behavior, deterministic normalization/rebuild evidence, and reaches the approved extraction/resolution gates.
-- **AC-28:** Benchmark report covers at least 100,000 unified entities across ASCII-name, Unicode-name, Unicode-signature, and shared-Unicode-path strata without FTS/UDF/projection/candidate cap; every search case is `<150 ms`, DB is `<3x` source text, and existing startup/no-op/build/context/memory targets pass on the documented environment.
+- **AC-27:** Benchmark report records all quality metrics, duplicate-module/alias/Unicode behavior against independent golden truth, and canonical semantic determinism excluding only documented operational fields; it reaches the approved extraction/resolution and `100%` deterministic-rebuild gates on the production corpus.
+- **AC-28:** Benchmark report separates a schema-v2 search corpus from a production-built Python corpus. Search evidence covers at least 100,000 unified entities across ASCII-name, Unicode-name, Unicode-signature, and shared-Unicode-path strata without new indexes/FTS/UDF/projection/candidate cap; every case reports a cold sample plus ten post-warm-up samples whose warm maximum is `<150 ms`. Production-corpus evidence proves DB is `<3x` actual accepted source bytes and the existing startup/no-op/build/context/memory targets pass on the documented environment.
 - **AC-29:** Implementation plan keeps Units A/B/C and their ownership unchanged, remediates each Task 1–7 schema-v2 delta with measurable output and verification before Task 8, and preserves dependency order.
 - **AC-30:** Product docs and Wiki identify incremental indexing and TypeScript as separate technical debt; Python MVP output makes no claim that either exists.
 
@@ -1181,7 +1191,7 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 - **Duplicate or unprovable modules:** multiple source roots can expose the same dotted name and namespace layouts can lack reliable evidence. Mitigation: occurrence-aware `module_key`, distinct IDs, all-target ambiguity, file-only fallback with warning, and no path-order winner.
 - **Alias multiplicity:** repeated and ambiguous aliases can multiply relation rows and result candidates. Mitigation: retain full relation provenance, aggregate import sites by target entity for search, deterministic lowest-code-point public alias, de-duplicate before limit, and benchmark fan-out cases.
 - **Unicode size and semantic surprises:** casefold can expand text, Unicode tables change between runtimes, and no NFC/NFKC means canonically equivalent spellings remain different. Mitigation: compact ASCII scalar deltas, persisted token keys, versioned normalizer and Unicode data, explicit no-normalization contract, query bounds, deterministic rebuild, and Unicode golden fixtures.
-- **Projection-free search latency:** lexical/signature/path tiers may scan normalized columns because no FTS/UDF/projection/candidate cap is allowed. Mitigation: raw endpoint indexes for exact/prefix/resolution, compact persisted normalization, literal `instr` checks, a 100,000-entity stratified benchmark, `<150 ms` gate, and `<3x` DB-size gate.
+- **Projection-free search latency:** lexical/signature/path tiers may scan normalized columns because no FTS/UDF/projection/candidate cap is allowed. Mitigation: sequential exclusive-rank queries, existing raw endpoint indexes for exact/prefix/resolution, safe early-stop only at the public limit, compact persisted normalization, literal `instr` checks, and the separate 100,000-entity `<150 ms` search gate. The `<3x` storage gate is measured independently on a production-built source corpus.
 - **Dynamic Python false certainty:** syntactic calls cannot model runtime dispatch. Mitigation: conservative resolver states, preserved references/candidates, and false-resolution quality gates.
 - **Tree-sitter startup cost:** mandatory dependencies could affect ordinary Wiki startup. Mitigation: lazy grammar/parser initialization and measured startup gate.
 - **Selector expansion cost:** broad globs can create excessive links. Mitigation: materialize file links only, reuse file limits, report truncation/conflicts, and avoid per-symbol expansion.
@@ -1190,7 +1200,9 @@ Task 8 remains the first Unit C implementation task and MUST NOT compensate for 
 
 ## 20. Human checkpoints
 
-The schema-v2 decisions in this specification are approved inputs: five authoritative tables, file-backed module occurrences, occurrence-aware IDs, typed module/symbol relations, alias semantics, projection-free Unicode search, bounded validation, incompatible-cache rebuild, unified MCP entities, and unchanged A/B/C units. The specification passed `check-chain spec` and received human approval on 2026-08-11; no checkpoint remains before implementation planning.
+The schema-v2 decisions approved on 2026-08-11 remain unchanged inputs: five authoritative tables, twenty named indexes, file-backed module occurrences, occurrence-aware IDs, typed module/symbol relations, alias semantics, projection-free Unicode search, bounded validation, incompatible-cache rebuild, unified MCP entities, and unchanged A/B/C units.
+
+The first Task 13 benchmark on 2026-08-12 stopped as required after search latency, DB/source, determinism-method, Unicode-truth, and lexical-fixture contradictions. The reopened human checkpoint fixed sequential exclusive-rank query execution with public-limit early-stop; separate search and production corpora; production-only DB/source measurement; canonical semantic determinism; independent Unicode/lexical truth; and the cold plus one-warm-up plus ten-warm-sample policy. It did not relax any threshold or approve a new table, index, projection, FTS, UDF, normalization, candidate cap, public contract, or ownership change. This revised specification requires a fresh `check-chain spec`, checked-spec approval, revised checked plan, and plan approval before remediation resumes.
 
 Tasks 1–7 MUST be remediated and re-verified against this specification before Task 8 begins. Implementation MUST stop and return to design review if it needs to weaken a hard constraint, add a sixth authoritative/search table, add NFC/NFKC/FTS/UDF/candidate caps, add incremental/TypeScript scope, change the four MCP contracts, add module/alias selectors, change `wiki_search`, replace the approved storage/identity/publication model, or move work across the approved unit boundaries.
 
