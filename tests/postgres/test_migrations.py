@@ -49,7 +49,7 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
             tables = {row[0] for row in cursor.fetchall()}
 
     assert schemas_after - schemas_before == {"iwiki"}
-    assert result.applied_versions == (1, 2)
+    assert result.applied_versions == (1, 2, 3)
     assert tables == {
         "chunks",
         "domains",
@@ -81,9 +81,9 @@ def test_repeated_and_concurrent_startup_applies_one_ordered_history(clean_postg
             )
             versions = tuple(row[0] for row in cursor.fetchall())
 
-    assert sorted(result.applied_versions for result in results) == [(), (1, 2)]
+    assert sorted(result.applied_versions for result in results) == [(), (1, 2, 3)]
     assert repeated.applied_versions == ()
-    assert versions == (1, 2)
+    assert versions == (1, 2, 3)
 
 
 def test_unrelated_schema_survives_migration(clean_postgres):
@@ -122,7 +122,7 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
     run_migrations(_settings(clean_postgres))
     broken = MIGRATIONS + (
         Migration(
-            version=3,
+            version=4,
             statements=(
                 "CREATE TABLE iwiki.must_roll_back (id integer PRIMARY KEY)",
                 "THIS IS NOT VALID SQL",
@@ -140,7 +140,7 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
                 "array_agg(version ORDER BY version) "
                 "FROM iwiki.schema_migrations"
             )
-            assert cursor.fetchone() == (None, [1, 2])
+            assert cursor.fetchone() == (None, [1, 2, 3])
 
 
 def test_newer_schema_version_refuses_startup(clean_postgres):
@@ -293,6 +293,7 @@ def test_schema_uses_tenant_composite_constraints(clean_postgres):
         "links_iwiki_source_page_fk",
         "links_iwiki_target_page_fk",
         "tokens_iwiki_fk",
+        "tokens_token_id_key",
         "token_domain_grants_iwiki_token_fk",
         "token_domain_grants_iwiki_domain_fk",
     } <= constraints

@@ -1,12 +1,14 @@
 """Tenant-scoped PostgreSQL page, vector, and link storage."""
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Callable
 
 import numpy as np
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg.types.json import Jsonb
 
 from .. import graph, indexer, retrieval
 from ..engine import frontmatter
@@ -103,6 +105,195 @@ class PostgresStore:
                     "ON CONFLICT (iwiki_id, slug) DO NOTHING",
                     (self.iwiki_id, domain),
                 )
+
+    def import_pages(
+        self,
+        pages: list[tuple[str, str, str]],
+        source_fingerprint: str,
+        *,
+        domains: tuple[str, ...] | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Validate and atomically import one Git snapshot into an empty wiki."""
+        self._require_admin()
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM iwiki.iwikis WHERE iwiki_id = %s",
+                    (self.iwiki_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError("wiki not found")
+                cursor.execute(
+                    "SELECT counts FROM iwiki.git_imports "
+                    "WHERE iwiki_id = %s AND source_fingerprint = %s",
+                    (self.iwiki_id, source_fingerprint),
+                )
+                completed = cursor.fetchone()
+        if completed is not None:
+            return {
+                **completed[0],
+                "already_imported": True,
+                "imported": False,
+                "dry_run": dry_run,
+                "source_fingerprint": source_fingerprint,
+            }
+        prepared = [self._prepare_page(*page) for page in pages]
+        import_domains = sorted(
+            {
+                _validate_identifier(domain, "domain")
+                for domain in (
+                    domains
+                    if domains is not None
+                    else tuple(page[0] for page in prepared)
+                )
+            }
+        )
+        if any(page[0] not in import_domains for page in prepared):
+            raise ValueError("page domain is absent from import domains")
+        counts = {
+            "domains": len(import_domains),
+            "pages": len(prepared),
+            "chunks": sum(len(page[4]) for page in prepared),
+            "links": sum(len(page[5]) for page in prepared),
+        }
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT active FROM iwiki.iwikis WHERE iwiki_id = %s FOR UPDATE",
+                    (self.iwiki_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError("wiki not found")
+                cursor.execute(
+                    "SELECT counts FROM iwiki.git_imports "
+                    "WHERE iwiki_id = %s AND source_fingerprint = %s",
+                    (self.iwiki_id, source_fingerprint),
+                )
+                completed = cursor.fetchone()
+                if completed is not None:
+                    return {
+                        **completed[0],
+                        "already_imported": True,
+                        "imported": False,
+                        "dry_run": dry_run,
+                        "source_fingerprint": source_fingerprint,
+                    }
+                cursor.execute(
+                    "SELECT "
+                    "(SELECT count(*) FROM iwiki.domains WHERE iwiki_id = %s), "
+                    "(SELECT count(*) FROM iwiki.pages WHERE iwiki_id = %s), "
+                    "(SELECT count(*) FROM iwiki.tokens WHERE iwiki_id = %s)",
+                    (self.iwiki_id, self.iwiki_id, self.iwiki_id),
+                )
+                if any(cursor.fetchone()):
+                    raise ValueError("target wiki is not empty")
+                if dry_run:
+                    connection.rollback()
+                    return {
+                        **counts,
+                        "already_imported": False,
+                        "imported": False,
+                        "dry_run": True,
+                        "source_fingerprint": source_fingerprint,
+                    }
+                domain_ids = {}
+                for domain in import_domains:
+                    cursor.execute(
+                        "INSERT INTO iwiki.domains (iwiki_id, slug) "
+                        "VALUES (%s, %s) RETURNING domain_id",
+                        (self.iwiki_id, domain),
+                    )
+                    domain_ids[domain] = cursor.fetchone()[0]
+                for domain, slug, markdown, chunks, records, targets in prepared:
+                    cursor.execute(
+                        "INSERT INTO iwiki.pages "
+                        "(iwiki_id, domain_id, slug, markdown) "
+                        "VALUES (%s, %s, %s, %s) RETURNING page_id",
+                        (self.iwiki_id, domain_ids[domain], slug, markdown),
+                    )
+                    page_id = cursor.fetchone()[0]
+                    self._replace_derived(
+                        cursor, page_id, chunks, records, targets
+                    )
+                cursor.execute(
+                    "UPDATE iwiki.links l SET target_page_id = p.page_id "
+                    "FROM iwiki.pages p "
+                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                    "AND d.domain_id = p.domain_id "
+                    "WHERE l.iwiki_id = %s AND p.iwiki_id = l.iwiki_id "
+                    "AND d.slug = l.target_domain AND p.slug = l.target_slug",
+                    (self.iwiki_id,),
+                )
+                cursor.execute(
+                    "INSERT INTO iwiki.git_imports "
+                    "(iwiki_id, source_fingerprint, counts) VALUES (%s, %s, %s)",
+                    (self.iwiki_id, source_fingerprint, Jsonb(counts)),
+                )
+        return {
+            **counts,
+            "already_imported": False,
+            "imported": True,
+            "dry_run": False,
+            "source_fingerprint": source_fingerprint,
+        }
+
+    def export_snapshot(self) -> dict:
+        """Read one consistent snapshot containing only authored wiki data."""
+        self._require_admin()
+        with self._connect() as connection:
+            connection.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM iwiki.iwikis WHERE iwiki_id = %s",
+                    (self.iwiki_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError("wiki not found")
+                cursor.execute(
+                    "SELECT slug FROM iwiki.domains WHERE iwiki_id = %s "
+                    "ORDER BY slug",
+                    (self.iwiki_id,),
+                )
+                domains = [row[0] for row in cursor.fetchall()]
+                cursor.execute(
+                    "SELECT d.slug, p.slug, p.markdown FROM iwiki.pages p "
+                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                    "AND d.domain_id = p.domain_id "
+                    "WHERE p.iwiki_id = %s ORDER BY d.slug, p.slug",
+                    (self.iwiki_id,),
+                )
+                pages = [
+                    {"domain": row[0], "slug": row[1], "markdown": row[2]}
+                    for row in cursor.fetchall()
+                ]
+                cursor.execute(
+                    "SELECT "
+                    "(SELECT count(*) FROM iwiki.chunks WHERE iwiki_id = %s), "
+                    "(SELECT count(*) FROM iwiki.links WHERE iwiki_id = %s)",
+                    (self.iwiki_id, self.iwiki_id),
+                )
+                chunks, links = cursor.fetchone()
+        page_hashes = {
+            f"{page['domain']}/{page['slug']}.md": hashlib.sha256(
+                page["markdown"].encode("utf-8")
+            ).hexdigest()
+            for page in pages
+        }
+        return {
+            "iwiki": self.iwiki_id,
+            "domains": domains,
+            "pages": pages,
+            "counts": {
+                "domains": len(domains),
+                "pages": len(pages),
+                "chunks": chunks,
+                "links": links,
+            },
+            "page_hashes": page_hashes,
+        }
 
     def list_domains(self) -> list[str]:
         with self._connect() as connection:

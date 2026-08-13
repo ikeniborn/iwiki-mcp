@@ -92,14 +92,14 @@ def test_token_is_256_bit_one_time_secret_and_database_stores_only_digest(
     with psycopg.connect(auth_store.dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT token_digest, label FROM iwiki.tokens WHERE token_id = %s",
+                "SELECT token_digest, owner FROM iwiki.tokens WHERE token_id = %s",
                 (token_id,),
             )
-            digest, label = cursor.fetchone()
+            digest, owner = cursor.fetchone()
     assert bytes(digest) == hashlib.sha256(token.encode()).digest()
     assert token.encode() not in bytes(digest)
     assert secret not in bytes(digest)
-    assert label == "alice"
+    assert owner == "alice"
 
 
 def test_authentication_returns_immutable_one_wiki_context(auth_store):

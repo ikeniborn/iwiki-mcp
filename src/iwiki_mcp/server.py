@@ -25,6 +25,7 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
+from . import admin as _admin  # noqa: F401
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from .postgres import migrations as _postgres_migrations  # noqa: F401
 from .postgres import auth as _postgres_auth  # noqa: F401
@@ -2703,9 +2704,13 @@ def _initialize_postgres_storage(cfg: Config) -> None:
 def main() -> None:
     import argparse
 
+    argv = sys.argv[1:]
+    if _admin.is_admin_command(argv):
+        raise SystemExit(_admin.run(argv))
+
     p = argparse.ArgumentParser(prog="iwiki-mcp")
     p.add_argument("--project", help="project dir (overrides cwd / IWIKI_PROJECT_DIR)")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.project:
         os.environ["IWIKI_PROJECT_DIR"] = os.path.abspath(args.project)
     cfg = None

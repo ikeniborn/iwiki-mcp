@@ -217,6 +217,14 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=3,
+        statements=(
+            "ALTER TABLE iwiki.tokens RENAME COLUMN label TO owner",
+            "ALTER TABLE iwiki.tokens ADD CONSTRAINT "
+            "tokens_token_id_key UNIQUE (token_id)",
+        ),
+    ),
 )
 
 

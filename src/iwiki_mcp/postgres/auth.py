@@ -143,7 +143,7 @@ class AuthStore:
     def create_token(
         self,
         iwiki_id: str,
-        label: str,
+        owner: str,
         *,
         read_domains: list[str],
         write_domains: list[str],
@@ -154,8 +154,8 @@ class AuthStore:
             raise ValueError("read grant is required")
         if any(domain not in read for domain in write):
             raise ValueError("write grant must also be readable")
-        if not isinstance(label, str) or not label.strip():
-            raise ValueError("token label is required")
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("token owner is required")
 
         token_id = secrets.token_hex(16)
         secret = secrets.token_urlsafe(32)
@@ -173,9 +173,9 @@ class AuthStore:
                     raise ValueError("domain grant does not exist")
                 cursor.execute(
                     "INSERT INTO iwiki.tokens "
-                    "(iwiki_id, token_id, token_digest, label) "
+                    "(iwiki_id, token_id, token_digest, owner) "
                     "VALUES (%s, %s, %s, %s)",
-                    (iwiki_id, token_id, digest, label.strip()),
+                    (iwiki_id, token_id, digest, owner.strip()),
                 )
                 for domain in read:
                     cursor.execute(
@@ -249,14 +249,59 @@ class AuthStore:
             primary=write[0] if write else None,
         )
 
-    def revoke_token(self, token_id: str) -> None:
+    def list_tokens(self, iwiki_id: str) -> list[dict]:
+        with psycopg.connect(self.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT t.token_id, t.owner, t.created_at, t.last_used_at, "
+                    "t.revoked_at, d.slug, g.can_read, g.can_write "
+                    "FROM iwiki.tokens t "
+                    "LEFT JOIN iwiki.token_domain_grants g "
+                    "ON g.iwiki_id = t.iwiki_id AND g.token_id = t.token_id "
+                    "LEFT JOIN iwiki.domains d ON d.iwiki_id = g.iwiki_id "
+                    "AND d.domain_id = g.domain_id "
+                    "WHERE t.iwiki_id = %s ORDER BY t.created_at, t.token_id, d.slug",
+                    (iwiki_id,),
+                )
+                rows = cursor.fetchall()
+        tokens: dict[str, dict] = {}
+        for (
+            token_id,
+            owner,
+            created_at,
+            last_used_at,
+            revoked_at,
+            domain,
+            can_read,
+            can_write,
+        ) in rows:
+            token = tokens.setdefault(
+                token_id,
+                {
+                    "token_id": token_id,
+                    "owner": owner,
+                    "created_at": created_at,
+                    "last_used_at": last_used_at,
+                    "revoked_at": revoked_at,
+                    "read_domains": [],
+                    "write_domains": [],
+                },
+            )
+            if domain is not None and can_read:
+                token["read_domains"].append(domain)
+            if domain is not None and can_write:
+                token["write_domains"].append(domain)
+        return list(tokens.values())
+
+    def revoke_token(self, token_id: str) -> bool:
         with psycopg.connect(self.dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE iwiki.tokens SET revoked_at = CURRENT_TIMESTAMP "
-                    "WHERE token_id = %s",
+                    "WHERE token_id = %s AND revoked_at IS NULL",
                     (token_id,),
                 )
+                return cursor.rowcount == 1
 
     def set_wiki_active(self, iwiki_id: str, active: bool) -> None:
         with psycopg.connect(self.dsn) as connection:
