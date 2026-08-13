@@ -4,7 +4,9 @@
 
 ## What it is
 
-iwiki-mcp is a shared, git-synced wiki base split into domains and queried over MCP from Codex and Claude Code. The agent authors Markdown pages; the stdio MCP server stores them in the base, builds indexes, searches across bound domains, and returns the matching wiki context.
+iwiki-mcp is a shared wiki service split into domains and queried over MCP from Codex
+and Claude Code. It supports a Git-synced local base or tenant-isolated PostgreSQL,
+over stdio or hosted Streamable HTTP as described below.
 
 ## Install
 
@@ -38,6 +40,190 @@ uv run pytest -q
 ```
 
 `uv run iwiki-mcp` then runs the server from the checkout without a global install.
+
+## Storage and transport modes
+
+| Storage | stdio | Streamable HTTP |
+| --- | --- | --- |
+| Git directory | supported; default | unsupported |
+| PostgreSQL | supported for one locally configured wiki | supported for hosted multi-wiki access |
+
+### Local Git stdio
+
+The existing local mode is unchanged:
+
+```bash
+export IWIKI_BASE_DIR=/srv/iwiki-base
+iwiki-mcp --project /srv/project
+```
+
+### Local PostgreSQL stdio
+
+Create `/srv/project/.iwiki.toml` with an explicit maximum domain scope. Unlike Git
+storage, PostgreSQL requires non-empty `read` and `write` arrays and a `primary`
+domain. The named wiki and domains must already have been created by an administrator.
+
+```toml
+read = ["backend", "frontend"]
+write = ["backend"]
+primary = "backend"
+
+[storage]
+type = "postgres"
+host = "db.internal.example"
+port = 5432
+database = "iwiki"
+user = "iwiki_app"
+sslmode = "verify-full"
+iwiki_id = "team-wiki"
+```
+
+Supply secrets and model identity only through the process environment:
+
+```bash
+export IWIKI_DB_PASSWORD='<database-password>'
+export IWIKI_LLM_BASE_URL='https://models.internal.example/v1'
+export IWIKI_LLM_KEY='<model-api-key>'
+export IWIKI_EMBED_MODEL='lemonade-embeddings-bge-m3-q8'
+export IWIKI_EMBED_DIMENSIONS='1024'
+export IWIKI_RERANK_MODEL='lemonade-reranker-bge-reranker-v2-m3'
+iwiki-mcp --project /srv/project
+```
+
+`wiki_bind` may narrow this maximum scope for the current process; it cannot widen it.
+PostgreSQL update and delete calls require `expected_revision` from `wiki_read_page`.
+
+### Hosted Streamable HTTP
+
+Hosted mode requires PostgreSQL and a separate server TOML. It rejects `iwiki_id`:
+the bearer token selects one wiki and its maximum read/write grants.
+
+```toml
+[storage]
+type = "postgres"
+host = "db.internal.example"
+port = 5432
+database = "iwiki"
+user = "iwiki_app"
+sslmode = "verify-full"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+allowed_origins = ["https://iwiki.example"]
+pool_min_size = 2
+pool_max_size = 10
+statement_timeout_ms = 30000
+lock_timeout_ms = 5000
+```
+
+```bash
+export IWIKI_SERVER_CONFIG=/etc/iwiki/server.toml
+export IWIKI_DB_PASSWORD='<database-password>'
+export IWIKI_LLM_BASE_URL='https://models.internal.example/v1'
+export IWIKI_LLM_KEY='<model-api-key>'
+export IWIKI_EMBED_MODEL='lemonade-embeddings-bge-m3-q8'
+export IWIKI_EMBED_DIMENSIONS='1024'
+export IWIKI_RERANK_MODEL='lemonade-reranker-bge-reranker-v2-m3'
+iwiki-mcp serve --transport streamable-http
+```
+
+The MCP endpoint is `/mcp`. Put the loopback listener behind a reverse proxy that
+terminates public TLS, forwards the exact `Origin`, and does not log `Authorization`.
+Browser requests must match `allowed_origins`; clients without an `Origin` are allowed,
+but every MCP request still needs `Authorization: Bearer <token>`. Invalid credentials,
+grants, sessions, and unavailable storage return sanitized 401/403/404/503 responses.
+
+The server opens a bounded connection pool and applies the configured statement and
+lock timeouts. Startup probes the model endpoint, validates model metadata, and applies
+forward-only, transaction-locked migrations before opening the listener. Repeated
+startup is idempotent. One database can hold many isolated wikis under distinct
+`iwiki_id` values. The configured embedding model and dimension are database-wide
+metadata: a mismatch refuses startup; changing them is an operator-managed migration,
+not an automatic re-embedding. Embedding and rerank credentials remain server-only.
+
+### PostgreSQL provisioning and least privilege
+
+The operator creates the database and installs the `vector` extension. The application
+creates and migrates only the `iwiki` schema. Prefer a dedicated login role with
+`CONNECT` on the database and ownership of the `iwiki` schema; alternatively grant
+only `USAGE` plus the required table and sequence privileges after a privileged role
+runs migrations. Do not grant access to unrelated schemas. Use `sslmode="verify-full"`
+with a trusted CA and matching database hostname outside an isolated development host.
+
+All PostgreSQL admin commands accept `--config PATH`; otherwise they read
+`IWIKI_SERVER_CONFIG`. Only the bare stdio command accepts `--project`; `serve` accepts
+only `--transport streamable-http`. `--read-domain` and `--write-domain` may be repeated.
+`base show`, `base list`, `token list`, import, and export support machine-readable
+`--json`; import/export alone support `--dry-run`.
+
+```bash
+iwiki-mcp base create --iwiki team-wiki
+iwiki-mcp base list
+iwiki-mcp base show --iwiki team-wiki
+iwiki-mcp base disable --iwiki team-wiki
+iwiki-mcp base enable --iwiki team-wiki
+iwiki-mcp domain create --iwiki team-wiki --domain backend
+iwiki-mcp token create --iwiki team-wiki --owner deploy --read-domain backend --write-domain backend
+iwiki-mcp token list --iwiki team-wiki
+iwiki-mcp token revoke --token-id <token-id>
+iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
+iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
+```
+
+`token create` prints plaintext token material once; store it in a secret manager.
+`token list` never returns it. Revocation and wiki disable take effect on later requests.
+There is intentionally no physical-delete command.
+
+Import reads a Git wiki repository and writes one PostgreSQL wiki. Export requires an
+empty destination, writes a portable Git repository, and creates its initial commit.
+`--dry-run` validates and reports without mutation. For local rollback, export, point a
+project's `.iwiki.toml` back to Git storage and the exported base, then run `wiki_index`.
+Import/export never run `wiki_sync` automatically.
+
+Database backup, encryption, retention, and restore drills are operator responsibilities.
+Use PostgreSQL-native tools and a service definition so credentials do not enter shell
+history. The restore target database must already exist.
+
+```bash
+pg_dump --dbname=service=iwiki --format=custom --schema=iwiki --file=/secure/encrypted-volume/iwiki.dump
+pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /secure/encrypted-volume/iwiki.dump
+```
+
+### PostgreSQL MCP tool contract
+
+| PostgreSQL support | Tools |
+| --- | --- |
+| Supported | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
+| Git only | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_create_domain`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
+
+Git-only tools return
+`{"error":"unsupported_storage","storage":"postgres","hint":"use this tool with Git storage"}`.
+PostgreSQL `wiki_status` reports `storage`, `transport`, effective `read`/`write`,
+`primary`, and visible `domains`; local stdio also reports `project_dir`. It never
+reports the DSN or credentials:
+
+```json
+{"storage":"postgres","transport":"streamable-http","read":["backend"],"write":["backend"],"primary":"backend","domains":["backend"]}
+```
+
+PostgreSQL `wiki_read_page` includes the optimistic revision alongside the authored
+Markdown. Pass that value to update or delete:
+
+```json
+{"domain":"backend","slug":"architecture/auth","markdown":"# Auth\n\n## Flow\n...\n","revision":2}
+```
+
+Omitting or losing an optimistic revision returns stable shapes. Read the page again
+before retrying a conflict:
+
+```json
+{"error":"expected_revision_required","hint":"read the page and retry with its revision"}
+{"error":"conflict","current_revision":2,"hint":"read the page and retry against the current revision"}
+```
+
+Current non-goals: HTTP with Git storage, automatic Git sync, database or extension
+creation, physical wiki deletion, and automatic embedding-model/dimension migration.
 
 ## Python code graph MVP
 

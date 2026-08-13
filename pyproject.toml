@@ -1,7 +1,7 @@
 [project]
 name = "iwiki-mcp"
-version = "0.7.103"
-description = "MCP server for a shared, git-synced wiki knowledge base split into domains"
+version = "0.7.104"
+description = "MCP server for a shared Git or PostgreSQL wiki split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

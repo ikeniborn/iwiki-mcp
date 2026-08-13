@@ -10,20 +10,68 @@ sync, OKF frontmatter). Diagrams are Mermaid, tuned for a dark Obsidian theme.
 
 ## What it is
 
-`iwiki-mcp` is a **stdio MCP server** — not a daemon. The MCP client (Claude Code,
-Codex) spawns one process per session and talks to it over stdin/stdout. The server
-fronts a shared, git-synced wiki **base** split into **domains**. Coding agents author
-Markdown pages; the server validates structure, persists to disk, embeds and indexes
-the content, and answers hybrid (vector + lexical + link-graph) search across the
-domains a project is bound to.
+`iwiki-mcp` has two runtimes: a client-spawned **stdio MCP server** and a hosted
+**Streamable HTTP** server bound to loopback behind a TLS reverse proxy. Stdio supports
+the original Git base or one locally configured PostgreSQL wiki; hosted HTTP requires
+PostgreSQL and selects an isolated wiki from each bearer token. Coding agents author
+Markdown pages; the server validates structure, persists and indexes content, and
+answers hybrid (vector + lexical + link-graph) search inside the effective domain scope.
 
 Three nouns anchor everything:
 
-- **Base** — a directory (intended to be a git repo) pointed at by `IWIKI_BASE_DIR`.
-- **Domain** — an immediate subdirectory of the base; holds `*.md` pages plus a
-  per-domain `index.jsonl` (vector store) and `log.jsonl` (ingest log).
+- **Base** — a Git directory pointed at by `IWIKI_BASE_DIR`, or a PostgreSQL tenant
+  selected by local `storage.iwiki_id` or hosted authentication.
+- **Domain** — a named wiki partition inside one tenant. Git represents it as an
+  immediate base subdirectory with `*.md`, `index.jsonl`, and `log.jsonl`; PostgreSQL
+  represents it as tenant-scoped relational rows.
 - **Binding** — a project's `.iwiki.toml` declaring which domains it may `read`
   from and the single domain it may `write` to.
+
+## PostgreSQL storage and hosted HTTP
+
+PostgreSQL uses one database-wide `iwiki` schema and separates wikis with `iwiki_id`
+on every tenant-owned row and composite constraint. `postgres.migrations` applies
+forward-only migrations in one transaction under a database advisory lock before the
+runtime starts. It creates only the `iwiki` schema, expects the operator-installed
+`vector` extension, and records the embedding model and vector dimension as immutable
+storage metadata. A metadata mismatch refuses startup rather than silently mixing
+vectors or re-embedding data.
+
+`postgres.store.PostgresStore` owns tenant-scoped page, chunk, link, search, lint, and
+optimistic-revision operations. `postgres.auth.AuthStore` stores digested bearer tokens
+and domain grants. `admin` creates/disables wikis, creates domains, creates/lists/revokes
+tokens, and imports/exports portable Git bases. No command physically deletes a wiki.
+
+Local PostgreSQL stdio resolves an immutable maximum scope from `.iwiki.toml`, including
+`storage.iwiki_id`. Hosted config forbids `iwiki_id`: `http.HostedRuntime` authenticates
+the request, derives the tenant and grants, and creates session-owned binding state.
+`wiki_bind` can only narrow that state. A lock serializes concurrent narrowing so two
+requests cannot combine stale scopes. Session identifiers used under a different token
+are indistinguishable from unknown sessions and expire after bounded inactivity.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
+flowchart LR
+    Local["Local MCP client"] -->|"stdio + .iwiki.toml"| Server["server tool handlers"]
+    Remote["Remote MCP client"] -->|"TLS / reverse proxy / Bearer"| HTTP["http HostedRuntime"]
+    HTTP -->|"authenticated tenant + grants"| Server
+    Server --> Store["postgres.store"]
+    Store --> DB[("PostgreSQL: iwiki schema")]
+    Admin["admin CLI"] --> DB
+    Models["Embedding / rerank provider"] <-->|"server-only credentials"| Server
+```
+
+Hosted startup order is strict: parse secret-safe TOML and environment, probe the model
+endpoint, open a bounded psycopg pool, run migrations, then let uvicorn accept `/mcp`.
+The listener accepts loopback hosts only. Browser `Origin` must exactly match the
+normalized allowlist; non-browser clients may omit it, but bearer authentication remains
+mandatory. Database, authentication, and authorization failures cross the HTTP boundary
+only as sanitized 503, 401, or 403 responses; invalid or mismatched sessions use 404.
+
+Git-only tools fail early with stable `unsupported_storage` data when PostgreSQL is
+active. PostgreSQL update/delete require `expected_revision`; a lost optimistic-lock
+race returns `conflict` and the current revision. See `README.md` for the complete tool
+matrix and operator commands.
 
 ## Optional Python code graph
 
@@ -63,7 +111,7 @@ Both require separate specifications and deliveries.
 ## Layered architecture
 
 Two layers live under `src/iwiki_mcp/`. The **top layer** is MCP-aware and reaches
-side effects (filesystem, git, HTTP embeddings). The **`engine/` core** is
+side effects (filesystem, git, PostgreSQL, hosted HTTP, model HTTP). The **`engine/` core** is
 framework-free and unit-testable without the MCP runtime — several of its modules
 (`validate`, `lint`, `links`, `frontmatter`, `okf_artifacts`) are deliberately
 kept `httpx`-free and stdlib-only so they import in any project.
@@ -72,14 +120,15 @@ kept `httpx`-free and stdlib-only so they import in any project.
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
 flowchart TB
     Client["MCP client<br/>(Claude Code / Codex)"]
-    Client -->|"stdio JSON-RPC"| Top
+    Client -->|"stdio or Streamable HTTP"| Top
 
-    Top["Top layer — MCP-aware<br/>server · base · graph · indexer · retrieval<br/>okf · sync · ignore · lock · resources"]
+    Top["Top layer — MCP-aware<br/>server · http · admin · postgres.* · base · graph<br/>indexer · retrieval · okf · sync · resources"]
     Engine["engine/ core — framework-free<br/>chunk · embed · store · graph_store · fusion · hier · grep<br/>rerank · search · related · classify · section<br/>frontmatter · links · validate · lint · config"]
 
     Top --> Engine
     Top -->|"read/write pages, index, log"| fs["Filesystem<br/>base / domains"]
     Top -->|"commit · push · pull"| git["git<br/>base repo + remote"]
+    Top -->|"tenant-scoped SQL"| pg["PostgreSQL<br/>iwiki schema"]
     Engine -.->|"store.save index.jsonl"| fs
     Engine -->|"embeddings / chat / rerank"| llm["OpenAI-compatible<br/>endpoint"]
 
@@ -88,10 +137,12 @@ flowchart TB
     classDef extcls fill:#f9e2af,color:#1e1e2e,stroke:#df8e1d
     class Top topcls
     class Engine engcls
-    class fs,git,llm extcls
+    class fs,git,pg,llm extcls
 ```
 
-**Top-layer modules:** `server` (tool surface + guards), `base` (binding + path
+**Top-layer modules:** `server` (tool surface + storage dispatch), `http` (hosted
+authentication, sessions, pool, and uvicorn lifecycle), `admin` (PostgreSQL operator
+CLI), `postgres.*` (configuration, migration, authorization, and tenant store), `base` (binding + path
 resolve), `graph` (freshness, rebuild, and scoped graph provider), `indexer`
 (ingest + index), `retrieval` (multi-signal query), `okf`
 (frontmatter assembly), `sync` (git ops), `ignore` (`.iwikiignore` gate), `lock`
@@ -105,15 +156,19 @@ resolve), `graph` (freshness, rebuild, and scoped graph provider), `indexer`
 
 | Concern | Top layer | Engine core |
 | --- | --- | --- |
-| Knows about MCP / `FastMCP` | yes (`server.py`) | no |
+| Knows about MCP / `FastMCP` | yes (`server.py`, `http.py`) | no |
 | Reaches git | `sync.py`, `graph.py` (freshness), and `okf.py` (`git log` for timestamps) | `graph_store.py` delegates only local-cache exclusion to `base.ensure_graph_store_excluded` |
-| Reaches the network | `okf.py`→`classify`, indexer/retrieval→`embed`, `server`→`rerank` | only `embed`/`classify`/`rerank` |
+| Reaches the network | `http.py`→PostgreSQL/uvicorn, `postgres.*`→PostgreSQL, `okf.py`→`classify`, indexer/retrieval→`embed`, `server`→`rerank` | only `embed`/`classify`/`rerank` |
 | Path-traversal guards | `server._validate_domain` / `_slug_parts` / `_page_path` / `_contains`, `okf._is_safe_type_segment`, `retrieval._domain_file_parts` (all top-layer) | — |
 | Config-free / stdlib-only | — | `validate`, `lint`, `links`, `frontmatter`, `okf_artifacts`, `section`, `grep` |
 
 ## Module dependencies
 
-Import direction is top → engine except for one narrow cache-bootstrap edge:
+Import direction is top → engine except for one narrow cache-bootstrap edge.
+`server` dispatches Git bindings to the filesystem modules and PostgreSQL bindings to
+`postgres.store`; `http` composes `server`, `postgres.auth`, migrations, the psycopg
+pool, and uvicorn without moving transport state into the engine.
+
 `engine.graph_store` calls `base.ensure_graph_store_excluded` before opening the
 derived database. It does not import MCP, retrieval, indexing, or sync behaviour.
 (`okf`/`indexer`/`retrieval` importing `base` remains top-layer composition.) The
@@ -131,10 +186,10 @@ and the `_H2` regex are copied across `chunk.py`, `validate.py`, `lint.py`,
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
 flowchart TB
-    server["server"] --> base["base"] & graph["graph"] & indexer["indexer"] & retrieval["retrieval"] & okf["okf"] & sync["sync"] & ignore["ignore"]
-    graph --> base & sync & graph_store["engine.graph_store"]
+    server["server"] --> base["base"] & graph_mod["graph"] & indexer["indexer"] & retrieval["retrieval"] & okf["okf"] & sync["sync"] & ignore["ignore"]
+    graph_mod --> base & sync & graph_store["engine.graph_store"]
     indexer --> base
-    retrieval --> base & graph
+    retrieval --> base & graph_mod
     okf --> base
 
     classDef hot fill:#f38ba8,color:#1e1e2e,stroke:#d20f39
@@ -177,7 +232,12 @@ flowchart TB
 primitives; `store.VectorStore` is the deliberate seam for a future
 SQLite/sqlite-vec swap (callers depend only on `load`/`save`/`query`).
 
-## On-disk model
+## Storage models
+
+The following on-disk model is authoritative only for Git storage. PostgreSQL stores
+the same authored Markdown and derived retrieval records in tenant-scoped relational
+tables under `iwiki`; it has no base directory, local graph cache, or automatic Git
+commit/sync path. Git import and export are explicit admin operations.
 
 The base is a git repo. Each non-`.`-prefixed subdirectory is a domain. Pages live
 at `<type>/<slug>.md` (the frontmatter `type` doubles as the directory). Per-domain
@@ -291,12 +351,22 @@ flowchart TD
 unset — surfaced as a `HALT:` error (the stop rule). Missing base/binding raises
 `base.BaseError`.
 
+PostgreSQL driver errors are caught separately and become a stable
+`PostgreSQL operation failed` tool result without connection text or SQL. Git-only
+tools under PostgreSQL return `unsupported_storage` before touching local paths.
+
 ## Startup / process lifecycle
 
-`main()` runs *before* opening MCP stdio: it loads config and sends one probe
+Bare `main()` runs *before* opening MCP stdio: it loads config and sends one probe
 request to the embeddings endpoint (`probe_embedding_endpoint`, 10 s timeout, no
-retries). A failure prints a redacted diagnostic to stderr and exits `1`.
+retries). For local PostgreSQL it also validates storage config and runs migrations
+before stdio starts. A failure prints a redacted diagnostic to stderr and exits `1`.
 `iwiki-mcp --help` stays offline (no probe).
+
+`iwiki-mcp serve` follows the stricter hosted startup described above and runs only
+Streamable HTTP with PostgreSQL. Admin subcommands load the same server config and run
+migrations before their operation, but never start a listener. `--config` overrides
+`IWIKI_SERVER_CONFIG`; `--project` belongs only to the bare local stdio parser.
 
 After startup, the stdio transport exits after 1,800 seconds without an incoming
 MCP message. Set `IWIKI_IDLE_TIMEOUT_SECONDS=0` to retain the process without an
@@ -310,7 +380,7 @@ sequenceDiagram
     participant C as MCP client
     participant M as main()
     participant E as embed endpoint
-    participant R as mcp.run()
+    participant R as MCP runtime
 
     C->>M: spawn iwiki-mcp (stdio)
     M->>M: Config.load()
@@ -321,8 +391,9 @@ sequenceDiagram
         alt probe fails
             M-->>C: redacted diagnostic + exit 1
         else probe ok
-            M->>R: mcp.run()
-            R-->>C: stdio ready, wiki_* tools live
+            M->>M: PostgreSQL migration (when selected)
+            M->>R: mcp.run() or hosted listener
+            R-->>C: transport ready, wiki_* tools live
         end
     end
 ```
@@ -748,13 +819,19 @@ each source against `.iwikiignore` and path-escape before reading it.
 
 ## Configuration & dependencies
 
-Runtime config is entirely env-driven (`engine/config.py`, `Config.load()`); see the
-`README.md` **Env reference** for the full table. Key knobs: embeddings
+Model config and credentials are env-driven (`engine/config.py`, `Config.load()`),
+while storage addresses and hosted limits are strict TOML (`postgres.config`); see the
+`README.md` **Env reference** and deployment examples. Key knobs: embeddings
 (`IWIKI_EMBED_MODEL`, `IWIKI_EMBED_DIMENSIONS`), search tuning (`IWIKI_TOP_K`,
 `IWIKI_SCORE_THRESHOLD`, `IWIKI_SEARCH_MODE`, `IWIKI_SEED_*`, `IWIKI_GRAPH_DEPTH`),
 indexing (`IWIKI_CHUNK_SIZE`, `IWIKI_CHUNK_OVERLAP`), and optional
 `IWIKI_CHAT_MODEL` / `IWIKI_RERANK_MODEL`. `IWIKI_IDLE_TIMEOUT_SECONDS` controls
 the stdio idle shutdown and defaults to 1,800 seconds; `0` disables it.
+
+PostgreSQL TOML deliberately excludes passwords and model settings. Local stdio adds
+`storage.iwiki_id`; hosted config forbids it and requires loopback host, normalized
+`allowed_origins`, bounded pool sizes, and positive statement/lock timeouts. Runtime
+secrets are `IWIKI_DB_PASSWORD`, `IWIKI_LLM_KEY`, and the model endpoint environment.
 
 **External dependencies** (`pyproject.toml`):
 
@@ -766,6 +843,9 @@ the stdio idle shutdown and defaults to 1,800 seconds; `0` disables it.
 | `pathspec` | gitignore-style `.iwikiignore` matching |
 | `filelock` | cross-process git lock on the base |
 | `tomli` | `.iwiki.toml` parsing on Python 3.10 (`tomllib` on ≥3.11) |
+| `psycopg` / `psycopg-pool` | PostgreSQL driver and bounded hosted connection pool |
+| `pgvector` | PostgreSQL vector adaptation and similarity storage |
+| `uvicorn` | loopback ASGI server for hosted Streamable HTTP |
 
 Dev extra: `pytest`, `pytest-asyncio`, `flake8` (max-line-length 100). Tests never
 hit the network — they monkeypatch `indexer.embed_texts` and set dummy `IWIKI_*`
@@ -780,6 +860,12 @@ env vars.
   `retrieval._domain_file_parts`.
 - **Transactional writes** roll back file + log + index on any step failure; writes
   refuse to overwrite.
+- **Tenant isolation is structural.** PostgreSQL rows and constraints carry `iwiki_id`;
+  every store is created with immutable authenticated scope.
+- **Optimistic PostgreSQL mutations.** Update/delete require a current revision and
+  return stable conflicts instead of overwriting concurrent changes.
+- **Hosted startup is fail-closed.** Config, model probe, pool, and migrations succeed
+  before the listener accepts traffic; credentials never enter status or error payloads.
 - **Pre-write freshness** fast-forwards a cleanly-behind base and refuses a
   `diverged` one with zero side effects.
 - **Constant duplication is intentional** — `OVERVIEW_HEADING`, `LEAD_MAX`, the
