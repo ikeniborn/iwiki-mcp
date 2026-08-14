@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 37c202e34904c44e
+  spec_hash: fb3b4aaac667f3e5
   last_run: 2026-08-14
   phases:
     structure: { status: passed }
@@ -12,7 +12,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "4.1 Identity, scope, and compatibility"
-      section_hash: 8550ce4312ffd185
+      section_hash: 93829393125b176b
       fragment: "A direct runtime principal MUST NOT own protected tables"
       text: >-
         The prior design allowed the documented runtime principal to be the
@@ -26,7 +26,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "13. Migration and rollout"
-      section_hash: b76d40e02e59fdd1
+      section_hash: 83295a0a32cdb8b2
       fragment: "Application rollback from schema 4 is an explicit operator procedure"
       text: >-
         The prior rollback text did not let a pre-v4 application pass its
@@ -40,7 +40,7 @@ review:
       phase: clarity
       severity: CRITICAL
       section: "4.3 Sessions, concurrency, and atomic visibility"
-      section_hash: d2538968eeb07513
+      section_hash: b66bfdcdee6d6970
       fragment: "SET LOCAL lock_timeout = <configured milliseconds>"
       text: >-
         The prior design required a configurable wait but the plan selected
@@ -48,6 +48,48 @@ review:
       fix: >-
         Specify blocking pg_advisory_xact_lock under transaction-local timeout
         and map only SQLSTATE 55P03 from lock acquisition to busy.
+      verdict: fixed
+      verdict_at: 2026-08-14
+    - id: F-004
+      phase: coverage
+      severity: CRITICAL
+      section: "7.3 PostgreSQL runtime scope"
+      section_hash: 3dfd860961e87d10
+      fragment: "hosted service principal is a separate trusted application boundary"
+      text: >-
+        The hosted service principal has no defined RLS policy or principal-domain
+        grants, so enabling the shared policies can hide all hosted Markdown and graph rows.
+      fix: >-
+        Define hosted service-role grants and policy behavior, including whether
+        FORCE ROW LEVEL SECURITY is used and how hosted domain access is provisioned.
+      verdict: fixed
+      verdict_at: 2026-08-14
+    - id: F-005
+      phase: coverage
+      severity: CRITICAL
+      section: "4.3 Sessions, concurrency, and atomic visibility"
+      section_hash: b66bfdcdee6d6970
+      fragment: "After expiry or supersession, an old publisher MUST NOT append or finalize"
+      text: >-
+        The protocol has no resume, reattach, or supersession operation, so its
+        fencing token never rotates after begin and adds no protection beyond session_id.
+      fix: >-
+        Either remove fencing and supersession from the first-release contract or
+        define an ownership re-establishment operation that rotates the token atomically.
+      verdict: fixed
+      verdict_at: 2026-08-14
+    - id: F-006
+      phase: coverage
+      severity: CRITICAL
+      section: "13. Migration and rollout"
+      section_hash: 83295a0a32cdb8b2
+      fragment: "Only the existing admin migration command may apply schema changes"
+      text: >-
+        The rollout does not explicitly define startup behavior for both hosted HTTP
+        and stdio direct PostgreSQL, while both currently run migrations at startup.
+      fix: >-
+        Define one runtime startup rule for both entry points and the separate
+        operator migration workflow before changing either implementation.
       verdict: fixed
       verdict_at: 2026-08-14
 chain:
@@ -111,9 +153,9 @@ The following outcomes and completion rule are copied verbatim from the approved
 ### 4.1 Identity, scope, and compatibility
 
 - **R-001 — One domain, one repository:** Each `(iwiki_id, domain_id)` MUST identify exactly one repository and at most one active code-graph snapshot. Code-graph tools MUST use the bound `primary`; they MUST NOT accept a separate domain or repository argument. **Acceptance:** AC-01.
-- **R-002 — Existing authorization:** Code-graph publication MUST require the bound `primary` in existing wiki write scope. Code-graph query MUST require it in existing wiki read scope. Remote MCP MUST derive `iwiki_id` and domain grants from the existing token. Direct PostgreSQL MUST use the existing restricted runtime principal's wiki-domain grant. The schema owner/migrator, hosted service principal, and direct runtime principal are distinct operational roles; this separation is infrastructure, not graph-specific authorization. No code-graph token, role, ACL, or graph-specific grant table may be introduced. **Acceptance:** AC-02.
+- **R-002 — Existing authorization:** Code-graph publication MUST require the bound `primary` in existing wiki write scope. Code-graph query MUST require it in existing wiki read scope. Remote MCP MUST derive `iwiki_id` and domain grants from the existing token. Direct PostgreSQL MUST use the existing restricted runtime principal's wiki-domain grant. The schema owner/migrator, hosted service principal, and direct runtime principal are distinct operational roles. The hosted service principal MUST receive explicit entries in the shared `database_principal_domain_grants` table for every domain served; bearer-token scope remains the application authorization boundary inside that database scope. This separation and mapping are infrastructure, not graph-specific authorization. No code-graph token, role, ACL, or graph-specific grant table may be introduced. **Acceptance:** AC-02.
 - **R-003 — Existing graph compatibility:** Published rows MUST preserve current schema-v2 entity identities, relation semantics, deterministic revision rules, and Python-only behavior. Existing Git/SQLite code-graph and ordinary PostgreSQL wiki contracts MUST remain usable. **Acceptance:** AC-03.
-- **R-004 — Tenant integrity:** Every PostgreSQL graph row MUST carry `iwiki_id`, `domain_id`, and `snapshot_id` where applicable. Composite keys and foreign keys MUST reject cross-wiki, cross-domain, and cross-snapshot references. Direct publication MUST use the same immutable local `iwiki_id`, `read`, `write`, and `primary` configuration as direct PostgreSQL Markdown access, and the local publisher MUST reject any requested scope outside it. PostgreSQL row-level policies MUST independently reject a direct principal outside its existing wiki-domain grant. A direct runtime principal MUST NOT own protected tables, hold `BYPASSRLS`, or run migrations; deployment MUST stop if those properties cannot be proven for the credentials documented for direct mode. **Acceptance:** AC-04.
+- **R-004 — Tenant integrity:** Every PostgreSQL graph row MUST carry `iwiki_id`, `domain_id`, and `snapshot_id` where applicable. Composite keys and foreign keys MUST reject cross-wiki, cross-domain, and cross-snapshot references. Direct publication MUST use the same immutable local `iwiki_id`, `read`, `write`, and `primary` configuration as direct PostgreSQL Markdown access, and the local publisher MUST reject any requested scope outside it. PostgreSQL row-level security MUST be enabled, but not forced, on protected Markdown and graph tables. Policies MUST independently reject any hosted or direct runtime principal outside its shared wiki-domain grant. Runtime principals MUST NOT own protected tables, hold `BYPASSRLS`, or run migrations; only the non-runtime schema owner may use PostgreSQL's owner exemption. Deployment MUST stop if those properties or required hosted/direct grants cannot be proven. **Acceptance:** AC-04.
 
 ### 4.2 Shared publication protocol
 
@@ -126,7 +168,7 @@ The following outcomes and completion rule are copied verbatim from the approved
 ### 4.3 Sessions, concurrency, and atomic visibility
 
 - **R-010 — Staging sessions:** `begin` MUST create a staging session scoped to one `(iwiki_id, domain_id)`, capture the current active `snapshot_revision` and authoritative Markdown change token, issue an opaque session ID, and establish a configurable lease expiry. PostgreSQL uses `markdown_generation`; SQLite uses the canonical Markdown hash. The graph is completely built and canonically serialized before `begin`, minimizing the Markdown-conflict window. Multiple staging sessions MAY coexist for the same domain. **Acceptance:** AC-10.
-- **R-011 — Lease and fencing:** Every SQLite, direct PostgreSQL, and remote MCP mutating session operation MUST validate session ownership, state, lease, and monotonically increasing fencing token in the same transaction or SQLite critical section as its mutation. After expiry or supersession, an old publisher MUST NOT append or finalize. No database lock may be held between calls. **Acceptance:** AC-11.
+- **R-011 — Lease and non-transferable ownership:** Every SQLite, direct PostgreSQL, and remote MCP mutating session operation MUST validate session ownership, state, and lease in the same transaction or SQLite critical section as its mutation. A session MUST NOT be resumed, reattached, transferred, or superseded by another publisher. After expiry, the original publisher MUST NOT append or finalize and MUST start a new session. No database lock may be held between calls. **Acceptance:** AC-11.
 - **R-012 — Optimistic finalize:** `finalize` MUST take only a short transaction-scoped advisory lock keyed by a reserved constant namespace and a database-assigned unique domain lock ID. PostgreSQL MUST wait for that lock under `SET LOCAL lock_timeout = <configured milliseconds>` and map only SQLSTATE `55P03` from that acquisition to `busy`. Under the lock it MUST compare the captured graph revision and target-specific Markdown change token with current values. Any change MUST return `snapshot_conflict` and leave the active snapshot unchanged; last-writer-wins is forbidden. **Acceptance:** AC-12.
 - **R-013 — Atomic pointer switch:** After complete validation and target-side link derivation, `finalize` MUST mark the staged snapshot ready and switch the domain's active pointer in one transaction. Readers MUST see either the previous ready snapshot or the new ready snapshot, never staging or partial rows. Different domains MUST publish concurrently. **Acceptance:** AC-13.
 - **R-014 — Cleanup:** `abort` MUST be idempotent and make a session non-finalizable. Every `begin` MUST run bounded opportunistic cleanup for the selected domain before creating a session. Cleanup MUST remove at most the configured row/session limit and only expired, aborted, conflicted, or invalid staging data older than the configurable retention period; it MUST NOT affect an active snapshot. **Acceptance:** AC-14.
@@ -153,7 +195,7 @@ The following outcomes and completion rule are copied verbatim from the approved
 - **R-026 — Publication tools:** Remote MCP MUST expose `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, and `wiki_code_publish_abort`. Each tool MUST use the request's authenticated `iwiki_id`, bound primary, and write scope; none accepts tenant or domain override fields. **Acceptance:** AC-26.
 - **R-027 — Local indexing tool:** `wiki_code_index` MUST remain a local extraction operation. It MUST feed the shared publisher selected by `publish_mode`. When the running process lacks a checkout, it MUST return `source_unavailable` and direct the operator to run a local indexer; it MUST NOT create an empty snapshot. **Acceptance:** AC-27.
 - **R-028 — Stable safe errors:** New publication paths MUST use the closed codes `unauthorized`, `scope_mismatch`, `unsupported_storage`, `busy`, `session_expired`, `invalid_batch`, `batch_conflict`, `snapshot_incomplete`, `revision_mismatch`, `snapshot_conflict`, and `markdown_unavailable`. Adapter/config/index paths add only `invalid_config`, `remote_mcp_failed`, and `source_unavailable`; read readiness adds only `missing_snapshot` and `stale_snapshot`. Existing query-validation codes remain compatible. Errors MUST contain no token, DSN, password, SQL text, absolute path, source text, or cross-scope identifiers. **Acceptance:** AC-28.
-- **R-029 — Trust boundaries:** Remote sessions MUST be owned by the authenticated token identity that created them; another token MUST NOT append, abort, or finalize them even when it has write access to the same domain. Direct PostgreSQL and SQLite adapters MUST bind sessions to their configured local publisher identity. **Acceptance:** AC-29.
+- **R-029 — Trust boundaries:** Remote sessions MUST be owned by the authenticated token identity that created them; another token MUST NOT append, abort, or finalize them even when it has write access to the same domain. Direct PostgreSQL and SQLite adapters MUST bind sessions to an ephemeral publisher-instance identity generated for the current indexing run and kept out of repository configuration. A replacement process receives a different identity and MUST create a new session. **Acceptance:** AC-29.
 - **R-030 — First-release bounds:** Discovery MUST keep the existing `max_total_files` default and hard support target of 20,000 indexed files. Publication batch bounds, session TTL, staging retention, freshness, and query limits MUST be configurable within validated server-side ceilings. **Acceptance:** AC-30.
 
 ## 5. Architecture
@@ -193,9 +235,9 @@ The local indexer ends after normalized graph construction; it does not know whe
 
 ```text
 begin(header) -> session
-publish_batch(session_id, fencing_token, kind, ordinal, rows, payload_hash) -> batch_ack
-finalize(session_id, fencing_token) -> snapshot_result
-abort(session_id, fencing_token) -> abort_result
+publish_batch(session_id, kind, ordinal, rows, payload_hash) -> batch_ack
+finalize(session_id) -> snapshot_result
+abort(session_id) -> abort_result
 ```
 
 `header` is the sole declaration of expected counts and `graph_payload_revision`. It also contains the schema version, normalizer and extractor versions, languages, repository identity derived from primary, source fingerprint, and safe build metadata. `finalize` independently recomputes and compares the declared revision; no duplicate finalize argument may override the header. The header excludes absolute root path, source text, credentials, and credential-bearing Git URLs.
@@ -214,7 +256,7 @@ staging -> failed
 
 Only `staging` accepts batches or finalization. `ready`, `aborted`, `expired`, `conflicted`, and `failed` are terminal. Retrying a completed `finalize` for the same session returns its stored terminal result without another pointer switch.
 
-The lease is renewed only by an accepted batch. Rejected operations, `busy`, and failed finalization do not extend it. A successful finalization makes the session terminal. The returned fencing token changes whenever session ownership is re-established; every adapter compares it inside the same mutation boundary as ownership, state, and lease.
+The lease is renewed only by an accepted batch. Rejected operations, `busy`, and failed finalization do not extend it. A successful finalization makes the session terminal. Ownership is fixed at `begin`: remote MCP uses the authenticated token identity, while direct PostgreSQL and SQLite use an ephemeral publisher-instance identity held by the creating adapter. There is no resume, reattach, ownership transfer, supersession, or fencing token. A publisher that loses its in-memory session handle starts a new session; retention cleanup later removes the abandoned one.
 
 ## 7. Storage model
 
@@ -222,28 +264,28 @@ The lease is renewed only by an accepted batch. Rejected operations, `busy`, and
 
 | Table | Purpose | Key constraints |
 |---|---|---|
-| `code_graph_domain_state` | Active snapshot pointer, database-assigned unique advisory-lock ID, and next fencing token | unique `(iwiki_id, domain_id)` and unique lock ID |
-| `code_graph_publication_sessions` | Owner, state, lease, fencing token, captured revisions, terminal result | unique session ID plus tenant/domain FK |
+| `code_graph_domain_state` | Active snapshot pointer and database-assigned unique advisory-lock ID | unique `(iwiki_id, domain_id)` and unique lock ID |
+| `code_graph_publication_sessions` | Fixed owner, state, lease, captured revisions, and terminal result | unique session ID plus tenant/domain FK |
 | `code_graph_snapshots` | Immutable header, graph payload revision, canonical snapshot revision, Markdown revision, state, counts, timestamps | unique `(iwiki_id, domain_id, snapshot_id)` |
 | `code_graph_batches` | Accepted kind/ordinal/hash/count/bytes for idempotency and audit | unique `(iwiki_id, domain_id, session_id, kind, ordinal)` |
 | `code_graph_files` | Snapshot-scoped schema-v2 file/module rows | composite tenant/domain/snapshot keys |
 | `code_graph_symbols` | Snapshot-scoped schema-v2 symbol rows | composite FKs to files |
 | `code_graph_relations` | Snapshot-scoped typed relations | composite FKs to source and resolved targets |
 | `code_graph_wiki_links` | Target-derived selector links and provenance | composite FKs to snapshot and authoritative page/domain |
-| `database_principal_domain_grants` | Direct PostgreSQL principal scope shared by Markdown and code graph | unique `(principal, iwiki_id, domain_id)` with read/write flags |
+| `database_principal_domain_grants` | Hosted and direct PostgreSQL principal scope shared by Markdown and code graph | unique `(principal, iwiki_id, domain_id)` with read/write flags |
 | `domains.markdown_generation` | O(1) conflict and stale-link token updated with Markdown mutations | non-negative monotonic value per domain |
 
 Migration 4 is transactional under the existing migration lock and all its object/policy creation is idempotent so the compatibility rollback procedure can later reapply it. Existing wiki row data is not rewritten. Graph tables use fully qualified `iwiki` names and explicit columns; untrusted `search_path` is not used. The active pointer references only a ready snapshot. Deleting staging or an inactive snapshot cannot cascade into wiki Markdown tables.
 
 ### 7.2 SQLite realization
 
-SQLite keeps the current separate graph database and schema-v2 rows. The publisher writes a unique staging database plus owner, state, lease, fencing, batch, and captured-revision metadata, validates it through the shared contract, derives links from the local wiki base, and uses the existing atomic replacement boundary. Batch recording and hashes use the same protocol even though all calls occur in one local process. This preserves one publication implementation above the adapter boundary.
+SQLite keeps the current separate graph database and schema-v2 rows. The publisher writes a unique staging database plus fixed owner, state, lease, batch, and captured-revision metadata, validates it through the shared contract, derives links from the local wiki base, and uses the existing atomic replacement boundary. Batch recording and hashes use the same protocol even though all calls occur in one local process. This preserves one publication implementation above the adapter boundary.
 
-### 7.3 Direct PostgreSQL scope
+### 7.3 PostgreSQL runtime scope
 
 Direct mode reuses one restricted PostgreSQL runtime principal for both Markdown and code graph. The configured `iwiki_id` is immutable for the process; `primary` must be inside configured read and write scope. An admin-owned `database_principal_domain_grants` mapping represents that principal's shared Markdown and code-graph scope; it is not graph-specific. Direct runtime logins receive no table ownership, `BYPASSRLS`, role-management, migration, or unrestricted DML privileges. Row-level policies resolve `session_user` and require the mapped read/write flag. The documented direct-mode user MUST be this restricted role, never the schema owner shown in migration commands.
 
-The schema owner/migrator is used only by the existing admin migration command and owns protected objects. The hosted service principal is a separate trusted application boundary with the existing broad database access required after bearer-token authorization. Neither credential is valid direct-mode documentation. The local adapter also rejects any scope outside its configuration before calling PostgreSQL. Composite constraints enforce relational tenant integrity even inside an allowed scope.
+The hosted service principal is also a non-owner, non-`BYPASSRLS` runtime role. Domain provisioning MUST insert or verify its shared read/write grant for each domain served before tokens for that domain are enabled. The hosted application still checks each bearer token's existing read/write/primary scope before SQL; the database grant limits the service role to provisioned hosted domains. Policies use ordinary `ENABLE ROW LEVEL SECURITY`, not `FORCE ROW LEVEL SECURITY`, because the schema owner/migrator is an administration-only role and never a runtime credential. The local adapter also rejects any scope outside its configuration before calling PostgreSQL. Composite constraints enforce relational tenant integrity even inside an allowed scope.
 
 ## 8. MCP and configuration contracts
 
@@ -254,9 +296,14 @@ The schema owner/migrator is used only by the existing admin migration command a
 publish_mode = "sqlite" # sqlite | postgres | mcp
 read_mode = "sqlite"    # sqlite | postgres | mcp
 max_snapshot_age_seconds = 86400
+max_batch_rows = 1000
+max_batch_bytes = 1000000
+publication_session_ttl_seconds = 900
+staging_retention_seconds = 86400
+staging_cleanup_limit = 100
 ```
 
-Existing code-graph discovery, parser, file-size, file-count, language, and context settings remain authoritative. Session TTL, staging retention, and batch ceilings are operator/server settings with safe defaults and validated upper bounds; remote clients cannot raise them. PostgreSQL mode reuses `[storage]` and `IWIKI_DB_PASSWORD`. MCP mode uses the configured remote endpoint and existing bearer-token secret source. Secret values are never copied into `.iwiki.toml` examples, status, logs, snapshot headers, or errors.
+Existing code-graph discovery, parser, file-size, file-count, language, and context settings remain authoritative. These numeric fields configure local SQLite/direct publication. Hosted server configuration exposes the same numeric fields without mode selectors and enforces validated upper bounds; remote clients cannot raise them. PostgreSQL mode reuses `[storage]` and `IWIKI_DB_PASSWORD`. MCP mode uses the configured remote endpoint and existing bearer-token secret source. Secret values are never copied into `.iwiki.toml` examples, status, logs, snapshot headers, or errors.
 
 ### 8.2 Tool behavior
 
@@ -273,7 +320,8 @@ Existing code-graph discovery, parser, file-size, file-count, language, and cont
 | Missing checkout for indexing | `source_unavailable` | unchanged |
 | Missing active snapshot | non-ready `missing_snapshot` | none |
 | Snapshot older than positive freshness limit | `stale_snapshot`, no rows | unchanged |
-| Expired or fenced session | `session_expired` | unchanged |
+| Expired session | `session_expired` | unchanged |
+| Different publisher owns session | `unauthorized` | unchanged |
 | Same ordinal, different hash | `batch_conflict` | unchanged |
 | Missing/invalid rows or counts | `snapshot_incomplete` or `invalid_batch` | unchanged |
 | Graph payload revision mismatch | `revision_mismatch` | unchanged |
@@ -286,7 +334,7 @@ Existing code-graph discovery, parser, file-size, file-count, language, and cont
 ## 10. Security and trust analysis
 
 - Remote publication authenticates before parsing batch content and authorizes the bound primary for every call.
-- Session ownership is token-identity-specific; possession of a session ID is insufficient.
+- Remote session ownership is token-identity-specific; possession of a session ID is insufficient. Local publisher identity is ephemeral and non-transferable, so process recovery always starts a new session.
 - Payload limits are checked before full row materialization where the transport permits it, then row counts, types, string lengths, and hashes are validated again in the publication service.
 - Stable graph IDs are data, never SQL identifiers. SQL is parameterized and table names are fixed.
 - Snapshot metadata strips absolute paths and credential-bearing repository URLs.
@@ -305,7 +353,7 @@ Run one parameterized publisher/reader contract suite against SQLite and direct 
 - identical canonical revisions and normalized query results for one fixture;
 - ordered chunk publication, boundary-sized batches, empty kinds, and complete counts;
 - same-ordinal/same-hash idempotency and different-hash conflict;
-- abort, expiry, fencing, failed validation, and idempotent terminal responses;
+- abort, expiry, fixed ownership, failed validation, and idempotent terminal responses;
 - independent target recomputation and `revision_mismatch` for a forged header revision;
 - bounded opportunistic cleanup invoked by `begin` without deleting active data;
 - ready-only reads and atomic old-or-new visibility;
@@ -323,6 +371,7 @@ Integration tests MUST prove:
 - failed finalize leaves the previous pointer and rows visible;
 - cross-wiki/domain/snapshot inserts and queries fail through constraints and scope checks;
 - existing token read/write/primary grants authorize remote graph operations exactly like Markdown operations;
+- the non-owner hosted service principal can access every provisioned hosted domain through shared grants, cannot access an unprovisioned domain, and remains subject to RLS;
 - the documented restricted direct PostgreSQL role authorizes Markdown and graph operations through one database-enforced scope, while an owner, `BYPASSRLS`, unmapped, or out-of-scope role is rejected as a valid direct-mode configuration;
 - another writable token cannot take over an existing publication session;
 - lock contention waits for the configured timeout and returns `busy` without changing or renewing the session;
@@ -339,16 +388,16 @@ Integration tests MUST prove:
 ## 12. Acceptance criteria
 
 - **AC-01:** Two snapshots cannot be active for one domain; code tools resolve only bound primary.
-- **AC-02:** Existing token and restricted direct database-principal tests prove graph read/write scope parity with Markdown and absence of graph-specific auth state.
+- **AC-02:** Existing token plus hosted-service and restricted-direct database-principal tests prove graph read/write scope parity with Markdown and absence of graph-specific auth state.
 - **AC-03:** Existing schema-v2 identities and SQLite regression fixtures produce unchanged normalized results.
-- **AC-04:** Composite constraints, row-level policies, privilege inspection, and direct config tests reject cross-scope rows, owner/`BYPASSRLS` direct credentials, and a primary outside immutable scope.
+- **AC-04:** Composite constraints, row-level policies, privilege inspection, hosted grant provisioning, and direct config tests reject cross-scope rows, runtime owner/`BYPASSRLS` credentials, unprovisioned hosted domains, and a primary outside immutable scope.
 - **AC-05:** All publication modes pass one lifecycle contract suite with the same serialized fixture.
 - **AC-06:** Payload inspection proves only safe normalized graph rows are transmitted.
 - **AC-07:** Batch replay tests prove idempotent equality and conflicting-hash rejection.
 - **AC-08:** Missing, extra, out-of-order, oversized, and invalid rows cannot activate a snapshot.
 - **AC-09:** Target recomputation rejects a forged graph payload revision and produces the existing canonical snapshot revision after link derivation.
 - **AC-10:** Parallel staging sessions capture explicit graph revision and target-specific Markdown change tokens after graph construction is complete.
-- **AC-11:** SQLite, direct PostgreSQL, and MCP expiry/ownership/fencing tests prove an old or different publisher cannot mutate or finalize, with no lock retained between calls.
+- **AC-11:** SQLite, direct PostgreSQL, and MCP expiry/ownership tests prove an expired, replacement, or different publisher cannot mutate or finalize and that no session can be transferred, with no lock retained between calls.
 - **AC-12:** Concurrent graph or Markdown mutation produces a stable conflict and preserves active state.
 - **AC-13:** Concurrent readers observe only complete old or complete new snapshots; separate domains finalize concurrently.
 - **AC-14:** Abort is retry-safe, and a subsequent `begin` invokes bounded retention cleanup that removes only eligible non-active staging data.
@@ -371,7 +420,7 @@ Integration tests MUST prove:
 
 ## 13. Migration and rollout
 
-1. Provision separate schema-owner/migrator, hosted service, and restricted direct runtime roles. Apply PostgreSQL graph objects, Markdown generation, row-level policies, and the shared direct-principal scope mapping in migration 4 under the existing migration framework and lock.
+1. Provision separate schema-owner/migrator, hosted service, and restricted direct runtime roles. Apply PostgreSQL graph objects, Markdown generation, non-forced row-level policies, and the shared runtime-principal scope mapping in migration 4 under the existing migration framework and lock. Provision explicit hosted-service and direct-role grants before starting either runtime.
 2. Add shared publisher/reader contracts and make the current SQLite path satisfy them without changing public query semantics.
 3. Add PostgreSQL staging, finalize, active-read, and target-link implementations.
 4. Add MCP publication and read adapters over those services.
@@ -380,7 +429,9 @@ Integration tests MUST prove:
 
 No existing code-graph row migration to PostgreSQL is automatic. Operators explicitly run the local indexer and publish the first snapshot. Until then, PostgreSQL code tools report `missing_snapshot`.
 
-Application rollback from schema 4 is an explicit operator procedure, shipped as reviewed idempotent SQL and tested against a disposable database. It stops writers, takes the migration advisory lock, verifies restricted-role grants plus pre-v4 Markdown CRUD/search compatibility, removes only migration version 4 from `schema_migrations`, and leaves new graph objects, generation data, policies, and grants intact but unused by the previous application. Migration 4 statements must therefore tolerate reapplication when the new version returns. Dropping graph tables, policies, generation data, or grants is a destructive down-migration and remains outside scope.
+Runtime startup never applies migrations. Both hosted HTTP `prepare_runtime` and stdio direct PostgreSQL initialization perform the same read-only schema-version-4 check and fail before serving when it is absent or newer than supported. Only the existing operator/admin migration command runs migration 4 with schema-owner credentials. Deployment order is therefore migrate, provision or verify runtime grants, then start hosted and direct runtimes.
+
+Application rollback from schema 4 is an explicit operator procedure, shipped as reviewed idempotent SQL and tested against a disposable database. It stops writers, takes the migration advisory lock, verifies hosted-service and restricted-direct grants, and removes only migration version 4 from `schema_migrations`; graph objects, generation data, policies, grants, and data remain intact. The compatibility smoke exports pinned pre-v4 commit `d4f4e19a50454cb7381268c3fefbcb3135e36929`, launches it with the current test interpreter and installed dependency environment plus an isolated project/server config and disposable DSN, and must prove that startup passes the schema guard before page create/read/update/delete and lexical search pass under the hosted service role. Any other startup failure fails the smoke. Migration 4 statements must tolerate reapplication when the new version returns. Dropping graph tables, policies, generation data, or grants is a destructive down-migration and remains outside scope.
 
 ## 14. Risks and mitigations
 
@@ -389,19 +440,19 @@ Application rollback from schema 4 is an explicit operator procedure, shipped as
 | Partial or corrupt upload becomes visible | Complete staging validation plus atomic active pointer | AC-08, AC-13 |
 | Concurrent developers overwrite each other | Captured base revisions, short domain lock, optimistic conflict | AC-10, AC-12 |
 | Stale local Markdown creates wrong links | Target-only link derivation and Markdown revision binding | AC-16–AC-19 |
-| Tenant data crosses scope | Existing auth, restricted direct-role policies, and composite tenant/domain/snapshot constraints | AC-02, AC-04 |
+| Tenant data crosses scope | Existing token auth, shared hosted/direct RLS grants, and composite tenant/domain/snapshot constraints | AC-02, AC-04 |
 | Remote publication leaks source or credentials | Row allowlist, metadata redaction, no source fields | AC-06, AC-25, AC-28 |
 | Three modes drift into separate implementations | Shared contract and parameterized adapter suite | AC-05, AC-20 |
 | Abandoned sessions consume storage | Lease, terminal states, bounded retention cleanup | AC-11, AC-14 |
 | Broker becomes an operational dependency | Transactions and advisory locks are complete correctness boundary | AC-15 |
-| Runtime table owner bypasses row policies | Separate migrator/service/direct roles, privilege inspection, and deployment stop | AC-02, AC-04 |
+| Runtime principal bypasses or lacks row policies | Non-forced RLS plus explicit hosted/direct grants, non-owner runtime roles, privilege inspection, and deployment stop | AC-02, AC-04 |
 | Previous application rejects schema 4 during rollback | Tested compatibility SQL removes only the v4 migration marker and preserves data/objects for later reapply | PostgreSQL migration integration |
 | Busy contract returns immediately or waits without bound | Transaction-local lock timeout plus blocking advisory lock and contention test | AC-12, AC-28 |
 
 ## 15. Human checkpoints
 
 - Approve this checked specification before implementation planning.
-- Review the concrete PostgreSQL migration, role grants, row-level policies, and compatibility rollback SQL during plan execution before any production deployment.
+- Review the concrete PostgreSQL migration, hosted/direct role grants, non-forced row-level policies, runtime schema checks, and compatibility rollback SQL during plan execution before any production deployment.
 - Provision and test real direct-database credentials outside the repository; no agent may create, expose, or use production credentials.
 - Run production publication only through an operator-controlled deployment procedure after migration and integration evidence passes.
 
