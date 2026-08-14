@@ -424,6 +424,13 @@ Use relative Markdown links within one domain: `[Auth](architecture/auth.md#flow
 
 The server resolves project binding from `.iwiki.toml` in the project root. The client normally starts the server with `cwd` set to the project root; override that with `IWIKI_PROJECT_DIR` or `iwiki-mcp --project DIR`.
 
+When `.iwiki.toml` is missing or contains only whitespace, the server creates a
+commented template with Git, PostgreSQL, and `code_graph` examples. It does the
+same for `.iwikiignore`, whose template covers secrets and common project noise
+and is optionally extended with the current `.gitignore`. Once either file has
+non-whitespace content, server operations leave its bytes unchanged. Edit both
+files manually after initialization.
+
 ```toml
 # .iwiki.toml
 read = ["backend", "frontend"]
@@ -434,13 +441,18 @@ primary = "backend"
 
 `read` controls the default project search scope. To read from **every** domain in the base, set `read = []` or omit the line entirely — an empty or absent `read` falls back to all domains. `read = ["all"]` is **not** a wildcard; it is treated as a literal domain named `all`. `write` is the list of domains mutating tools may change. `primary` selects the default target for tools such as `wiki_index` without a `domain` argument and must belong to `write`. Every write domain must also belong to `read`. `base` is optional and overrides `IWIKI_BASE_DIR` for this project.
 
-You can also bind from the MCP tool surface:
+For Git storage, `wiki_bind` does not write project configuration. An attempted
+automatic binding change returns a controlled response and leaves the file
+unchanged:
 
-```text
-wiki_bind(read=["backend", "frontend"], write=["backend", "frontend"], primary="backend")
+```json
+{"error":"project configuration cannot be changed automatically","code":"project_config_manual_edit_required","hint":"edit .iwiki.toml manually; populated configuration is never rewritten automatically"}
 ```
 
-`wiki_bind` validates that every provided read and write domain already exists. For an existing non-empty `read`, the tool preserves configured domains and may only append the current project domain. `primary` must match the current project domain, derived from the project directory name. `wiki_create_domain` may bootstrap an empty missing domain outside the current write list; it creates no page, index, or log. Bind that domain before writing to it.
+PostgreSQL `wiki_bind` remains session-only: it may narrow the configured maximum
+scope but never changes `.iwiki.toml`. `wiki_create_domain` may bootstrap an empty
+missing Git domain outside the current write list; it creates no page, index, or
+log. Add that domain to `.iwiki.toml` manually before writing to it.
 
 ## Teach the agent to use iwiki
 
@@ -529,7 +541,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
 | `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
-| `wiki_bind` | Write or update `.iwiki.toml` for the current project after validating domains. |
+| `wiki_bind` | Narrow PostgreSQL scope for the current session; Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
 | `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |
@@ -635,10 +647,12 @@ If `pull --rebase` conflicts, `wiki_sync` aborts the rebase and returns `conflic
 wiki_create_domain(name="backend")
 ```
 
-3. Bind the project, and append the agent snippet (see [Teach the agent to use iwiki](#teach-the-agent-to-use-iwiki)):
+3. Edit the initialized `.iwiki.toml` manually, then append the agent snippet (see [Teach the agent to use iwiki](#teach-the-agent-to-use-iwiki)):
 
-```text
-wiki_bind(read=["backend"], write=["backend"], primary="backend")
+```toml
+read = ["backend"]
+write = ["backend"]
+primary = "backend"
 ```
 
 4. Write the first page:

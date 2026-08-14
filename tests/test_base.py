@@ -1,5 +1,7 @@
 import dataclasses
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -459,90 +461,106 @@ def test_scope_all_vs_explicit(tmp_path, monkeypatch):
     assert base.resolve_scope(bind, "project", ["b", "c"]) == ["b", "c"]
 
 
-def test_write_project_config_roundtrip(tmp_path, monkeypatch):
-    b = _mkbase(tmp_path, "x")
+def test_load_project_config_initializes_missing_complete_template(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
-    monkeypatch.setenv("IWIKI_BASE_DIR", b)
-    base.write_project_config(
-        str(proj), read=["x"], write=["x", "x"], primary="x"
-    )
-    bind = base.resolve_binding(str(proj))
-    assert bind.write == ("x",)
-    assert bind.read == ("x",)
-    assert bind.primary == "x"
+
+    assert base.load_project_config(str(proj)) == {}
+    path = proj / ".iwiki.toml"
+    assert path.is_file()
+    text = path.read_text()
+    assert "Git storage" in text
+    assert "PostgreSQL storage" in text
+    assert "[code_graph]" in text
+    assert "max_total_files" in text
 
 
-def test_write_project_config_preserves_fields_on_partial_updates(tmp_path, monkeypatch):
-    b = _mkbase(tmp_path, "a", "b")
+def test_load_project_config_fills_whitespace_only_file(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
-    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
-    (proj / ".iwiki.toml").write_text(
-        f'base = "{b}"\nread = ["a", "b"]\nwrite = ["a"]\nprimary = "a"\n'
-    )
+    path = proj / ".iwiki.toml"
+    path.write_text(" \n\t")
 
-    base.write_project_config(str(proj), write=["b"], primary="b")
-    bind = base.resolve_binding(str(proj))
-    assert bind.base == b
-    assert bind.read == ("a", "b")
-    assert bind.write == ("b",)
-
-    base.write_project_config(str(proj), read=["b"])
-    bind = base.resolve_binding(str(proj))
-    assert bind.base == b
-    assert bind.read == ("b",)
-    assert bind.write == ("b",)
+    assert base.load_project_config(str(proj)) == {}
+    assert "PostgreSQL storage" in path.read_text()
 
 
-def test_write_project_config_preserves_unknown_lines_and_comments(
+def test_load_project_config_keeps_nonempty_file_byte_identical(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    path = proj / ".iwiki.toml"
+    original = b'read = ["manual"]\r\n# keep bytes\r\n'
+    path.write_bytes(original)
+
+    assert base.load_project_config(str(proj)) == {"read": ["manual"]}
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("initial", [None, b" \n\t"])
+def test_ensure_project_config_initializes_once_under_race(tmp_path, initial):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    path = proj / ".iwiki.toml"
+    if initial is not None:
+        path.write_bytes(initial)
+    barrier = threading.Barrier(8)
+
+    def initialize(_):
+        barrier.wait()
+        return base.ensure_project_config(str(proj))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(
+            executor.map(initialize, range(8))
+        )
+
+    assert results.count(True) == 1
+    assert "PostgreSQL storage" in path.read_text()
+
+
+def test_ensure_project_config_does_not_follow_symlink(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "manual.toml"
+    outside.write_bytes(b" \n\t")
+    (proj / ".iwiki.toml").symlink_to(outside)
+
+    assert base.ensure_project_config(str(proj)) is False
+    assert outside.read_bytes() == b" \n\t"
+
+
+def test_resolve_storage_binding_ignores_initialization_io_error(
     tmp_path, monkeypatch
 ):
-    b = _mkbase(tmp_path, "a", "b")
-    proj = tmp_path / "proj"
+    wiki_base = _mkbase(tmp_path, "backend")
+    proj = tmp_path / "read-only-project"
     proj.mkdir()
-    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
-    (proj / ".iwiki.toml").write_text(
-        f'# keep me\nbase = "{b}"\ncustom = "value"\nread = ["a"]\nwrite = ["a"]\nprimary = "a"\n'
+    monkeypatch.setenv("IWIKI_BASE_DIR", wiki_base)
+    monkeypatch.setattr(
+        base.os,
+        "makedirs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
-    base.write_project_config(str(proj), read=["b"], write=["b"], primary="b")
+    bind = base.resolve_storage_binding(str(proj))
 
-    text = (proj / ".iwiki.toml").read_text()
-    assert "# keep me" in text
-    assert 'custom = "value"' in text
-    assert f'base = "{b}"' in text
-    assert 'read = ["b"]' in text
-    assert 'write = ["b"]' in text
+    assert bind.base == wiki_base
+    assert not (proj / ".iwiki.toml").exists()
 
 
-def test_write_project_config_removes_multiline_core_assignment(
-    tmp_path, monkeypatch
-):
-    b = _mkbase(tmp_path, "new")
+def test_legacy_write_project_config_refuses_automatic_rewrite(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
-    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
-    (proj / ".iwiki.toml").write_text(
-        f'base = "{b}"\n'
-        "# keep multiline\n"
-        "custom = \"value\"\n"
-        "read = [\n"
-        '  "old",\n'
-        "]\n"
-        'write = ["old"]\nprimary = "old"\n'
-    )
+    path = proj / ".iwiki.toml"
+    original = b'read = ["manual"]\r\n'
+    path.write_bytes(original)
 
-    base.write_project_config(str(proj), read=["new"], write=["new"], primary="new")
+    with pytest.raises(
+        base.BaseError, match="project configuration cannot be changed automatically"
+    ):
+        base.write_project_config(str(proj), read=["automatic"])
 
-    text = (proj / ".iwiki.toml").read_text()
-    bind = base.resolve_binding(str(proj))
-    assert bind.read == ("new",)
-    assert bind.write == ("new",)
-    assert "# keep multiline" in text
-    assert 'custom = "value"' in text
-    assert '"old"' not in text
-    assert "\n]\n" not in text
+    assert path.read_bytes() == original
 
 
 def test_index_path_uses_jsonl_index():

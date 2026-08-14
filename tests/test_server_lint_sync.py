@@ -189,7 +189,7 @@ def test_remediation_plan_rejects_missing_write_domain(tmp_path, monkeypatch):
     out = server.wiki_remediation_plan()
 
     assert out["error"] == "no write domain bound"
-    assert "wiki_bind" in out["hint"]
+    assert "edit .iwiki.toml manually" in out["hint"]
 
 
 def test_remediation_plan_does_not_mutate_page_or_log(tmp_path, monkeypatch):

@@ -194,7 +194,7 @@ def test_migrate_no_domain_no_write_target_friendly_error(monkeypatch):
     res = server.wiki_migrate_okf()
     assert res == {
         "error": "no domain given and no write-target bound",
-        "hint": "pass domain= or set write in .iwiki.toml via wiki_bind",
+        "hint": "pass domain= or edit write in .iwiki.toml manually",
     }
 
 

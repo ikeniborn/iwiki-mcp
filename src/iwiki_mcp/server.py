@@ -359,7 +359,10 @@ def _safe(fn):
         except _codegraph_models.CodeGraphError as e:
             return _codegraph_runtime.sanitized_error(e)
         except base.BaseError as e:
-            return {"error": str(e), "hint": "set IWIKI_BASE_DIR or run wiki_bind"}
+            return {
+                "error": str(e),
+                "hint": "set IWIKI_BASE_DIR or edit .iwiki.toml manually",
+            }
         except (ConfigError, EmbedError) as e:
             if _SESSION_BINDING.get() is not None:
                 return {
@@ -482,7 +485,7 @@ def _mutation_guard(fn):
         except base.BaseError as exc:
             return {
                 "error": str(exc),
-                "hint": "set IWIKI_BASE_DIR or run wiki_bind",
+                "hint": "set IWIKI_BASE_DIR or edit .iwiki.toml manually",
             }
 
     return wrap
@@ -1857,7 +1860,7 @@ def wiki_index(domain: str | None = None) -> dict:
     if not target:
         return {
             "error": "no domain given and no write-target bound",
-            "hint": "pass domain= or set write in .iwiki.toml via wiki_bind",
+            "hint": "pass domain= or edit write in .iwiki.toml manually",
         }
     valid_domain = _validate_domain(target)
     if _is_postgres(bind):
@@ -1992,75 +1995,13 @@ def _wiki_bind(
         if session is None:
             result["project_dir"] = narrowed.project_dir
         return result
-    current_domain = _validate_domain(base.current_project_domain(bind.project_dir))
-    valid_read = None if read is None else [_validate_domain(d) for d in read]
-    valid_write = None if write is None else [_validate_domain(d) for d in write]
-    valid_primary = None if primary is None else _validate_domain(primary)
-    merged_read = None
-    if valid_read is not None:
-        merged, read_error = base.merge_read_scope(
-            bind.read,
-            valid_read,
-            current_domain,
-        )
-        if read_error:
-            return {
-                "error": read_error,
-                "hint": "existing read scope is preserved; only the current "
-                        "project domain may be appended automatically",
-            }
-        merged_read = list(merged)
-
-    for domain in valid_read or ():
-        if not _domain_path(bind.base, domain).is_dir():
-            return {
-                "error": f"domain '{domain}' not found",
-                "hint": "create it with wiki_create_domain",
-            }
-    for domain in valid_write or ():
-        if not _domain_path(bind.base, domain).is_dir():
-            return {
-                "error": f"domain '{domain}' not found",
-                "hint": "create it with wiki_create_domain",
-            }
-    candidate_read = tuple(merged_read) if merged_read is not None else bind.read
-    candidate_write = tuple(valid_write) if valid_write is not None else bind.write
-    candidate_primary = valid_primary
-    if candidate_primary is None:
-        candidate_primary = (
-            bind.primary if bind.primary in candidate_write else
-            (candidate_write[0] if candidate_write else None)
-        )
-    if candidate_primary != current_domain:
-        return {
-            "error": "write domain must match current project domain",
-            "hint": f"include '{current_domain}' in write and set it as primary",
-        }
-    try:
-        base._resolved_write_domains(
-            bind.base,
-            candidate_read,
-            candidate_write,
-            candidate_primary,
-        )
-    except base.BaseError as exc:
-        return {
-            "error": str(exc),
-            "hint": "write domains must exist and be included in read",
-        }
-    base.write_project_config(
-        bind.project_dir,
-        read=merged_read,
-        write=valid_write,
-        primary=valid_primary,
-    )
-    ignore.ensure_iwikiignore(bind.project_dir)
-    new = base.resolve_binding()
     return {
-        "read": list(new.read),
-        "write": list(new.write),
-        "primary": new.primary,
-        "project_dir": new.project_dir,
+        "error": "project configuration cannot be changed automatically",
+        "code": "project_config_manual_edit_required",
+        "hint": (
+            "edit .iwiki.toml manually; populated configuration is never "
+            "rewritten automatically"
+        ),
     }
 
 
@@ -2142,7 +2083,7 @@ def wiki_remediation_plan(domain: str | None = None) -> dict:
     if not bind.primary:
         return {
             "error": "no write domain bound",
-            "hint": "set write in .iwiki.toml via wiki_bind",
+            "hint": "edit .iwiki.toml manually to set write",
         }
     target = _validate_domain(domain or bind.primary)
     if target != bind.primary:
@@ -2272,7 +2213,7 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
     target = domain or bind.primary
     if not target:
         return {"error": "no domain given and no write-target bound",
-                "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
+                "hint": "pass domain= or edit write in .iwiki.toml manually"}
     target = _validate_domain(target)
     dom_path, scope_error = _existing_domain_write_guard(bind, target)
     if scope_error:
@@ -2630,7 +2571,7 @@ def wiki_export_okf(domain: str | None = None) -> dict:
     target = domain or bind.primary
     if not target:
         return {"error": "no domain given and no write-target bound",
-                "hint": "pass domain= or set write in .iwiki.toml via wiki_bind"}
+                "hint": "pass domain= or edit write in .iwiki.toml manually"}
     valid_domain = _validate_domain(target)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
