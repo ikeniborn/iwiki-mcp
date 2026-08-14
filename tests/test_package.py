@@ -11,7 +11,7 @@ def test_package_version_matches_distribution_metadata():
 
 
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.112"
+    assert iwiki_mcp.__version__ == "0.7.113"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
