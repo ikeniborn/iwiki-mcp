@@ -1,13 +1,67 @@
 ---
 review:
-  spec_hash: c3e9da15f67386e5
+  spec_hash: fd2095a0c2926347
   last_run: 2026-08-14
   phases:
     structure: { status: passed }
     coverage: { status: passed }
     clarity: { status: passed }
     consistency: { status: passed }
-  findings: []
+  findings:
+    - id: F-001
+      phase: consistency
+      severity: CRITICAL
+      section: "5. Domain Provisioning Flow"
+      section_hash: 87b101a49d8418b5
+      fragment: '"created": true'
+      text: "Hosted response changed the existing created field from string to boolean."
+      fix: "Keep created as the domain string and add already_existed as a boolean."
+      verdict: fixed
+    - id: F-002
+      phase: consistency
+      severity: CRITICAL
+      section: "4. Authentication and Authorization"
+      section_hash: 9fc42ad0cd561110
+      fragment: "arguments is not a dictionary"
+      text: "Malformed protected tool calls could bypass pre-dispatch capability checks."
+      fix: "Authorize a recognized protected tool name before any permissive argument return."
+      verdict: fixed
+    - id: F-003
+      phase: consistency
+      severity: CRITICAL
+      section: "4. Authentication and Authorization"
+      section_hash: 9fc42ad0cd561110
+      fragment: "persisted session binding"
+      text: "In-place fresh-grant intersection would permanently mutate explicit session narrowing."
+      fix: "Separate persisted selected scope from request-local effective scope."
+      verdict: fixed
+    - id: F-004
+      phase: coverage
+      severity: CRITICAL
+      section: "10. Verification Strategy"
+      section_hash: 23c95156a178a59a
+      fragment: "Migration v4"
+      text: "The migration plan omitted existing dynamic-version and hard-coded v1-v3 tests."
+      fix: "Require migration tests to derive the next version and expected applied versions."
+      verdict: fixed
+    - id: F-005
+      phase: clarity
+      severity: WARNING
+      section: "8. Error Contract"
+      section_hash: 26052d90f6cbdac1
+      fragment: "403 access denied"
+      text: "The source did not distinguish HTTP pre-dispatch denial from in-band transaction-time denial."
+      fix: "Specify both boundaries and hosted-only unsupported payloads."
+      verdict: fixed
+    - id: F-006
+      phase: coverage
+      severity: WARNING
+      section: "9. Files and Boundaries"
+      section_hash: 5a0f3deb7433eafd
+      fragment: "hosted tool routing"
+      text: "The source omitted actual guard split, strict validator, session holder, indexes, and exact-test impacts."
+      fix: "Describe the concrete code boundaries and verification targets."
+      verdict: fixed
 chain:
   intent: docs/superpowers/intents/2026-08-14-domain-token-management-intent.md
   spec: null
@@ -31,6 +85,11 @@ PostgreSQL stdio continues to use the administrative CLI for provisioning.
 Domain deletion, archival, ownership transfer, metadata administration, and
 HTTP delegation of management authority are outside this design.
 
+"Alongside `.iwiki.toml` and `.iwikiignore`" describes initializer sequencing,
+not remote file mutation: the hosted tool changes PostgreSQL only, while the
+client-side initializer owns those local files and then binds the returned
+domain.
+
 ## 2. Requirements
 
 ### R1. Tenant-scoped domain creation
@@ -41,7 +100,10 @@ existing `iwiki_id`; callers cannot provide or override an `iwiki_id`.
 
 Acceptance criterion: a capable token creates a valid domain in its own tenant,
 while a token without the capability receives the same sanitized `403 access
-denied` response used by other hosted authorization failures.
+denied` response used by other hosted authorization failures. Hosted creation
+preserves the existing string-valued `created` field and adds an explicit
+`already_existed` boolean, so Git and hosted responses do not overload one key
+with different types.
 
 ### R2. Atomic bootstrap authority
 
@@ -54,13 +116,16 @@ successful call leaves all three rows visible through PostgreSQL queries.
 
 ### R3. Idempotent creation
 
-A retry by the same caller succeeds with `created=false` when the domain already
-exists and the caller already owns its read, write, and management grants. An
+A retry by the same caller succeeds when the domain already
+exists and the caller already owns its read, write, and management grants. In
+the concrete response this state is `created=<domain>` and
+`already_existed=true`. An
 existing domain not managed by the caller returns sanitized denial without
 revealing its owner or grants.
 
-Acceptance criterion: a lost-response retry returns the same effective scope
-without adding or changing rows; a competing caller receives no grant.
+Acceptance criterion: a lost-response retry returns the same effective scope,
+restores the creator's request-local/session selection for that domain, and
+does not add or change database rows; a competing caller receives no grant.
 
 ### R4. Content-grant administration
 
@@ -88,24 +153,30 @@ No MCP argument or tool can create, update, or delete another token's
 domain bootstrap or explicit server-side admin CLI recovery.
 
 Acceptance criterion: the MCP tool schemas contain no management-write field,
-and attempts to smuggle management or tenant identifiers are rejected before a
-database mutation.
+schema introspection confirms that absence, and attempts to smuggle management
+or tenant identifiers are rejected before a database mutation.
 
 ### R6. Immediate revocation
 
 Every hosted request authenticates against current database grants. A stored
-session binding is intersected with the freshly authenticated content scope
-before authorization and dispatch. Revoked access therefore disappears on the
-next request. Newly granted access does not expand an existing target session;
-the target starts a new MCP session to use it.
+session retains the user's explicit selected scope. Middleware creates a
+request-local effective holder by intersecting that selected scope with freshly
+authenticated content grants; it never writes a transient revocation back into
+the persisted selection. Revoked access therefore disappears on the next
+request, while later restoration can reappear only when the domain remained in
+the explicit selection. Newly granted access does not expand an existing target
+session; the target starts a new MCP session to use it.
 
 The successful creator call is the only bounded expansion of its current
 session: after commit, the new domain is added to read/write and becomes
 primary.
 
 Acceptance criterion: a target's established session loses revoked access on
-its next request, does not gain newly granted access, and the creator can use
-the new domain immediately in the creation session.
+its next request without corrupting its explicit selection, does not gain newly
+granted access, and the creator can use the new domain immediately in the
+creation session or after an idempotent retry. Existing request session IDs are
+persisted on any successful response even when no new response session header
+is emitted.
 
 ### R7. Database and CLI auditability
 
@@ -115,8 +186,9 @@ or revoke tenant creation authority and per-domain management authority for
 provisioning and recovery.
 
 Acceptance criterion: SQL and `token list --json` identify each token's content
-and management authority, and CLI recovery changes only the named tenant,
-token, domain, and capability.
+and management authority. The existing default token-list output remains JSON;
+`--json` remains a compatibility no-op. CLI recovery changes only the named
+tenant, token, domain, and capability.
 
 ### R8. Empty-tenant bootstrap
 
@@ -133,12 +205,16 @@ still rejected.
 
 Migration defaults grant no new authority. Existing token and content-grant
 behavior remains unchanged. Authentication loads the two new authority shapes
-without adding a database round-trip to the normal hosted request path.
+without adding a database round-trip to the normal hosted request path. Both
+grant tables have indexes beginning with `(iwiki_id, domain_id)` for domain
+listing and foreign-key cascade paths.
 
 Acceptance criterion: legacy token tests remain green, existing rows
 authenticate with both new capabilities disabled, and query-level tests show
 the token lookup plus combined domain-authority lookup retain the existing
-authentication query count.
+authentication query count. On the same PostgreSQL instance and fixed seeded
+fixture, the median of three runs of 500 warm authentications must keep p95 at
+or below 1.25 times the legacy content-only SQL baseline.
 
 ## 3. PostgreSQL Model
 
@@ -165,6 +241,12 @@ CREATE TABLE iwiki.token_domain_management_grants (
         REFERENCES iwiki.domains (iwiki_id, domain_id)
         ON DELETE CASCADE
 );
+
+CREATE INDEX token_domain_grants_domain_idx
+    ON iwiki.token_domain_grants (iwiki_id, domain_id);
+
+CREATE INDEX token_domain_management_grants_domain_idx
+    ON iwiki.token_domain_management_grants (iwiki_id, domain_id);
 ```
 
 The explicit boolean keeps management authority visible in SQL output. Only a
@@ -175,11 +257,21 @@ tenant isolation and cascade token/domain deletion.
 migration. All existing tokens receive `can_create_domain=false`, and the new
 management table starts empty.
 
+Migrations remain forward-only. Because older binaries reject a database whose
+schema version is newer than they know, binary rollback after v4 requires a
+database restore or a compatibility release; no destructive down migration is
+added. Deployment documentation must state this stop condition before applying
+v4.
+
 ## 4. Authentication and Authorization
 
 `AuthContext` gains immutable `can_create_domain: bool` and
 `managed_domains: tuple[str, ...]` fields plus `can_manage_grants(domain)` and
-require helpers. Existing read/write methods retain their semantics.
+require helpers. Existing read/write methods retain their semantics. Every
+explicit reconstruction site (`AuthContext.narrow`, hosted middleware, and the
+stdio fallback in `server._postgres_store_for_binding`) must preserve or
+intentionally default the new fields. `primary` continues to derive only from
+write domains; management-only domains never become primary.
 
 Authentication reads `can_create_domain` in the existing token-row query. Its
 existing domain query becomes a combined indexed query over the tenant's domain
@@ -188,21 +280,45 @@ any domain for which either grant exists, so a recovery manager need not also
 hold content access. No extra query is added.
 
 The HTTP middleware installs the full authenticated context in a request-local
-context variable used by hosted tool dispatch. The persisted session binding
-continues to store only narrowed content scope. On every request the middleware
-intersects that scope with fresh `read_domains` and `write_domains`; it never
-restores a domain removed by the session's earlier explicit narrowing.
+context variable used by hosted tool dispatch. No `PostgresBinding` field is
+added: hosted code reads the real token/capabilities from that context variable,
+while PostgreSQL stdio uses the current authority-free fallback.
 
-Middleware checks tool capabilities before dispatch. Each mutating store method
-also locks and rechecks the active token, tenant, and capability inside its
+The session registry persists only the explicit selected binding. Each request
+gets a new `_HostedBindingState` containing both that selected binding and a
+derived effective binding intersected with fresh grants. Normal request refresh
+never writes the effective intersection back to the selected binding. A
+successful `wiki_bind` persists its explicit narrowing; successful domain
+creation or idempotent recovery explicitly expands both selected and effective
+bindings. Response capture stores the request's selected binding under the
+response session ID or, when absent, the successful request session ID. This
+keeps creator expansion available after the call without confusing revocation
+with user narrowing.
+
+Middleware recognizes protected tool names before permissive parsing exits.
+For a recognized protected call, malformed/non-dictionary arguments fail
+closed and never reach dispatch. A fourth `_DOMAIN_GRANT_TOOLS` category owns
+the three grant tools; creation has its own capability rule. Static
+`tools/list` remains unchanged and may advertise unavailable tools because tool
+discovery is not the authorization boundary.
+
+Each mutating `AuthStore` method also locks and rechecks the active token,
+tenant, and capability inside its
 write transaction. This second check closes the interval between bearer
 authentication and mutation if an administrator revokes authority concurrently.
 
 ## 5. Domain Provisioning Flow
 
-The PostgreSQL unsupported guard for `wiki_create_domain` becomes transport
-aware: Git behavior remains unchanged, PostgreSQL stdio remains unsupported,
-and hosted PostgreSQL dispatches to the authenticated provisioning method.
+The shared PostgreSQL unsupported guard remains unchanged for the other five
+Git-only tools. `wiki_create_domain` is removed from that shared guard and gets
+a dedicated guard: Git behavior remains unchanged, PostgreSQL stdio remains
+unsupported, and hosted PostgreSQL dispatches to a new authenticated
+`AuthStore.provision_domain` method. `PostgresStore.create_domain` and its
+`_require_admin` rule remain unchanged.
+
+Domain validation moves to one strict PostgreSQL-safe helper shared by admin
+and authenticated provisioning. It rejects empty or trim-invalid identifiers,
+leading dots, `/`, and `\\`; server and admin must not import each other.
 
 The store transaction performs this sequence:
 
@@ -219,12 +335,16 @@ grants. Exact bootstrap ownership produces the idempotent result; every other
 state produces sanitized denial. Concurrent creators therefore cannot attach
 grants to another creator's domain.
 
-Only after commit does the server update `_HostedBindingState` by adding the
-domain to read and write scope and selecting it as primary. The response is:
+After either a new commit or an exact idempotent match, the server locks the
+request-local state directly, adds the domain to selected/effective read and
+write scope, and selects it as primary. It does not rebuild the response through
+`_resolved_binding`, because `_MUTATION_BINDING` contains the pre-call snapshot.
+The response is:
 
 ```json
 {
-  "created": true,
+  "created": "new-project",
+  "already_existed": false,
   "domain": "new-project",
   "read": ["new-project"],
   "write": ["new-project"],
@@ -233,7 +353,8 @@ domain to read and write scope and selecting it as primary. The response is:
 ```
 
 The arrays contain the complete effective session scope, not only the new
-domain. An idempotent retry returns the same shape with `created=false`.
+domain. An idempotent retry returns the same shape with
+`already_existed=true`.
 
 ## 6. Content-Grant Tool Flow
 
@@ -253,13 +374,16 @@ states remain indistinguishable.
 
 All tools reject a target equal to the caller before mutation. Local
 `wiki_bind` remains the supported way for a token to narrow its own effective
-content scope.
+content scope. This self-target rule prevents accidental lockout; it is not a
+credential-compromise boundary. A manager controlling another token's bearer
+secret is already outside the token-isolation threat model. Management
+non-delegation and admin-only recovery remain the authority boundaries.
 
 ## 7. Admin CLI
 
-`token create` adds optional `--can-create-domain`. `--read-domain` is no longer
-parser-required, but service validation requires at least one read domain unless
-the creation capability is enabled.
+`token create` adds optional `--can-create-domain`. `--read-domain` becomes
+parser-optional with `default=[]`; service validation requires at least one read
+domain unless the creation capability is enabled.
 
 Explicit recovery commands set the two management capability types:
 
@@ -269,18 +393,29 @@ iwiki-mcp token set-domain-management --iwiki <id> --token-id <id> --domain <nam
 ```
 
 Both commands validate the tenant, active token, and existing domain before the
-single intended update. `token list` adds the capability fields to JSON and
-human-readable output. No command prints a token secret after initial creation.
+single intended update. `token list` adds the capability fields to the existing
+default JSON output. The current `--json` flag remains a no-op compatibility
+alias; no new human-readable formatter is introduced. No command prints a token
+secret after initial creation.
 
 ## 8. Error Contract
 
 - Missing, malformed, disabled, or revoked bearer: HTTP `401 authentication
   required` with the existing `WWW-Authenticate: Bearer` header.
-- Missing capability, cross-tenant identifier, foreign domain, foreign token,
-  or occupied domain not managed by the caller: HTTP `403 access denied`.
-- Invalid domain syntax, invalid booleans, `write` without `read`, empty grant,
-  or self-target mutation: sanitized MCP validation failure with no database
-  identifiers beyond caller-supplied values.
+- Missing capability detected before dispatch, a protected call with malformed
+  argument envelope, or an explicit tenant override: HTTP `403 access denied`.
+- Capability revoked after dispatch, cross-tenant/foreign/missing domain or
+  token discovered by a transaction, occupied domain not managed by the
+  caller, or self-target mutation: HTTP `200` with the existing tool-level
+  `{\"error\": \"access_denied\", ...}` payload. This in-band response is
+  intentionally indistinguishable across those states.
+- Invalid domain syntax, invalid booleans, `write` without `read`, or empty
+  grant in an otherwise authorized call: sanitized MCP validation failure with
+  no database identifiers beyond caller-supplied values.
+- Calling any of the three grant tools outside hosted PostgreSQL returns HTTP
+  `200` with `{\"error\": \"unsupported_transport\", \"storage\":
+  <git|postgres>, \"transport\": <stdio|streamable-http>, \"hint\": \"use
+  hosted Streamable HTTP with PostgreSQL storage\"}`.
 - PostgreSQL availability or transaction failure: existing sanitized `503
   service unavailable` or tool-level `operation failed` boundary; no partial
   rows survive.
@@ -292,14 +427,21 @@ server operators, but never bearer secrets, token digests, DSNs, or credentials.
 
 - `src/iwiki_mcp/postgres/migrations.py`: additive migration v4.
 - `src/iwiki_mcp/postgres/auth.py`: authority model, authentication, atomic
-  provisioning, grant operations, CLI-facing recovery methods.
-- `src/iwiki_mcp/http.py`: tool authorization, fresh-scope intersection, and
+  provisioning, strict shared domain validation, grant operations, and
+  CLI-facing recovery methods. `PostgresStore.create_domain` remains untouched.
+- `src/iwiki_mcp/http.py`: fail-closed protected-tool authorization,
+  selected/effective session separation, request-session persistence, and
   request-local authenticated context installation.
-- `src/iwiki_mcp/server.py`: hosted tool routing, session expansion after
-  provisioning, tool registration, and unsupported-storage responses.
+- `src/iwiki_mcp/server.py`: dedicated hosted-create and hosted-grant guards,
+  direct locked session expansion after provisioning, tool registration, and
+  transport-aware unsupported responses. The shared Git-only guard remains for
+  its other five tools.
 - `src/iwiki_mcp/admin.py`: provisioning/recovery flags and capability output.
-- PostgreSQL auth, migration, HTTP, tool-matrix, admin, and store tests: focused
-  observable coverage.
+- `eval/auth_grant_latency.py`: fixed-fixture legacy/new authentication SQL
+  p95 comparison used as result evidence, not as a flaky unit-test gate.
+- PostgreSQL auth, migration, HTTP, tool-matrix, admin, and server tests:
+  focused observable coverage, including exact dict/schema assertions and
+  static tool discovery behavior.
 - `README.md`, `docs/README.ru.md`, and `docs/architecture.md`: public contract,
   commands, authority model, and security behavior.
 
@@ -309,23 +451,39 @@ in-memory authority cache is introduced.
 ## 10. Verification Strategy
 
 Migration tests verify defaults, explicit management visibility, composite
-foreign keys, cascade behavior, uniqueness, and cross-tenant rejection.
+foreign keys, both domain-leading indexes, cascade behavior, uniqueness, and
+cross-tenant rejection. Existing rollback/failure tests must derive the next
+synthetic migration version from `MIGRATIONS[-1].version + 1` and derive applied
+version lists rather than hard-code `(1, 2, 3)` or fabricate a second v4.
 
 Authentication tests verify legacy defaults, create-only token bootstrap,
-combined authority loading, no additional normal authentication query, and
-admin listing. Store integration tests force rollback between each provisioning
-write and exercise same-caller retry plus concurrent competing callers.
+combined authority loading, all three reconstruction sites, write-implies-read,
+strict shared domain validation, no additional normal authentication query, and
+admin listing. `AuthStore` integration tests force rollback between each
+provisioning write and exercise same-caller retry plus concurrent competing
+callers without weakening `PostgresStore._require_admin`.
 
 Hosted HTTP tests cover create allowed/denied, immediate creator use, grant
 list/set/revoke, invalid grant combinations, self-target rejection, foreign and
 missing object indistinguishability, capability revocation between requests,
-content revocation in an established session, and no automatic expansion for a
-newly granted target.
+content revocation in an established session without permanent selected-scope
+mutation, idempotent session restoration, request-session persistence without a
+new response header, and no automatic expansion for a newly granted target.
+Unit tests prove malformed protected calls cannot bypass authorization and that
+both hosted context variables are installed/reset together.
 
 Tool-matrix tests prove Git `wiki_create_domain` stays unchanged, hosted
 PostgreSQL gains the four intended tools, and PostgreSQL stdio plus Git reject
-the three grant tools. Admin tests cover parser, service validation, recovery
-commands, JSON output, and secret redaction.
+the three grant tools with the transport-aware payload. Tests update the exact
+registered-tool count and assert real Git rejection instead of constructing an
+all-supported tautology. Tool-schema introspection proves no management-write or
+tenant override field exists. Admin tests update exact token-list dictionaries,
+cover `--read-domain` defaulting, recovery commands, JSON output, and secret
+redaction.
+
+`eval/auth_grant_latency.py` compares the legacy content-only SQL and new
+combined authority SQL against the same seeded database. Result verification
+records three 500-call warm runs and requires median p95 ratio `<= 1.25`.
 
 Focused suites run before the full `uv run pytest -q` suite. Documentation and
 version artifacts receive the required patch bump, and wiki lint must report no
