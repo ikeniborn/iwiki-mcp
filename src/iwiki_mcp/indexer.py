@@ -32,6 +32,27 @@ class GraphMutation:
     staged_fingerprint: str | None = None
 
 
+def prepare_page_records(
+    cfg: Config,
+    file: str,
+    markdown: str,
+    *,
+    embedder=None,
+):
+    """Chunk and embed one already-validated page without touching storage."""
+    chunks = chunk_markdown(
+        file, markdown, cfg.chunk_size, cfg.chunk_overlap, cfg.summary_max
+    )
+    if embedder is None:
+        embedder = embed_texts
+    vectors = embedder(cfg, [chunk.text for chunk in chunks])
+    if len(vectors) != len(chunks):
+        raise ValueError("embedding response count mismatch")
+    if any(len(vector) != cfg.dimensions for vector in vectors):
+        raise ValueError("embedding dimension mismatch")
+    return chunks, [make_record(chunk, vector) for chunk, vector in zip(chunks, vectors)]
+
+
 def src_hash(path: str) -> str | None:
     try:
         with open(path, "rb") as fh:

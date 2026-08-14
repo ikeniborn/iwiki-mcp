@@ -76,6 +76,7 @@ def test_update_public_signature_adds_trailing_optional_new_heading():
         "description",
         "status",
         "new_heading",
+        "expected_revision",
     ]
     assert signature.parameters["new_heading"].default is None
 

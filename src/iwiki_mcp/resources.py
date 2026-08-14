@@ -35,6 +35,11 @@ AUTHORING_RULES: str = """\
   section (or its `new_heading` rename), and `wiki_delete_page` only when a source was
   removed. Run `wiki_lint` after changes; use `wiki_remediation_plan` to inspect grouped
   repair actions.
+- PostgreSQL reads include a numeric `revision`. Pass it as `expected_revision` to
+  PostgreSQL update/delete calls; omission or a stale value leaves the page unchanged.
+  Git mode keeps its existing mutation contract and does not require a revision.
+- Code graph, remediation, OKF migration/apply/export, sync, and domain creation tools
+  require Git storage. PostgreSQL domains are provisioned by an administrator.
 
 ## OKF frontmatter
 

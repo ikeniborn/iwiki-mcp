@@ -6,6 +6,7 @@ import pytest
 from iwiki_mcp import server
 from iwiki_mcp.engine.config import Config, ConfigError
 from iwiki_mcp.engine.embed import EmbedError
+from iwiki_mcp.storage import PostgresBinding
 
 
 def _cfg() -> Config:
@@ -44,6 +45,60 @@ def test_main_loads_config_probes_and_runs_mcp_in_order(monkeypatch):
     server.main()
 
     assert calls == ["load", ("probe", cfg), "run", "shutdown-code-graph"]
+
+
+def test_main_migrates_postgres_before_embedding_probe(monkeypatch):
+    cfg = _cfg()
+    calls = []
+    binding = PostgresBinding(
+        host="db.invalid",
+        port=5432,
+        database="fixture",
+        user="fixture",
+        sslmode="require",
+        iwiki_id="wiki-a",
+        read=("docs",),
+        write=("docs",),
+        primary="docs",
+        project_dir="/not-used",
+        embed_model=cfg.embed_model,
+        embed_dimensions=cfg.dimensions,
+        rerank_model="",
+        password="fixture-secret",
+    )
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.Config, "load", lambda: calls.append("load") or cfg)
+    monkeypatch.setattr(server.base, "resolve_project_dir", lambda: "/not-used")
+    monkeypatch.setattr(
+        server.base,
+        "load_project_config",
+        lambda _project: {"storage": {"type": "postgres"}},
+    )
+    monkeypatch.setattr(
+        server.base, "resolve_storage_binding", lambda _project: binding
+    )
+    monkeypatch.setattr(
+        server._postgres_migrations,
+        "run_migrations",
+        lambda settings: calls.append((
+            "migrate", settings.embed_model, settings.embed_dimensions
+        )),
+    )
+    monkeypatch.setattr(
+        server,
+        "probe_embedding_endpoint",
+        lambda actual: calls.append(("probe", actual)),
+    )
+    monkeypatch.setattr(server.mcp, "run", lambda: calls.append("run"))
+
+    server.main()
+
+    assert calls == [
+        "load",
+        ("migrate", cfg.embed_model, cfg.dimensions),
+        ("probe", cfg),
+        "run",
+    ]
 
 
 def test_main_does_not_import_tree_sitter_language_pack(monkeypatch):

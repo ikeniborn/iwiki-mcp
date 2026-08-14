@@ -4,7 +4,9 @@
 
 ## Что это
 
-iwiki-mcp — это общая wiki-база, синхронизируемая через git, разбитая на домены и доступная по протоколу MCP из Codex и Claude Code. Агент пишет страницы в Markdown; stdio MCP-сервер сохраняет их в базе, строит индексы, ищет по привязанным доменам и возвращает подходящий контекст из wiki.
+iwiki-mcp — общая wiki-служба с доменами и MCP-доступом из Codex и Claude Code.
+Поддерживаются локальная Git-синхронизируемая база или tenant-isolated PostgreSQL,
+через stdio или hosted Streamable HTTP по матрице ниже.
 
 ## Установка
 
@@ -38,6 +40,190 @@ uv run pytest -q
 ```
 
 После этого `uv run iwiki-mcp` запускает сервер из копии без глобальной установки.
+
+## Режимы хранения и транспорта
+
+| Хранилище | stdio | Streamable HTTP |
+| --- | --- | --- |
+| Git-каталог | поддерживается; по умолчанию | не поддерживается |
+| PostgreSQL | поддерживается для одной локально настроенной wiki | поддерживается для hosted-доступа к нескольким wiki |
+
+### Локальный Git stdio
+
+Существующий локальный режим не изменился:
+
+```bash
+export IWIKI_BASE_DIR=/srv/iwiki-base
+iwiki-mcp --project /srv/project
+```
+
+### Локальный PostgreSQL stdio
+
+Создайте `/srv/project/.iwiki.toml` с явной максимальной областью доменов. В отличие
+от Git, PostgreSQL требует непустые массивы `read` и `write` и домен `primary`.
+Указанные wiki и домены должны быть заранее созданы администратором.
+
+```toml
+read = ["backend", "frontend"]
+write = ["backend"]
+primary = "backend"
+
+[storage]
+type = "postgres"
+host = "db.internal.example"
+port = 5432
+database = "iwiki"
+user = "iwiki_app"
+sslmode = "verify-full"
+iwiki_id = "team-wiki"
+```
+
+Секреты и идентификатор модели передавайте только через окружение процесса:
+
+```bash
+export IWIKI_DB_PASSWORD='<database-password>'
+export IWIKI_LLM_BASE_URL='https://models.internal.example/v1'
+export IWIKI_LLM_KEY='<model-api-key>'
+export IWIKI_EMBED_MODEL='lemonade-embeddings-bge-m3-q8'
+export IWIKI_EMBED_DIMENSIONS='1024'
+export IWIKI_RERANK_MODEL='lemonade-reranker-bge-reranker-v2-m3'
+iwiki-mcp --project /srv/project
+```
+
+`wiki_bind` может сузить максимальную область текущего процесса, но не расширить её.
+Для update/delete в PostgreSQL обязателен `expected_revision` из `wiki_read_page`.
+
+### Hosted Streamable HTTP
+
+Hosted-режим требует PostgreSQL и отдельный server TOML. Поле `iwiki_id` запрещено:
+wiki и её максимальные read/write grants определяются bearer-токеном.
+
+```toml
+[storage]
+type = "postgres"
+host = "db.internal.example"
+port = 5432
+database = "iwiki"
+user = "iwiki_app"
+sslmode = "verify-full"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+allowed_origins = ["https://iwiki.example"]
+pool_min_size = 2
+pool_max_size = 10
+statement_timeout_ms = 30000
+lock_timeout_ms = 5000
+```
+
+```bash
+export IWIKI_SERVER_CONFIG=/etc/iwiki/server.toml
+export IWIKI_DB_PASSWORD='<database-password>'
+export IWIKI_LLM_BASE_URL='https://models.internal.example/v1'
+export IWIKI_LLM_KEY='<model-api-key>'
+export IWIKI_EMBED_MODEL='lemonade-embeddings-bge-m3-q8'
+export IWIKI_EMBED_DIMENSIONS='1024'
+export IWIKI_RERANK_MODEL='lemonade-reranker-bge-reranker-v2-m3'
+iwiki-mcp serve --transport streamable-http
+```
+
+MCP endpoint — `/mcp`. Размещайте loopback-listener за reverse proxy: он завершает
+публичный TLS, передаёт точный `Origin` и не пишет `Authorization` в логи. Для
+браузера `Origin` обязан совпасть с `allowed_origins`; клиенты без `Origin` допустимы,
+но каждый MCP-запрос всё равно требует `Authorization: Bearer <token>`. Ошибки
+credentials, grants, session и storage возвращаются очищенными 401/403/404/503.
+
+Сервер открывает ограниченный connection pool и применяет заданные statement/lock
+timeouts. До открытия listener startup проверяет модель, сверяет её метаданные и
+транзакционно запускает forward-only миграции под lock. Повторный startup идемпотентен.
+Одна БД хранит несколько изолированных wiki с разными `iwiki_id`. Модель эмбеддингов
+и размерность — общие метаданные БД: несовпадение останавливает startup; их смена —
+операторская миграция, не автоматический re-embedding. Embedding/rerank credentials
+остаются только на сервере.
+
+### Подготовка PostgreSQL и минимальные привилегии
+
+Оператор создаёт БД и устанавливает расширение `vector`. Приложение создаёт и
+мигрирует только схему `iwiki`. Предпочтителен отдельный login-role с `CONNECT` к БД
+и владением схемой `iwiki`; другой вариант — privileged-role выполняет миграции,
+после чего app-role получает только `USAGE` и нужные права на таблицы и sequences.
+Не выдавайте доступ к посторонним схемам. Вне изолированного dev-хоста используйте
+`sslmode="verify-full"`, доверенный CA и совпадающее имя хоста БД.
+
+Все PostgreSQL admin-команды принимают `--config PATH`; без него читают
+`IWIKI_SERVER_CONFIG`. Только bare stdio-команда принимает `--project`; `serve`
+принимает только `--transport streamable-http`. `--read-domain` и `--write-domain`
+можно повторять. `base show`, `base list`, `token list`, import и export поддерживают
+machine-readable `--json`; только import/export поддерживают `--dry-run`.
+
+```bash
+iwiki-mcp base create --iwiki team-wiki
+iwiki-mcp base list
+iwiki-mcp base show --iwiki team-wiki
+iwiki-mcp base disable --iwiki team-wiki
+iwiki-mcp base enable --iwiki team-wiki
+iwiki-mcp domain create --iwiki team-wiki --domain backend
+iwiki-mcp token create --iwiki team-wiki --owner deploy --read-domain backend --write-domain backend
+iwiki-mcp token list --iwiki team-wiki
+iwiki-mcp token revoke --token-id <token-id>
+iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
+iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
+```
+
+`token create` показывает plaintext-токен один раз; сохраните его в secret manager.
+`token list` не возвращает токен. Revoke токена и disable wiki действуют на следующих
+запросах. Команды физического удаления намеренно нет.
+
+Import читает Git wiki-репозиторий и пишет одну PostgreSQL wiki. Export требует пустой
+каталог, создаёт переносимый Git-репозиторий и первый commit. `--dry-run` только
+проверяет и формирует отчёт. Для локального rollback выполните export, переключите
+`.iwiki.toml` проекта обратно на Git и экспортированную базу, затем запустите
+`wiki_index`. Import/export не запускают `wiki_sync` автоматически.
+
+Backup БД, шифрование, retention и учебные восстановления — ответственность оператора.
+Используйте штатные PostgreSQL tools и service definition, чтобы credentials не попали
+в shell history. Целевая БД для restore должна существовать заранее.
+
+```bash
+pg_dump --dbname=service=iwiki --format=custom --schema=iwiki --file=/secure/encrypted-volume/iwiki.dump
+pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /secure/encrypted-volume/iwiki.dump
+```
+
+### Контракт MCP-инструментов PostgreSQL
+
+| Поддержка PostgreSQL | Инструменты |
+| --- | --- |
+| Поддерживаются | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
+| Только Git | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_create_domain`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
+
+Git-only инструменты возвращают
+`{"error":"unsupported_storage","storage":"postgres","hint":"use this tool with Git storage"}`.
+PostgreSQL `wiki_status` сообщает `storage`, `transport`, эффективные `read`/`write`,
+`primary` и видимые `domains`; локальный stdio также сообщает `project_dir`. DSN и
+credentials не возвращаются:
+
+```json
+{"storage":"postgres","transport":"streamable-http","read":["backend"],"write":["backend"],"primary":"backend","domains":["backend"]}
+```
+
+PostgreSQL `wiki_read_page` возвращает optimistic revision вместе с authored Markdown.
+Передайте это значение в update/delete:
+
+```json
+{"domain":"backend","slug":"architecture/auth","markdown":"# Auth\n\n## Flow\n...\n","revision":2}
+```
+
+Отсутствующая или проигравшая optimistic revision возвращает стабильные формы. Перед
+повтором conflict снова прочитайте страницу:
+
+```json
+{"error":"expected_revision_required","hint":"read the page and retry with its revision"}
+{"error":"conflict","current_revision":2,"hint":"read the page and retry against the current revision"}
+```
+
+Текущие non-goals: HTTP с Git storage, автоматический Git sync, создание БД или
+extension, физическое удаление wiki и автоматическая миграция модели/размерности.
 
 ## Python code graph MVP
 
@@ -475,5 +661,7 @@ wiki_search(query="how does auth work?")
 
 - Внутри домена используйте `[Heading](<type>/<slug>.md#heading)`; между доменами — `iwiki://<domain>/<page-id>#<anchor>`.
 - `.iwiki/graph.sqlite3` — локальный производный кэш, а не переносимая замена векторам/логам и не граф code-dependencies.
-- Векторный поиск использует numpy brute force, а не внешнюю векторную БД.
+- Git storage использует numpy brute-force поиск по переносимым JSONL-индексам;
+  PostgreSQL storage получает tenant/domain-scoped cosine-кандидатов через pgvector,
+  затем применяет общие lexical fusion, deduplication и опциональный reranking.
 - Проверки устаревания локальны для проекта и зависят от доступных путей к исходникам и логов ingest.

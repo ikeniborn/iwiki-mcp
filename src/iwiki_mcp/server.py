@@ -1,4 +1,4 @@
-"""iwiki MCP server (stdio).
+"""iwiki MCP server.
 
 Tools are fail-soft: every handler returns a JSON-serializable dict, and
 exceptions become {"error","hint"} structures.
@@ -6,6 +6,7 @@ exceptions become {"error","hint"} structures.
 from __future__ import annotations
 
 import datetime as _dt
+from dataclasses import replace
 import functools
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
@@ -15,6 +16,7 @@ import os
 import re
 import secrets
 import sys
+from threading import RLock
 import time
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -24,7 +26,12 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
+from . import admin as _admin  # noqa: F401
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
+from . import http as _http  # noqa: F401
+from .postgres import migrations as _postgres_migrations  # noqa: F401
+from .postgres import auth as _postgres_auth  # noqa: F401
+from .postgres import store as _postgres_store  # noqa: F401
 # Code graph adapters join the full startup import closure; their grammar and
 # parser initialization remains lazy until an adapter parses source.
 from .codegraph import config as _codegraph_config  # noqa: F401
@@ -40,7 +47,7 @@ from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401
 from .lock import mutation_lock
-from .engine import rerank
+from .engine import classify, rerank
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
@@ -65,6 +72,7 @@ from .engine.section import SectionError, replace_section
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
+from .storage import expected_revision_required
 
 
 LOGGER = logging.getLogger(__name__)
@@ -219,13 +227,104 @@ _UPDATE_REMEDIATION_TOOLS = [
 
 _DELETE_REMEDIATION_TOOLS = ["wiki_delete_page", "wiki_lint"]
 
-_MUTATION_BINDING: ContextVar[base.Binding | None] = ContextVar(
+_MUTATION_BINDING: ContextVar[base.Binding | base.PostgresBinding | None] = ContextVar(
     "iwiki_mutation_binding", default=None
 )
 
 
-def _resolved_binding() -> base.Binding:
-    return _MUTATION_BINDING.get() or base.resolve_binding()
+class _HostedBindingState:
+    """Mutable session holder whose values remain immutable bindings."""
+
+    def __init__(self, binding: base.PostgresBinding) -> None:
+        self._binding = binding
+        self._lock = RLock()
+
+    def locked(self):
+        return self._lock
+
+    def get(self) -> base.PostgresBinding:
+        with self._lock:
+            return self._binding
+
+    def set(self, binding: base.PostgresBinding) -> None:
+        with self._lock:
+            self._binding = binding
+
+
+_SESSION_BINDING: ContextVar[
+    base.PostgresBinding | _HostedBindingState | None
+] = ContextVar(
+    "iwiki_postgres_session_binding", default=None
+)
+_LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
+_HOSTED_POOL = None
+_HOSTED_CONFIG: Config | None = None
+
+
+def _install_hosted_runtime(pool, cfg: Config) -> None:
+    global _HOSTED_POOL, _HOSTED_CONFIG
+    _HOSTED_POOL = pool
+    _HOSTED_CONFIG = cfg
+
+
+def _clear_hosted_runtime(pool) -> None:
+    global _HOSTED_POOL, _HOSTED_CONFIG
+    if _HOSTED_POOL is pool:
+        _HOSTED_POOL = None
+        _HOSTED_CONFIG = None
+
+
+def _resolved_binding() -> base.Binding | base.PostgresBinding:
+    session = _SESSION_BINDING.get()
+    if isinstance(session, _HostedBindingState):
+        session = session.get()
+    return (
+        _MUTATION_BINDING.get()
+        or session
+        or _LOCAL_POSTGRES_BINDING
+        or base.resolve_binding()
+    )
+
+
+def _is_postgres(binding) -> bool:
+    return isinstance(binding, base.PostgresBinding)
+
+
+def _postgres_store_for_binding(binding: base.PostgresBinding):
+    auth_context = _postgres_auth.AuthContext(
+        iwiki_id=binding.iwiki_id,
+        token_id="",
+        read_domains=tuple(binding.read),
+        write_domains=tuple(binding.write),
+        primary=binding.primary,
+    )
+    return _postgres_store.PostgresStore(
+        binding.connection_dsn(),
+        binding.iwiki_id,
+        _HOSTED_CONFIG or Config.load(),
+        auth_context=auth_context,
+        connection_factory=(
+            _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
+        ),
+    )
+
+
+def _unsupported_storage() -> dict:
+    return {
+        "error": "unsupported_storage",
+        "storage": "postgres",
+        "hint": "use this tool with Git storage",
+    }
+
+
+def _postgres_unsupported_guard(fn):
+    @functools.wraps(fn)
+    def wrap(*args, **kwargs):
+        if _is_postgres(_resolved_binding()):
+            return _unsupported_storage()
+        return fn(*args, **kwargs)
+
+    return wrap
 
 
 def _creation_binding() -> base.Binding:
@@ -262,9 +361,24 @@ def _safe(fn):
         except base.BaseError as e:
             return {"error": str(e), "hint": "set IWIKI_BASE_DIR or run wiki_bind"}
         except (ConfigError, EmbedError) as e:
+            if _SESSION_BINDING.get() is not None:
+                return {
+                    "error": "model operation failed",
+                    "hint": "retry or inspect sanitized server diagnostics",
+                }
             return {
                 "error": f"HALT: {e}",
                 "hint": "set IWIKI_LLM_BASE_URL / IWIKI_LLM_KEY",
+            }
+        except _postgres_store.psycopg.Error:
+            return {
+                "error": "PostgreSQL operation failed",
+                "hint": "retry or inspect sanitized server diagnostics",
+            }
+        except _postgres_auth.AccessError:
+            return {
+                "error": "access_denied",
+                "hint": "the authenticated context does not allow this operation",
             }
         except cross_domain.CrossDomainError as e:
             hint = {
@@ -281,6 +395,11 @@ def _safe(fn):
                 result["rolled_back"] = True
             return result
         except Exception as e:
+            if _SESSION_BINDING.get() is not None:
+                return {
+                    "error": "operation failed",
+                    "hint": "retry or inspect sanitized server diagnostics",
+                }
             return {"error": str(e), "hint": "unexpected error; see server logs"}
 
     return wrap
@@ -319,11 +438,17 @@ def _mutation_guard(fn):
     def wrap(*args, **kwargs):
         try:
             try:
-                bind = base.resolve_binding()
+                bind = _resolved_binding()
             except base.BaseError:
                 if fn.__name__ != "wiki_create_domain":
                     raise
                 bind = _creation_binding()
+            if _is_postgres(bind):
+                token = _MUTATION_BINDING.set(bind)
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _MUTATION_BINDING.reset(token)
             optional_domain = fn.__name__ in {
                 "wiki_index",
                 "wiki_migrate_okf",
@@ -510,7 +635,28 @@ def _read_source_preview(path: str) -> tuple[str, int, bool]:
 
 @_safe
 def wiki_status() -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        domains = [
+            domain
+            for domain in _postgres_store_for_binding(bind).list_domains()
+            if domain in bind.read
+        ]
+        result = {
+            "storage": "postgres",
+            "transport": (
+                "streamable-http"
+                if _SESSION_BINDING.get() is not None
+                else "stdio"
+            ),
+            "read": list(bind.read),
+            "write": list(bind.write),
+            "primary": bind.primary,
+            "domains": domains,
+        }
+        if _SESSION_BINDING.get() is None:
+            result["project_dir"] = bind.project_dir
+        return result
     return {
         "base": bind.base,
         "read": list(bind.read),
@@ -540,7 +686,9 @@ def _invalid_code_config() -> dict:
 @_safe
 @_code_safe
 def wiki_code_status() -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        return _unsupported_storage()
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).status()
@@ -556,7 +704,9 @@ def wiki_code_index(
         not languages or any(language != "python" for language in languages)
     ):
         return _invalid_code_config()
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        return _unsupported_storage()
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).index(force=force, languages=languages)
@@ -578,7 +728,9 @@ def wiki_code_search(
         languages=languages,
         limit=limit,
     )
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        return _unsupported_storage()
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).search(
@@ -614,7 +766,9 @@ def wiki_code_context(
         max_files=max_files,
         max_source_bytes=max_source_bytes,
     )
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        return _unsupported_storage()
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).context(
@@ -632,7 +786,17 @@ def wiki_code_context(
 
 @_safe
 def wiki_list_domains() -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        domains = [
+            domain
+            for domain in _postgres_store_for_binding(bind).list_domains()
+            if domain in bind.read
+        ]
+        return {
+            "domains": domains,
+            "detail": [{"domain": domain, "index_bytes": 0} for domain in domains],
+        }
     out = []
     for d in base.list_domains(bind.base):
         base.migrate_store_location(bind.base, d)
@@ -648,7 +812,27 @@ def _index_bytes(path: str) -> int:
 
 @_safe
 def wiki_list_pages(domain: str) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        valid_domain = _validate_domain(domain)
+        if valid_domain not in bind.read:
+            return {
+                "error": f"domain '{valid_domain}' is outside bound read scope",
+                "hint": "narrow or update the authorized read scope",
+            }
+        store = _postgres_store_for_binding(bind)
+        if valid_domain not in store.list_domains():
+            return {
+                "error": f"domain '{valid_domain}' not found",
+                "hint": "ask an administrator to create the domain",
+            }
+        pages = store.list_pages(valid_domain)
+        return {
+            "domain": valid_domain,
+            "pages": [
+                {"slug": slug, "file": f"{slug}.md"} for slug in pages
+            ],
+        }
     dom_path = _domain_path(bind.base, domain)
     if not dom_path.is_dir():
         return {
@@ -667,7 +851,22 @@ def wiki_list_pages(domain: str) -> dict:
 
 @_safe
 def wiki_read_page(domain: str, slug: str) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        valid_domain = _validate_domain(domain)
+        _slug_parts(slug)
+        if valid_domain not in bind.read:
+            return {
+                "error": f"domain '{valid_domain}' is outside bound read scope",
+                "hint": "narrow or update the authorized read scope",
+            }
+        page = _postgres_store_for_binding(bind).read_page(valid_domain, slug)
+        if page is None:
+            return {
+                "error": f"page '{valid_domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages",
+            }
+        return page
     path = _page_path(bind.base, domain, slug)
     if not os.path.isfile(path):
         return {
@@ -694,19 +893,35 @@ def wiki_search(
     intent: str = "read",
     heading: str | None = None,
 ) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     cfg = Config.load()
     if intent.strip().lower() == "write":
         target = bind.primary or (domains[0] if domains else None)
         if not target:
             return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
         target = _validate_domain(target)      # path guards are load-bearing
+        if _is_postgres(bind):
+            if target not in bind.write:
+                return {"target": {"domain": target, "exists": False}}
+            return {
+                "target": _postgres_store_for_binding(bind).locate_target(
+                    target, query, heading
+                )
+            }
         return {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
     resolved_mode = cfg.search_mode if mode is None else mode.strip().lower()
     allowed_modes = ("hybrid", "lexical", "semantic")
     if resolved_mode not in allowed_modes:
         return {"error": "invalid search mode; allowed values: hybrid, lexical, semantic"}
-    doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
+    if _is_postgres(bind):
+        requested = list(domains) if domains is not None else list(bind.read)
+        doms = [
+            _validate_domain(domain)
+            for domain in requested
+            if domain in bind.read
+        ]
+    else:
+        doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
         return {"results": [], "hint": "no domains in scope"}
     q_type = (type.strip().lower() or None) if type else None
@@ -715,26 +930,45 @@ def wiki_search(
     requested_top_k = cfg.top_k if k is None else k
     page_cache = {}
     try:
-        candidates = retrieval.prepare_read_candidates(
-            cfg,
-            bind.base,
-            doms,
-            query,
-            top_k=requested_top_k,
-            threshold=cfg.score_threshold if threshold is None else threshold,
-            mode=resolved_mode,
-            type=q_type,
-            tags=q_tags,
-            page_cache=page_cache,
-        )
+        if _is_postgres(bind):
+            candidates = _postgres_store_for_binding(bind).prepare_read_candidates(
+                doms,
+                query,
+                top_k=requested_top_k,
+                threshold=cfg.score_threshold if threshold is None else threshold,
+                mode=resolved_mode,
+                type=q_type,
+                tags=q_tags,
+            )
+        else:
+            candidates = retrieval.prepare_read_candidates(
+                cfg,
+                bind.base,
+                doms,
+                query,
+                top_k=requested_top_k,
+                threshold=cfg.score_threshold if threshold is None else threshold,
+                mode=resolved_mode,
+                type=q_type,
+                tags=q_tags,
+                page_cache=page_cache,
+            )
     except EmbedError as exc:
+        if _SESSION_BINDING.get() is not None:
+            return {
+                "error": "model operation failed",
+                "hint": "retry or inspect sanitized server diagnostics",
+            }
         return {"error": str(exc)}
     results = candidates[:requested_top_k]
     response = {"results": results}
     if cfg.rerank_model:
-        hydrated = retrieval.hydrate_candidates(
-            cfg, bind.base, candidates, page_cache=page_cache
-        )
+        if _is_postgres(bind):
+            hydrated = _postgres_store_for_binding(bind).hydrate_candidates(candidates)
+        else:
+            hydrated = retrieval.hydrate_candidates(
+                cfg, bind.base, candidates, page_cache=page_cache
+            )
         ranked, metadata = rerank.rerank_candidates(
             cfg, query, hydrated, top_n=requested_top_k
         )
@@ -757,9 +991,16 @@ def wiki_search(
 
 @_safe
 def wiki_related(domain: str, section_id: str) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
     cfg = Config.load()
     valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        if valid_domain not in bind.read:
+            return {
+                "error": f"domain '{valid_domain}' is outside bound read scope",
+                "hint": "narrow or update the authorized read scope",
+            }
+        return _postgres_store_for_binding(bind).related(valid_domain, section_id)
     dom_path = _domain_path(bind.base, valid_domain)
     base.migrate_store_location(bind.base, valid_domain)
     recs = VectorStore(base.index_path(bind.base, valid_domain)).load()
@@ -883,6 +1124,110 @@ def _write_sync_result(
     return result
 
 
+def _prepare_postgres_page(
+    cfg: Config,
+    domain: str,
+    slug: str,
+    markdown: str,
+    *,
+    source: str | None,
+    type: str | None,
+    tags: list[str] | None,
+    description: str | None,
+    status: str | None,
+) -> tuple[str, str, str | None] | dict:
+    """Build canonical PostgreSQL Markdown without touching local storage."""
+    try:
+        authored_meta, body = _fm.split(markdown, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "use only code.symbols, code.files, and code.source_globs",
+        }
+    authored_code = authored_meta.get("code")
+    if authored_code is not None:
+        try:
+            _codegraph_linking.validate_code_mapping(authored_code)
+        except _codegraph_linking.SelectorError as exc:
+            return {
+                "error": str(exc),
+                "hint": "use only code.symbols, code.files, and code.source_globs",
+            }
+    body = to_markdown_links(body)
+    blocking = [
+        finding
+        for finding in validate_page(body)
+        if finding.get("type") in _BLOCKING
+    ]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "use only ## headings; no text before the first ##",
+        }
+
+    warnings = []
+    requested_type = type or authored_meta.get("type")
+    if requested_type is not None:
+        page_type = _fm.normalize_type(requested_type)
+        page_tags = _fm.normalize_tags(
+            tags if tags is not None else authored_meta.get("tags", [])
+        )
+    elif cfg.chat_model:
+        classified = classify.classify_page(cfg, body, [])
+        page_type = classified["type"]
+        page_tags = (
+            _fm.normalize_tags(tags) if tags is not None else classified["tags"]
+        )
+        if classified["warning"]:
+            warnings.append(classified["warning"])
+    else:
+        page_type = _fm.DEFAULT_TYPE
+        page_tags = _fm.normalize_tags(tags or [])
+        warnings.append(
+            "type not given and IWIKI_CHAT_MODEL unset; defaulted to concept"
+        )
+    try:
+        identity = _resolve_identity(slug, page_type)
+    except ValueError as exc:
+        return {
+            "error": str(exc),
+            "hint": "pass a bare slug with a matching `type`, or a slug whose "
+                    "first segment equals the frontmatter type",
+        }
+    page_file = f"{identity}.md"
+    if page_file in RESERVED_OKF:
+        return {
+            "error": f"slug tail is reserved for the generated OKF file '{page_file}'",
+            "hint": "choose another slug; index/log are generated, not authored",
+        }
+
+    meta = {
+        "type": page_type,
+        "title": _fm.derive_title(body, _slug_parts(identity)[-1]),
+    }
+    page_description = (
+        description
+        if description is not None
+        else authored_meta.get("description") or _fm.derive_description(body)
+    )
+    if page_description:
+        meta["description"] = page_description
+    else:
+        warnings.append("no description given and no ## Overview to derive from")
+    if source:
+        meta["resource"] = source
+    if page_tags:
+        meta["tags"] = page_tags
+    meta["status"] = _fm.normalize_status(
+        status or authored_meta.get("status") or _fm.DEFAULT_STATUS
+    )
+    if authored_code is not None:
+        meta["code"] = authored_code
+    meta["timestamp"] = _dt.date.today().isoformat()
+    return identity, _fm.render(meta) + body, "; ".join(warnings) or None
+
+
 @_safe
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None,
@@ -891,6 +1236,35 @@ def wiki_write_page(
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        store = _postgres_store_for_binding(bind)
+        if valid_domain not in store.list_domains():
+            return {
+                "error": f"domain '{valid_domain}' not found",
+                "hint": "ask an administrator to create the domain",
+            }
+        cfg = Config.load()
+        prepared = _prepare_postgres_page(
+            cfg,
+            valid_domain,
+            slug,
+            markdown,
+            source=source,
+            type=type,
+            tags=tags,
+            description=description,
+            status=status,
+        )
+        if isinstance(prepared, dict):
+            return prepared
+        identity, full_markdown, warning = prepared
+        result = store.write_page(valid_domain, identity, full_markdown)
+        if warning and "error" not in result:
+            result["warning"] = warning
+        return result
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
         return scope_error
@@ -1220,9 +1594,76 @@ def wiki_update_page(
     domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
     description: str | None = None, status: str | None = None,
     new_heading: str | None = None,
+    expected_revision: int | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        if expected_revision is None:
+            return expected_revision_required()
+        _slug_parts(slug)
+        store = _postgres_store_for_binding(bind)
+        page = store.read_page(valid_domain, slug)
+        if page is None:
+            return {
+                "error": f"page '{valid_domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages",
+            }
+        try:
+            meta, original_body = _fm.split(
+                page["markdown"], strict_code=True
+            )
+        except _fm.FrontmatterError as exc:
+            return {
+                "error": str(exc),
+                "hint": "fix nested code frontmatter before updating",
+            }
+        try:
+            updated_body = replace_section(
+                original_body,
+                heading,
+                to_markdown_links(new_body),
+                new_heading=new_heading,
+            )
+        except SectionError as exc:
+            return {
+                "error": str(exc),
+                "hint": "check the heading with wiki_read_page",
+            }
+        blocking = [
+            finding
+            for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "new_body must use only ## headings; no ###+, no pre-## text",
+            }
+        if description is not None:
+            meta["description"] = description
+        if status is not None:
+            meta["status"] = _fm.normalize_status(status)
+        if source is not None:
+            meta["resource"] = source
+        if meta:
+            meta["timestamp"] = _dt.date.today().isoformat()
+            updated_markdown = _fm.render(meta) + updated_body
+        else:
+            updated_markdown = updated_body
+        result = store.update_page(
+            valid_domain,
+            slug,
+            updated_markdown,
+            expected_revision,
+        )
+        if "error" not in result:
+            result["heading"] = heading.lstrip("#").strip()
+        return result
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
         return scope_error
@@ -1343,9 +1784,21 @@ def wiki_update_page(
 
 
 @_safe
-def wiki_delete_page(domain: str, slug: str) -> dict:
+def wiki_delete_page(
+    domain: str, slug: str, expected_revision: int | None = None
+) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        if expected_revision is None:
+            return expected_revision_required()
+        _slug_parts(slug)
+        return _postgres_store_for_binding(bind).delete_page(
+            valid_domain, slug, expected_revision
+        )
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
         return scope_error
@@ -1407,6 +1860,11 @@ def wiki_index(domain: str | None = None) -> dict:
             "hint": "pass domain= or set write in .iwiki.toml via wiki_bind",
         }
     valid_domain = _validate_domain(target)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        return _postgres_store_for_binding(bind).index_domain(valid_domain)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
         return scope_error
@@ -1453,13 +1911,87 @@ def wiki_create_domain(name: str) -> dict:
             "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
 
 
-@_safe
-def wiki_bind(
+def _wiki_bind(
     read: list[str] | None = None,
     write: list[str] | None = None,
     primary: str | None = None,
 ) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        global _LOCAL_POSTGRES_BINDING
+        valid_read = (
+            list(bind.read)
+            if read is None
+            else [_validate_domain(domain) for domain in read]
+        )
+        valid_write = (
+            list(bind.write)
+            if write is None
+            else [_validate_domain(domain) for domain in write]
+        )
+        if primary is None:
+            valid_primary = (
+                bind.primary
+                if bind.primary in valid_write
+                else (valid_write[0] if valid_write else None)
+            )
+        else:
+            valid_primary = _validate_domain(primary)
+        if any(domain not in bind.read for domain in valid_read):
+            return {
+                "error": "read scope is protected",
+                "hint": "wiki_bind may narrow PostgreSQL read scope but cannot expand it",
+            }
+        if any(domain not in bind.write for domain in valid_write):
+            return {
+                "error": "write scope is protected",
+                "hint": "wiki_bind may narrow PostgreSQL write scope but cannot expand it",
+            }
+        if any(domain not in valid_read for domain in valid_write):
+            return {
+                "error": "write scope must be a subset of read scope",
+                "hint": "include every write domain in read scope",
+            }
+        if (
+            (valid_write and valid_primary not in valid_write)
+            or (not valid_write and valid_primary is not None)
+        ):
+            return {
+                "error": "primary domain must belong to write scope",
+                "hint": "select a primary from the narrowed write scope",
+            }
+        existing = set(_postgres_store_for_binding(bind).list_domains())
+        missing = [
+            domain
+            for domain in (*valid_read, *valid_write)
+            if domain not in existing
+        ]
+        if missing:
+            return {
+                "error": f"domain '{missing[0]}' not found",
+                "hint": "ask an administrator to create the domain",
+            }
+        narrowed = replace(
+            bind,
+            read=tuple(dict.fromkeys(valid_read)),
+            write=tuple(dict.fromkeys(valid_write)),
+            primary=valid_primary,
+        )
+        session = _SESSION_BINDING.get()
+        if isinstance(session, _HostedBindingState):
+            session.set(narrowed)
+        elif session is not None:
+            _SESSION_BINDING.set(narrowed)
+        else:
+            _LOCAL_POSTGRES_BINDING = narrowed
+        result = {
+            "read": list(narrowed.read),
+            "write": list(narrowed.write),
+            "primary": narrowed.primary,
+        }
+        if session is None:
+            result["project_dir"] = narrowed.project_dir
+        return result
     current_domain = _validate_domain(base.current_project_domain(bind.project_dir))
     valid_read = None if read is None else [_validate_domain(d) for d in read]
     valid_write = None if write is None else [_validate_domain(d) for d in write]
@@ -1533,8 +2065,34 @@ def wiki_bind(
 
 
 @_safe
+def wiki_bind(
+    read: list[str] | None = None,
+    write: list[str] | None = None,
+    primary: str | None = None,
+) -> dict:
+    session = _SESSION_BINDING.get()
+    if isinstance(session, _HostedBindingState):
+        with session.locked():
+            return _wiki_bind(read=read, write=write, primary=primary)
+    return _wiki_bind(read=read, write=write, primary=primary)
+
+
+@_safe
 def wiki_lint(domain: str | None = None) -> dict:
-    bind = base.resolve_binding()
+    bind = _resolved_binding()
+    if _is_postgres(bind):
+        targets = [domain] if domain else list(bind.read)
+        valid_targets = [
+            _validate_domain(target)
+            for target in targets
+            if target in bind.read
+        ]
+        store = _postgres_store_for_binding(bind)
+        reports = {
+            target: store.lint_domain(target, list(bind.read))
+            for target in valid_targets
+        }
+        return {"domains": list(reports), "reports": reports}
     targets = [domain] if domain else base.resolve_scope(bind, "project", None)
     valid_targets = [_validate_domain(target) for target in targets]
     visible_domains = {
@@ -2126,6 +2684,16 @@ def wiki_sync() -> dict:
     return sync.sync(bind.base)
 
 
+# PostgreSQL rejects Git-only tools before any local lock, Git, filesystem, or
+# SQLite helper can run.
+wiki_create_domain = _postgres_unsupported_guard(wiki_create_domain)
+wiki_remediation_plan = _postgres_unsupported_guard(wiki_remediation_plan)
+wiki_migrate_okf = _postgres_unsupported_guard(wiki_migrate_okf)
+wiki_apply_okf = _postgres_unsupported_guard(wiki_apply_okf)
+wiki_export_okf = _postgres_unsupported_guard(wiki_export_okf)
+wiki_sync = _postgres_unsupported_guard(wiki_sync)
+
+
 # Every overlapping mutation recovers journals before any other side effect.
 wiki_write_page = _mutation_guard(wiki_write_page)
 wiki_update_page = _mutation_guard(wiki_update_page)
@@ -2197,19 +2765,49 @@ def _print_startup_failure(reason: str, cfg: Config | None = None) -> None:
     )
 
 
+def _initialize_postgres_storage(cfg: Config) -> None:
+    project_dir = base.resolve_project_dir()
+    project_config = base.load_project_config(project_dir)
+    storage = project_config.get("storage")
+    if not isinstance(storage, dict) or storage.get("type") != "postgres":
+        return
+    binding = base.resolve_storage_binding(project_dir)
+    if not _is_postgres(binding):
+        return
+    _postgres_migrations.run_migrations(
+        _postgres_migrations.MigrationSettings(
+            dsn=binding.connection_dsn(),
+            embed_model=cfg.embed_model,
+            embed_dimensions=cfg.dimensions,
+            statement_timeout_ms=30_000,
+            lock_timeout_ms=5_000,
+        )
+    )
+
+
 def main() -> None:
     import argparse
 
+    argv = sys.argv[1:]
+    if _admin.is_admin_command(argv):
+        raise SystemExit(_admin.run(argv))
+
     p = argparse.ArgumentParser(prog="iwiki-mcp")
     p.add_argument("--project", help="project dir (overrides cwd / IWIKI_PROJECT_DIR)")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.project:
         os.environ["IWIKI_PROJECT_DIR"] = os.path.abspath(args.project)
     cfg = None
     try:
         cfg = Config.load()
+        _initialize_postgres_storage(cfg)
         probe_embedding_endpoint(cfg)
-    except (ConfigError, EmbedError) as exc:
+    except (
+        base.BaseError,
+        ConfigError,
+        EmbedError,
+        _postgres_migrations.MigrationError,
+    ) as exc:
         _print_startup_failure(str(exc), cfg)
         raise SystemExit(1) from None
     mcp.set_idle_timeout(cfg.idle_timeout_seconds)

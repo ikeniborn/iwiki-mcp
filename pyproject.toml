@@ -1,7 +1,7 @@
 [project]
 name = "iwiki-mcp"
-version = "0.7.93"
-description = "MCP server for a shared, git-synced wiki knowledge base split into domains"
+version = "0.7.106"
+description = "MCP server for a shared Git or PostgreSQL wiki split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -11,6 +11,10 @@ dependencies = [
     "pathspec>=0.12",
     "filelock>=3.29",
     "numpy>=1.26",
+    "pgvector>=0.3",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+    "uvicorn>=0.30",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.13.3",
     "tomli>=2.0; python_version < '3.11'",
@@ -38,3 +42,6 @@ packages = ["src/iwiki_mcp"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "postgres_integration: requires an explicit disposable PostgreSQL database",
+]

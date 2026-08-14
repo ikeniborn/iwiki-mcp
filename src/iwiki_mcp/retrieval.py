@@ -360,6 +360,242 @@ def _internal_hit(domain, rec, source, rank_key, seed_origins=None) -> dict:
     }
 
 
+def prepare_storage_candidates(
+    cfg: Config,
+    domains: list[str],
+    query: str,
+    records_by_domain: dict[str, list],
+    markdown_by_domain: dict[str, dict[str, str]],
+    semantic_scores: dict[tuple[str, str, str, int], float],
+    neighbor_provider: Callable[[str], Iterable[str]],
+    top_k: int,
+    threshold: float,
+    mode: str = "hybrid",
+    type: str | None = None,
+    tags: list | None = None,
+) -> list[dict]:
+    """Rank materialized backend data with the Git search contract."""
+    if mode not in _VALID_MODES:
+        allowed = ", ".join(sorted(_VALID_MODES))
+        raise ValueError(f"invalid search mode: {mode}; allowed values: {allowed}")
+    if top_k <= 0 or not domains:
+        return []
+
+    limit = _candidate_limit(top_k)
+    signals: dict[str, list[dict]] = {
+        "semantic_page": [],
+        "lexical_page": [],
+        "graph_page": [],
+        "semantic_chunk": [],
+        "lexical_section": [],
+    }
+    sections_by_domain: dict[str, dict[str, list]] = {}
+    semantic_seeds: dict[str, list[tuple[str, float]]] = {}
+    lexical_seeds: dict[str, list[tuple[str, int]]] = {}
+
+    for domain in domains:
+        records = [
+            record for record in records_by_domain.get(domain, [])
+            if _facet_ok(record.type, record.tags, type, tags)
+        ]
+        summaries = [record for record in records if record.kind == "summary"]
+        sections = [record for record in records if record.kind == "section"]
+        sections_by_file: dict[str, list] = {}
+        for record in sorted(
+            sections,
+            key=lambda item: (item.file, item.ordinal, item.chunk, item.heading),
+        ):
+            sections_by_file.setdefault(record.file, []).append(record)
+        sections_by_domain[domain] = sections_by_file
+
+        page_seeds = []
+        semantic_chunks = []
+        if mode in ("semantic", "hybrid"):
+            for record in summaries:
+                key = (domain, record.file, record.heading, record.chunk)
+                if key in semantic_scores:
+                    score = round(semantic_scores[key], 4)
+                    if score >= cfg.seed_threshold:
+                        page_seeds.append((record.file, score))
+            page_seeds.sort(key=lambda item: (-item[1], item[0]))
+            page_seeds = page_seeds[:cfg.seed_top_k]
+            for record in sections:
+                key = (domain, record.file, record.heading, record.chunk)
+                if key in semantic_scores:
+                    score = round(semantic_scores[key], 4)
+                    if score >= threshold:
+                        semantic_chunks.append((record, score))
+            semantic_chunks.sort(
+                key=lambda item: (
+                    -item[1], item[0].file, item[0].ordinal, item[0].chunk
+                )
+            )
+            semantic_chunks = semantic_chunks[:limit]
+        semantic_seeds[domain] = page_seeds
+
+        page_scores: dict[str, int] = {}
+        lexical_hits = []
+        lexical_map = {}
+        if mode in ("lexical", "hybrid"):
+            indexed = _unique_sections(sections)
+            eligible = {
+                (record.file, record.heading, record.chunk) for record in sections
+            }
+            eligible_headings: dict[str, set[str]] = {}
+            for record in sections:
+                eligible_headings.setdefault(record.file, set()).add(record.heading)
+            chunks = []
+            for file, markdown in sorted(markdown_by_domain.get(domain, {}).items()):
+                for hit in score_sections(file, markdown, query):
+                    if hit["heading"] in eligible_headings.get(file, set()):
+                        page_scores[file] = page_scores.get(file, 0) + hit["score"]
+                for chunk in chunk_markdown(
+                    file,
+                    markdown,
+                    cfg.chunk_size,
+                    cfg.chunk_overlap,
+                    cfg.summary_max,
+                ):
+                    identity = (file, chunk.heading, chunk.chunk)
+                    record = indexed.get(identity)
+                    if (
+                        chunk.kind == "section"
+                        and identity in eligible
+                        and record is not None
+                        and record.hash == chunk.hash
+                    ):
+                        chunks.append(chunk)
+                        lexical_map[identity] = record
+            lexical_hits = score_chunks(chunks, query, None)
+        ranked_pages = sorted(page_scores.items(), key=lambda item: (-item[1], item[0]))
+        lexical_seeds[domain] = ranked_pages[:cfg.seed_top_k]
+
+        for rank, (file, _score) in enumerate(page_seeds):
+            for record in sections_by_file.get(file, []):
+                signals["semantic_page"].append(
+                    _internal_hit(
+                        domain,
+                        record,
+                        "seed",
+                        (rank, record.ordinal, record.chunk, record.file),
+                        ["semantic"],
+                    )
+                )
+        for rank, (file, _score) in enumerate(lexical_seeds[domain]):
+            for record in sections_by_file.get(file, []):
+                signals["lexical_page"].append(
+                    _internal_hit(
+                        domain,
+                        record,
+                        "seed",
+                        (rank, record.ordinal, record.chunk, record.file),
+                        ["lexical"],
+                    )
+                )
+        for record, score in semantic_chunks:
+            signals["semantic_chunk"].append(
+                _internal_hit(
+                    domain,
+                    record,
+                    "global",
+                    (-score, record.file, record.ordinal, record.chunk),
+                    ["semantic"],
+                )
+            )
+        for rank, hit in enumerate(lexical_hits):
+            record = lexical_map[(hit["file"], hit["heading"], hit["chunk"])]
+            signals["lexical_section"].append(
+                _internal_hit(
+                    domain,
+                    record,
+                    "lexical",
+                    (rank, record.file, record.ordinal, record.chunk),
+                    ["lexical"],
+                )
+            )
+
+    graph_seeds = []
+    for domain in domains:
+        graph_seeds.extend(
+            (f"{domain}/{file}", "semantic", rank)
+            for rank, (file, _score) in enumerate(semantic_seeds[domain])
+        )
+        graph_seeds.extend(
+            (f"{domain}/{file}", "lexical", rank)
+            for rank, (file, _score) in enumerate(lexical_seeds[domain])
+        )
+    allowed_pages = {
+        f"{domain}/{file}"
+        for domain, pages in markdown_by_domain.items()
+        if domain in domains
+        for file in pages
+    }
+    if graph_seeds:
+        for page_rank, page in enumerate(
+            graph.rank_storage_graph(
+                graph_seeds,
+                neighbor_provider,
+                cfg.graph_depth,
+                cfg.bfs_top_k,
+                allowed_pages,
+            )
+        ):
+            domain, file = page["file"].split("/", 1)
+            for record in sections_by_domain.get(domain, {}).get(file, []):
+                signals["graph_page"].append(
+                    _internal_hit(
+                        domain,
+                        record,
+                        page["source"],
+                        (page_rank, record.ordinal, record.chunk, domain, file),
+                        page["seed_origins"],
+                    )
+                )
+
+    for hits in signals.values():
+        hits.sort(
+            key=lambda hit: (
+                hit["rank_key"],
+                hit["domain"],
+                hit["file"],
+                hit["ordinal"],
+                hit["chunk"],
+            )
+        )
+        for hit in hits:
+            hit.pop("rank_key")
+
+    public = []
+    for candidate in fusion.fuse_ranked(signals, limit):
+        signal_names = set(candidate.pop("signals"))
+        origins = set(candidate.get("seed_origins", []))
+        semantic = bool(signal_names & {"semantic_page", "semantic_chunk"})
+        lexical = bool(signal_names & {"lexical_page", "lexical_section"})
+        if "graph_page" in signal_names:
+            semantic = semantic or "semantic" in origins
+            lexical = lexical or "lexical" in origins
+        candidate["hit"] = (
+            "both" if semantic and lexical else "semantic" if semantic else "lexical"
+        )
+        candidate.pop("ordinal", None)
+        candidate.pop("seed_origins", None)
+        public.append(
+            {
+                key: candidate[key]
+                for key in (
+                    "domain",
+                    "file",
+                    "heading",
+                    "chunk",
+                    "score",
+                    "hit",
+                    "source",
+                )
+            }
+        )
+    return public
+
+
 def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                     query_vec: list[float] | None, mode: str, limit: int,
                     threshold: float, type: str | None,

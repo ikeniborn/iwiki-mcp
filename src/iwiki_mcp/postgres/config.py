@@ -1,0 +1,290 @@
+"""Strict, secret-safe configuration for PostgreSQL-backed runtimes."""
+from __future__ import annotations
+
+import ipaddress
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping
+from urllib.parse import urlsplit
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
+
+class ConfigError(RuntimeError):
+    """Raised when PostgreSQL or hosted-server configuration is invalid."""
+
+
+@dataclass(frozen=True)
+class PostgresConfig:
+    host: str
+    port: int
+    database: str
+    user: str
+    sslmode: str
+    password: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    embed_model: str
+    embed_dimensions: int
+    rerank_model: str
+
+
+@dataclass(frozen=True)
+class HostedServerConfig:
+    host: str
+    port: int
+    allowed_origins: tuple[str, ...]
+    pool_min_size: int
+    pool_max_size: int
+    statement_timeout_ms: int
+    lock_timeout_ms: int
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    storage: PostgresConfig
+    models: ModelConfig
+    server: HostedServerConfig
+
+
+_SSLMODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+_RUNTIME_ONLY_FIELDS = {
+    "password",
+    "embed_model",
+    "embed_dimensions",
+    "rerank_model",
+    "llm_base_url",
+    "llm_key",
+}
+_POSTGRES_FIELDS = {
+    "type",
+    "host",
+    "port",
+    "database",
+    "user",
+    "sslmode",
+    "iwiki_id",
+}
+_SERVER_FIELDS = {
+    "host",
+    "port",
+    "allowed_origins",
+    "pool_min_size",
+    "pool_max_size",
+    "statement_timeout_ms",
+    "lock_timeout_ms",
+}
+_SERVER_TOP_LEVEL_FIELDS = {"storage", "server"}
+
+
+def _required_string(config: Mapping[str, Any], name: str) -> str:
+    value = config.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"storage.{name} is required")
+    return value.strip()
+
+
+def _bounded_integer(
+    config: Mapping[str, Any], name: str, minimum: int, maximum: int
+) -> int:
+    value = config.get(name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
+    env = os.environ if environ is None else environ
+    embed_model = env.get("IWIKI_EMBED_MODEL", "").strip()
+    if not embed_model:
+        raise ConfigError("embedding model is required")
+    raw_dimensions = env.get("IWIKI_EMBED_DIMENSIONS", "").strip()
+    try:
+        dimensions = int(raw_dimensions)
+    except ValueError as exc:
+        raise ConfigError("embedding dimensions must be a positive integer") from exc
+    if dimensions <= 0:
+        raise ConfigError("embedding dimensions must be a positive integer")
+    return ModelConfig(
+        embed_model=embed_model,
+        embed_dimensions=dimensions,
+        rerank_model=env.get("IWIKI_RERANK_MODEL", "").strip(),
+    )
+
+
+def load_postgres_config(
+    config: Mapping[str, Any], environ: Mapping[str, str] | None = None
+) -> PostgresConfig:
+    env = os.environ if environ is None else environ
+    if _RUNTIME_ONLY_FIELDS.intersection(config):
+        raise ConfigError("credentials and model settings must use the runtime environment")
+    if set(config) - _POSTGRES_FIELDS:
+        raise ConfigError("storage configuration contains keys that are not allowed")
+    host = _required_string(config, "host")
+    port = _bounded_integer(config, "port", 1, 65535)
+    database = _required_string(config, "database")
+    user = _required_string(config, "user")
+    sslmode = _required_string(config, "sslmode")
+    if sslmode not in _SSLMODES:
+        raise ConfigError("storage.sslmode is invalid")
+    password = env.get("IWIKI_DB_PASSWORD", "")
+    if not password:
+        raise ConfigError("database password is required")
+    return PostgresConfig(
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        sslmode=sslmode,
+        password=password,
+    )
+
+
+def _loopback_host(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("server.host is required")
+    host = value.strip()
+    if host == "localhost":
+        return host
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError as exc:
+        raise ConfigError("server.host must be a loopback address") from exc
+    if not loopback:
+        raise ConfigError("server.host must be a loopback address")
+    return host
+
+
+def _allowed_origins(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError("server.allowed_origins must be a non-empty array")
+    origins: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError("server.allowed_origins must contain non-empty strings")
+        origins.append(normalize_origin(item.strip()))
+    if len(origins) != len(set(origins)):
+        raise ConfigError("server.allowed_origins must not contain duplicates")
+    return tuple(origins)
+
+
+def normalize_origin(origin: str) -> str:
+    """Return the canonical form used for hosted Origin comparisons."""
+    try:
+        parsed = urlsplit(origin)
+        host = parsed.hostname
+        port = parsed.port
+    except (UnicodeError, ValueError) as exc:
+        raise ConfigError("server.allowed_origins contains an invalid origin") from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.netloc
+        or host is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc.rsplit("@", 1)[-1].endswith(":")
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ConfigError("server.allowed_origins contains an invalid origin")
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            normalized_host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ConfigError(
+                "server.allowed_origins contains an invalid origin"
+            ) from exc
+        labels = normalized_host.split(".")
+        if any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(char.isalnum() or char == "-" for char in label)
+            for label in labels
+        ):
+            raise ConfigError("server.allowed_origins contains an invalid origin")
+        authority = normalized_host
+    else:
+        if "%" in host:
+            raise ConfigError("server.allowed_origins contains an invalid origin")
+        normalized_host = address.compressed
+        authority = f"[{normalized_host}]" if address.version == 6 else normalized_host
+
+    if scheme == "http" and normalized_host not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        raise ConfigError("server.allowed_origins contains an invalid origin")
+    if port is not None and port != {"http": 80, "https": 443}[scheme]:
+        authority = f"{authority}:{port}"
+    return f"{scheme}://{authority}"
+
+
+def _load_toml(path: str | os.PathLike[str]) -> dict[str, Any]:
+    try:
+        with Path(path).open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError("server configuration could not be loaded") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("server configuration must be a TOML table")
+    return data
+
+
+def load_server_config(
+    path: str | os.PathLike[str], environ: Mapping[str, str] | None = None
+) -> ServerConfig:
+    data = _load_toml(path)
+    if set(data) - _SERVER_TOP_LEVEL_FIELDS:
+        raise ConfigError("server configuration contains keys that are not allowed")
+    storage = data.get("storage")
+    if storage is not None and not isinstance(storage, dict):
+        raise ConfigError("top-level storage and server must be tables")
+    if not isinstance(storage, dict) or storage.get("type") != "postgres":
+        raise ConfigError("hosted server requires postgres storage")
+    if "iwiki_id" in storage:
+        raise ConfigError("storage.iwiki_id is not allowed in hosted configuration")
+    server = data.get("server")
+    if server is not None and not isinstance(server, dict):
+        raise ConfigError("top-level storage and server must be tables")
+    if not isinstance(server, dict):
+        raise ConfigError("server configuration is required")
+    if set(server) - _SERVER_FIELDS:
+        raise ConfigError("server configuration contains keys that are not allowed")
+
+    pool_min_size = _bounded_integer(server, "pool_min_size", 1, 100)
+    pool_max_size = _bounded_integer(server, "pool_max_size", 1, 100)
+    if pool_min_size > pool_max_size:
+        raise ConfigError("pool_min_size must not exceed pool_max_size")
+    hosted = HostedServerConfig(
+        host=_loopback_host(server.get("host")),
+        port=_bounded_integer(server, "port", 1, 65535),
+        allowed_origins=_allowed_origins(server.get("allowed_origins")),
+        pool_min_size=pool_min_size,
+        pool_max_size=pool_max_size,
+        statement_timeout_ms=_bounded_integer(
+            server, "statement_timeout_ms", 1, 300000
+        ),
+        lock_timeout_ms=_bounded_integer(server, "lock_timeout_ms", 1, 300000),
+    )
+    return ServerConfig(
+        storage=load_postgres_config(storage, environ),
+        models=load_model_config(environ),
+        server=hosted,
+    )

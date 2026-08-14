@@ -1,3 +1,4 @@
+import dataclasses
 import subprocess
 from pathlib import Path
 
@@ -28,6 +29,303 @@ def test_resolve_from_env(tmp_path, monkeypatch):
     assert bind.write == ("backend",)
     assert bind.primary == "backend"
     assert (proj / ".iwikiignore").is_file()
+
+
+@pytest.mark.parametrize("storage_block", ["", '[storage]\ntype = "git"\n'])
+def test_resolve_binding_uses_git_storage_by_default(
+    tmp_path, monkeypatch, storage_block
+):
+    b = _mkbase(tmp_path, "backend")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n'
+        + storage_block
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    bind = base.resolve_binding(str(proj))
+
+    assert bind.storage == "git"
+    assert bind.base == b
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        b'password = "must-not-be-shown"\n[storage]\ntype = [',
+        b'password = "must-not-be-shown"\n\xff',
+    ],
+)
+def test_resolve_storage_binding_rejects_invalid_project_toml_safely(
+    tmp_path, monkeypatch, contents
+):
+    b = _mkbase(tmp_path, "backend")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_bytes(contents)
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    with pytest.raises(base.BaseError) as caught:
+        base.resolve_storage_binding(str(proj))
+
+    assert "must-not-be-shown" not in str(caught.value)
+    assert "project configuration" in str(caught.value)
+
+
+@pytest.mark.parametrize("contents", [b"invalid = [", b"\xff"])
+def test_legacy_project_config_loader_remains_fail_soft(tmp_path, contents):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_bytes(contents)
+
+    assert base.load_project_config(str(proj)) == {}
+
+
+def test_resolve_storage_binding_keeps_absent_project_config_git_default(
+    tmp_path, monkeypatch
+):
+    b = _mkbase(tmp_path, "backend")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    bind = base.resolve_storage_binding(str(proj))
+
+    assert bind.storage == "git"
+    assert bind.base == b
+
+
+def _set_postgres_runtime(monkeypatch, *, password="database-secret"):
+    monkeypatch.setenv("IWIKI_DB_PASSWORD", password)
+    monkeypatch.setenv("IWIKI_EMBED_MODEL", "lemonade-embeddings-bge-m3-q8")
+    monkeypatch.setenv("IWIKI_EMBED_DIMENSIONS", "1024")
+    monkeypatch.setenv("IWIKI_RERANK_MODEL", "lemonade-reranker-bge-reranker-v2-m3")
+
+
+def test_resolve_binding_builds_immutable_local_postgres_binding(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["docs", "shared"]\n'
+        'write = ["docs"]\n'
+        'primary = "docs"\n'
+        '[storage]\n'
+        'type = "postgres"\n'
+        'host = "db.example.net"\n'
+        'port = 5432\n'
+        'database = "iwiki"\n'
+        'user = "iwiki_local"\n'
+        'sslmode = "verify-full"\n'
+        'iwiki_id = "personal"\n'
+    )
+    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
+    _set_postgres_runtime(monkeypatch)
+
+    bind = base.resolve_binding(str(proj))
+
+    assert bind.storage == "postgres"
+    assert bind.host == "db.example.net"
+    assert bind.port == 5432
+    assert bind.database == "iwiki"
+    assert bind.user == "iwiki_local"
+    assert bind.sslmode == "verify-full"
+    assert bind.iwiki_id == "personal"
+    assert bind.read == ("docs", "shared")
+    assert bind.write == ("docs",)
+    assert bind.primary == "docs"
+    assert bind.embed_model == "lemonade-embeddings-bge-m3-q8"
+    assert bind.embed_dimensions == 1024
+    assert bind.rerank_model == "lemonade-reranker-bge-reranker-v2-m3"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        bind.iwiki_id = "other"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+            '[storage]\ntype = "sqlite"\n',
+            "unsupported storage type",
+        ),
+        (
+            'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+            '[storage]\ntype = "postgres"\nport = 5432\n'
+            'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+            'iwiki_id = "personal"\n',
+            "host",
+        ),
+        (
+            'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+            '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+            'database = "iwiki"\nuser = "user"\nsslmode = "require"\n',
+            "iwiki_id",
+        ),
+        (
+            '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+            'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+            'iwiki_id = "personal"\n',
+            "read",
+        ),
+        (
+            'read = ["docs"]\nwrite = ["private"]\nprimary = "private"\n'
+            '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+            'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+            'iwiki_id = "personal"\n',
+            "write scope",
+        ),
+        (
+            'read = [""]\nwrite = ["docs"]\nprimary = "docs"\n'
+            '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+            'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+            'iwiki_id = "personal"\n',
+            "read",
+        ),
+        (
+            'read = ["docs"]\nwrite = [""]\nprimary = "docs"\n'
+            '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+            'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+            'iwiki_id = "personal"\n',
+            "write",
+        ),
+    ],
+)
+def test_resolve_binding_rejects_invalid_postgres_configuration(
+    tmp_path, monkeypatch, config, message
+):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(config)
+    monkeypatch.delenv("IWIKI_BASE_DIR", raising=False)
+    _set_postgres_runtime(monkeypatch)
+
+    with pytest.raises(base.BaseError, match=message):
+        base.resolve_binding(str(proj))
+
+
+def test_postgres_binding_diagnostic_and_repr_redact_password(tmp_path, monkeypatch):
+    secret = "swordfish-database-secret"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+        '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+        'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+        'iwiki_id = "personal"\n'
+    )
+    _set_postgres_runtime(monkeypatch, password=secret)
+
+    bind = base.resolve_binding(str(proj))
+
+    assert secret not in repr(bind)
+    assert "IWIKI_DB_PASSWORD" not in repr(bind)
+
+
+def test_local_postgres_rejects_credentials_and_models_in_project_toml(
+    tmp_path, monkeypatch
+):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+        '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+        'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+        'iwiki_id = "personal"\npassword = "must-not-be-used"\n'
+        'embed_model = "must-not-be-used"\n'
+    )
+    _set_postgres_runtime(monkeypatch)
+
+    with pytest.raises(base.BaseError, match="runtime environment"):
+        base.resolve_binding(str(proj))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        'password = "must-not-be-used"',
+        'llm_key = "must-not-be-used"',
+        'embed_model = "must-not-be-used"',
+        "embed_dimensions = 12",
+        'rerank_model = "must-not-be-used"',
+        "unexpected = true",
+    ],
+)
+def test_local_postgres_rejects_non_project_top_level_keys(
+    tmp_path, monkeypatch, field
+):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        field
+        + '\nread = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+        '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+        'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+        'iwiki_id = "personal"\n'
+    )
+    _set_postgres_runtime(monkeypatch)
+
+    with pytest.raises(base.BaseError, match="not allowed") as caught:
+        base.resolve_storage_binding(str(proj))
+
+    assert "must-not-be-used" not in str(caught.value)
+
+
+def test_explicit_git_keeps_unknown_top_level_fields(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "docs")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'unexpected = true\nread = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+        '[storage]\ntype = "git"\n'
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    bind = base.resolve_storage_binding(str(proj))
+
+    assert bind.storage == "git"
+    assert bind.read == ("docs",)
+
+
+@pytest.mark.parametrize(
+    ("scope", "message"),
+    [
+        ('read = [1]\nwrite = ["docs"]\nprimary = "docs"\n', "read elements"),
+        ('read = ["docs"]\nwrite = [1]\nprimary = "1"\n', "write elements"),
+        ('read = ["docs"]\nwrite = ["docs"]\nprimary = 1\n', "primary must"),
+    ],
+)
+def test_local_postgres_rejects_non_string_scope_values(
+    tmp_path, monkeypatch, scope, message
+):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        scope
+        + '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+        'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+        'iwiki_id = "personal"\n'
+    )
+    _set_postgres_runtime(monkeypatch)
+
+    with pytest.raises(base.BaseError, match=message):
+        base.resolve_binding(str(proj))
+
+
+def test_git_binding_preserves_legacy_numeric_scope_coercion(tmp_path, monkeypatch):
+    b = _mkbase(tmp_path, "1")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = [1]\nwrite = ["1"]\nprimary = 1\n[storage]\ntype = "git"\n'
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", b)
+
+    bind = base.resolve_binding(str(proj))
+
+    assert bind.read == ("1",)
+    assert bind.write == ("1",)
+    assert bind.primary == "1"
 
 
 def test_resolve_list_write_with_primary_domain(tmp_path, monkeypatch):
@@ -71,6 +369,7 @@ def test_manual_binding_fixture_exposes_write_domains():
     assert base.writable_domains(bind) == ("backend",)
     assert base.write_scope_error(bind, "backend") is None
     assert "outside bound write scope" in base.write_scope_error(bind, "other")["error"]
+    assert repr(bind).startswith("Binding(")
 
 
 def test_resolve_binding_deduplicates_write_domains(tmp_path, monkeypatch):
