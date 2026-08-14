@@ -323,7 +323,7 @@ wheels = [
 
 [[package]]
 name = "iwiki-mcp"
-version = "0.7.114"
+version = "0.7.115"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },

@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: c42f2a977340b6c3
+  plan_hash: 75cabef334ee0a9a
   last_run: 2026-08-14
   phases:
     structure: { status: passed }
@@ -90,7 +90,7 @@ review:
       verdict: fixed
       verdict_at: 2026-08-14
     - id: F-009
-      phase: clarity
+      phase: coverage
       severity: CRITICAL
       section: "Task 8: Runtime composition and MCP tool surface"
       section_hash: a95be9a77ee14c86
@@ -210,7 +210,7 @@ review:
       verdict: fixed
       verdict_at: 2026-08-14
     - id: F-021
-      phase: clarity
+      phase: coverage
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
       section_hash: 1f4f83404ab33346
@@ -223,7 +223,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 10: Operator documentation and 20,000-file evidence"
-      section_hash: 0133f57c2f2201be
+      section_hash: 6361d2060108aeef
       fragment: "test_postgres_publication_respects_server_ceilings"
       text: "Scale evidence covered only SQLite and did not exercise distributed server ceilings."
       fix: "Keep the 20,000-file SQLite boundary and add a real 2,000-file PostgreSQL ceiling/query-bound run required before result reconciliation."

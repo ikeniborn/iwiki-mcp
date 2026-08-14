@@ -94,6 +94,86 @@ def test_load_server_config_parses_hosted_postgres_settings(tmp_path):
     assert config.models.rerank_model == "lemonade-reranker-bge-reranker-v2-m3"
 
 
+def test_hosted_code_graph_limits_have_safe_defaults(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
+    config = load_server_config(
+        _write_config(tmp_path, _server_toml() + "\n[code_graph]\n"),
+        environ=_runtime_env(),
+    )
+
+    assert config.code_graph.max_snapshot_age_seconds == 86400
+    assert config.code_graph.max_batch_rows == 1000
+    assert config.code_graph.max_batch_bytes == 1_000_000
+    assert config.code_graph.publication_session_ttl_seconds == 900
+    assert config.code_graph.staging_retention_seconds == 86400
+    assert config.code_graph.staging_cleanup_limit == 100
+
+
+def test_hosted_code_graph_limits_accept_valid_values(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
+    text = _server_toml() + """
+[code_graph]
+max_snapshot_age_seconds = 0
+max_batch_rows = 5000
+max_batch_bytes = 5000000
+publication_session_ttl_seconds = 3600
+staging_retention_seconds = 604800
+staging_cleanup_limit = 1000
+"""
+
+    config = load_server_config(
+        _write_config(tmp_path, text),
+        environ=_runtime_env(),
+    )
+
+    assert config.code_graph.max_snapshot_age_seconds == 0
+    assert config.code_graph.max_batch_rows == 5000
+    assert config.code_graph.max_batch_bytes == 5_000_000
+    assert config.code_graph.publication_session_ttl_seconds == 3600
+    assert config.code_graph.staging_retention_seconds == 604800
+    assert config.code_graph.staging_cleanup_limit == 1000
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("max_snapshot_age_seconds = -1", "max_snapshot_age_seconds"),
+        ("max_batch_rows = 5001", "max_batch_rows"),
+        ("max_batch_bytes = 5000001", "max_batch_bytes"),
+        ("publication_session_ttl_seconds = 3601", "publication_session_ttl_seconds"),
+        ("staging_retention_seconds = 604801", "staging_retention_seconds"),
+        ("staging_cleanup_limit = 1001", "staging_cleanup_limit"),
+        ('password = "must-not-be-used"', "not allowed"),
+        ('dsn = "postgresql://must-not-be-used"', "not allowed"),
+        ('token = "must-not-be-used"', "not allowed"),
+        ('url = "https://must-not-be-used"', "not allowed"),
+        ("unexpected = true", "not allowed"),
+    ],
+)
+def test_hosted_code_graph_rejects_unsafe_bounds_and_fields(
+    tmp_path, field, message
+):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    text = _server_toml() + f"\n[code_graph]\n{field}\n"
+
+    with pytest.raises(ConfigError, match=message) as caught:
+        load_server_config(_write_config(tmp_path, text), environ=_runtime_env())
+
+    assert "must-not-be-used" not in str(caught.value)
+
+
+def test_hosted_code_graph_requires_a_table(tmp_path):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    text = "code_graph = true\n" + _server_toml()
+
+    with pytest.raises(ConfigError, match="tables"):
+        load_server_config(_write_config(tmp_path, text), environ=_runtime_env())
+
+
 def test_runtime_models_accept_another_model_and_dimension():
     from iwiki_mcp.postgres.config import load_model_config
 

@@ -36,6 +36,14 @@ def test_code_graph_config_defaults_and_mapping_values():
         max_total_files=20_000,
         include_tests=True,
         exclude=(),
+        publish_mode="sqlite",
+        read_mode="sqlite",
+        max_snapshot_age_seconds=86400,
+        max_batch_rows=1000,
+        max_batch_bytes=1_000_000,
+        publication_session_ttl_seconds=900,
+        staging_retention_seconds=86400,
+        staging_cleanup_limit=100,
     )
     assert CodeGraphConfig.from_mapping(
         {
@@ -49,6 +57,50 @@ def test_code_graph_config_defaults_and_mapping_values():
             "exclude": ["generated/**"],
         }
     ).exclude == ("generated/**",)
+
+
+def test_modes_and_snapshot_age_are_explicit():
+    config = CodeGraphConfig.from_mapping(
+        {
+            "publish_mode": "mcp",
+            "read_mode": "postgres",
+            "max_snapshot_age_seconds": 0,
+        }
+    )
+
+    assert config.publish_mode == "mcp"
+    assert config.read_mode == "postgres"
+    assert config.max_snapshot_age_seconds == 0
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"publish_mode": "auto"},
+        {"read_mode": "auto"},
+        {"max_snapshot_age_seconds": -1},
+        {"max_batch_rows": 0},
+        {"max_batch_bytes": True},
+        {"publication_session_ttl_seconds": 0},
+        {"staging_retention_seconds": 0},
+        {"staging_cleanup_limit": 0},
+        {"dsn": "postgresql://secret"},
+        {"mcp_token": "secret"},
+        {"mcp_url": "https://example.invalid"},
+        {"password": "secret"},
+    ],
+)
+def test_code_graph_publication_config_rejects_invalid_or_secret_values(mapping):
+    with pytest.raises(CodeGraphConfigError) as caught:
+        CodeGraphConfig.from_mapping(mapping)
+
+    assert "secret" not in str(caught.value)
+
+
+def test_code_graph_config_has_no_secret_bearing_fields():
+    field_names = {field.name for field in fields(CodeGraphConfig)}
+
+    assert field_names.isdisjoint({"dsn", "mcp_token", "mcp_url", "password"})
 
 
 @pytest.mark.parametrize(

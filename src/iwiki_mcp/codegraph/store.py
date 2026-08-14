@@ -17,6 +17,7 @@ import uuid
 
 from filelock import ReadWriteLock, Timeout
 
+from .canonical import canonical_json_bytes, canonical_sha256
 from .location import CodeGraphLocationError, open_cache_directory
 from .models import (
     compact_casefold,
@@ -64,12 +65,6 @@ def _is_canonical_revision(value: object) -> bool:
     return isinstance(value, str) and _CANONICAL_REVISION.fullmatch(value) is not None
 
 
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
-
-
 def _snapshot_revision(
     repository: Mapping[str, object],
     files: Sequence[Mapping[str, object]],
@@ -101,7 +96,7 @@ def _snapshot_revision(
             wiki_code_links, key=lambda row: str(row["link_id"])
         ),
     }
-    return "sha256:" + hashlib.sha256(_canonical_json(rows)).hexdigest()
+    return canonical_sha256(rows, prefix=True)
 
 
 def _table_rows(
@@ -354,7 +349,7 @@ def _validate_normalized_rows(
             metadata = json.loads(str(row["metadata_json"]))
         except (TypeError, ValueError) as exc:
             raise CodeGraphStoreError("code graph row contract mismatch") from exc
-        if _canonical_json(metadata).decode("utf-8") != row["metadata_json"]:
+        if canonical_json_bytes(metadata).decode("utf-8") != row["metadata_json"]:
             raise CodeGraphStoreError("code graph row contract mismatch")
 
     for row in relations:
@@ -411,7 +406,7 @@ def _validate_normalized_rows(
             metadata = json.loads(str(row["metadata_json"]))
         except (TypeError, ValueError) as exc:
             raise CodeGraphStoreError("code graph row contract mismatch") from exc
-        if _canonical_json(metadata).decode("utf-8") != row["metadata_json"]:
+        if canonical_json_bytes(metadata).decode("utf-8") != row["metadata_json"]:
             raise CodeGraphStoreError("code graph row contract mismatch")
 
 
