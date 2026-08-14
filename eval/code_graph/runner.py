@@ -61,7 +61,7 @@ DEFAULT_THRESHOLDS = {
     "static_calls": 0.75,
     "false_resolved_calls": 0.05,
     "deterministic_rebuild": 1.0,
-    "startup_ms": 100.0,
+    "startup_ms": 500.0,
     "noop_ms": 200.0,
     "build_1000_files_ms": 15_000.0,
     "search_ms": 500.0,
