@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -1321,6 +1322,89 @@ class CodeGraphStore:
             raise CodeGraphStoreError("cannot discard code graph staging") from exc
         finally:
             self._staging_identities.pop(staging_path, None)
+
+    def cleanup_retained_publication_staging(
+        self,
+        *,
+        now: datetime,
+        retention_seconds: int,
+        limit: int,
+        exclude: Sequence[Path] = (),
+    ) -> int:
+        """Remove a bounded set of safely identified terminal session files."""
+        if limit <= 0:
+            return 0
+        canonical = self._absolute(self.path)
+        excluded = {self._absolute(path) for path in exclude}
+        prefix = f"{canonical.name}.staging-"
+        removed = 0
+        try:
+            candidates = sorted(canonical.parent.iterdir(), key=lambda path: path.name)
+        except FileNotFoundError:
+            return 0
+        for directory in candidates:
+            if removed >= limit or not directory.name.startswith(prefix):
+                continue
+            staging = directory / "snapshot.sqlite3"
+            if staging in excluded:
+                continue
+            try:
+                directory_status = os.lstat(directory)
+                file_status = os.lstat(staging)
+            except OSError:
+                continue
+            if (
+                not stat.S_ISDIR(directory_status.st_mode)
+                or stat.S_IMODE(directory_status.st_mode) != 0o700
+                or not stat.S_ISREG(file_status.st_mode)
+                or file_status.st_nlink != 1
+            ):
+                continue
+            eligible = False
+            connection = None
+            try:
+                uri = f"file:{quote(staging.as_posix(), safe='/:')}?mode=ro"
+                connection = sqlite3.connect(uri, uri=True)
+                row = connection.execute(
+                    "SELECT state, lease_expires_at, updated_at "
+                    "FROM publication_session"
+                ).fetchone()
+                if row is not None:
+                    state = str(row[0])
+                    terminal_at = datetime.fromisoformat(
+                        str(row[2]).replace("Z", "+00:00")
+                    )
+                    if state == "staging":
+                        lease = datetime.fromisoformat(
+                            str(row[1]).replace("Z", "+00:00")
+                        )
+                        eligible = (
+                            now >= lease
+                            and (now - lease).total_seconds() >= retention_seconds
+                        )
+                    elif state in {"aborted", "expired", "conflicted", "failed"}:
+                        eligible = (
+                            now - terminal_at
+                        ).total_seconds() >= retention_seconds
+            except (OSError, sqlite3.DatabaseError, TypeError, ValueError):
+                eligible = (
+                    now.timestamp() - file_status.st_mtime >= retention_seconds
+                )
+            finally:
+                if connection is not None:
+                    connection.close()
+            if not eligible:
+                continue
+            self._staging_identities[staging] = _StagingIdentity(
+                directory=directory,
+                directory_dev=directory_status.st_dev,
+                directory_ino=directory_status.st_ino,
+                file_dev=file_status.st_dev,
+                file_ino=file_status.st_ino,
+            )
+            self.discard_staging(staging)
+            removed += 1
+        return removed
 
     @staticmethod
     def _connect_existing(path: Path) -> sqlite3.Connection:

@@ -37,6 +37,7 @@ from .models import (
     RelationRecord,
     relation_id,
 )
+from .publication import RowKind, SnapshotHeader, graph_payload_revision
 from .resolver import SymbolIndex, sort_relations
 from .schema import SCHEMA_VERSION, TABLES, CodeGraphStoreError
 from .store import (
@@ -216,6 +217,17 @@ class BuildControl:
     def leave_publication(self) -> None:
         if self.publication_entered.is_set():
             self._publication_gate.release()
+
+
+@dataclass(frozen=True)
+class BuiltSnapshot:
+    """Portable normalized graph plus private local build state."""
+
+    header: SnapshotHeader
+    tables: Mapping[RowKind, tuple[Mapping[str, object], ...]]
+    private_root: Path
+    indexed_at: str
+    diagnostics: Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -1266,6 +1278,148 @@ class CodeGraphIndexer:
         except CodeGraphStoreError as exc:
             raise CodeGraphStoreFailure("code graph store failed") from exc
 
+    def build_rows(
+        self,
+        *,
+        languages: list[str] | None = None,
+        deadline: float | None = None,
+        control: BuildControl | None = None,
+    ) -> BuiltSnapshot:
+        """Build normalized portable rows without reading or writing a target."""
+        started = time.monotonic()
+        timings = {phase: 0 for phase in _PHASE_NAMES}
+        try:
+            config = self._config_for_languages(self.config, languages)
+            normalization_versions = self._normalization_versions()
+            if deadline is None:
+                deadline = started + config.max_rebuild_seconds
+
+            def check_control() -> None:
+                if control is not None and control.cancelled.is_set():
+                    raise Timeout(str(self.paths.lock))
+                _check_deadline(deadline, self.paths.lock)
+
+            check_control()
+            phase = time.monotonic()
+            discovered = discover_sources(
+                self.project_dir,
+                config,
+                extensions=self._extensions(config),
+            )
+            timings["discovery"] = _elapsed_ms(phase)
+            check_control()
+
+            phase = time.monotonic()
+            commit = current_git_commit(self.project_dir)
+            fingerprints = compose_fingerprints(
+                discovered.files,
+                config,
+                repository_id=self.domain,
+                git_commit=commit,
+                dirty_marker=git_dirty_marker(self.project_dir),
+                schema_version=SCHEMA_VERSION,
+                parser_version=self._parser_version(config),
+                grammar_version=self._grammar_version(config),
+                adapter_version=self._adapter_version(config),
+                resolver_version=self.resolver_version,
+                normalizer_version=normalization_versions[0],
+                unicode_data_version=normalization_versions[1],
+            )
+            timings["fingerprint"] = _elapsed_ms(phase)
+            check_control()
+
+            phase = time.monotonic()
+            parsed_files, parser_warnings, adapters = self._parse(
+                discovered, config
+            )
+            timings["parsing"] = _elapsed_ms(phase)
+            normalization_started = time.monotonic()
+            parsed_files = tuple(parsed_files)
+            timings["normalization"] = _elapsed_ms(normalization_started)
+            check_control()
+
+            phase = time.monotonic()
+            relations, resolver_warnings = self._resolve(parsed_files, adapters)
+            relation_rows = self._relation_rows(relations)
+            timings["resolution"] = _elapsed_ms(phase)
+            indexed_at = datetime.now(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+            initial = self._initial_snapshot(
+                parsed_files=parsed_files,
+                unresolved_relations=(),
+                fingerprints=fingerprints,
+                commit=commit,
+                indexed_at=indexed_at,
+                normalization_versions=normalization_versions,
+            )
+            repository = initial["repositories"][0]
+            tables: dict[RowKind, tuple[Mapping[str, object], ...]] = {
+                "repositories": ({
+                    key: repository[key]
+                    for key in (
+                        "repository_id",
+                        "git_commit",
+                        "source_fingerprint",
+                        "config_fingerprint",
+                        "parser_fingerprint",
+                        "normalizer_version",
+                        "unicode_data_version",
+                        "state",
+                        "indexed_at",
+                    )
+                },),
+                "files": initial["files"],
+                "symbols": initial["symbols"],
+                "relations": relation_rows,
+            }
+            payload_revision = graph_payload_revision(tables)
+            counts = self._counts(parsed_files, relations)
+            diagnostics = self._metadata(
+                revision=payload_revision,
+                fingerprints=fingerprints,
+                commit=commit,
+                counts=counts,
+                indexed_at=indexed_at,
+                discovered=discovered,
+                parser_warnings=parser_warnings,
+                resolver_warnings=resolver_warnings,
+                timings=timings,
+                config=config,
+                duration_ms=_elapsed_ms(started),
+                normalization_versions=normalization_versions,
+            )
+            return BuiltSnapshot(
+                header=SnapshotHeader(
+                    protocol_version=1,
+                    schema_version=SCHEMA_VERSION,
+                    repository_id=self.domain,
+                    source_fingerprint=fingerprints.source,
+                    parser_fingerprint=fingerprints.parser,
+                    normalizer_version=normalization_versions[0],
+                    unicode_data_version=normalization_versions[1],
+                    languages=tuple(config.languages),
+                    expected_counts={
+                        kind: len(tables[kind]) for kind in tables
+                    },
+                    graph_payload_revision=payload_revision,
+                ),
+                tables=tables,
+                private_root=Path(self.project_dir).resolve(),
+                indexed_at=indexed_at,
+                diagnostics=diagnostics,
+            )
+        except Timeout:
+            raise
+        except DiscoveryError as exc:
+            raise CodeGraphUnsafePathError(
+                "unsafe code graph source path"
+            ) from exc
+        except CodeGraphError:
+            raise
+        except Exception as exc:
+            raise CodeGraphBuildError("code graph rebuild failed") from exc
+
     def build(
         self,
         *,
@@ -1796,6 +1950,7 @@ class CodeGraphIndexer:
 __all__ = [
     "AdapterBinding",
     "AdapterFactory",
+    "BuiltSnapshot",
     "BuildControl",
     "KNOWN_WARNING_CODES",
     "CodeGraphBuildError",

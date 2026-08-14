@@ -1,4 +1,5 @@
 from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
@@ -55,6 +56,41 @@ EXPECTED_INDEXES = {
     "idx_wiki_links_symbol",
     "idx_wiki_links_file",
 }
+
+
+def test_retained_publication_cleanup_is_bounded_and_preserves_canonical(
+    tmp_path,
+):
+    store = CodeGraphStore(tmp_path / "canonical.sqlite3")
+    snapshot = canonical_snapshot()
+    store.insert_snapshot(snapshot)
+    canonical_before = store.reconstruct_metadata("backend")
+    for suffix in ("a", "b"):
+        staging = store.create_staging_path()
+        with closing(sqlite3.connect(staging)) as connection:
+            connection.execute(
+                "CREATE TABLE publication_session ("
+                "state TEXT, lease_expires_at TEXT, updated_at TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO publication_session VALUES (?, ?, ?)",
+                (
+                    "aborted",
+                    "2026-08-14T00:00:00Z",
+                    "2026-08-14T00:00:00Z",
+                ),
+            )
+            connection.commit()
+
+    removed = store.cleanup_retained_publication_staging(
+        now=datetime(2026, 8, 14, 0, 0, 21, tzinfo=timezone.utc),
+        retention_seconds=20,
+        limit=1,
+    )
+
+    assert removed == 1
+    assert len(tuple(tmp_path.glob("canonical.sqlite3.staging-*"))) == 1
+    assert store.reconstruct_metadata("backend") == canonical_before
 
 
 def snapshot_with_symbol_file_and_wiki_links(
