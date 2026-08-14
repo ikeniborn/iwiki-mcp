@@ -178,50 +178,58 @@ def test_create_domain(tmp_path, monkeypatch):
     assert os.path.isdir(os.path.join(b, "new-domain"))
 
 
-def test_bind_writes_config_for_current_project_domain(tmp_path, monkeypatch):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj"))
-
-    out = server.wiki_bind(
-        read=["backend", "proj"], write=["proj"], primary="proj"
-    )
-
-    assert out["read"] == ["backend", "proj"]
-    text = open(os.path.join(proj, ".iwiki.toml")).read()
-    assert 'read = ["backend", "proj"]' in text
-    assert 'write = ["proj"]' in text
-
-
-def test_bind_persists_write_domains_and_primary(tmp_path, monkeypatch):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj"))
-
-    out = server.wiki_bind(
-        read=["backend", "proj"],
-        write=["proj", "backend", "proj"],
-        primary="proj",
-    )
-
-    assert out["write"] == ["proj", "backend"]
-    assert out["primary"] == "proj"
-    assert server.wiki_status()["write"] == ["proj", "backend"]
-    assert server.wiki_status()["primary"] == "proj"
-    text = open(os.path.join(proj, ".iwiki.toml"), encoding="utf-8").read()
-    assert 'write = ["proj", "backend"]' in text
-
-
-def test_bind_invalid_write_leaves_config_byte_identical(tmp_path, monkeypatch):
+def test_bind_returns_controlled_error_and_preserves_nonempty_config(
+    tmp_path, monkeypatch
+):
     b, proj = _seed(tmp_path, monkeypatch)
     os.makedirs(os.path.join(b, "proj"))
     config_path = os.path.join(proj, ".iwiki.toml")
     before = open(config_path, "rb").read()
 
     out = server.wiki_bind(
-        read=["backend", "proj"], write=["backend"], primary="proj"
+        read=["backend", "proj"], write=["proj"], primary="proj"
     )
 
-    assert "primary domain" in out["error"]
+    assert out["code"] == "project_config_manual_edit_required"
+    assert "edit .iwiki.toml manually" in out["hint"]
+    assert "existing file was not changed" not in out["hint"]
     assert open(config_path, "rb").read() == before
+
+
+def test_bind_initializes_empty_config_then_returns_controlled_error(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+    open(config_path, "w", encoding="utf-8").write(" \n\t")
+
+    out = server.wiki_bind(
+        read=["backend", "proj"], write=["proj"], primary="proj"
+    )
+
+    assert out["code"] == "project_config_manual_edit_required"
+    text = open(config_path, encoding="utf-8").read()
+    assert "Git storage" in text
+    assert "PostgreSQL storage" in text
+    assert "[code_graph]" in text
+
+
+def test_bind_initializes_missing_config_then_returns_controlled_error(
+    tmp_path, monkeypatch
+):
+    b, proj = _seed(tmp_path, monkeypatch)
+    os.makedirs(os.path.join(b, "proj"))
+    config_path = os.path.join(proj, ".iwiki.toml")
+    os.unlink(config_path)
+
+    out = server.wiki_bind(
+        read=["backend", "proj"], write=["proj"], primary="proj"
+    )
+
+    assert out["code"] == "project_config_manual_edit_required"
+    assert os.path.isfile(config_path)
+    assert "max_rebuild_seconds" in open(config_path, encoding="utf-8").read()
 
 
 def test_write_rejects_existing_domain_outside_scope_before_freshness(
@@ -242,86 +250,6 @@ def test_write_rejects_existing_domain_outside_scope_before_freshness(
 
     assert "outside bound write scope" in out["error"]
     assert list((tmp_path / "wiki" / "other").iterdir()) == []
-
-
-def test_bind_rejects_missing_domain_without_writing(tmp_path, monkeypatch):
-    _b, proj = _seed(tmp_path, monkeypatch)
-    config_path = os.path.join(proj, ".iwiki.toml")
-
-    out = server.wiki_bind(write=["missing"], primary="missing")
-
-    text = open(config_path).read()
-    assert "error" in out
-    assert "missing" in out["error"]
-    assert 'write = ["backend"]' in text
-    assert "missing" not in text
-
-
-def test_bind_preserves_existing_read_when_adding_current_project(tmp_path, monkeypatch):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj"))
-
-    out = server.wiki_bind(read=["proj"], write=["proj"], primary="proj")
-
-    assert out["read"] == ["backend", "proj"]
-    text = open(os.path.join(proj, ".iwiki.toml")).read()
-    assert 'read = ["backend", "proj"]' in text
-    assert 'write = ["proj"]' in text
-
-
-def test_bind_does_not_remove_existing_read_when_current_already_present(
-    tmp_path, monkeypatch
-):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj"))
-    config_path = os.path.join(proj, ".iwiki.toml")
-    open(config_path, "w").write('read = ["backend", "proj"]\nwrite = ["proj"]\nprimary = "proj"\n')
-
-    out = server.wiki_bind(read=["proj"], write=["proj"], primary="proj")
-
-    assert out["read"] == ["backend", "proj"]
-    assert 'read = ["backend", "proj"]' in open(config_path).read()
-
-
-def test_bind_rejects_new_non_current_read_without_writing(tmp_path, monkeypatch):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared"))
-    config_path = os.path.join(proj, ".iwiki.toml")
-
-    out = server.wiki_bind(read=["shared"], write=["proj"], primary="proj")
-
-    text = open(config_path).read()
-    assert out["error"] == "read scope is protected"
-    assert 'read = ["backend"]' in text
-    assert 'shared' not in text
-
-
-def test_bind_rejects_non_current_write_without_writing(tmp_path, monkeypatch):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "shared"))
-    config_path = os.path.join(proj, ".iwiki.toml")
-
-    out = server.wiki_bind(write=["shared"], primary="shared")
-
-    text = open(config_path).read()
-    assert out["error"] == "write domain must match current project domain"
-    assert 'write = ["backend"]' in text
-    assert 'write = ["shared"]' not in text
-
-
-def test_bind_rejects_existing_non_current_write_without_current_override(
-    tmp_path, monkeypatch
-):
-    b, proj = _seed(tmp_path, monkeypatch)
-    os.makedirs(os.path.join(b, "proj"))
-    config_path = os.path.join(proj, ".iwiki.toml")
-
-    out = server.wiki_bind(read=["proj"])
-
-    text = open(config_path).read()
-    assert out["error"] == "write domain must match current project domain"
-    assert 'read = ["backend"]' in text
-    assert 'write = ["backend"]' in text
 
 
 def test_write_page_removes_new_file_when_indexing_fails(tmp_path, monkeypatch):

@@ -9,6 +9,7 @@ from typing import Any
 from . import ignore
 from .postgres.config import ConfigError as PostgresConfigError
 from .postgres.config import load_model_config, load_postgres_config
+from .project_files import initialize_text_file
 from .storage import GitBinding, PostgresBinding
 
 try:
@@ -21,6 +22,47 @@ class BaseError(RuntimeError):
     """Raised when wiki base binding cannot be resolved."""
 
 
+_PROJECT_CONFIG_TEMPLATE = """\
+# .iwiki.toml -- project binding and storage examples.
+# The server creates this template only when the file is missing or empty.
+# Uncomment one storage example, replace placeholders, then edit manually.
+
+# --- Git storage (default) ---
+# base = "/absolute/path/to/iwiki-base"
+# read = ["project-domain", "shared-domain"]
+# write = ["project-domain"]
+# primary = "project-domain"
+# [storage]
+# type = "git"
+
+# --- PostgreSQL storage ---
+# PostgreSQL requires non-empty read/write, primary, and every storage field.
+# Keep passwords and model credentials in environment variables.
+# read = ["project-domain", "shared-domain"]
+# write = ["project-domain"]
+# primary = "project-domain"
+# [storage]
+# type = "postgres"
+# host = "db.internal.example"
+# port = 5432
+# database = "iwiki"
+# user = "iwiki_app"
+# sslmode = "verify-full"
+# iwiki_id = "team-wiki"
+
+# --- Optional local code graph ---
+# [code_graph]
+# enabled = true
+# languages = ["python"]
+# auto_rebuild = "bounded"  # "bounded" or "off"
+# max_rebuild_seconds = 10
+# max_file_bytes = 1000000
+# max_total_files = 20000
+# include_tests = true
+# exclude = []
+"""
+
+
 @dataclass(frozen=True)
 class Binding(GitBinding):
     """Backward-compatible name for the Git storage binding."""
@@ -31,10 +73,28 @@ def resolve_project_dir(explicit: str | None = None) -> str:
     return os.path.abspath(os.path.expanduser(project_dir))
 
 
-def load_project_config(project_dir: str) -> dict[str, Any]:
+def ensure_project_config(project_dir: str) -> bool:
+    """Fill .iwiki.toml only when it is missing or contains whitespace."""
     config_path = os.path.join(project_dir, ".iwiki.toml")
-    if not os.path.exists(config_path):
-        return {}
+    return initialize_text_file(config_path, _PROJECT_CONFIG_TEMPLATE)
+
+
+def write_project_config(
+    project_dir: str,
+    read: list[str] | tuple[str, ...] | None = None,
+    write: list[str] | tuple[str, ...] | None = None,
+    primary: str | None = None,
+) -> None:
+    """Reject legacy requests to rewrite project configuration automatically."""
+    del read, write, primary
+    ensure_project_config(resolve_project_dir(project_dir))
+    raise BaseError("project configuration cannot be changed automatically")
+
+
+def load_project_config(project_dir: str) -> dict[str, Any]:
+    ensure_project_config(project_dir)
+    ignore.ensure_iwikiignore(project_dir)
+    config_path = os.path.join(project_dir, ".iwiki.toml")
     try:
         with open(config_path, "rb") as fh:
             data = tomllib.load(fh)
@@ -44,6 +104,8 @@ def load_project_config(project_dir: str) -> dict[str, Any]:
 
 
 def _load_storage_project_config(project_dir: str) -> dict[str, Any]:
+    ensure_project_config(project_dir)
+    ignore.ensure_iwikiignore(project_dir)
     config_path = os.path.join(project_dir, ".iwiki.toml")
     if not os.path.exists(config_path):
         return {}
@@ -105,7 +167,7 @@ def write_scope_error(binding: Binding | PostgresBinding, domain: str) -> dict |
         return None
     return {
         "error": f"domain '{domain}' is outside bound write scope",
-        "hint": "add the domain to write via wiki_bind before mutating it",
+        "hint": "add the domain to write in .iwiki.toml manually before mutating it",
     }
 
 
@@ -338,111 +400,3 @@ def resolve_scope(
     if scope == "all":
         return list_domains(binding.base)
     return list(binding.read) if binding.read else list_domains(binding.base)
-
-
-def _toml_string(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def _toml_string_list(values: tuple[str, ...]) -> str:
-    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
-
-
-def _core_config_lines(config: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
-    if "base" in config and config["base"] is not None:
-        lines.append(f"base = {_toml_string(str(config['base']))}")
-    if "read" in config:
-        lines.append(f"read = {_toml_string_list(_as_str_tuple(config.get('read')))}")
-    if "write" in config and config["write"] is not None:
-        lines.append(f"write = {_toml_string_list(_unique_str_tuple(config['write']))}")
-    if "primary" in config and config["primary"] is not None:
-        lines.append(f"primary = {_toml_string(str(config['primary']))}")
-    return lines
-
-
-def _top_level_key(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith(("#", "[")):
-        return None
-    if "=" not in stripped:
-        return None
-    return stripped.split("=", 1)[0].strip()
-
-
-def _multiline_string_delimiter(value: str) -> str | None:
-    stripped = value.lstrip()
-    for delimiter in ('"""', "'''"):
-        if stripped.startswith(delimiter) and stripped.count(delimiter) < 2:
-            return delimiter
-    return None
-
-
-def _core_assignment_closed(value: str, delimiter: str | None) -> bool:
-    if delimiter is not None:
-        return value.count(delimiter) >= 2
-    stripped = value.lstrip()
-    if stripped.startswith("["):
-        return value.count("[") <= value.count("]")
-    return True
-
-
-def _preserved_top_level_lines(lines: list[str]) -> list[str]:
-    preserved: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        key = _top_level_key(line)
-        if key not in {"base", "read", "write", "primary"}:
-            preserved.append(line)
-            i += 1
-            continue
-
-        value = line.split("=", 1)[1]
-        delimiter = _multiline_string_delimiter(value)
-        i += 1
-        while i < len(lines) and not _core_assignment_closed(value, delimiter):
-            value += "\n" + lines[i]
-            i += 1
-    return preserved
-
-
-def _write_preserving_unknown_config(config_path: str, config: dict[str, Any]) -> None:
-    try:
-        with open(config_path, encoding="utf-8") as fh:
-            original = fh.read().splitlines()
-    except OSError:
-        original = []
-
-    first_table = next(
-        (i for i, line in enumerate(original) if line.strip().startswith("[")),
-        len(original),
-    )
-    prefix = _preserved_top_level_lines(original[:first_table])
-    suffix = original[first_table:]
-    lines = [*prefix, *_core_config_lines(config), *suffix]
-
-    with open(config_path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines))
-        if lines:
-            fh.write("\n")
-
-
-def write_project_config(
-    project_dir: str,
-    read: list[str] | tuple[str, ...] | None = None,
-    write: list[str] | tuple[str, ...] | None = None,
-    primary: str | None = None,
-) -> None:
-    resolved_project_dir = resolve_project_dir(project_dir)
-    os.makedirs(resolved_project_dir, exist_ok=True)
-    config = dict(load_project_config(resolved_project_dir))
-    if read is not None:
-        config["read"] = list(_as_str_tuple(read))
-    if write is not None:
-        config["write"] = list(_unique_str_tuple(write))
-    if primary is not None:
-        config["primary"] = primary
-
-    config_path = os.path.join(resolved_project_dir, ".iwiki.toml")
-    _write_preserving_unknown_config(config_path, config)

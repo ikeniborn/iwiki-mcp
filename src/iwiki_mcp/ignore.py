@@ -11,12 +11,13 @@ import os
 from pathspec import PathSpec
 
 from .engine.config import _load_ignore
+from .project_files import initialize_text_file
 
 _DEFAULT = """\
 # .iwikiignore -- source paths that must NOT be ingested into the wiki.
-# gitignore syntax. Seeded from .gitignore plus secret defaults; edit freely.
+# gitignore syntax. Created once when missing or empty; edit manually afterward.
 
-# --- secrets (default) ---
+# --- secrets ---
 .env
 .env.*
 *.key
@@ -24,27 +25,38 @@ _DEFAULT = """\
 *.p12
 *secret*
 *credentials*
+
+# --- common project noise ---
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+build/
+coverage/
+*.log
+.DS_Store
 """
 
 
 def ensure_iwikiignore(project_dir: str) -> bool:
-    """Create project_dir/.iwikiignore if absent. Idempotent.
-    Returns True iff a file was created."""
+    """Fill project_dir/.iwikiignore only when it is missing or empty."""
     path = os.path.join(project_dir, ".iwikiignore")
-    if os.path.exists(path):
-        return False
     content = _DEFAULT
     gitignore = os.path.join(project_dir, ".gitignore")
     if os.path.exists(gitignore):
-        with open(gitignore, encoding="utf-8") as fh:
-            inherited = fh.read()
-        if not inherited.endswith("\n"):
-            inherited += "\n"
-        content += "\n# --- inherited from .gitignore ---\n" + inherited
-    os.makedirs(project_dir, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    return True
+        try:
+            with open(gitignore, encoding="utf-8") as fh:
+                inherited = fh.read()
+        except (OSError, UnicodeDecodeError):
+            inherited = ""
+        if inherited:
+            if not inherited.endswith("\n"):
+                inherited += "\n"
+            content += "\n# --- inherited from .gitignore ---\n" + inherited
+    return initialize_text_file(path, content)
 
 
 def load_project_ignore(project_dir: str) -> PathSpec | None:

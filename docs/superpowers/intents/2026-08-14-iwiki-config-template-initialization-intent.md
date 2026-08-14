@@ -12,6 +12,13 @@ review:
     consistency: { status: passed }
     alignment: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: intent
+  intent_hash: f3a4c1e8e83e8d64
+  last_run: 2026-08-14
+  reviewed: true
+  docs_checked: true
 ---
 
 # Intent: iwiki-config-template-initialization
