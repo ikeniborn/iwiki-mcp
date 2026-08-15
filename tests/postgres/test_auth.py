@@ -1,6 +1,7 @@
 """PostgreSQL personal-token authentication and authorization contract."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 import base64
@@ -281,6 +282,301 @@ def test_authentication_keeps_three_statements_with_combined_authority_query():
     assert context.write_domains == ("docs",)
     assert context.managed_domains == ("private",)
     assert context.primary == "docs"
+
+
+def _provisioner(auth_store, owner="provisioner"):
+    created = auth_store.create_token(
+        "wiki-a",
+        owner,
+        read_domains=[],
+        write_domains=[],
+        can_create_domain=True,
+    )
+    return created, auth_store.authenticate(created["token"])
+
+
+def _domain_authority_rows(auth_store, domain):
+    import psycopg
+
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT d.slug, g.token_id, g.can_read, g.can_write, "
+                "m.token_id, m.can_manage_grants "
+                "FROM iwiki.domains d "
+                "LEFT JOIN iwiki.token_domain_grants g "
+                "ON g.iwiki_id = d.iwiki_id AND g.domain_id = d.domain_id "
+                "LEFT JOIN iwiki.token_domain_management_grants m "
+                "ON m.iwiki_id = d.iwiki_id AND m.domain_id = d.domain_id "
+                "WHERE d.iwiki_id = %s AND d.slug = %s "
+                "ORDER BY g.token_id, m.token_id",
+                ("wiki-a", domain),
+            )
+            return cursor.fetchall()
+
+
+def test_provision_domain_is_atomic_idempotent_and_scoped(auth_store):
+    from iwiki_mcp.postgres.auth import AccessError
+
+    _created, context = _provisioner(auth_store)
+
+    assert auth_store.provision_domain(context, "new-project") == {
+        "domain": "new-project",
+        "already_existed": False,
+    }
+    first_rows = _domain_authority_rows(auth_store, "new-project")
+    assert first_rows == [
+        (
+            "new-project",
+            context.token_id,
+            True,
+            True,
+            context.token_id,
+            True,
+        )
+    ]
+
+    assert auth_store.provision_domain(context, "new-project") == {
+        "domain": "new-project",
+        "already_existed": True,
+    }
+    assert _domain_authority_rows(auth_store, "new-project") == first_rows
+
+    with pytest.raises(AccessError, match="access denied"):
+        auth_store.provision_domain(context, "docs")
+
+
+@pytest.mark.parametrize("fail_at", [1, 2, 3])
+def test_provision_domain_rolls_back_after_each_bootstrap_write(
+    auth_store, fail_at
+):
+    import psycopg
+
+    _created, context = _provisioner(auth_store, owner=f"failure-{fail_at}")
+    writes = 0
+
+    class FailingCursor:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def __enter__(self):
+            self._cursor.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._cursor.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._cursor, name)
+
+        def execute(self, statement, parameters=None):
+            nonlocal writes
+            normalized = " ".join(statement.split())
+            if normalized.startswith(
+                (
+                    "INSERT INTO iwiki.domains",
+                    "INSERT INTO iwiki.token_domain_grants",
+                    "INSERT INTO iwiki.token_domain_management_grants",
+                )
+            ):
+                writes += 1
+                if writes == fail_at:
+                    raise RuntimeError("injected bootstrap failure")
+            return self._cursor.execute(statement, parameters)
+
+    class FailingConnection:
+        def __init__(self):
+            self._connection = psycopg.connect(auth_store.dsn)
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._connection.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def cursor(self):
+            return FailingCursor(self._connection.cursor())
+
+    failing_store = type(auth_store)(
+        auth_store.dsn, connection_factory=FailingConnection
+    )
+    domain = f"rollback-{fail_at}"
+
+    with pytest.raises(RuntimeError, match="injected bootstrap failure"):
+        failing_store.provision_domain(context, domain)
+
+    assert _domain_authority_rows(auth_store, domain) == []
+
+
+def test_competing_domain_creators_cannot_take_each_others_grants(auth_store):
+    from iwiki_mcp.postgres.auth import AccessError
+
+    _first, first_context = _provisioner(auth_store, owner="first")
+    _second, second_context = _provisioner(auth_store, owner="second")
+
+    def provision(context):
+        try:
+            return auth_store.provision_domain(context, "contended")
+        except AccessError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(provision, (first_context, second_context)))
+
+    assert results.count("access denied") == 1
+    assert sum(isinstance(result, dict) for result in results) == 1
+    rows = _domain_authority_rows(auth_store, "contended")
+    content_tokens = {row[1] for row in rows if row[1] is not None}
+    management_tokens = {row[4] for row in rows if row[4] is not None}
+    assert len(content_tokens) == 1
+    assert management_tokens == content_tokens
+
+
+def test_provision_domain_rechecks_active_creation_authority(auth_store):
+    import psycopg
+
+    from iwiki_mcp.postgres.auth import AccessError
+
+    created, context = _provisioner(auth_store)
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE iwiki.tokens SET can_create_domain = false "
+                "WHERE iwiki_id = %s AND token_id = %s",
+                (context.iwiki_id, context.token_id),
+            )
+
+    with pytest.raises(AccessError, match="access denied"):
+        auth_store.provision_domain(context, "too-late")
+
+    auth_store.revoke_token(created["token_id"])
+    with pytest.raises(AccessError, match="access denied"):
+        auth_store.provision_domain(context, "revoked")
+
+
+def test_domain_grant_lifecycle_preserves_management_authority(auth_store):
+    import psycopg
+
+    _manager, creation_context = _provisioner(auth_store)
+    auth_store.provision_domain(creation_context, "managed")
+    manager = auth_store.authenticate(_manager["token"])
+    target = auth_store.create_token(
+        "wiki-a", "target", read_domains=["docs"], write_domains=[]
+    )
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO iwiki.token_domain_management_grants "
+                "(iwiki_id, token_id, domain_id, can_manage_grants) "
+                "SELECT %s, %s, domain_id, true FROM iwiki.domains "
+                "WHERE iwiki_id = %s AND slug = %s",
+                ("wiki-a", target["token_id"], "wiki-a", "managed"),
+            )
+
+    assert auth_store.set_domain_grant(
+        manager,
+        "managed",
+        target["token_id"],
+        can_read=True,
+        can_write=True,
+    ) == {
+        "domain": "managed",
+        "token_id": target["token_id"],
+        "can_read": True,
+        "can_write": True,
+    }
+    listed = auth_store.list_domain_grants(manager, "managed")
+    target_row = next(
+        row for row in listed if row["token_id"] == target["token_id"]
+    )
+    assert target_row == {
+        "token_id": target["token_id"],
+        "owner": "target",
+        "can_read": True,
+        "can_write": True,
+        "can_manage_grants": True,
+    }
+
+    assert auth_store.revoke_domain_grant(
+        manager, "managed", target["token_id"]
+    ) == {
+        "domain": "managed",
+        "token_id": target["token_id"],
+        "revoked": True,
+    }
+    assert auth_store.revoke_domain_grant(
+        manager, "managed", target["token_id"]
+    )["revoked"] is False
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT can_manage_grants "
+                "FROM iwiki.token_domain_management_grants "
+                "WHERE iwiki_id = %s AND token_id = %s",
+                ("wiki-a", target["token_id"]),
+            )
+            assert cursor.fetchone() == (True,)
+
+
+def test_domain_grants_reject_invalid_or_unauthorized_mutations(auth_store):
+    import psycopg
+
+    from iwiki_mcp.postgres.auth import AccessError
+
+    manager_created, creation_context = _provisioner(auth_store)
+    auth_store.provision_domain(creation_context, "managed")
+    manager = auth_store.authenticate(manager_created["token"])
+    target = auth_store.create_token(
+        "wiki-a", "target", read_domains=["docs"], write_domains=[]
+    )
+    foreign = auth_store.create_token(
+        "wiki-b", "foreign", read_domains=["docs"], write_domains=[]
+    )
+
+    for can_read, can_write in ((False, False), (False, True), (1, True)):
+        with pytest.raises(ValueError):
+            auth_store.set_domain_grant(
+                manager,
+                "managed",
+                target["token_id"],
+                can_read=can_read,
+                can_write=can_write,
+            )
+
+    for token_id in (
+        manager.token_id,
+        foreign["token_id"],
+        "missing-token",
+    ):
+        with pytest.raises(AccessError, match="access denied"):
+            auth_store.set_domain_grant(
+                manager,
+                "managed",
+                token_id,
+                can_read=True,
+                can_write=False,
+            )
+
+    auth_store.revoke_token(target["token_id"])
+    with pytest.raises(AccessError, match="access denied"):
+        auth_store.revoke_domain_grant(
+            manager, "managed", target["token_id"]
+        )
+
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM iwiki.token_domain_management_grants "
+                "WHERE iwiki_id = %s AND token_id = %s",
+                (manager.iwiki_id, manager.token_id),
+            )
+
+    with pytest.raises(AccessError, match="access denied"):
+        auth_store.list_domain_grants(manager, "managed")
 
 
 def test_token_is_bound_to_one_wiki_even_when_slugs_overlap(auth_store):

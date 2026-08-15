@@ -295,6 +295,214 @@ class AuthStore:
             managed_domains=managed,
         )
 
+    @staticmethod
+    def _active_caller(cursor, context: AuthContext, *, lock: bool) -> bool:
+        suffix = " FOR UPDATE" if lock else ""
+        cursor.execute(
+            "SELECT can_create_domain FROM iwiki.tokens "
+            "WHERE iwiki_id = %s AND token_id = %s "
+            "AND revoked_at IS NULL" + suffix,
+            (context.iwiki_id, context.token_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise AccessError(403)
+        return bool(row[0])
+
+    @classmethod
+    def _managed_domain(
+        cls,
+        cursor,
+        context: AuthContext,
+        domain: str,
+        *,
+        lock: bool,
+    ) -> int:
+        cls._active_caller(cursor, context, lock=lock)
+        suffix = " FOR UPDATE OF m" if lock else ""
+        cursor.execute(
+            "SELECT d.domain_id FROM iwiki.domains d "
+            "JOIN iwiki.token_domain_management_grants m "
+            "ON m.iwiki_id = d.iwiki_id AND m.domain_id = d.domain_id "
+            "WHERE d.iwiki_id = %s AND d.slug = %s "
+            "AND m.token_id = %s AND m.can_manage_grants = true" + suffix,
+            (context.iwiki_id, domain, context.token_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise AccessError(403)
+        return row[0]
+
+    @staticmethod
+    def _active_target(cursor, context: AuthContext, token_id: str) -> str:
+        if token_id == context.token_id:
+            raise AccessError(403)
+        cursor.execute(
+            "SELECT owner FROM iwiki.tokens "
+            "WHERE iwiki_id = %s AND token_id = %s "
+            "AND revoked_at IS NULL FOR UPDATE",
+            (context.iwiki_id, token_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise AccessError(403)
+        return row[0]
+
+    def provision_domain(self, context: AuthContext, domain: str) -> dict:
+        valid_domain = validate_domain_identifier(domain)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                if not self._active_caller(cursor, context, lock=True):
+                    raise AccessError(403)
+                cursor.execute(
+                    "INSERT INTO iwiki.domains (iwiki_id, slug) "
+                    "VALUES (%s, %s) ON CONFLICT (iwiki_id, slug) "
+                    "DO NOTHING RETURNING domain_id",
+                    (context.iwiki_id, valid_domain),
+                )
+                inserted = cursor.fetchone()
+                if inserted is not None:
+                    domain_id = inserted[0]
+                    cursor.execute(
+                        "INSERT INTO iwiki.token_domain_grants "
+                        "(iwiki_id, token_id, domain_id, can_read, can_write) "
+                        "VALUES (%s, %s, %s, true, true)",
+                        (context.iwiki_id, context.token_id, domain_id),
+                    )
+                    cursor.execute(
+                        "INSERT INTO iwiki.token_domain_management_grants "
+                        "(iwiki_id, token_id, domain_id, "
+                        "can_manage_grants) VALUES (%s, %s, %s, true)",
+                        (context.iwiki_id, context.token_id, domain_id),
+                    )
+                    return {
+                        "domain": valid_domain,
+                        "already_existed": False,
+                    }
+
+                cursor.execute(
+                    "SELECT g.can_read, g.can_write, m.can_manage_grants "
+                    "FROM iwiki.domains d "
+                    "LEFT JOIN iwiki.token_domain_grants g "
+                    "ON g.iwiki_id = d.iwiki_id "
+                    "AND g.domain_id = d.domain_id AND g.token_id = %s "
+                    "LEFT JOIN iwiki.token_domain_management_grants m "
+                    "ON m.iwiki_id = d.iwiki_id "
+                    "AND m.domain_id = d.domain_id AND m.token_id = %s "
+                    "WHERE d.iwiki_id = %s AND d.slug = %s FOR UPDATE OF d",
+                    (
+                        context.token_id,
+                        context.token_id,
+                        context.iwiki_id,
+                        valid_domain,
+                    ),
+                )
+                existing = cursor.fetchone()
+                if existing != (True, True, True):
+                    raise AccessError(403)
+                return {"domain": valid_domain, "already_existed": True}
+
+    def list_domain_grants(
+        self, context: AuthContext, domain: str
+    ) -> list[dict]:
+        valid_domain = validate_domain_identifier(domain)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._managed_domain(
+                    cursor, context, valid_domain, lock=False
+                )
+                cursor.execute(
+                    "SELECT t.token_id, t.owner, g.can_read, g.can_write, "
+                    "m.can_manage_grants FROM iwiki.tokens t "
+                    "LEFT JOIN iwiki.token_domain_grants g "
+                    "ON g.iwiki_id = t.iwiki_id AND g.token_id = t.token_id "
+                    "AND g.domain_id = %s "
+                    "LEFT JOIN iwiki.token_domain_management_grants m "
+                    "ON m.iwiki_id = t.iwiki_id AND m.token_id = t.token_id "
+                    "AND m.domain_id = %s "
+                    "WHERE t.iwiki_id = %s "
+                    "AND (g.domain_id IS NOT NULL OR m.domain_id IS NOT NULL) "
+                    "ORDER BY t.token_id",
+                    (domain_id, domain_id, context.iwiki_id),
+                )
+                rows = cursor.fetchall()
+        return [
+            {
+                "token_id": token_id,
+                "owner": owner,
+                "can_read": bool(can_read),
+                "can_write": bool(can_write),
+                "can_manage_grants": bool(can_manage),
+            }
+            for token_id, owner, can_read, can_write, can_manage in rows
+        ]
+
+    def set_domain_grant(
+        self,
+        context: AuthContext,
+        domain: str,
+        token_id: str,
+        *,
+        can_read: bool,
+        can_write: bool,
+    ) -> dict:
+        valid_domain = validate_domain_identifier(domain)
+        if not isinstance(can_read, bool) or not isinstance(can_write, bool):
+            raise ValueError("grant flags must be booleans")
+        if can_write and not can_read:
+            raise ValueError("write grant must also be readable")
+        if not can_read and not can_write:
+            raise ValueError("empty grant must be revoked")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._managed_domain(
+                    cursor, context, valid_domain, lock=True
+                )
+                self._active_target(cursor, context, token_id)
+                cursor.execute(
+                    "INSERT INTO iwiki.token_domain_grants "
+                    "(iwiki_id, token_id, domain_id, can_read, can_write) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (iwiki_id, token_id, domain_id) "
+                    "DO UPDATE SET can_read = EXCLUDED.can_read, "
+                    "can_write = EXCLUDED.can_write",
+                    (
+                        context.iwiki_id,
+                        token_id,
+                        domain_id,
+                        can_read,
+                        can_write,
+                    ),
+                )
+        return {
+            "domain": valid_domain,
+            "token_id": token_id,
+            "can_read": can_read,
+            "can_write": can_write,
+        }
+
+    def revoke_domain_grant(
+        self, context: AuthContext, domain: str, token_id: str
+    ) -> dict:
+        valid_domain = validate_domain_identifier(domain)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._managed_domain(
+                    cursor, context, valid_domain, lock=True
+                )
+                self._active_target(cursor, context, token_id)
+                cursor.execute(
+                    "DELETE FROM iwiki.token_domain_grants "
+                    "WHERE iwiki_id = %s AND token_id = %s AND domain_id = %s",
+                    (context.iwiki_id, token_id, domain_id),
+                )
+                revoked = cursor.rowcount == 1
+        return {
+            "domain": valid_domain,
+            "token_id": token_id,
+            "revoked": revoked,
+        }
+
     def list_tokens(self, iwiki_id: str) -> list[dict]:
         with self._connect() as connection:
             with connection.cursor() as cursor:
