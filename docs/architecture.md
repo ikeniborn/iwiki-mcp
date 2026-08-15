@@ -39,15 +39,40 @@ vectors or re-embedding data.
 
 `postgres.store.PostgresStore` owns tenant-scoped page, chunk, link, search, lint, and
 optimistic-revision operations. `postgres.auth.AuthStore` stores digested bearer tokens
-and domain grants. `admin` creates/disables wikis, creates domains, creates/lists/revokes
-tokens, and imports/exports portable Git bases. No command physically deletes a wiki.
+and separate content/management domain grants. Schema v4 adds default-deny
+`tokens.can_create_domain`, `token_domain_management_grants`, and domain-leading indexes
+on both grant tables. It is forward-only: there is no down migration, and rollback to an
+older binary requires a pre-v4 database restore or compatibility release. `admin`
+creates/disables wikis, creates domains, creates/lists/revokes tokens, exposes
+`managed_domains`, and provides `token set-create-domain` plus
+`token set-domain-management` recovery. No command physically deletes a wiki.
 
 Local PostgreSQL stdio resolves an immutable maximum scope from `.iwiki.toml`, including
 `storage.iwiki_id`. Hosted config forbids `iwiki_id`: `http.HostedRuntime` authenticates
 the request, derives the tenant and grants, and creates session-owned binding state.
-`wiki_bind` can only narrow that state. A lock serializes concurrent narrowing so two
-requests cannot combine stale scopes. Session identifiers used under a different token
-are indistinguishable from unknown sessions and expire after bounded inactivity.
+Persistent explicit `selected` scope is separate from request `effective` scope
+intersected with fresh grants. A session lock bridges FastMCP dispatch, makes revocation
+immediate without persisting transient removal, and prevents newly granted target access
+from automatic expansion. `wiki_bind` can only persist narrowing. Project initialization
+owns local `.iwiki.toml` and `.iwikiignore`; hosted provisioning never writes them.
+Session identifiers used under a different token are indistinguishable from unknown
+sessions and expire after bounded inactivity.
+
+Hosted `wiki_create_domain` uses the real request AuthContext and an `AuthStore`
+transaction to recheck `can_create_domain`, create the domain, and insert creator
+read/write plus `can_manage_grants` authority atomically. It expands only the creator's
+selected/effective state after commit or exact idempotent retry. The domain manager tools
+`wiki_list_domain_grants`, `wiki_set_domain_grant`, and `wiki_revoke_domain_grant`
+pre-authorize current `managed_domains` and recheck authority in SQL. They never mutate
+management rows, self-target is denied, and management authority cannot be delegated
+through MCP schemas.
+
+Authentication retains three statements: token/capability lookup, one domain-rooted
+combined query with left joins to content and management grants, and throttled
+`last_used_at` update. `eval/auth_grant_latency.py` compares three rounds of 500 complete
+legacy/current authentication SQL paths on a fixed 8-content/2-overlapping-management
+fixture and fails when median p95 ratio exceeds 1.25. It prints fixture counts and
+latency only, never the DSN.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
@@ -353,7 +378,10 @@ unset — surfaced as a `HALT:` error (the stop rule). Missing base/binding rais
 
 PostgreSQL driver errors are caught separately and become a stable
 `PostgreSQL operation failed` tool result without connection text or SQL. Git-only
-tools under PostgreSQL return `unsupported_storage` before touching local paths.
+tools under PostgreSQL return `unsupported_storage` before touching local paths. Domain
+grant tools outside hosted PostgreSQL return `unsupported_transport` with actual storage
+and transport. Missing capabilities or malformed protected envelopes fail before dispatch
+with HTTP 403; transaction-time authority loss returns in-band `access_denied`.
 
 ## Startup / process lifecycle
 

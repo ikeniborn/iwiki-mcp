@@ -142,6 +142,14 @@ startup is idempotent. One database can hold many isolated wikis under distinct
 metadata: a mismatch refuses startup; changing them is an operator-managed migration,
 not an automatic re-embedding. Embedding and rerank credentials remain server-only.
 
+Every request reloads current token authority. A session keeps its explicit `selected`
+scope separately from the fresh-grant `effective` scope: revocation applies on the next
+request, restored access reappears only when it remained selected, and a new target grant
+does not expand an established session. Only successful `wiki_create_domain` provisioning
+expands the creator's current session. Project initialization still owns local
+`.iwiki.toml` and `.iwikiignore`; the hosted server creates PostgreSQL domain state but
+never writes those project files.
+
 ### PostgreSQL provisioning and least privilege
 
 The operator creates the database and installs the `vector` extension. The application
@@ -165,15 +173,21 @@ iwiki-mcp base disable --iwiki team-wiki
 iwiki-mcp base enable --iwiki team-wiki
 iwiki-mcp domain create --iwiki team-wiki --domain backend
 iwiki-mcp token create --iwiki team-wiki --owner deploy --read-domain backend --write-domain backend
+iwiki-mcp token create --iwiki team-wiki --owner bootstrap --can-create-domain
 iwiki-mcp token list --iwiki team-wiki
+iwiki-mcp token set-create-domain --iwiki team-wiki --token-id <token-id> --enabled
+iwiki-mcp token set-domain-management --iwiki team-wiki --token-id <token-id> --domain backend --enabled
 iwiki-mcp token revoke --token-id <token-id>
 iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
 iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
 ```
 
 `token create` prints plaintext token material once; store it in a secret manager.
-`token list` never returns it. Revocation and wiki disable take effect on later requests.
-There is intentionally no physical-delete command.
+`token list` never returns it and reports `can_create_domain`, `managed_domains`,
+`read_domains`, and `write_domains` in both default JSON and `--json` output.
+`set-create-domain` and `set-domain-management` are server-side recovery operations;
+exactly one of `--enabled` or `--disabled` is required. Revocation and wiki disable take
+effect on later requests. There is intentionally no physical-delete command.
 
 Import reads a Git wiki repository and writes one PostgreSQL wiki. Export requires an
 empty destination, writes a portable Git repository, and creates its initial commit.
@@ -185,6 +199,11 @@ Database backup, encryption, retention, and restore drills are operator responsi
 Use PostgreSQL-native tools and a service definition so credentials do not enter shell
 history. The restore target database must already exist.
 
+Migration v4 is forward-only and adds `can_create_domain`,
+`token_domain_management_grants`, and domain-leading grant indexes. There is no down
+migration. An older binary rejects schema v4, so binary rollback requires restoring a
+pre-v4 database backup or deploying a compatibility release before startup.
+
 ```bash
 pg_dump --dbname=service=iwiki --format=custom --schema=iwiki --file=/secure/encrypted-volume/iwiki.dump
 pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /secure/encrypted-volume/iwiki.dump
@@ -195,10 +214,40 @@ pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /se
 | PostgreSQL support | Tools |
 | --- | --- |
 | Supported | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
-| Git only | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_create_domain`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
+| Hosted PostgreSQL only | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
+| Git only | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
 
 Git-only tools return
 `{"error":"unsupported_storage","storage":"postgres","hint":"use this tool with Git storage"}`.
+The three grant tools return `unsupported_transport` with actual `storage` and
+`transport` outside hosted PostgreSQL. `wiki_create_domain(name)` requires
+`can_create_domain`; it atomically creates the domain plus caller read/write and
+`can_manage_grants` rows, returning `created`, `already_existed`, `domain`, and the
+complete effective session scope. Exact retries are idempotent.
+
+`wiki_list_domain_grants(domain)` exposes token owner and content/management flags for
+audit. `wiki_set_domain_grant(domain, token_id, can_read, can_write)` and
+`wiki_revoke_domain_grant(domain, token_id)` may change only another active token's
+content row. Write requires read, empty grants must be revoked, self-target is denied,
+and management authority cannot be delegated over HTTP: no MCP schema accepts a
+management-write field. CLI recovery is the only post-bootstrap path for management
+authority.
+
+Hosted creation returns the complete creator scope:
+
+```json
+{"created":"new-project","already_existed":false,"domain":"new-project","read":["new-project"],"write":["new-project"],"primary":"new-project"}
+```
+
+An exact retry changes only `already_existed` to `true`. Grant list returns
+`{"domain":<domain>,"grants":[{"token_id":...,"owner":...,"can_read":...,"can_write":...,"can_manage_grants":...}]}`.
+Set returns the named `domain`, `token_id`, `can_read`, and `can_write`; revoke returns
+the named `domain`, `token_id`, and `revoked` boolean. Missing capability or malformed
+protected arguments return HTTP 403 `{"error":"access denied"}`. Authority lost after
+dispatch, self-target, and foreign/missing transactional state return HTTP 200 with the
+in-band `{"error":"access_denied",...}` tool result. Invalid syntax or grant flags
+return a sanitized MCP/tool validation failure.
+
 PostgreSQL `wiki_status` reports `storage`, `transport`, effective `read`/`write`,
 `primary`, and visible `domains`; local stdio also reports `project_dir`. It never
 reports the DSN or credentials:
