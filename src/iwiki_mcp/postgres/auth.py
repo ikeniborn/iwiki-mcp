@@ -503,49 +503,131 @@ class AuthStore:
             "revoked": revoked,
         }
 
+    def set_create_domain(
+        self, iwiki_id: str, token_id: str, enabled: bool
+    ) -> dict:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled flag must be boolean")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE iwiki.tokens t SET can_create_domain = %s "
+                    "FROM iwiki.iwikis w WHERE w.iwiki_id = t.iwiki_id "
+                    "AND w.active = true AND t.iwiki_id = %s "
+                    "AND t.token_id = %s AND t.revoked_at IS NULL",
+                    (enabled, iwiki_id, token_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("active token not found")
+        return {
+            "iwiki": iwiki_id,
+            "token_id": token_id,
+            "can_create_domain": enabled,
+        }
+
+    def set_domain_management(
+        self,
+        iwiki_id: str,
+        token_id: str,
+        domain: str,
+        enabled: bool,
+    ) -> dict:
+        valid_domain = validate_domain_identifier(domain)
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled flag must be boolean")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT d.domain_id FROM iwiki.domains d "
+                    "JOIN iwiki.iwikis w ON w.iwiki_id = d.iwiki_id "
+                    "WHERE d.iwiki_id = %s AND d.slug = %s "
+                    "AND w.active = true",
+                    (iwiki_id, valid_domain),
+                )
+                domain_row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT 1 FROM iwiki.tokens WHERE iwiki_id = %s "
+                    "AND token_id = %s AND revoked_at IS NULL FOR UPDATE",
+                    (iwiki_id, token_id),
+                )
+                token_row = cursor.fetchone()
+                if domain_row is None or token_row is None:
+                    raise ValueError("active token or domain not found")
+                domain_id = domain_row[0]
+                if enabled:
+                    cursor.execute(
+                        "INSERT INTO iwiki.token_domain_management_grants "
+                        "(iwiki_id, token_id, domain_id, "
+                        "can_manage_grants) VALUES (%s, %s, %s, true) "
+                        "ON CONFLICT (iwiki_id, token_id, domain_id) "
+                        "DO NOTHING",
+                        (iwiki_id, token_id, domain_id),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM iwiki.token_domain_management_grants "
+                        "WHERE iwiki_id = %s AND token_id = %s "
+                        "AND domain_id = %s",
+                        (iwiki_id, token_id, domain_id),
+                    )
+        return {
+            "iwiki": iwiki_id,
+            "token_id": token_id,
+            "domain": valid_domain,
+            "can_manage_grants": enabled,
+        }
+
     def list_tokens(self, iwiki_id: str) -> list[dict]:
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT t.token_id, t.owner, t.created_at, t.last_used_at, "
-                    "t.revoked_at, d.slug, g.can_read, g.can_write "
+                    "t.revoked_at, t.can_create_domain, "
+                    "COALESCE(array_agg(DISTINCT d.slug ORDER BY d.slug) "
+                    "FILTER (WHERE g.can_read), ARRAY[]::text[]), "
+                    "COALESCE(array_agg(DISTINCT d.slug ORDER BY d.slug) "
+                    "FILTER (WHERE g.can_write), ARRAY[]::text[]), "
+                    "COALESCE(array_agg(DISTINCT md.slug ORDER BY md.slug) "
+                    "FILTER (WHERE m.can_manage_grants), ARRAY[]::text[]) "
                     "FROM iwiki.tokens t "
                     "LEFT JOIN iwiki.token_domain_grants g "
                     "ON g.iwiki_id = t.iwiki_id AND g.token_id = t.token_id "
                     "LEFT JOIN iwiki.domains d ON d.iwiki_id = g.iwiki_id "
                     "AND d.domain_id = g.domain_id "
-                    "WHERE t.iwiki_id = %s ORDER BY t.created_at, t.token_id, d.slug",
+                    "LEFT JOIN iwiki.token_domain_management_grants m "
+                    "ON m.iwiki_id = t.iwiki_id AND m.token_id = t.token_id "
+                    "LEFT JOIN iwiki.domains md ON md.iwiki_id = m.iwiki_id "
+                    "AND md.domain_id = m.domain_id "
+                    "WHERE t.iwiki_id = %s "
+                    "GROUP BY t.iwiki_id, t.token_id "
+                    "ORDER BY t.created_at, t.token_id",
                     (iwiki_id,),
                 )
                 rows = cursor.fetchall()
-        tokens: dict[str, dict] = {}
-        for (
-            token_id,
-            owner,
-            created_at,
-            last_used_at,
-            revoked_at,
-            domain,
-            can_read,
-            can_write,
-        ) in rows:
-            token = tokens.setdefault(
+        return [
+            {
+                "token_id": token_id,
+                "owner": owner,
+                "created_at": created_at,
+                "last_used_at": last_used_at,
+                "revoked_at": revoked_at,
+                "can_create_domain": can_create_domain,
+                "read_domains": list(read_domains),
+                "write_domains": list(write_domains),
+                "managed_domains": list(managed_domains),
+            }
+            for (
                 token_id,
-                {
-                    "token_id": token_id,
-                    "owner": owner,
-                    "created_at": created_at,
-                    "last_used_at": last_used_at,
-                    "revoked_at": revoked_at,
-                    "read_domains": [],
-                    "write_domains": [],
-                },
-            )
-            if domain is not None and can_read:
-                token["read_domains"].append(domain)
-            if domain is not None and can_write:
-                token["write_domains"].append(domain)
-        return list(tokens.values())
+                owner,
+                created_at,
+                last_used_at,
+                revoked_at,
+                can_create_domain,
+                read_domains,
+                write_domains,
+                managed_domains,
+            ) in rows
+        ]
 
     def revoke_token(self, token_id: str) -> bool:
         with self._connect() as connection:

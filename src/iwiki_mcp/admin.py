@@ -16,7 +16,7 @@ from psycopg.conninfo import make_conninfo
 
 from .engine.config import Config
 from .engine.embed import EmbedError, embed_texts
-from .postgres.auth import AuthStore
+from .postgres.auth import AuthStore, validate_domain_identifier
 from .postgres.config import ConfigError, ServerConfig, load_server_config
 from .postgres.migrations import MigrationError, MigrationSettings, run_migrations
 from .postgres.store import PostgresStore, _validate_identifier
@@ -88,8 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config(token_create)
     token_create.add_argument("--iwiki", required=True)
     token_create.add_argument("--owner", required=True)
-    token_create.add_argument("--read-domain", action="append", required=True)
+    token_create.add_argument("--read-domain", action="append", default=[])
     token_create.add_argument("--write-domain", action="append", default=[])
+    token_create.add_argument("--can-create-domain", action="store_true")
     token_list = token_commands.add_parser("list")
     _add_config(token_list)
     token_list.add_argument("--iwiki", required=True)
@@ -97,6 +98,16 @@ def build_parser() -> argparse.ArgumentParser:
     token_revoke = token_commands.add_parser("revoke")
     _add_config(token_revoke)
     token_revoke.add_argument("--token-id", required=True)
+    for name in ("set-create-domain", "set-domain-management"):
+        action = token_commands.add_parser(name)
+        _add_config(action)
+        action.add_argument("--iwiki", required=True)
+        action.add_argument("--token-id", required=True)
+        if name == "set-domain-management":
+            action.add_argument("--domain", required=True)
+        state = action.add_mutually_exclusive_group(required=True)
+        state.add_argument("--enabled", action="store_true")
+        state.add_argument("--disabled", action="store_true")
     return parser
 
 
@@ -126,10 +137,7 @@ def _integer_env(
 
 
 def _domain_identifier(value: str) -> str:
-    domain = _validate_identifier(value, "domain")
-    if domain.startswith(".") or "/" in domain:
-        raise ValueError("invalid domain")
-    return domain
+    return validate_domain_identifier(value)
 
 
 def _engine_config(
@@ -474,6 +482,7 @@ def _dispatch(args, service: AdminService):
                 args.owner,
                 read_domains=args.read_domain,
                 write_domains=args.write_domain,
+                can_create_domain=args.can_create_domain,
             )
         if args.token_command == "list":
             return service.auth.list_tokens(args.iwiki)
@@ -481,6 +490,17 @@ def _dispatch(args, service: AdminService):
             if not service.auth.revoke_token(args.token_id):
                 raise ValueError("token not found or already revoked")
             return {"revoked": args.token_id}
+        if args.token_command == "set-create-domain":
+            return service.auth.set_create_domain(
+                args.iwiki, args.token_id, args.enabled
+            )
+        if args.token_command == "set-domain-management":
+            return service.auth.set_domain_management(
+                args.iwiki,
+                args.token_id,
+                args.domain,
+                args.enabled,
+            )
     raise ValueError("unsupported administration command")
 
 
