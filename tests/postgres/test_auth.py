@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
 
 import pytest
@@ -167,6 +168,119 @@ def test_token_creation_requires_explicit_existing_safe_grants(
             read_domains=read_domains,
             write_domains=write_domains,
         )
+
+
+def test_create_only_token_requires_creation_authority(auth_store):
+    created = auth_store.create_token(
+        "wiki-a",
+        "provisioner",
+        read_domains=[],
+        write_domains=[],
+        can_create_domain=True,
+    )
+
+    context = auth_store.authenticate(created["token"])
+
+    assert context.can_create_domain is True
+    assert context.read_domains == ()
+    assert context.write_domains == ()
+    assert context.primary is None
+
+    with pytest.raises(ValueError, match="write grant must also be readable"):
+        auth_store.create_token(
+            "wiki-a",
+            "invalid provisioner",
+            read_domains=[],
+            write_domains=["docs"],
+            can_create_domain=True,
+        )
+
+
+def test_authentication_loads_content_and_management_authority(auth_store):
+    import psycopg
+
+    created = auth_store.create_token(
+        "wiki-a", "manager", read_domains=["docs"], write_domains=[]
+    )
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE iwiki.tokens SET can_create_domain = true "
+                "WHERE iwiki_id = %s AND token_id = %s",
+                ("wiki-a", created["token_id"]),
+            )
+            cursor.execute(
+                "INSERT INTO iwiki.token_domain_management_grants "
+                "(iwiki_id, token_id, domain_id, can_manage_grants) "
+                "SELECT %s, %s, domain_id, true FROM iwiki.domains "
+                "WHERE iwiki_id = %s AND slug = %s",
+                (
+                    "wiki-a",
+                    created["token_id"],
+                    "wiki-a",
+                    "private",
+                ),
+            )
+
+    context = auth_store.authenticate(created["token"])
+
+    assert context.can_create_domain is True
+    assert context.read_domains == ("docs",)
+    assert context.write_domains == ()
+    assert context.managed_domains == ("private",)
+    assert context.primary is None
+
+
+def test_authentication_keeps_three_statements_with_combined_authority_query():
+    from iwiki_mcp.postgres.auth import AuthStore
+
+    secret = b"x" * 32
+    encoded = base64.urlsafe_b64encode(secret).decode().rstrip("=")
+    token = f"iwiki_token-a_{encoded}"
+    digest = hashlib.sha256(token.encode()).digest()
+    statements = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, statement, _parameters=None):
+            statements.append(" ".join(statement.split()))
+
+        def fetchone(self):
+            return "wiki-a", digest, True
+
+        def fetchall(self):
+            return [
+                ("docs", True, True, False),
+                ("private", None, None, True),
+            ]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    store = AuthStore("unused", connection_factory=Connection)
+
+    context = store.authenticate(token)
+
+    assert len(statements) == 3
+    assert "token_domain_grants" in statements[1]
+    assert "token_domain_management_grants" in statements[1]
+    assert context.can_create_domain is True
+    assert context.read_domains == ("docs",)
+    assert context.write_domains == ("docs",)
+    assert context.managed_domains == ("private",)
+    assert context.primary == "docs"
 
 
 def test_token_is_bound_to_one_wiki_even_when_slugs_overlap(auth_store):

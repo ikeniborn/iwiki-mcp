@@ -177,13 +177,14 @@ class AuthStore:
         *,
         read_domains: list[str],
         write_domains: list[str],
+        can_create_domain: bool = False,
     ) -> dict:
         read = _unique_domains(read_domains)
         write = _unique_domains(write_domains)
-        if not read:
-            raise ValueError("read grant is required")
         if any(domain not in read for domain in write):
             raise ValueError("write grant must also be readable")
+        if not read and not can_create_domain:
+            raise ValueError("read grant is required")
         if not isinstance(owner, str) or not owner.strip():
             raise ValueError("token owner is required")
 
@@ -203,9 +204,15 @@ class AuthStore:
                     raise ValueError("domain grant does not exist")
                 cursor.execute(
                     "INSERT INTO iwiki.tokens "
-                    "(iwiki_id, token_id, token_digest, owner) "
-                    "VALUES (%s, %s, %s, %s)",
-                    (iwiki_id, token_id, digest, owner.strip()),
+                    "(iwiki_id, token_id, token_digest, owner, "
+                    "can_create_domain) VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        iwiki_id,
+                        token_id,
+                        digest,
+                        owner.strip(),
+                        can_create_domain,
+                    ),
                 )
                 for domain in read:
                     cursor.execute(
@@ -235,7 +242,7 @@ class AuthStore:
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT t.iwiki_id, t.token_digest "
+                    "SELECT t.iwiki_id, t.token_digest, t.can_create_domain "
                     "FROM iwiki.tokens t "
                     "JOIN iwiki.iwikis w ON w.iwiki_id = t.iwiki_id "
                     "WHERE t.token_id = %s AND t.revoked_at IS NULL "
@@ -247,19 +254,26 @@ class AuthStore:
                     supplied_digest, bytes(row[1])
                 ):
                     return None
-                iwiki_id = row[0]
+                iwiki_id, _stored_digest, can_create_domain = row
                 cursor.execute(
-                    "SELECT d.slug, g.can_read, g.can_write "
-                    "FROM iwiki.token_domain_grants g "
-                    "JOIN iwiki.domains d ON d.iwiki_id = g.iwiki_id "
-                    "AND d.domain_id = g.domain_id "
-                    "WHERE g.iwiki_id = %s AND g.token_id = %s "
+                    "SELECT d.slug, g.can_read, g.can_write, "
+                    "m.can_manage_grants "
+                    "FROM iwiki.domains d "
+                    "LEFT JOIN iwiki.token_domain_grants g "
+                    "ON g.iwiki_id = d.iwiki_id "
+                    "AND g.domain_id = d.domain_id AND g.token_id = %s "
+                    "LEFT JOIN iwiki.token_domain_management_grants m "
+                    "ON m.iwiki_id = d.iwiki_id "
+                    "AND m.domain_id = d.domain_id AND m.token_id = %s "
+                    "WHERE d.iwiki_id = %s "
+                    "AND (g.token_id IS NOT NULL OR m.token_id IS NOT NULL) "
                     "ORDER BY d.slug",
-                    (iwiki_id, token_id),
+                    (token_id, token_id, iwiki_id),
                 )
                 grants = cursor.fetchall()
                 read = tuple(row[0] for row in grants if row[1])
                 write = tuple(row[0] for row in grants if row[2])
+                managed = tuple(row[0] for row in grants if row[3])
                 cursor.execute(
                     "UPDATE iwiki.tokens SET last_used_at = %s "
                     "WHERE iwiki_id = %s AND token_id = %s "
@@ -277,6 +291,8 @@ class AuthStore:
             read_domains=read,
             write_domains=write,
             primary=write[0] if write else None,
+            can_create_domain=bool(can_create_domain),
+            managed_domains=managed,
         )
 
     def list_tokens(self, iwiki_id: str) -> list[dict]:
