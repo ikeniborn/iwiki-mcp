@@ -191,6 +191,67 @@ def test_schema_adds_separate_domain_management_authority(clean_postgres):
     assert all("(iwiki_id, domain_id)" in index for index in indexes.values())
 
 
+def test_v4_preserves_legacy_tokens_without_authority(clean_postgres):
+    import psycopg
+
+    from iwiki_mcp.postgres.migrations import MIGRATIONS, run_migrations
+
+    run_migrations(_settings(clean_postgres), migrations=MIGRATIONS[:3])
+    with psycopg.connect(clean_postgres) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO iwiki.iwikis (iwiki_id, slug) "
+                "VALUES ('legacy', 'legacy')"
+            )
+            cursor.execute(
+                "INSERT INTO iwiki.tokens "
+                "(iwiki_id, token_id, token_digest, owner) "
+                "VALUES ('legacy', 'legacy-token', %s, 'legacy owner')",
+                (b"legacy-digest",),
+            )
+
+    run_migrations(_settings(clean_postgres))
+    with psycopg.connect(clean_postgres) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT can_create_domain FROM iwiki.tokens "
+                "WHERE iwiki_id = 'legacy' AND token_id = 'legacy-token'"
+            )
+            assert cursor.fetchone() == (False,)
+
+
+def test_management_grant_rows_must_be_enabled(clean_postgres):
+    import psycopg
+
+    from iwiki_mcp.postgres.migrations import run_migrations
+
+    run_migrations(_settings(clean_postgres))
+    with psycopg.connect(clean_postgres) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO iwiki.iwikis (iwiki_id, slug) "
+                "VALUES ('wiki-a', 'wiki-a')"
+            )
+            cursor.execute(
+                "INSERT INTO iwiki.domains (iwiki_id, slug) "
+                "VALUES ('wiki-a', 'docs') RETURNING domain_id"
+            )
+            domain_id = cursor.fetchone()[0]
+            cursor.execute(
+                "INSERT INTO iwiki.tokens "
+                "(iwiki_id, token_id, token_digest, owner) "
+                "VALUES ('wiki-a', 'token-a', %s, 'alice')",
+                (b"token-a-digest",),
+            )
+            with pytest.raises(psycopg.errors.CheckViolation):
+                cursor.execute(
+                    "INSERT INTO iwiki.token_domain_management_grants "
+                    "(iwiki_id, token_id, domain_id, can_manage_grants) "
+                    "VALUES ('wiki-a', 'token-a', %s, false)",
+                    (domain_id,),
+                )
+
+
 def test_newer_schema_version_refuses_startup(clean_postgres):
     import psycopg
 
