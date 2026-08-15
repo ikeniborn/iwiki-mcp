@@ -165,6 +165,17 @@ async def _send_service_unavailable(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _send_method_not_allowed(send) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [(b"allow", b"POST, DELETE")],
+        }
+    )
+    await send({"type": "http.response.body", "body": b""})
+
+
 def _binding(
     config: ServerConfig, context: AuthContext, project_dir: str
 ) -> base.PostgresBinding:
@@ -357,6 +368,9 @@ class AuthenticatedMCPMiddleware:
                     scopes=[],
                 )
             )
+            if scope.get("method") == "GET":
+                await _send_method_not_allowed(send)
+                return
             session_id = _one_header(scope, b"mcp-session-id")
             initial = _binding(self.config, context, self.project_dir)
 
