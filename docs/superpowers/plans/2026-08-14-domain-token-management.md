@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: e6739c25322aa605
+  plan_hash: 1907bcc0d0abec49
   last_run: 2026-08-15
   phases:
     structure: { status: passed }
@@ -23,10 +23,10 @@ authority.
 **Architecture:** Migration v4 stores tenant creation authority on tokens and
 per-domain management authority in a table separate from content grants.
 Authentication loads both authority shapes into an immutable request context.
-Hosted middleware persists explicit session selection but derives a fresh
-request-local effective scope. Authenticated store methods recheck authority
-inside mutation transactions. Git creation stays unchanged; PostgreSQL stdio
-rejects hosted-only grant operations.
+Hosted middleware persists explicit session selection but derives a fresh effective
+scope in a serialized transient carrier required by FastMCP session task context.
+Authenticated store methods recheck authority inside mutation transactions. Git
+creation stays unchanged; PostgreSQL stdio rejects hosted-only grant operations.
 
 **Tech Stack:** Python 3.10+, psycopg 3, PostgreSQL/pgvector migrations,
 FastMCP Streamable HTTP, pytest/pytest-asyncio, Starlette TestClient, uv.
@@ -37,7 +37,7 @@ FastMCP Streamable HTTP, pytest/pytest-asyncio, Starlette TestClient, uv.
   at approved body hash `5abfc7209ba1336e`.
 - Specification:
   `docs/superpowers/specs/2026-08-14-domain-token-management-design.md` at
-  approved body hash `fd2095a0c2926347`.
+  approved body hash `19b936e63885b62f`.
 - Requirements: R1-R9.
 - Excluded: domain deletion/archive/transfer, metadata administration, generic
   RBAC, HTTP management-authority delegation, dynamic `tools/list` filtering,
@@ -349,17 +349,17 @@ effective holder.
 
 - [ ] **Step 4: Implement selected/effective holders**
 
-Keep registry records as persistent explicit selected state. For every request,
-derive a new request-local holder whose effective binding intersects selected
-read/write with fresh content grants and whose primary remains effective and
-writable. The holder keeps a reference to selected state so only explicit
-`wiki_bind` or creator expansion can update persistence under its lock.
+Keep explicit selected state separate from the session transport carrier. For every
+request, serialize the carrier, derive an effective binding that intersects selected
+read/write with fresh content grants, and install the full authenticated context for
+FastMCP dispatch. Reset transient effective/authenticated fields afterward. Only
+explicit `wiki_bind` or creator expansion can update selected persistence under its
+lock.
 
-Install full auth context and request-local holder together. Store state before
-forwarding `http.response.start`, using response session ID first and incoming
-session ID as fallback. Reset both ContextVars in reverse order. Do not add
-token fields to `PostgresBinding` and do not use `_SESSION_BINDING` as the
-capability source.
+Store the carrier before forwarding `http.response.start`, using response session ID
+first and incoming session ID as fallback. Reset both ContextVars in reverse order. Do
+not add token fields to `PostgresBinding`; hosted capability reads use the carrier's
+current real AuthContext, while stdio retains the authority-free fallback.
 
 - [ ] **Step 5: Verify state-model GREEN**
 

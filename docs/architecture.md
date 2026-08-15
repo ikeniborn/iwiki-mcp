@@ -65,7 +65,8 @@ selected/effective state after commit or exact idempotent retry. The domain mana
 `wiki_list_domain_grants`, `wiki_set_domain_grant`, and `wiki_revoke_domain_grant`
 pre-authorize current `managed_domains` and recheck authority in SQL. They never mutate
 management rows, self-target is denied, and management authority cannot be delegated
-through MCP schemas.
+through MCP schemas. Operator token revocation retains the token audit row but deletes
+its content and management grants in the same transaction.
 
 Authentication retains three statements: token/capability lookup, one domain-rooted
 combined query with left joins to content and management grants, and throttled

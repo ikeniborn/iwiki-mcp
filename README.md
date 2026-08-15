@@ -187,7 +187,9 @@ iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run 
 `read_domains`, and `write_domains` in both default JSON and `--json` output.
 `set-create-domain` and `set-domain-management` are server-side recovery operations;
 exactly one of `--enabled` or `--disabled` is required. Revocation and wiki disable take
-effect on later requests. There is intentionally no physical-delete command.
+effect on later requests. Token revocation atomically removes its content and management
+grant rows while retaining the revoked token audit record. There is intentionally no
+physical-delete command.
 
 Import reads a Git wiki repository and writes one PostgreSQL wiki. Export requires an
 empty destination, writes a portable Git repository, and creates its initial commit.

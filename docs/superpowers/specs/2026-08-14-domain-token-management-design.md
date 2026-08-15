@@ -1,7 +1,7 @@
 ---
 review:
-  spec_hash: fd2095a0c2926347
-  last_run: 2026-08-14
+  spec_hash: 19b936e63885b62f
+  last_run: 2026-08-15
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -21,7 +21,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "4. Authentication and Authorization"
-      section_hash: 9fc42ad0cd561110
+      section_hash: e682c70152f3bbc8
       fragment: "arguments is not a dictionary"
       text: "Malformed protected tool calls could bypass pre-dispatch capability checks."
       fix: "Authorize a recognized protected tool name before any permissive argument return."
@@ -30,10 +30,10 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "4. Authentication and Authorization"
-      section_hash: 9fc42ad0cd561110
+      section_hash: e682c70152f3bbc8
       fragment: "persisted session binding"
       text: "In-place fresh-grant intersection would permanently mutate explicit session narrowing."
-      fix: "Separate persisted selected scope from request-local effective scope."
+      fix: "Separate persisted selected scope from the serialized transient effective carrier."
       verdict: fixed
     - id: F-004
       phase: coverage
@@ -159,13 +159,14 @@ or tenant identifiers are rejected before a database mutation.
 ### R6. Immediate revocation
 
 Every hosted request authenticates against current database grants. A stored
-session retains the user's explicit selected scope. Middleware creates a
-request-local effective holder by intersecting that selected scope with freshly
-authenticated content grants; it never writes a transient revocation back into
-the persisted selection. Revoked access therefore disappears on the next
-request, while later restoration can reappear only when the domain remained in
-the explicit selection. Newly granted access does not expand an existing target
-session; the target starts a new MCP session to use it.
+session retains the user's explicit selected scope. Middleware derives a fresh
+effective snapshot by intersecting that selected scope with authenticated content
+grants, publishes it through a serialized per-session transport carrier for the
+duration of FastMCP dispatch, and resets the transient state afterward. It never
+writes a transient revocation back into the persisted selection. Revoked access
+therefore disappears on the next request, while later restoration can reappear only
+when the domain remained in the explicit selection. Newly granted access does not
+expand an existing target session; the target starts a new MCP session to use it.
 
 The successful creator call is the only bounded expansion of its current
 session: after commit, the new domain is added to read/write and becomes
@@ -280,20 +281,22 @@ any domain for which either grant exists, so a recovery manager need not also
 hold content access. No extra query is added.
 
 The HTTP middleware installs the full authenticated context in a request-local
-context variable used by hosted tool dispatch. No `PostgresBinding` field is
-added: hosted code reads the real token/capabilities from that context variable,
-while PostgreSQL stdio uses the current authority-free fallback.
+context variable beside `_HostedBindingState`. FastMCP retains the initialization
+task's ContextVar object, so the session record also retains that transport carrier;
+requests are serialized while its effective binding and authenticated context are
+replaced, then both are reset after dispatch. No `PostgresBinding` token field is
+added: hosted code reads the real token/capabilities through the current carrier,
+while PostgreSQL stdio uses the explicit authority-free fallback.
 
-The session registry persists only the explicit selected binding. Each request
-gets a new `_HostedBindingState` containing both that selected binding and a
-derived effective binding intersected with fresh grants. Normal request refresh
-never writes the effective intersection back to the selected binding. A
-successful `wiki_bind` persists its explicit narrowing; successful domain
-creation or idempotent recovery explicitly expands both selected and effective
-bindings. Response capture stores the request's selected binding under the
-response session ID or, when absent, the successful request session ID. This
-keeps creator expansion available after the call without confusing revocation
-with user narrowing.
+The carrier references a separate persistent explicit selected binding. Every request
+derives an effective binding intersected with fresh grants, but normal refresh never
+writes that intersection back to selected state. A successful `wiki_bind` persists its
+explicit narrowing; successful domain creation or idempotent recovery explicitly
+expands both selected and effective bindings. Response capture stores the carrier under
+the response session ID or, when absent, the successful request session ID. Outside an
+active request its effective/authenticated fields are reset, so only explicit selection
+has durable authority semantics. This keeps creator expansion available after the call
+without confusing revocation with user narrowing.
 
 Middleware recognizes protected tool names before permissive parsing exits.
 For a recognized protected call, malformed/non-dictionary arguments fail

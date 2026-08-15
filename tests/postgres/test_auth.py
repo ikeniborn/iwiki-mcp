@@ -609,6 +609,33 @@ def test_unknown_malformed_revoked_and_disabled_tokens_are_rejected(auth_store):
     assert auth_store.authenticate(second["token"]) is None
 
 
+def test_revoke_token_removes_content_and_management_grants(auth_store):
+    import psycopg
+
+    created, context = _provisioner(auth_store)
+    auth_store.provision_domain(context, "owned")
+
+    assert auth_store.revoke_token(created["token_id"]) is True
+
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT "
+                "(SELECT count(*) FROM iwiki.token_domain_grants "
+                "WHERE iwiki_id = %s AND token_id = %s), "
+                "(SELECT count(*) "
+                "FROM iwiki.token_domain_management_grants "
+                "WHERE iwiki_id = %s AND token_id = %s)",
+                (
+                    context.iwiki_id,
+                    context.token_id,
+                    context.iwiki_id,
+                    context.token_id,
+                ),
+            )
+            assert cursor.fetchone() == (0, 0)
+
+
 def test_last_used_is_updated_at_most_once_per_five_minutes(auth_store):
     created = auth_store.create_token(
         "wiki-a", "alice", read_domains=["docs"], write_domains=[]

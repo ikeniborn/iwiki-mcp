@@ -634,10 +634,25 @@ class AuthStore:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "UPDATE iwiki.tokens SET revoked_at = CURRENT_TIMESTAMP "
-                    "WHERE token_id = %s AND revoked_at IS NULL",
+                    "WHERE token_id = %s AND revoked_at IS NULL "
+                    "RETURNING iwiki_id",
                     (token_id,),
                 )
-                return cursor.rowcount == 1
+                row = cursor.fetchone()
+                if row is None:
+                    return False
+                iwiki_id = row[0]
+                cursor.execute(
+                    "DELETE FROM iwiki.token_domain_grants "
+                    "WHERE iwiki_id = %s AND token_id = %s",
+                    (iwiki_id, token_id),
+                )
+                cursor.execute(
+                    "DELETE FROM iwiki.token_domain_management_grants "
+                    "WHERE iwiki_id = %s AND token_id = %s",
+                    (iwiki_id, token_id),
+                )
+                return True
 
     def set_wiki_active(self, iwiki_id: str, active: bool) -> None:
         with self._connect() as connection:

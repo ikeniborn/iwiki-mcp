@@ -187,7 +187,8 @@ iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run 
 `read_domains` и `write_domains` как в стандартном JSON, так и с `--json`.
 `set-create-domain` и `set-domain-management` — server-side recovery; требуется ровно
 один флаг `--enabled` или `--disabled`. Revoke токена и disable wiki действуют на
-следующих запросах. Команды физического удаления намеренно нет.
+следующих запросах. Revoke токена атомарно удаляет его content/management grant rows,
+но сохраняет revoked token audit record. Команды физического удаления намеренно нет.
 
 Import читает Git wiki-репозиторий и пишет одну PostgreSQL wiki. Export требует пустой
 каталог, создаёт переносимый Git-репозиторий и первый commit. `--dry-run` только
