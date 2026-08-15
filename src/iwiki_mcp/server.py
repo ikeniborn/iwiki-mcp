@@ -232,8 +232,8 @@ _MUTATION_BINDING: ContextVar[base.Binding | base.PostgresBinding | None] = Cont
 )
 
 
-class _HostedBindingState:
-    """Mutable session holder whose values remain immutable bindings."""
+class _HostedSelectedState:
+    """Persist the domain scope explicitly selected for one HTTP session."""
 
     def __init__(self, binding: base.PostgresBinding) -> None:
         self._binding = binding
@@ -251,10 +251,93 @@ class _HostedBindingState:
             self._binding = binding
 
 
+class _HostedBindingState:
+    """Hold one request's effective binding beside its persisted selection."""
+
+    def __init__(
+        self,
+        selected: base.PostgresBinding | _HostedSelectedState,
+        effective: base.PostgresBinding | None = None,
+    ) -> None:
+        if isinstance(selected, base.PostgresBinding):
+            selected = _HostedSelectedState(selected)
+        self._selected = selected
+        self._effective = effective or selected.get()
+        self._auth_context: _postgres_auth.AuthContext | None = None
+        self._request_lock = anyio.Lock()
+
+    def locked(self):
+        return self._selected.locked()
+
+    def get(self) -> base.PostgresBinding:
+        return self._effective
+
+    def set(self, binding: base.PostgresBinding) -> None:
+        self._selected.set(binding)
+        self._effective = binding
+
+    def set_effective(
+        self,
+        binding: base.PostgresBinding,
+        auth_context: _postgres_auth.AuthContext,
+    ) -> None:
+        self._effective = binding
+        self._auth_context = auth_context
+
+    def reset_effective(self) -> None:
+        self._effective = self._selected.get()
+        self._auth_context = None
+
+    def auth_context(self) -> _postgres_auth.AuthContext | None:
+        return self._auth_context
+
+    def request_lock(self):
+        return self._request_lock
+
+    def selected_state(self) -> _HostedSelectedState:
+        return self._selected
+
+    def expand_domain(
+        self,
+        domain: str,
+        auth_context: _postgres_auth.AuthContext,
+    ) -> base.PostgresBinding:
+        def expanded(values):
+            return tuple(dict.fromkeys((*values, domain)))
+
+        with self.locked():
+            selected_current = self._selected.get()
+            selected = replace(
+                selected_current,
+                read=expanded(selected_current.read),
+                write=expanded(selected_current.write),
+                primary=domain,
+            )
+            effective = replace(
+                self._effective,
+                read=expanded(self._effective.read),
+                write=expanded(self._effective.write),
+                primary=domain,
+            )
+            self._selected.set(selected)
+            self._effective = effective
+            self._auth_context = replace(
+                auth_context,
+                read_domains=expanded(auth_context.read_domains),
+                write_domains=expanded(auth_context.write_domains),
+                primary=domain,
+                managed_domains=expanded(auth_context.managed_domains),
+            )
+            return effective
+
+
 _SESSION_BINDING: ContextVar[
     base.PostgresBinding | _HostedBindingState | None
 ] = ContextVar(
     "iwiki_postgres_session_binding", default=None
+)
+_AUTH_CONTEXT: ContextVar[_postgres_auth.AuthContext | None] = ContextVar(
+    "iwiki_postgres_auth_context", default=None
 )
 _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
 _HOSTED_POOL = None
@@ -290,14 +373,30 @@ def _is_postgres(binding) -> bool:
     return isinstance(binding, base.PostgresBinding)
 
 
+def _request_auth_context() -> _postgres_auth.AuthContext | None:
+    session = _SESSION_BINDING.get()
+    if isinstance(session, _HostedBindingState):
+        return session.auth_context()
+    return _AUTH_CONTEXT.get()
+
+
 def _postgres_store_for_binding(binding: base.PostgresBinding):
-    auth_context = _postgres_auth.AuthContext(
-        iwiki_id=binding.iwiki_id,
-        token_id="",
-        read_domains=tuple(binding.read),
-        write_domains=tuple(binding.write),
-        primary=binding.primary,
-    )
+    request_context = _request_auth_context()
+    if request_context is not None and request_context.iwiki_id == binding.iwiki_id:
+        auth_context = replace(
+            request_context,
+            read_domains=tuple(binding.read),
+            write_domains=tuple(binding.write),
+            primary=binding.primary,
+        )
+    else:
+        auth_context = _postgres_auth.AuthContext(
+            iwiki_id=binding.iwiki_id,
+            token_id="",
+            read_domains=tuple(binding.read),
+            write_domains=tuple(binding.write),
+            primary=binding.primary,
+        )
     return _postgres_store.PostgresStore(
         binding.connection_dsn(),
         binding.iwiki_id,
@@ -309,11 +408,33 @@ def _postgres_store_for_binding(binding: base.PostgresBinding):
     )
 
 
+def _postgres_auth_for_binding(binding: base.PostgresBinding):
+    return _postgres_auth.AuthStore(
+        binding.connection_dsn(),
+        connection_factory=(
+            _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
+        ),
+    )
+
+
 def _unsupported_storage() -> dict:
     return {
         "error": "unsupported_storage",
         "storage": "postgres",
         "hint": "use this tool with Git storage",
+    }
+
+
+def _unsupported_hosted_transport(binding) -> dict:
+    return {
+        "error": "unsupported_transport",
+        "storage": "postgres" if _is_postgres(binding) else "git",
+        "transport": (
+            "streamable-http"
+            if isinstance(_SESSION_BINDING.get(), _HostedBindingState)
+            else "stdio"
+        ),
+        "hint": "use hosted Streamable HTTP with PostgreSQL storage",
     }
 
 
@@ -1899,6 +2020,26 @@ def wiki_index(domain: str | None = None) -> dict:
 @_safe
 def wiki_create_domain(name: str) -> dict:
     bind = _resolved_binding()
+    if _is_postgres(bind):
+        session = _SESSION_BINDING.get()
+        if not isinstance(session, _HostedBindingState):
+            return _unsupported_storage()
+        context = _request_auth_context()
+        if context is None:
+            raise _postgres_auth.AccessError(403)
+        valid_domain = _postgres_auth.validate_domain_identifier(name)
+        provisioned = _postgres_auth_for_binding(bind).provision_domain(
+            context, valid_domain
+        )
+        effective = session.expand_domain(valid_domain, context)
+        return {
+            "created": valid_domain,
+            "already_existed": provisioned["already_existed"],
+            "domain": valid_domain,
+            "read": list(effective.read),
+            "write": list(effective.write),
+            "primary": effective.primary,
+        }
     valid_domain = _validate_domain(name)
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
@@ -1912,6 +2053,59 @@ def wiki_create_domain(name: str) -> dict:
                                   pathspec=valid_domain)
     return {"created": valid_domain, "committed": commit.get("committed", False),
             "pushed": commit.get("pushed", False), **_fresh_warn(fresh)}
+
+
+def _hosted_domain_authority():
+    binding = _resolved_binding()
+    session = _SESSION_BINDING.get()
+    if not _is_postgres(binding) or not isinstance(
+        session, _HostedBindingState
+    ):
+        return binding, None, _unsupported_hosted_transport(binding)
+    context = _request_auth_context()
+    if context is None:
+        raise _postgres_auth.AccessError(403)
+    return binding, context, None
+
+
+@_safe
+def wiki_list_domain_grants(domain: str) -> dict:
+    binding, context, unsupported = _hosted_domain_authority()
+    if unsupported is not None:
+        return unsupported
+    grants = _postgres_auth_for_binding(binding).list_domain_grants(
+        context, domain
+    )
+    return {"domain": domain, "grants": grants}
+
+
+@_safe
+def wiki_set_domain_grant(
+    domain: str,
+    token_id: str,
+    can_read: bool,
+    can_write: bool,
+) -> dict:
+    binding, context, unsupported = _hosted_domain_authority()
+    if unsupported is not None:
+        return unsupported
+    return _postgres_auth_for_binding(binding).set_domain_grant(
+        context,
+        domain,
+        token_id,
+        can_read=can_read,
+        can_write=can_write,
+    )
+
+
+@_safe
+def wiki_revoke_domain_grant(domain: str, token_id: str) -> dict:
+    binding, context, unsupported = _hosted_domain_authority()
+    if unsupported is not None:
+        return unsupported
+    return _postgres_auth_for_binding(binding).revoke_domain_grant(
+        context, domain, token_id
+    )
 
 
 def _wiki_bind(
@@ -2627,7 +2821,6 @@ def wiki_sync() -> dict:
 
 # PostgreSQL rejects Git-only tools before any local lock, Git, filesystem, or
 # SQLite helper can run.
-wiki_create_domain = _postgres_unsupported_guard(wiki_create_domain)
 wiki_remediation_plan = _postgres_unsupported_guard(wiki_remediation_plan)
 wiki_migrate_okf = _postgres_unsupported_guard(wiki_migrate_okf)
 wiki_apply_okf = _postgres_unsupported_guard(wiki_apply_okf)
@@ -2663,6 +2856,9 @@ mcp.tool()(wiki_update_page)
 mcp.tool()(wiki_delete_page)
 mcp.tool()(wiki_index)
 mcp.tool()(wiki_create_domain)
+mcp.tool()(wiki_list_domain_grants)
+mcp.tool()(wiki_set_domain_grant)
+mcp.tool()(wiki_revoke_domain_grant)
 mcp.tool()(wiki_bind)
 mcp.tool()(wiki_lint)
 mcp.tool()(wiki_remediation_plan)

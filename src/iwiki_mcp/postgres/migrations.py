@@ -225,6 +225,40 @@ MIGRATIONS = (
             "tokens_token_id_key UNIQUE (token_id)",
         ),
     ),
+    Migration(
+        version=4,
+        statements=(
+            "ALTER TABLE iwiki.tokens ADD COLUMN "
+            "can_create_domain boolean NOT NULL DEFAULT false",
+            """
+            CREATE TABLE iwiki.token_domain_management_grants (
+                iwiki_id text NOT NULL,
+                token_id text NOT NULL,
+                domain_id bigint NOT NULL,
+                can_manage_grants boolean NOT NULL,
+                PRIMARY KEY (iwiki_id, token_id, domain_id),
+                CONSTRAINT token_domain_management_grants_enabled
+                    CHECK (can_manage_grants),
+                CONSTRAINT token_domain_management_grants_iwiki_token_fk
+                    FOREIGN KEY (iwiki_id, token_id)
+                    REFERENCES iwiki.tokens (iwiki_id, token_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT token_domain_management_grants_iwiki_domain_fk
+                    FOREIGN KEY (iwiki_id, domain_id)
+                    REFERENCES iwiki.domains (iwiki_id, domain_id)
+                    ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX token_domain_grants_domain_idx
+                ON iwiki.token_domain_grants (iwiki_id, domain_id)
+            """,
+            """
+            CREATE INDEX token_domain_management_grants_domain_idx
+                ON iwiki.token_domain_management_grants (iwiki_id, domain_id)
+            """,
+        ),
+    ),
 )
 
 

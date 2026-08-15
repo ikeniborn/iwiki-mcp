@@ -17,6 +17,8 @@ EXPECTED_TOOLS = {
     "wiki_status", "wiki_list_domains", "wiki_list_pages", "wiki_read_page",
     "wiki_search", "wiki_related", "wiki_write_page", "wiki_update_page",
     "wiki_delete_page", "wiki_index", "wiki_create_domain", "wiki_bind",
+    "wiki_list_domain_grants", "wiki_set_domain_grant",
+    "wiki_revoke_domain_grant",
     "wiki_lint", "wiki_remediation_plan", "wiki_migrate_okf", "wiki_apply_okf",
     "wiki_export_okf", "wiki_sync",
     "wiki_code_status", "wiki_code_index", "wiki_code_search",
