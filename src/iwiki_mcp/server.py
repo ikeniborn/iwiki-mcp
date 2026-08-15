@@ -232,8 +232,8 @@ _MUTATION_BINDING: ContextVar[base.Binding | base.PostgresBinding | None] = Cont
 )
 
 
-class _HostedBindingState:
-    """Mutable session holder whose values remain immutable bindings."""
+class _HostedSelectedState:
+    """Persist the domain scope explicitly selected for one HTTP session."""
 
     def __init__(self, binding: base.PostgresBinding) -> None:
         self._binding = binding
@@ -251,10 +251,60 @@ class _HostedBindingState:
             self._binding = binding
 
 
+class _HostedBindingState:
+    """Hold one request's effective binding beside its persisted selection."""
+
+    def __init__(
+        self,
+        selected: base.PostgresBinding | _HostedSelectedState,
+        effective: base.PostgresBinding | None = None,
+    ) -> None:
+        if isinstance(selected, base.PostgresBinding):
+            selected = _HostedSelectedState(selected)
+        self._selected = selected
+        self._effective = effective or selected.get()
+        self._auth_context: _postgres_auth.AuthContext | None = None
+        self._request_lock = anyio.Lock()
+
+    def locked(self):
+        return self._selected.locked()
+
+    def get(self) -> base.PostgresBinding:
+        return self._effective
+
+    def set(self, binding: base.PostgresBinding) -> None:
+        self._selected.set(binding)
+        self._effective = binding
+
+    def set_effective(
+        self,
+        binding: base.PostgresBinding,
+        auth_context: _postgres_auth.AuthContext,
+    ) -> None:
+        self._effective = binding
+        self._auth_context = auth_context
+
+    def reset_effective(self) -> None:
+        self._effective = self._selected.get()
+        self._auth_context = None
+
+    def auth_context(self) -> _postgres_auth.AuthContext | None:
+        return self._auth_context
+
+    def request_lock(self):
+        return self._request_lock
+
+    def selected_state(self) -> _HostedSelectedState:
+        return self._selected
+
+
 _SESSION_BINDING: ContextVar[
     base.PostgresBinding | _HostedBindingState | None
 ] = ContextVar(
     "iwiki_postgres_session_binding", default=None
+)
+_AUTH_CONTEXT: ContextVar[_postgres_auth.AuthContext | None] = ContextVar(
+    "iwiki_postgres_auth_context", default=None
 )
 _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
 _HOSTED_POOL = None
@@ -290,14 +340,30 @@ def _is_postgres(binding) -> bool:
     return isinstance(binding, base.PostgresBinding)
 
 
+def _request_auth_context() -> _postgres_auth.AuthContext | None:
+    session = _SESSION_BINDING.get()
+    if isinstance(session, _HostedBindingState):
+        return session.auth_context()
+    return _AUTH_CONTEXT.get()
+
+
 def _postgres_store_for_binding(binding: base.PostgresBinding):
-    auth_context = _postgres_auth.AuthContext(
-        iwiki_id=binding.iwiki_id,
-        token_id="",
-        read_domains=tuple(binding.read),
-        write_domains=tuple(binding.write),
-        primary=binding.primary,
-    )
+    request_context = _request_auth_context()
+    if request_context is not None and request_context.iwiki_id == binding.iwiki_id:
+        auth_context = replace(
+            request_context,
+            read_domains=tuple(binding.read),
+            write_domains=tuple(binding.write),
+            primary=binding.primary,
+        )
+    else:
+        auth_context = _postgres_auth.AuthContext(
+            iwiki_id=binding.iwiki_id,
+            token_id="",
+            read_domains=tuple(binding.read),
+            write_domains=tuple(binding.write),
+            primary=binding.primary,
+        )
     return _postgres_store.PostgresStore(
         binding.connection_dsn(),
         binding.iwiki_id,

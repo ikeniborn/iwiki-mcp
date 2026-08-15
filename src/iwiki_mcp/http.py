@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Lock
 import time
 from typing import Any, Mapping
@@ -182,6 +182,28 @@ def _binding(
     )
 
 
+def _effective_binding(
+    selected: base.PostgresBinding, context: AuthContext
+) -> base.PostgresBinding:
+    read = tuple(
+        domain for domain in selected.read if domain in context.read_domains
+    )
+    write = tuple(
+        domain
+        for domain in selected.write
+        if domain in context.write_domains and domain in read
+    )
+    primary = selected.primary if selected.primary in write else None
+    if primary is None and write:
+        primary = write[0]
+    return replace(
+        selected,
+        read=read,
+        write=write,
+        primary=primary,
+    )
+
+
 def _string_domains(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -317,54 +339,74 @@ class AuthenticatedMCPMiddleware:
 
             state = self.sessions.resolve(session_id, context)
             if state is None:
-                state = server._HostedBindingState(initial)
-            current = state.get()
-            effective_context = AuthContext(
-                iwiki_id=context.iwiki_id,
-                token_id=context.token_id,
-                read_domains=tuple(current.read),
-                write_domains=tuple(current.write),
-                primary=current.primary,
-            )
+                selected = server._HostedSelectedState(initial)
+                state = server._HostedBindingState(selected, initial)
 
-            messages = await _request_messages(receive)
-            _authorize_tool(effective_context, _request_json(messages))
-            iterator = iter(messages)
-
-            async def replay_receive():
+            async with state.request_lock():
+                selected = state.selected_state()
+                current = _effective_binding(selected.get(), context)
+                effective_context = replace(
+                    context,
+                    read_domains=tuple(current.read),
+                    write_domains=tuple(current.write),
+                    primary=current.primary,
+                )
+                state.set_effective(current, effective_context)
                 try:
-                    return next(iterator)
-                except StopIteration:
-                    return await receive()
+                    messages = await _request_messages(receive)
+                    _authorize_tool(effective_context, _request_json(messages))
+                    iterator = iter(messages)
 
-            binding_token = server._SESSION_BINDING.set(state)
+                    async def replay_receive():
+                        try:
+                            return next(iterator)
+                        except StopIteration:
+                            return await receive()
 
-            async def capture_send(message):
-                if message["type"] == "http.response.start":
-                    response_session = next(
-                        (
-                            value.decode("latin-1")
-                            for key, value in message.get("headers", ())
-                            if key.lower() == b"mcp-session-id"
-                        ),
-                        None,
-                    )
-                    if response_session is not None:
-                        self.sessions.store(response_session, context, state)
-                    if scope.get("method") == "DELETE" and message["status"] < 400:
-                        self.sessions.remove(session_id)
-                await send(message)
+                    auth_token = server._AUTH_CONTEXT.set(effective_context)
+                    binding_token = server._SESSION_BINDING.set(state)
 
-            try:
-                inner_scope = dict(scope)
-                inner_scope["headers"] = [
-                    (key, value)
-                    for key, value in scope.get("headers", ())
-                    if key.lower() not in {b"authorization", b"origin"}
-                ]
-                await self.app(inner_scope, replay_receive, capture_send)
-            finally:
-                server._SESSION_BINDING.reset(binding_token)
+                    async def capture_send(message):
+                        if message["type"] == "http.response.start":
+                            response_session = next(
+                                (
+                                    value.decode("latin-1")
+                                    for key, value in message.get("headers", ())
+                                    if key.lower() == b"mcp-session-id"
+                                ),
+                                None,
+                            )
+                            if (
+                                scope.get("method") == "DELETE"
+                                and message["status"] < 400
+                            ):
+                                self.sessions.remove(session_id)
+                            elif message["status"] < 400:
+                                target_session = response_session or session_id
+                                if target_session is not None:
+                                    self.sessions.store(
+                                        target_session,
+                                        context,
+                                        state,
+                                    )
+                        await send(message)
+
+                    try:
+                        inner_scope = dict(scope)
+                        inner_scope["headers"] = [
+                            (key, value)
+                            for key, value in scope.get("headers", ())
+                            if key.lower()
+                            not in {b"authorization", b"origin"}
+                        ]
+                        await self.app(
+                            inner_scope, replay_receive, capture_send
+                        )
+                    finally:
+                        server._SESSION_BINDING.reset(binding_token)
+                        server._AUTH_CONTEXT.reset(auth_token)
+                finally:
+                    state.reset_effective()
         except AccessError as exc:
             await _send_error(send, exc)
         except psycopg.Error:

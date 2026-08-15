@@ -428,3 +428,93 @@ def test_hosted_runtime_rejects_git_before_listener(
         http.run_server(str(config_path), environ=environ)
 
     assert listener_started is False
+
+
+def test_session_refresh_preserves_selection_without_grant_expansion(
+    hosted_runtime,
+):
+    import psycopg
+
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    created = auth.create_token(
+        "wiki-a",
+        "session-manager",
+        read_domains=["docs", "private"],
+        write_domains=["docs", "private"],
+    )
+    token = created["token"]
+
+    def status(client, session_id):
+        response = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert response.status_code == 200
+        return json.loads(response.json()["result"]["content"][0]["text"])
+
+    def set_private(enabled):
+        with psycopg.connect(auth.dsn) as connection:
+            with connection.cursor() as cursor:
+                if enabled:
+                    cursor.execute(
+                        "INSERT INTO iwiki.token_domain_grants "
+                        "(iwiki_id, token_id, domain_id, can_read, can_write) "
+                        "SELECT %s, %s, domain_id, true, true "
+                        "FROM iwiki.domains WHERE iwiki_id = %s "
+                        "AND slug = 'private' "
+                        "ON CONFLICT (iwiki_id, token_id, domain_id) "
+                        "DO UPDATE SET can_read = true, can_write = true",
+                        ("wiki-a", created["token_id"], "wiki-a"),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM iwiki.token_domain_grants g "
+                        "USING iwiki.domains d WHERE d.iwiki_id = g.iwiki_id "
+                        "AND d.domain_id = g.domain_id AND g.iwiki_id = %s "
+                        "AND g.token_id = %s AND d.slug = 'private'",
+                        ("wiki-a", created["token_id"]),
+                    )
+
+    with TestClient(
+        runtime.app, base_url="http://127.0.0.1:8765"
+    ) as client:
+        initialized = _initialize(client, token)
+        session_id = initialized.headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+
+        set_private(False)
+        assert status(client, session_id)["read"] == ["docs"]
+
+        set_private(True)
+        restored = status(client, session_id)
+        assert restored["read"] == ["docs", "private"]
+        assert restored["write"] == ["docs", "private"]
+
+        auth.create_domain("wiki-a", "new")
+        with psycopg.connect(auth.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO iwiki.token_domain_grants "
+                    "(iwiki_id, token_id, domain_id, can_read, can_write) "
+                    "SELECT %s, %s, domain_id, true, true "
+                    "FROM iwiki.domains WHERE iwiki_id = %s AND slug = 'new'",
+                    ("wiki-a", created["token_id"], "wiki-a"),
+                )
+        assert "new" not in status(client, session_id)["read"]
+
+        narrowed = _tool_call(
+            client,
+            token,
+            "wiki_bind",
+            {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+            session_id=session_id,
+        )
+        assert narrowed.status_code == 200
+        set_private(False)
+        set_private(True)
+        assert status(client, session_id)["read"] == ["docs"]
