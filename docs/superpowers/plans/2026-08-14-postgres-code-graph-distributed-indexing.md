@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: ecd61e998aed8d2a
+  plan_hash: 853044d788d96566
   last_run: 2026-08-15
   phases:
     structure: { status: passed }
@@ -23,7 +23,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 584ae0ca2b3cdaa6
+      section_hash: 2f9861fbce14c6f8
       fragment: "Do not implement resume, reattach, transfer, supersession, or fencing fields."
       text: "The prior fencing token had no ownership-transfer operation and therefore no protective effect."
       fix: "Remove fencing and make sessions non-transferable with fixed owner and lease checks."
@@ -33,7 +33,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 5: Target Markdown revision and code-to-wiki link derivation"
-      section_hash: 0c434cee7421eb8e
+      section_hash: 0f2e171f3e2c6045
       fragment: "PostgreSQL `lint_domain` and local `engine.lint` explicitly compute the current canonical hash"
       text: "R-019 lint output had no implementation owner or test."
       fix: "Assign PostgreSQL/local lint implementation and exact revision/stale-link tests to Task 5."
@@ -63,7 +63,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 584ae0ca2b3cdaa6
+      section_hash: 2f9861fbce14c6f8
       fragment: "SET LOCAL lock_timeout = <lock_timeout_ms>"
       text: "pg_try_advisory_xact_lock could not satisfy configured busy timeout semantics."
       fix: "Use blocking advisory lock, transaction-local timeout, SQLSTATE mapping, and real contention test."
@@ -83,7 +83,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 584ae0ca2b3cdaa6
+      section_hash: 2f9861fbce14c6f8
       fragment: "call cleanup_staging(now) before session creation"
       text: "Retention cleanup existed without an operational call site."
       fix: "Invoke bounded per-domain cleanup from every begin and test active-data preservation."
@@ -93,7 +93,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 8: Runtime composition and MCP tool surface"
-      section_hash: 3acc7588e7c06de4
+      section_hash: 8234772c317059df
       fragment: "`_code_publication_service` returns `unsupported_storage` unless the current call is authenticated hosted PostgreSQL"
       text: "Publication-tool behavior for Git/SQLite and wiki_code_index matrix entries was undefined."
       fix: "Specify static registration, hosted-only execution, local direct adapter use, and complete matrix tests."
@@ -103,7 +103,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: a310f0f3426f59c4
+      section_hash: 5dd28963a86f7437
       fragment: "real initialize/tool JSON-RPC requests through /mcp"
       text: "The MCP lifecycle branch could degrade into a fake argument-mapping test."
       fix: "Run the same lifecycle through the real in-process hosted ASGI/MCP stack and disposable PostgreSQL."
@@ -113,7 +113,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 584ae0ca2b3cdaa6
+      section_hash: 2f9861fbce14c6f8
       fragment: "test_finalize_recomputes_header_graph_revision"
       text: "Target-side revision_mismatch had no explicit implementation test."
       fix: "Make header the single source and require independent target recomputation with a forged-revision test."
@@ -143,7 +143,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 584ae0ca2b3cdaa6
+      section_hash: 2f9861fbce14c6f8
       fragment: "Do not implement resume, reattach, transfer, supersession, or fencing fields."
       text: "Plan fencing fields contradicted the revised non-transferable-session specification."
       fix: "Remove fencing from types, schema, adapters, MCP signatures, tests, and coverage evidence."
@@ -173,7 +173,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 6: PostgreSQL ready/fresh reader"
-      section_hash: 82c12d79e0903fd5
+      section_hash: 4f9b06b759d3db27
       fragment: "byte-for-byte equal normalized search results across all nine ranks"
       text: "Reader equivalence checked only entity order and could miss rank, field, or tie-break drift."
       fix: "Use the authoritative rank table and compare complete normalized SQLite/PostgreSQL results for all nine ranks."
@@ -213,7 +213,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: a310f0f3426f59c4
+      section_hash: 5dd28963a86f7437
       fragment: "Assert the three closed sets independently"
       text: "A combined adapter/readiness error type erased the route-specific closed sets in R-028."
       fix: "Define publication, adapter, and readiness types/constants separately and test each route independently."
@@ -223,7 +223,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 10: Operator documentation and 20,000-file evidence"
-      section_hash: e23a67bcee405ded
+      section_hash: 168a5a112358e91c
       fragment: "test_postgres_publication_respects_server_ceilings"
       text: "Scale evidence covered only SQLite and did not exercise distributed server ceilings."
       fix: "Keep the 20,000-file SQLite boundary and add a real 2,000-file PostgreSQL ceiling/query-bound run required before result reconciliation."
@@ -253,7 +253,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: a310f0f3426f59c4
+      section_hash: 5dd28963a86f7437
       fragment: "stage only the contract tests and version files"
       text: "The prior commit command pre-staged implementation files even when no demonstrated defect changed them."
       fix: "Return demonstrated defects to their owning task and stage only Task 9 contract tests in Task 9."
@@ -263,7 +263,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "1. Delivery rules and acceptance source"
-      section_hash: 2548b2bbd874f29f
+      section_hash: 93b190c1891cb24c
       fragment: "all four version surfaces"
       text: "Plan commits updated distribution metadata but omitted the runtime version and fixed package-version assertion, leaving the approved baseline failing."
       fix: "Add a checked 0.7.114 baseline repair, synchronize all four version surfaces in every later commit, and shift Task 1 through Task 10 versions."
@@ -273,7 +273,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "1. Delivery rules and acceptance source"
-      section_hash: 2548b2bbd874f29f
+      section_hash: 93b190c1891cb24c
       fragment: "strict `<500 ms`"
       text: "The existing strict startup gate of 100 ms rejected repeated healthy environment measurements between 101.742654 and 133.499218 ms."
       fix: "Apply the user-approved strict 500 ms startup gate through a failing boundary test, include it in the 0.7.114 baseline repair, and require the full suite to pass."
@@ -303,7 +303,7 @@ chain:
 - Implement requirements `R-001` through `R-030` and prove acceptance criteria `AC-01` through `AC-30` without changing the approved intent or spec.
 - Preserve one repository per bound primary domain, Python-only extraction, existing SQLite query behavior, and ordinary PostgreSQL wiki behavior.
 - Use TDD for every behavior change: focused failing test, observed failure, minimal implementation, focused pass, broader regression, version bump, commit.
-- Every repository commit updates the same version in `pyproject.toml`, `uv.lock`, `src/iwiki_mcp/__init__.py`, and the fixed package-version assertion in `tests/test_package.py`. Existing branch history uses baseline `0.7.114`, Task 1 `0.7.115`, the initial Task 2 slice `0.7.116`, and the approved specification correction `0.7.117`. The prior checked plan revision used `0.7.118`; the Task 2 atomic-recovery commit uses `0.7.119`; the hosted-principal and compatibility-artifact specification revision uses `0.7.120`; its plan revision used `0.7.121`; Task 3 uses `0.7.122`; the `origin/master` domain-authority merge uses `0.7.123`; this post-merge chain revision prepares `0.7.124`; Tasks 4–10 use `0.7.125` through `0.7.131`. Any demonstrated defect after Task 10 uses `0.7.132` or the next unused patch version.
+- Every repository commit updates the same version in `pyproject.toml`, `uv.lock`, `src/iwiki_mcp/__init__.py`, and the fixed package-version assertion in `tests/test_package.py`. Existing branch history uses baseline `0.7.114`, Task 1 `0.7.115`, the initial Task 2 slice `0.7.116`, and the approved specification correction `0.7.117`. The prior checked plan revision used `0.7.118`; the Task 2 atomic-recovery commit uses `0.7.119`; the hosted-principal and compatibility-artifact specification revision uses `0.7.120`; its plan revision used `0.7.121`; Task 3 uses `0.7.122`; the `origin/master` domain-authority merge uses `0.7.123`; this post-merge chain revision prepares `0.7.124`; the Task 2 publication-starvation test repair uses `0.7.125`; Tasks 4–10 use `0.7.126` through `0.7.132`. Any demonstrated defect after Task 10 uses `0.7.133` or the next unused patch version.
 - Before Task 1, repair the already reproduced baseline mismatch by setting all four version surfaces to `0.7.114`, and raise the existing code-graph startup release gate from strict `<100 ms` to user-approved strict `<500 ms` in the benchmark implementation and boundary test. Run `uv lock`, require `uv run pytest -q tests/test_package.py`, the focused startup boundary test, and `uv run pytest -q` to pass, then commit this checked plan correction with the synchronized version files, benchmark gate, and test. The observed pre-repair failures were `iwiki_mcp.__version__ == "0.7.108"` versus distribution metadata `0.7.113`, followed by environment startup measurements of `133.499218`, `125.841149`, `101.742654`, and `106.770350` ms against the old `<100 ms` gate.
 - Do not push, publish production snapshots, create production credentials, or run destructive database operations outside the disposable `*_test` database.
 - Parent agent alone updates iwiki task/wiki pages. Workers return repository paths and check evidence; they never call wiki write tools.
@@ -970,7 +970,7 @@ Expected: all configured tests PASS; two domains finalize concurrently, same-dom
 
 - [ ] **Step 5: Bump version and commit Task 4**
 
-Set all four version surfaces to `0.7.125`, then run:
+Set all four version surfaces to `0.7.126`, then run:
 
 ```bash
 uv lock
@@ -1085,7 +1085,7 @@ Expected: target links match selector provenance, any intervening Markdown conte
 
 - [ ] **Step 5: Bump version and commit Task 5**
 
-Set all four version surfaces to `0.7.126`, then run:
+Set all four version surfaces to `0.7.127`, then run:
 
 ```bash
 uv lock
@@ -1168,7 +1168,7 @@ Expected: SQLite and PostgreSQL return byte-for-byte equal normalized search res
 
 - [ ] **Step 5: Bump version and commit Task 6**
 
-Set all four version surfaces to `0.7.127`, then run:
+Set all four version surfaces to `0.7.128`, then run:
 
 ```bash
 uv lock
@@ -1258,7 +1258,7 @@ Expected: exact tool mapping passes, cross-token session takeover returns `unaut
 
 - [ ] **Step 5: Bump version and commit Task 7**
 
-Set all four version surfaces to `0.7.128`, then run:
+Set all four version surfaces to `0.7.129`, then run:
 
 ```bash
 uv lock
@@ -1366,7 +1366,7 @@ Expected: complete matrix includes all four publication tools plus `wiki_code_in
 
 - [ ] **Step 5: Bump version and commit Task 8**
 
-Set all four version surfaces to `0.7.129`, then run:
+Set all four version surfaces to `0.7.130`, then run:
 
 ```bash
 uv lock
@@ -1486,7 +1486,7 @@ Expected: all selected tests PASS; PostgreSQL integration tests SKIP only when t
 
 - [ ] **Step 5: Bump version and commit Task 9**
 
-Set all four version surfaces to `0.7.130`; stage only the contract tests and version files, then run:
+Set all four version surfaces to `0.7.131`; stage only the contract tests and version files, then run:
 
 ```bash
 uv lock
@@ -1605,7 +1605,7 @@ Expected: SQLite scale reports exactly 20,000 files, PostgreSQL scale reports ex
 
 - [ ] **Step 6: Bump version and commit Task 10**
 
-Set all four version surfaces to `0.7.131`, then run:
+Set all four version surfaces to `0.7.132`, then run:
 
 ```bash
 uv lock
@@ -1624,7 +1624,7 @@ Expected: final implementation commit contains docs, scale evidence, config temp
 **Requirements:** R-001–R-030; AC-01–AC-30.
 **Problem closed:** produce fresh evidence that implementation matches the selected spec and contains no excess behavior.
 **Files:**
-- Inspect only. If a check demonstrates a defect, stop Task 11, return to the owning implementation task, make a focused fix at version `0.7.132` or the next unused patch, synchronize all four version surfaces, commit it, then restart Task 11 from Step 1.
+- Inspect only. If a check demonstrates a defect, stop Task 11, return to the owning implementation task, make a focused fix at version `0.7.133` or the next unused patch, synchronize all four version surfaces, commit it, then restart Task 11 from Step 1.
 
 - [ ] **Step 1: Verify repository scope and versions**
 

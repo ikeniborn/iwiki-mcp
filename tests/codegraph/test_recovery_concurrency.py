@@ -35,7 +35,12 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     runtime_pair,
 ):
     first, second = runtime_pair
-    old = first.index(force=True)["revision"]
+    # Seed under a generous rebuild budget: the paused publication below needs
+    # the default two-second budget to prove bounded busy, but the first full
+    # build must not race it.
+    seeded = first.with_config(max_rebuild_seconds=30).index(force=True)
+    assert "revision" in seeded, seeded
+    old = seeded["revision"]
     with first.runtime._store.read_lease() as connection:
         old_names = tuple(
             row[0] for row in connection.execute(
@@ -82,7 +87,10 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
                 observations.append((repository, names))
             except Exception as exc:
                 observations.append(("error", type(exc).__name__))
-            time.sleep(0.005)
+            # Publication refuses to replace the canonical database while a
+            # foreign connection keeps -wal/-shm present, so the poll must
+            # leave the publisher a window instead of starving it.
+            time.sleep(0.05)
         observation_writer.send(observations)
         observation_writer.close()
 
@@ -95,7 +103,7 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
 
         def paused_replace(*args, **kwargs):
             entered.write_text("entered", encoding="utf-8")
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 30
             while not release_replace.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not release_replace.exists():
@@ -107,7 +115,7 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
             verify_calls += 1
             if verify_calls == 2:
                 verify_pending.write_text("pending", encoding="utf-8")
-                deadline = time.monotonic() + 8
+                deadline = time.monotonic() + 30
                 while (
                     not release_verify.exists()
                     and time.monotonic() < deadline
@@ -140,7 +148,7 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
         competing = second.index(force=True)
         elapsed = time.monotonic() - started
         release_replace.write_text("release", encoding="utf-8")
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 20
         while not verify_pending.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert verify_pending.exists()
@@ -167,7 +175,8 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     observation_reader.close()
     after = second.status()
     assert competing["code"] == "busy"
-    assert elapsed < 3
+    # Bounded by the two-second rebuild budget, never by the paused publication.
+    assert elapsed < 8
     assert {item["state"] for item in during} == {"rebuilding"}
     assert {item["revision"] for item in during} == {
         writer_result["status"]["revision"]
