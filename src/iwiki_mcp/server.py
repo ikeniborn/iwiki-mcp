@@ -307,6 +307,7 @@ def _postgres_store_for_binding(binding: base.PostgresBinding):
         connection_factory=(
             _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
         ),
+        require_database_principal=True,
     )
 
 
@@ -2716,15 +2717,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     binding = base.resolve_storage_binding(project_dir)
     if not _is_postgres(binding):
         return
-    _postgres_migrations.run_migrations(
-        _postgres_migrations.MigrationSettings(
-            dsn=binding.connection_dsn(),
-            embed_model=cfg.embed_model,
-            embed_dimensions=cfg.dimensions,
-            statement_timeout_ms=30_000,
-            lock_timeout_ms=5_000,
-        )
-    )
+    _postgres_migrations.require_schema_version(binding.connection_dsn())
 
 
 def main() -> None:

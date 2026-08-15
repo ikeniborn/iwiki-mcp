@@ -9,6 +9,7 @@ from typing import Any, ContextManager
 
 import numpy as np
 import psycopg
+from psycopg import sql
 from pgvector.psycopg import register_vector
 from psycopg.types.json import Jsonb
 
@@ -25,6 +26,247 @@ from .auth import AccessError, AuthContext
 
 
 _BLOCKING_FINDINGS = {"deep_heading", "pre_h2_text"}
+_PROTECTED_TABLES = (
+    "domains",
+    "pages",
+    "chunks",
+    "links",
+    "code_graph_domain_state",
+    "code_graph_publication_sessions",
+    "code_graph_snapshots",
+    "code_graph_batches",
+    "code_graph_files",
+    "code_graph_symbols",
+    "code_graph_relations",
+    "code_graph_wiki_links",
+)
+
+
+def _principal_shape(cursor, principal: str) -> tuple[bool, bool]:
+    cursor.execute(
+        "SELECT rolcanlogin, rolsuper OR rolbypassrls "
+        "FROM pg_roles WHERE rolname = %s",
+        (principal,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return False, False
+    cursor.execute(
+        "SELECT EXISTS ("
+        "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_roles r ON r.oid = c.relowner "
+        "WHERE n.nspname = 'iwiki' AND c.relname = ANY(%s) "
+        "AND pg_has_role(%s, r.rolname, 'MEMBER'))",
+        (list(_PROTECTED_TABLES), principal),
+    )
+    return True, bool(not row[0] or row[1] or cursor.fetchone()[0])
+
+
+def validate_direct_principal(
+    dsn: str,
+    *,
+    iwiki_id: str | None = None,
+    read_domains: tuple[str, ...] = (),
+    write_domains: tuple[str, ...] = (),
+) -> dict[str, str] | None:
+    """Reject owner/BYPASSRLS roles and, when supplied, unmapped scope."""
+    try:
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT session_user")
+                principal = cursor.fetchone()[0]
+                exists, invalid = _principal_shape(cursor, principal)
+                if not exists or invalid:
+                    return {"error": "invalid_config"}
+                if iwiki_id is None:
+                    return None
+                cursor.execute(
+                    "SELECT d.slug, "
+                    "iwiki.database_principal_can_access(d.iwiki_id, d.domain_id, false), "
+                    "iwiki.database_principal_can_access(d.iwiki_id, d.domain_id, true) "
+                    "FROM iwiki.domains d WHERE d.iwiki_id = %s",
+                    (iwiki_id,),
+                )
+                grants = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+    except psycopg.Error:
+        return {"error": "invalid_config"}
+    if any(not grants.get(domain, (False, False))[0] for domain in read_domains):
+        return {"error": "invalid_config"}
+    if any(not grants.get(domain, (False, False))[1] for domain in write_domains):
+        return {"error": "invalid_config"}
+    return None
+
+
+def provision_runtime_grant(
+    admin_dsn: str,
+    *,
+    principal: str,
+    iwiki_id: str,
+    read_domains: list[str],
+    write_domains: list[str],
+    runtime: str,
+) -> dict[str, object]:
+    """Map an existing restricted role and grant only runtime SQL privileges."""
+    if runtime not in {"hosted", "direct"}:
+        raise ValueError("runtime must be hosted or direct")
+    read = tuple(dict.fromkeys(read_domains))
+    write = tuple(dict.fromkeys(write_domains))
+    if not read:
+        raise ValueError("read grant is required")
+    if any(domain not in read for domain in write):
+        raise ValueError("write grant must also be readable")
+    with psycopg.connect(admin_dsn) as connection:
+        with connection.cursor() as cursor:
+            exists, invalid = _principal_shape(cursor, principal)
+            if not exists or invalid:
+                raise ValueError("invalid runtime principal")
+            cursor.execute(
+                "SELECT slug, domain_id FROM iwiki.domains "
+                "WHERE iwiki_id = %s AND slug = ANY(%s)",
+                (iwiki_id, list(read)),
+            )
+            domain_ids = {row[0]: row[1] for row in cursor.fetchall()}
+            if set(domain_ids) != set(read):
+                raise ValueError("domain grant does not exist")
+            cursor.execute(
+                "DELETE FROM iwiki.database_principal_domain_grants "
+                "WHERE principal = %s AND iwiki_id = %s",
+                (principal, iwiki_id),
+            )
+            for domain in read:
+                cursor.execute(
+                    "INSERT INTO iwiki.database_principal_domain_grants "
+                    "(principal, iwiki_id, domain_id, runtime, can_read, can_write) "
+                    "VALUES (%s, %s, %s, %s, true, %s)",
+                    (principal, iwiki_id, domain_ids[domain], runtime, domain in write),
+                )
+            role = sql.Identifier(principal)
+            cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA iwiki TO {}").format(role))
+            cursor.execute(
+                sql.SQL(
+                    "GRANT SELECT ON iwiki.schema_migrations, iwiki.iwikis, "
+                    "iwiki.tokens, iwiki.token_domain_grants, iwiki.domains, "
+                    "iwiki.pages, iwiki.chunks, iwiki.links, "
+                    "iwiki.code_graph_domain_state, "
+                    "iwiki.code_graph_publication_sessions, "
+                    "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
+                    "iwiki.code_graph_files, iwiki.code_graph_symbols, "
+                    "iwiki.code_graph_relations, iwiki.code_graph_wiki_links TO {}"
+                ).format(role)
+            )
+            cursor.execute(
+                sql.SQL("GRANT UPDATE (last_used_at) ON iwiki.tokens TO {}").format(
+                    role
+                )
+            )
+            cursor.execute(
+                sql.SQL(
+                    "GRANT INSERT, UPDATE, DELETE ON iwiki.pages, iwiki.chunks, "
+                    "iwiki.links, iwiki.code_graph_domain_state, "
+                    "iwiki.code_graph_publication_sessions, "
+                    "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
+                    "iwiki.code_graph_files, iwiki.code_graph_symbols, "
+                    "iwiki.code_graph_relations, iwiki.code_graph_wiki_links TO {}"
+                ).format(role)
+            )
+            cursor.execute(
+                sql.SQL(
+                    "GRANT USAGE ON SEQUENCE iwiki.pages_page_id_seq, "
+                    "iwiki.chunks_chunk_id_seq, iwiki.links_link_id_seq, "
+                    "iwiki.code_graph_domain_lock_id_seq TO {}"
+                ).format(role)
+            )
+            cursor.execute(
+                sql.SQL(
+                    "GRANT EXECUTE ON FUNCTION "
+                    "iwiki.database_principal_can_access(text, bigint, boolean), "
+                    "iwiki.database_principal_runtime_domains(text) TO {}"
+                ).format(role)
+            )
+    return {
+        "principal": principal,
+        "iwiki": iwiki_id,
+        "runtime": runtime,
+        "read_domains": list(read),
+        "write_domains": list(write),
+    }
+
+
+def inspect_runtime_principal(admin_dsn: str, principal: str) -> dict[str, object]:
+    """Return safe role shape and shared domain mappings for operators."""
+    with psycopg.connect(admin_dsn) as connection:
+        with connection.cursor() as cursor:
+            exists, invalid = _principal_shape(cursor, principal)
+            if not exists:
+                raise ValueError("runtime principal does not exist")
+            cursor.execute(
+                "SELECT g.iwiki_id, d.slug, g.runtime, g.can_read, g.can_write "
+                "FROM iwiki.database_principal_domain_grants g "
+                "JOIN iwiki.domains d USING (iwiki_id, domain_id) "
+                "WHERE g.principal = %s ORDER BY g.iwiki_id, d.slug",
+                (principal,),
+            )
+            grants = [
+                {
+                    "iwiki": row[0],
+                    "domain": row[1],
+                    "runtime": row[2],
+                    "can_read": row[3],
+                    "can_write": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+    return {"principal": principal, "valid_runtime_shape": not invalid, "grants": grants}
+
+
+def require_hosted_principal(
+    admin_dsn: str,
+    *,
+    principal: str,
+    iwiki_id: str,
+    read_domains: list[str],
+    write_domains: list[str],
+) -> None:
+    """Reject token issuance unless this exact hosted role covers every domain."""
+    with psycopg.connect(admin_dsn) as connection:
+        with connection.cursor() as cursor:
+            exists, invalid = _principal_shape(cursor, principal)
+            if not exists or invalid:
+                raise ValueError("invalid hosted principal")
+            cursor.execute(
+                "SELECT d.slug, g.can_read, g.can_write "
+                "FROM iwiki.database_principal_domain_grants g "
+                "JOIN iwiki.domains d USING (iwiki_id, domain_id) "
+                "WHERE g.principal = %s AND g.iwiki_id = %s "
+                "AND g.runtime = 'hosted'",
+                (principal, iwiki_id),
+            )
+            grants = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+    if any(not grants.get(domain, (False, False))[0] for domain in read_domains):
+        raise ValueError("hosted principal is not granted every read domain")
+    if any(not grants.get(domain, (False, False))[1] for domain in write_domains):
+        raise ValueError("hosted principal is not granted every write domain")
+
+
+def require_hosted_runtime_principal(dsn: str) -> None:
+    """Require the connected hosted role to be restricted and provisioned."""
+    try:
+        with psycopg.connect(dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT session_user")
+                principal = cursor.fetchone()[0]
+                exists, invalid = _principal_shape(cursor, principal)
+                if not exists or invalid:
+                    raise ValueError("invalid hosted principal")
+                cursor.execute(
+                    "SELECT iwiki.database_principal_runtime_domains(%s)",
+                    ("hosted",),
+                )
+                granted = cursor.fetchone()[0]
+    except psycopg.Error as exc:
+        raise ValueError("invalid hosted principal") from exc
+    if not granted:
+        raise ValueError("hosted principal is not provisioned for any domain")
 
 
 def _validate_identifier(value: str, name: str) -> str:
@@ -52,6 +294,7 @@ class PostgresStore:
         embedder: Callable = embed_texts,
         auth_context: AuthContext | None = None,
         connection_factory: Callable[[], ContextManager[Any]] | None = None,
+        require_database_principal: bool = False,
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = _validate_identifier(iwiki_id, "iwiki id")
@@ -63,6 +306,16 @@ class PostgresStore:
         self._connection_factory = connection_factory or (
             lambda: psycopg.connect(self._dsn)
         )
+        self._require_database_principal = require_database_principal
+        if require_database_principal:
+            context = auth_context
+            if context is None or validate_direct_principal(
+                dsn,
+                iwiki_id=self.iwiki_id,
+                read_domains=context.read_domains,
+                write_domains=context.write_domains,
+            ) is not None:
+                raise ValueError("invalid_config")
 
     def with_embedder(self, embedder: Callable) -> "PostgresStore":
         return PostgresStore(
@@ -72,6 +325,7 @@ class PostgresStore:
             embedder=embedder,
             auth_context=self._auth_context,
             connection_factory=self._connection_factory,
+            require_database_principal=self._require_database_principal,
         )
 
     def _require_read(self, domain: str) -> None:

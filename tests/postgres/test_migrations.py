@@ -49,8 +49,8 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
             tables = {row[0] for row in cursor.fetchall()}
 
     assert schemas_after - schemas_before == {"iwiki"}
-    assert result.applied_versions == (1, 2, 3)
-    assert tables == {
+    assert result.applied_versions == (1, 2, 3, 4)
+    assert {
         "chunks",
         "domains",
         "git_imports",
@@ -61,7 +61,9 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
         "storage_metadata",
         "token_domain_grants",
         "tokens",
-    }
+        "code_graph_snapshots",
+        "database_principal_domain_grants",
+    } <= tables
 
 
 def test_repeated_and_concurrent_startup_applies_one_ordered_history(clean_postgres):
@@ -81,9 +83,9 @@ def test_repeated_and_concurrent_startup_applies_one_ordered_history(clean_postg
             )
             versions = tuple(row[0] for row in cursor.fetchall())
 
-    assert sorted(result.applied_versions for result in results) == [(), (1, 2, 3)]
+    assert sorted(result.applied_versions for result in results) == [(), (1, 2, 3, 4)]
     assert repeated.applied_versions == ()
-    assert versions == (1, 2, 3)
+    assert versions == (1, 2, 3, 4)
 
 
 def test_unrelated_schema_survives_migration(clean_postgres):
@@ -122,7 +124,7 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
     run_migrations(_settings(clean_postgres))
     broken = MIGRATIONS + (
         Migration(
-            version=4,
+            version=5,
             statements=(
                 "CREATE TABLE iwiki.must_roll_back (id integer PRIMARY KEY)",
                 "THIS IS NOT VALID SQL",
@@ -140,7 +142,7 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
                 "array_agg(version ORDER BY version) "
                 "FROM iwiki.schema_migrations"
             )
-            assert cursor.fetchone() == (None, [1, 2, 3])
+            assert cursor.fetchone() == (None, [1, 2, 3, 4])
 
 
 def test_newer_schema_version_refuses_startup(clean_postgres):

@@ -58,36 +58,6 @@ def _markdown(title, description, heading, body, link=None):
     )
 
 
-@pytest.fixture
-def store_factory(clean_postgres):
-    from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
-    from iwiki_mcp.postgres.store import PostgresStore
-
-    cfg = _cfg()
-    run_migrations(
-        MigrationSettings(
-            dsn=clean_postgres,
-            embed_model=cfg.embed_model,
-            embed_dimensions=cfg.dimensions,
-            statement_timeout_ms=30_000,
-            lock_timeout_ms=5_000,
-        )
-    )
-
-    def factory(iwiki_id="wiki-a", *, embedder=_embed):
-        store = PostgresStore(
-            clean_postgres,
-            iwiki_id,
-            cfg,
-            embedder=embedder,
-        )
-        store.create_wiki(iwiki_id)
-        store.create_domain("docs")
-        return store
-
-    return factory
-
-
 def test_create_list_and_read_page_return_numeric_revision(store_factory):
     store = store_factory()
     markdown = _markdown("Alpha", "alpha summary", "Details", "alpha body")

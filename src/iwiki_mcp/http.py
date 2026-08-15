@@ -28,7 +28,8 @@ from .postgres.auth import (
     authorize_domains,
 )
 from .postgres.config import ConfigError, ServerConfig, load_server_config
-from .postgres.migrations import MigrationSettings, run_migrations
+from .postgres.migrations import require_schema_version
+from .postgres.store import require_hosted_runtime_principal
 
 
 _READ_DOMAIN_TOOLS = {
@@ -415,6 +416,8 @@ def prepare_runtime(
     cfg = admin._engine_config(config, env)
     probe(cfg)
     dsn = admin._dsn(config)
+    require_schema_version(dsn)
+    require_hosted_runtime_principal(dsn)
     options = (
         f"-c statement_timeout={config.server.statement_timeout_ms} "
         f"-c lock_timeout={config.server.lock_timeout_ms}"
@@ -429,15 +432,6 @@ def prepare_runtime(
     )
     try:
         pool.open(wait=True)
-        run_migrations(
-            MigrationSettings(
-                dsn=dsn,
-                embed_model=config.models.embed_model,
-                embed_dimensions=config.models.embed_dimensions,
-                statement_timeout_ms=config.server.statement_timeout_ms,
-                lock_timeout_ms=config.server.lock_timeout_ms,
-            )
-        )
         from . import server
 
         server._install_hosted_runtime(pool, cfg)

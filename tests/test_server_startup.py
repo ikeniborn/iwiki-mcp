@@ -47,7 +47,7 @@ def test_main_loads_config_probes_and_runs_mcp_in_order(monkeypatch):
     assert calls == ["load", ("probe", cfg), "run", "shutdown-code-graph"]
 
 
-def test_main_migrates_postgres_before_embedding_probe(monkeypatch):
+def test_main_checks_postgres_schema_before_embedding_probe(monkeypatch):
     cfg = _cfg()
     calls = []
     binding = PostgresBinding(
@@ -80,9 +80,12 @@ def test_main_migrates_postgres_before_embedding_probe(monkeypatch):
     monkeypatch.setattr(
         server._postgres_migrations,
         "run_migrations",
-        lambda settings: calls.append((
-            "migrate", settings.embed_model, settings.embed_dimensions
-        )),
+        lambda settings: pytest.fail("run_migrations called at startup"),
+    )
+    monkeypatch.setattr(
+        server._postgres_migrations,
+        "require_schema_version",
+        lambda dsn: calls.append(("require-schema", dsn)),
     )
     monkeypatch.setattr(
         server,
@@ -95,10 +98,69 @@ def test_main_migrates_postgres_before_embedding_probe(monkeypatch):
 
     assert calls == [
         "load",
-        ("migrate", cfg.embed_model, cfg.dimensions),
+        ("require-schema", binding.connection_dsn()),
         ("probe", cfg),
         "run",
     ]
+
+
+def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, capsys):
+    cfg = _cfg()
+    binding = PostgresBinding(
+        host="db.invalid",
+        port=5432,
+        database="fixture",
+        user="fixture",
+        sslmode="require",
+        iwiki_id="wiki-a",
+        read=("docs",),
+        write=("docs",),
+        primary="docs",
+        project_dir="/not-used",
+        embed_model=cfg.embed_model,
+        embed_dimensions=cfg.dimensions,
+        rerank_model="",
+        password="fixture-secret",
+    )
+    monkeypatch.setattr(server.sys, "argv", ["iwiki-mcp"])
+    monkeypatch.setattr(server.Config, "load", lambda: cfg)
+    monkeypatch.setattr(server.base, "resolve_project_dir", lambda: "/not-used")
+    monkeypatch.setattr(
+        server.base,
+        "load_project_config",
+        lambda _project: {"storage": {"type": "postgres"}},
+    )
+    monkeypatch.setattr(
+        server.base, "resolve_storage_binding", lambda _project: binding
+    )
+
+    def reject(dsn):
+        raise server._postgres_migrations.MigrationError(
+            "PostgreSQL schema version 4 is required"
+        )
+
+    monkeypatch.setattr(
+        server._postgres_migrations, "require_schema_version", reject
+    )
+    monkeypatch.setattr(
+        server._postgres_migrations,
+        "run_migrations",
+        lambda settings: pytest.fail("run_migrations called at startup"),
+    )
+    monkeypatch.setattr(
+        server,
+        "probe_embedding_endpoint",
+        lambda actual: pytest.fail("probe called after schema rejection"),
+    )
+    monkeypatch.setattr(server.mcp, "run", lambda: pytest.fail("mcp.run called"))
+
+    with pytest.raises(SystemExit) as exc:
+        server.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "Reason: PostgreSQL schema version 4 is required" in captured.err
+    assert "fixture-secret" not in captured.err
 
 
 def test_main_does_not_import_tree_sitter_language_pack(monkeypatch):

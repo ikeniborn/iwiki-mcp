@@ -259,8 +259,15 @@ def resolve_storage_binding(
         raise BaseError("storage must be a table")
     storage_type = "git" if storage is None else storage.get("type")
     if storage_type == "postgres":
-        if set(cfg) - {"read", "write", "primary", "storage"}:
+        if set(cfg) - {"read", "write", "primary", "storage", "code_graph"}:
             raise BaseError("project configuration contains keys that are not allowed")
+        code_graph = cfg.get("code_graph")
+        if code_graph is not None and not isinstance(code_graph, dict):
+            raise BaseError("code_graph must be a table")
+        if isinstance(code_graph, dict) and set(code_graph) & {
+            "iwiki_id", "read", "write", "primary"
+        }:
+            raise BaseError("code_graph cannot override postgres binding identity")
         return _postgres_binding(cfg, resolved_project_dir, storage)
     if storage_type != "git":
         raise BaseError(f"unsupported storage type: {storage_type!r}")
