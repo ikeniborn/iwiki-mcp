@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 040c6efe710b0369
+  plan_hash: ecd61e998aed8d2a
   last_run: 2026-08-15
   phases:
     structure: { status: passed }
@@ -23,7 +23,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 41edf2402df95181
+      section_hash: 584ae0ca2b3cdaa6
       fragment: "Do not implement resume, reattach, transfer, supersession, or fencing fields."
       text: "The prior fencing token had no ownership-transfer operation and therefore no protective effect."
       fix: "Remove fencing and make sessions non-transferable with fixed owner and lease checks."
@@ -33,7 +33,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 5: Target Markdown revision and code-to-wiki link derivation"
-      section_hash: 70e72e731d44f293
+      section_hash: 0c434cee7421eb8e
       fragment: "PostgreSQL `lint_domain` and local `engine.lint` explicitly compute the current canonical hash"
       text: "R-019 lint output had no implementation owner or test."
       fix: "Assign PostgreSQL/local lint implementation and exact revision/stale-link tests to Task 5."
@@ -43,7 +43,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "reject owner/`BYPASSRLS` roles"
       text: "The documented application/table-owner role could bypass RLS."
       fix: "Separate migrator, hosted service, and restricted direct roles; provision and validate shared grants."
@@ -53,7 +53,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "schema rollback-v4-compat --confirm"
       text: "Schema-v4 rollback could not start the previous application."
       fix: "Ship compatibility rollback, pinned pre-v4 smoke, and idempotent v4 reapplication."
@@ -63,7 +63,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 41edf2402df95181
+      section_hash: 584ae0ca2b3cdaa6
       fragment: "SET LOCAL lock_timeout = <lock_timeout_ms>"
       text: "pg_try_advisory_xact_lock could not satisfy configured busy timeout semantics."
       fix: "Use blocking advisory lock, transaction-local timeout, SQLSTATE mapping, and real contention test."
@@ -83,7 +83,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 41edf2402df95181
+      section_hash: 584ae0ca2b3cdaa6
       fragment: "call cleanup_staging(now) before session creation"
       text: "Retention cleanup existed without an operational call site."
       fix: "Invoke bounded per-domain cleanup from every begin and test active-data preservation."
@@ -93,7 +93,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 8: Runtime composition and MCP tool surface"
-      section_hash: cf896f35b74faafc
+      section_hash: 3acc7588e7c06de4
       fragment: "`_code_publication_service` returns `unsupported_storage` unless the current call is authenticated hosted PostgreSQL"
       text: "Publication-tool behavior for Git/SQLite and wiki_code_index matrix entries was undefined."
       fix: "Specify static registration, hosted-only execution, local direct adapter use, and complete matrix tests."
@@ -103,7 +103,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: f04b1fbb15e64c69
+      section_hash: a310f0f3426f59c4
       fragment: "real initialize/tool JSON-RPC requests through /mcp"
       text: "The MCP lifecycle branch could degrade into a fake argument-mapping test."
       fix: "Run the same lifecycle through the real in-process hosted ASGI/MCP stack and disposable PostgreSQL."
@@ -113,7 +113,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 41edf2402df95181
+      section_hash: 584ae0ca2b3cdaa6
       fragment: "test_finalize_recomputes_header_graph_revision"
       text: "Target-side revision_mismatch had no explicit implementation test."
       fix: "Make header the single source and require independent target recomputation with a forged-revision test."
@@ -123,7 +123,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "hosted service role is rls scoped"
       text: "Hosted service access was undefined after RLS enabled protected tables."
       fix: "Provision explicit shared hosted-domain grants and test a non-owner service role against allowed and unprovisioned domains."
@@ -133,7 +133,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "server._initialize_postgres_storage"
       text: "Stdio direct PostgreSQL would still migrate at startup while hosted startup became read-only."
       fix: "Apply one require_schema_version helper to both server.py and http.py and test that neither calls run_migrations."
@@ -143,7 +143,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 41edf2402df95181
+      section_hash: 584ae0ca2b3cdaa6
       fragment: "Do not implement resume, reattach, transfer, supersession, or fencing fields."
       text: "Plan fencing fields contradicted the revised non-transferable-session specification."
       fix: "Remove fencing from types, schema, adapters, MCP signatures, tests, and coverage evidence."
@@ -153,7 +153,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "move the reusable store_factory"
       text: "Cross-module tests referenced fixtures local to test_store.py and test_http.py."
       fix: "Move store_factory, hosted_runtime, and shared graph builders into tests/postgres/conftest.py before dependent tests."
@@ -163,7 +163,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "SCHEMA_GUARD_PASSED"
       text: "The pre-v4 rollback subprocess could pass or fail for unrelated interpreter, dependency, config, or startup reasons."
       fix: "Pin interpreter, PYTHONPATH, dependency environment, isolated config/DSN, schema-guard sentinel, and exact CRUD/search assertions."
@@ -173,7 +173,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 6: PostgreSQL ready/fresh reader"
-      section_hash: c1e944323396d29e
+      section_hash: 82c12d79e0903fd5
       fragment: "byte-for-byte equal normalized search results across all nine ranks"
       text: "Reader equivalence checked only entity order and could miss rank, field, or tie-break drift."
       fix: "Use the authoritative rank table and compare complete normalized SQLite/PostgreSQL results for all nine ranks."
@@ -193,7 +193,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: 01531a26d8d38301
+      section_hash: 258d171a0a98dafb
       fragment: "Replace runtime migration calls in both"
       text: "Hosted startup migration removal was not shared by stdio and was absent from the prior approved rollout contract."
       fix: "Revise the spec and plan to use operator-only migrations plus identical read-only runtime schema guards."
@@ -213,7 +213,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: f04b1fbb15e64c69
+      section_hash: a310f0f3426f59c4
       fragment: "Assert the three closed sets independently"
       text: "A combined adapter/readiness error type erased the route-specific closed sets in R-028."
       fix: "Define publication, adapter, and readiness types/constants separately and test each route independently."
@@ -223,7 +223,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 10: Operator documentation and 20,000-file evidence"
-      section_hash: 0519c6546a1ec53a
+      section_hash: e23a67bcee405ded
       fragment: "test_postgres_publication_respects_server_ceilings"
       text: "Scale evidence covered only SQLite and did not exercise distributed server ceilings."
       fix: "Keep the 20,000-file SQLite boundary and add a real 2,000-file PostgreSQL ceiling/query-bound run required before result reconciliation."
@@ -253,7 +253,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: f04b1fbb15e64c69
+      section_hash: a310f0f3426f59c4
       fragment: "stage only the contract tests and version files"
       text: "The prior commit command pre-staged implementation files even when no demonstrated defect changed them."
       fix: "Return demonstrated defects to their owning task and stage only Task 9 contract tests in Task 9."
@@ -263,7 +263,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "1. Delivery rules and acceptance source"
-      section_hash: 84f08326791492f7
+      section_hash: 2548b2bbd874f29f
       fragment: "all four version surfaces"
       text: "Plan commits updated distribution metadata but omitted the runtime version and fixed package-version assertion, leaving the approved baseline failing."
       fix: "Add a checked 0.7.114 baseline repair, synchronize all four version surfaces in every later commit, and shift Task 1 through Task 10 versions."
@@ -273,7 +273,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "1. Delivery rules and acceptance source"
-      section_hash: 84f08326791492f7
+      section_hash: 2548b2bbd874f29f
       fragment: "strict `<500 ms`"
       text: "The existing strict startup gate of 100 ms rejected repeated healthy environment measurements between 101.742654 and 133.499218 ms."
       fix: "Apply the user-approved strict 500 ms startup gate through a failing boundary test, include it in the 0.7.114 baseline repair, and require the full suite to pass."
@@ -298,12 +298,12 @@ chain:
 ## 1. Delivery rules and acceptance source
 
 - Approved intent: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/intents/2026-08-14-postgres-code-graph-distributed-indexing-intent.md` with body hash `a626f91a91ecfa50`.
-- Approved spec: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/specs/2026-08-14-postgres-code-graph-distributed-indexing-design.md` with body hash `a03ead3f44947d5d` and commit `a9a951a`.
+- Approved spec: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/specs/2026-08-14-postgres-code-graph-distributed-indexing-design.md` with body hash `0ce5a7a6ec17a244`, revised after the `origin/master` domain-authority merge.
 - Plan artifact: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/plans/2026-08-14-postgres-code-graph-distributed-indexing.md`.
 - Implement requirements `R-001` through `R-030` and prove acceptance criteria `AC-01` through `AC-30` without changing the approved intent or spec.
 - Preserve one repository per bound primary domain, Python-only extraction, existing SQLite query behavior, and ordinary PostgreSQL wiki behavior.
 - Use TDD for every behavior change: focused failing test, observed failure, minimal implementation, focused pass, broader regression, version bump, commit.
-- Every repository commit updates the same version in `pyproject.toml`, `uv.lock`, `src/iwiki_mcp/__init__.py`, and the fixed package-version assertion in `tests/test_package.py`. Existing branch history uses baseline `0.7.114`, Task 1 `0.7.115`, the initial Task 2 slice `0.7.116`, and the approved specification correction `0.7.117`. The prior checked plan revision used `0.7.118`; the Task 2 atomic-recovery commit uses `0.7.119`; the hosted-principal and compatibility-artifact specification revision uses `0.7.120`; this checked plan revision prepares `0.7.121`; Tasks 3–10 use `0.7.122` through `0.7.129`. Any demonstrated defect after Task 10 uses `0.7.130` or the next unused patch version.
+- Every repository commit updates the same version in `pyproject.toml`, `uv.lock`, `src/iwiki_mcp/__init__.py`, and the fixed package-version assertion in `tests/test_package.py`. Existing branch history uses baseline `0.7.114`, Task 1 `0.7.115`, the initial Task 2 slice `0.7.116`, and the approved specification correction `0.7.117`. The prior checked plan revision used `0.7.118`; the Task 2 atomic-recovery commit uses `0.7.119`; the hosted-principal and compatibility-artifact specification revision uses `0.7.120`; its plan revision used `0.7.121`; Task 3 uses `0.7.122`; the `origin/master` domain-authority merge uses `0.7.123`; this post-merge chain revision prepares `0.7.124`; Tasks 4–10 use `0.7.125` through `0.7.131`. Any demonstrated defect after Task 10 uses `0.7.132` or the next unused patch version.
 - Before Task 1, repair the already reproduced baseline mismatch by setting all four version surfaces to `0.7.114`, and raise the existing code-graph startup release gate from strict `<100 ms` to user-approved strict `<500 ms` in the benchmark implementation and boundary test. Run `uv lock`, require `uv run pytest -q tests/test_package.py`, the focused startup boundary test, and `uv run pytest -q` to pass, then commit this checked plan correction with the synchronized version files, benchmark gate, and test. The observed pre-repair failures were `iwiki_mcp.__version__ == "0.7.108"` versus distribution metadata `0.7.113`, followed by environment startup measurements of `133.499218`, `125.841149`, `101.742654`, and `106.770350` ms against the old `<100 ms` gate.
 - Do not push, publish production snapshots, create production credentials, or run destructive database operations outside the disposable `*_test` database.
 - Parent agent alone updates iwiki task/wiki pages. Workers return repository paths and check evidence; they never call wiki write tools.
@@ -324,11 +324,11 @@ chain:
 | `src/iwiki_mcp/codegraph/linking.py` | Shared selector parsing plus target-supplied Markdown snapshot resolution |
 | `src/iwiki_mcp/postgres/codegraph.py` | PostgreSQL sessions, batches, finalization, active reads, queries, cleanup |
 | `src/iwiki_mcp/postgres/config.py` | Hosted freshness, batch, session, and retention ceilings |
-| `src/iwiki_mcp/postgres/migrations.py` | Idempotent migration 4, graph schema, shared principal grants, RLS, rollback compatibility SQL |
+| `src/iwiki_mcp/postgres/migrations.py` | Idempotent migration 5, graph schema, shared principal grants, RLS, rollback compatibility SQL |
 | `src/iwiki_mcp/postgres/store.py` | Markdown generation mutation, canonical snapshot provider, shared scoped wiki operations |
-| `src/iwiki_mcp/admin.py` | Operator-only restricted-principal grants, exact `--hosted-principal` token validation, and schema-v4 compatibility rollback |
-| `compat/postgres-v3-runtime-guard.json` | Manifest pinning the compatibility base commit, `patch_sha256`, and `source_tree_sha256` |
-| `compat/postgres-v3-runtime-guard.patch` | Reviewed read-only schema-3 guard patch replacing both runtime `run_migrations` calls |
+| `src/iwiki_mcp/admin.py` | Operator-only restricted-principal grants, exact `--hosted-principal` token validation, and schema-v5 compatibility rollback |
+| `compat/postgres-v4-runtime-guard.json` | Manifest pinning the compatibility base commit, `patch_sha256`, and `source_tree_sha256` |
+| `compat/postgres-v4-runtime-guard.patch` | Reviewed read-only schema-4 guard patch replacing both runtime `run_migrations` calls |
 | `src/iwiki_mcp/postgres/auth.py` | Existing token identity/scope exposed to publication ownership checks |
 | `src/iwiki_mcp/storage.py` and `src/iwiki_mcp/base.py` | Preserve immutable local PostgreSQL scope and admit `[code_graph]` config |
 | `src/iwiki_mcp/http.py` | Hosted read-only schema guard plus read/write authorization classification for publication tools |
@@ -347,7 +347,7 @@ chain:
 | `tests/postgres/test_code_graph_http.py` | Hosted auth, ownership, publication tools, remote reads |
 | `tests/postgres/test_code_graph_contract.py` | Same lifecycle over SQLite, restricted direct PostgreSQL, and real in-process hosted MCP |
 | `tests/postgres/test_code_graph_scale.py` | Reduced generated PostgreSQL publication run proving server batch/query ceilings |
-| `tests/postgres/test_code_graph_rollback.py` | Schema-v4 compatibility rollback, reconstructed maintenance-artifact smoke, and raw pre-v4 negative control |
+| `tests/postgres/test_code_graph_rollback.py` | Schema-v5 compatibility rollback, reconstructed maintenance-artifact smoke, and raw pre-code-graph negative control |
 | `tests/test_server_startup.py` | Stdio startup ordering against the read-only schema guard instead of runtime migration |
 | `tests/eval/test_code_graph_publication_scale.py` | Generated 20,000-file publication evidence |
 | `tests/test_server_import_closure.py` | Live-server eager import closure for the SQLite adapter |
@@ -719,8 +719,8 @@ Expected: one Task 2 recovery commit with internal ready authority, explicit unc
 **Files:**
 - Create: `tests/postgres/test_code_graph_migrations.py`
 - Create: `tests/postgres/test_code_graph_rollback.py`
-- Create: `compat/postgres-v3-runtime-guard.json`
-- Create: `compat/postgres-v3-runtime-guard.patch`
+- Create: `compat/postgres-v4-runtime-guard.json`
+- Create: `compat/postgres-v4-runtime-guard.patch`
 - Modify: `tests/test_server_startup.py`
 - Modify: `src/iwiki_mcp/postgres/migrations.py:44-228`
 - Modify: `src/iwiki_mcp/postgres/store.py:43-100`
@@ -797,9 +797,9 @@ uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_code_grap
 
 Expected: PostgreSQL tests skip when `IWIKI_TEST_POSTGRES_DSN` is absent; when configured, FAIL because schema version remains 3, graph/scope objects are absent, `token create` accepts no `--hosted-principal`, and stdio startup still migrates.
 
-- [ ] **Step 3: Add idempotent migration 4, restricted-principal provisioning, and read-only startup schema check**
+- [ ] **Step 3: Add idempotent migration 5, restricted-principal provisioning, and read-only startup schema check**
 
-Add one contiguous `Migration(version=4, statements=GRAPH_MIGRATION_STATEMENTS)` containing the graph tables from spec Section 7.1, `domains.markdown_generation`, database-assigned unique `domain_lock_id`, state/kind checks, composite foreign keys, and active-ready pointer enforcement. Publication tables contain fixed owner and lease columns and no fencing counter/token. Every version-4 statement must tolerate reapplication after the compatibility marker is removed. Use ordinary `ENABLE ROW LEVEL SECURITY`, explicitly omit `FORCE ROW LEVEL SECURITY`, and ensure schema-owner credentials are never accepted as runtime credentials. Policies on domain-scoped Markdown and graph tables call the same fixed qualified principal-scope function:
+Add one contiguous `Migration(version=5, statements=GRAPH_MIGRATION_STATEMENTS)` containing the graph tables from spec Section 7.1, `domains.markdown_generation`, database-assigned unique `domain_lock_id`, state/kind checks, composite foreign keys, and active-ready pointer enforcement. Publication tables contain fixed owner and lease columns and no fencing counter/token. Every version-5 statement must tolerate reapplication after the compatibility marker is removed. Use ordinary `ENABLE ROW LEVEL SECURITY`, explicitly omit `FORCE ROW LEVEL SECURITY`, and ensure schema-owner credentials are never accepted as runtime credentials. Policies on domain-scoped Markdown and graph tables call the same fixed qualified principal-scope function:
 
 ```sql
 CREATE FUNCTION iwiki.database_principal_can_access(
@@ -822,15 +822,15 @@ AS $function$
 $function$;
 ```
 
-Add operator commands `iwiki-mcp principal grant` and `iwiki-mcp principal inspect`. They accept an existing PostgreSQL role name plus `--iwiki`, repeated read/write domains, and `--runtime hosted|direct`; reject owner/`BYPASSRLS` roles; write `database_principal_domain_grants`; and grant only required schema/table/sequence/function privileges. They never create a login or accept its password. Hosted domain provisioning inserts or verifies the service role's shared read/write row before enabling tokens for that domain. Add required `--hosted-principal ROLE` to the PostgreSQL `token create` command: before generating or persisting any token material it resolves that exact role, rejects it when absent from `database_principal_domain_grants` with `runtime='hosted'`, when it owns protected tables or holds `BYPASSRLS`, or when any requested token read/write domain lacks a matching grant. An aggregate "some hosted role is ready" check is not accepted, the command never creates a role or accepts its password, and operator docs require `ROLE` to equal the hosted server's `[storage].user`. Hosted startup independently validates its connected `session_user` against its provisioned domains and fails closed on mismatch. `PostgresStore` validates both runtime role shapes, while bearer-token checks remain the finer hosted authorization boundary. Policies cover pages by `domain_id`, chunks/ordinary links through their source page, and every graph table by composite tenant/domain key.
+Add operator commands `iwiki-mcp principal grant` and `iwiki-mcp principal inspect`. They accept an existing PostgreSQL role name plus `--iwiki`, repeated read/write domains, and `--runtime hosted|direct`; reject owner/`BYPASSRLS` roles; write `database_principal_domain_grants`; and grant only required schema/table/sequence/function privileges. They never create a login or accept its password. Migration 5 also exposes the reviewed `iwiki.create_domain_for_principal(text, text)` `SECURITY DEFINER` function so the released hosted domain-creation tool keeps working while row-level security stays enabled on `iwiki.domains`: it inserts the domain and the calling runtime principal's own grant in one statement, refuses a principal mapped to another wiki, and is executable only by provisioned runtime roles. Runtime roles additionally receive read/write on the token grant tables and column-scoped `UPDATE` on `iwiki.domains.markdown_generation`, which the merged hosted tools and the generation contract both require. Hosted domain provisioning inserts or verifies the service role's shared read/write row before enabling tokens for that domain. Add required `--hosted-principal ROLE` to the PostgreSQL `token create` command: before generating or persisting any token material it resolves that exact role, rejects it when absent from `database_principal_domain_grants` with `runtime='hosted'`, when it owns protected tables or holds `BYPASSRLS`, or when any requested token read/write domain lacks a matching grant. An aggregate "some hosted role is ready" check is not accepted, the command never creates a role or accepts its password, and operator docs require `ROLE` to equal the hosted server's `[storage].user`. A create-only bootstrap token requests no domain, so for that case only the restricted role shape is provable and is therefore the whole check. Hosted startup independently validates its connected `session_user` against its provisioned domains and fails closed on mismatch. `PostgresStore` validates both runtime role shapes, while bearer-token checks remain the finer hosted authorization boundary. Policies cover pages by `domain_id`, chunks/ordinary links through their source page, and every graph table by composite tenant/domain key.
 
-Replace runtime migration calls in both `http.prepare_runtime` and `server._initialize_postgres_storage` with the same read-only `require_schema_version(4)` helper. Tests monkeypatch `run_migrations` to fail if either runtime entry point calls it, verify both reject schema 3 and schema 5 before installing/listening, and verify only the operator/admin command uses schema-owner credentials. Allow top-level `code_graph` beside PostgreSQL `storage` in `base._postgres_binding`, keeping `iwiki_id/read/write/primary` immutable.
+Replace runtime migration calls in both `http.prepare_runtime` and `server._initialize_postgres_storage` with the same read-only `require_schema_version(5)` helper. Tests monkeypatch `run_migrations` to fail if either runtime entry point calls it, verify both reject schema 4 and schema 6 before installing/listening, and verify only the operator/admin command uses schema-owner credentials. Allow top-level `code_graph` beside PostgreSQL `storage` in `base._postgres_binding`, keeping `iwiki_id/read/write/primary` immutable.
 
-- [ ] **Step 4: Add schema-v4 compatibility rollback and the reproducible maintenance artifact**
+- [ ] **Step 4: Add schema-v5 compatibility rollback and the reproducible maintenance artifact**
 
-Expose reviewed `SCHEMA4_COMPATIBILITY_ROLLBACK_SQL` and operator command `iwiki-mcp schema rollback-v4-compat --confirm`. In one transaction it takes `_MIGRATION_LOCK`, verifies migration 4 is current, verifies every configured runtime principal — including the exact named hosted service role — remains mapped and non-owner/non-`BYPASSRLS`, then deletes only version 4 from `iwiki.schema_migrations`. It retains graph tables, generation values, policies, grants, and data. Without `--confirm`, return a dry-run object and mutate nothing.
+Expose reviewed `SCHEMA5_COMPATIBILITY_ROLLBACK_SQL` and operator command `iwiki-mcp schema rollback-v5-compat --confirm`. In one transaction it takes `_MIGRATION_LOCK`, verifies migration 5 is current, verifies every configured runtime principal — including the exact named hosted service role — remains mapped and non-owner/non-`BYPASSRLS`, then deletes only version 5 from `iwiki.schema_migrations`. It retains graph tables, generation values, policies, grants, and data. Without `--confirm`, return a dry-run object and mutate nothing.
 
-Commit the compatibility maintenance artifact as two reviewed repository files. `compat/postgres-v3-runtime-guard.json` pins base commit `d4f4e19a50454cb7381268c3fefbcb3135e36929`, `patch_sha256`, and `source_tree_sha256`, where the source-tree digest is SHA-256 over canonical JSON holding sorted `[relative_posix_path, file_sha256]` pairs for every file of the exported, patched tree. `compat/postgres-v3-runtime-guard.patch` contains only a read-only schema-version-3 guard plus replacement of the runtime `run_migrations` calls in hosted HTTP `prepare_runtime` and stdio direct PostgreSQL initialization; it adds no DDL, no migration execution, no owner credentials, and no database/schema `CREATE` requirement.
+Commit the compatibility maintenance artifact as two reviewed repository files. `compat/postgres-v4-runtime-guard.json` pins base commit `1197208ea3bf953664f726e7602b6c0843f58057`, `patch_sha256`, and `source_tree_sha256`, where the source-tree digest is SHA-256 over canonical JSON holding sorted `[relative_posix_path, file_sha256]` pairs for every file of the exported, patched tree. `compat/postgres-v4-runtime-guard.patch` contains only a read-only schema-version-4 guard plus replacement of the runtime `run_migrations` calls in hosted HTTP `prepare_runtime` and stdio direct PostgreSQL initialization; it adds no DDL, no migration execution, no owner credentials, and no database/schema `CREATE` requirement.
 
 `tests/postgres/test_code_graph_rollback.py` reconstructs the artifact from the manifest: `git archive` the pinned commit into `tmp_path`, verify `patch_sha256`, apply the patch with `git apply --check` followed by `git apply`, and verify the recomputed `source_tree_sha256`. Any digest mismatch fails the test. It then applies migration 4, provisions the exact hosted service role, and runs the compatibility rollback. Launch both patched runtime initialization paths with `sys.executable`, the current installed dependency environment, `PYTHONPATH=<exported>/src`, isolated project/server configs, and the disposable restricted-role DSNs. Each driver writes a distinct `SCHEMA_GUARD_PASSED` sentinel only after its initialization returns, then performs page create/read/update/delete and lexical search under the hosted service role. The parent requires exit code 0, both sentinels, and exact CRUD/search assertions; it also asserts the runtime roles hold no database/schema `CREATE` and no mutation privilege on `iwiki.schema_migrations`, and that startup left migration history unchanged. A negative control launches the raw unpatched pinned commit under the same restricted privileges and MUST fail before its sentinel. Any manifest, patch, digest, import, config, dependency, connection, startup, privilege, CRUD, or search failure fails the test rather than masquerading as rollback success. Reapply current migration 4 afterward and assert one schema row plus preserved Markdown and graph staging rows.
 
@@ -842,7 +842,7 @@ Run:
 uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_code_graph_rollback.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_admin.py tests/postgres/test_config.py tests/test_base.py tests/test_server_startup.py
 ```
 
-Expected: migration history `(1, 2, 3, 4)`, concurrent admin migration applies version 4 once, hosted and stdio startup are read-only, non-owner hosted/direct roles enforce shared Markdown/graph scope, owner/`BYPASSRLS` runtime config fails, `token create` rejects a missing, unsafe, or under-granted `--hosted-principal` before persistence, the reconstructed maintenance artifact passes both schema guards and the CRUD/search smoke while the raw unpatched control fails, and reapplication preserves data.
+Expected: migration history `(1, 2, 3, 4, 5)`, concurrent admin migration applies version 5 once, hosted and stdio startup are read-only, non-owner hosted/direct roles enforce shared Markdown/graph scope, owner/`BYPASSRLS` runtime config fails, `token create` rejects a missing, unsafe, or under-granted `--hosted-principal` before persistence, the reconstructed maintenance artifact passes both schema guards and the CRUD/search smoke while the raw unpatched control fails, and reapplication preserves data.
 
 - [ ] **Step 6: HUMAN CHECKPOINT — review migration, roles, and rollback diff**
 
@@ -854,7 +854,7 @@ Set all four version surfaces to `0.7.122`, then run:
 
 ```bash
 uv lock
-git add pyproject.toml uv.lock src/iwiki_mcp/__init__.py tests/test_package.py src/iwiki_mcp/postgres/migrations.py src/iwiki_mcp/postgres/store.py src/iwiki_mcp/admin.py src/iwiki_mcp/http.py src/iwiki_mcp/server.py src/iwiki_mcp/base.py compat/postgres-v3-runtime-guard.json compat/postgres-v3-runtime-guard.patch tests/postgres/conftest.py tests/postgres/test_store.py tests/postgres/test_migrations.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_code_graph_rollback.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_admin.py tests/test_server_startup.py
+git add pyproject.toml uv.lock src/iwiki_mcp/__init__.py tests/test_package.py src/iwiki_mcp/postgres/migrations.py src/iwiki_mcp/postgres/store.py src/iwiki_mcp/admin.py src/iwiki_mcp/http.py src/iwiki_mcp/server.py src/iwiki_mcp/base.py compat/postgres-v4-runtime-guard.json compat/postgres-v4-runtime-guard.patch tests/postgres/conftest.py tests/postgres/test_store.py tests/postgres/test_migrations.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_code_graph_rollback.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_admin.py tests/test_server_startup.py
 git diff --cached --check
 git commit -m "feat(postgres): add code graph snapshot schema"
 ```
@@ -970,7 +970,7 @@ Expected: all configured tests PASS; two domains finalize concurrently, same-dom
 
 - [ ] **Step 5: Bump version and commit Task 4**
 
-Set all four version surfaces to `0.7.123`, then run:
+Set all four version surfaces to `0.7.125`, then run:
 
 ```bash
 uv lock
@@ -1085,7 +1085,7 @@ Expected: target links match selector provenance, any intervening Markdown conte
 
 - [ ] **Step 5: Bump version and commit Task 5**
 
-Set all four version surfaces to `0.7.124`, then run:
+Set all four version surfaces to `0.7.126`, then run:
 
 ```bash
 uv lock
@@ -1168,7 +1168,7 @@ Expected: SQLite and PostgreSQL return byte-for-byte equal normalized search res
 
 - [ ] **Step 5: Bump version and commit Task 6**
 
-Set all four version surfaces to `0.7.125`, then run:
+Set all four version surfaces to `0.7.127`, then run:
 
 ```bash
 uv lock
@@ -1258,7 +1258,7 @@ Expected: exact tool mapping passes, cross-token session takeover returns `unaut
 
 - [ ] **Step 5: Bump version and commit Task 7**
 
-Set all four version surfaces to `0.7.126`, then run:
+Set all four version surfaces to `0.7.128`, then run:
 
 ```bash
 uv lock
@@ -1366,7 +1366,7 @@ Expected: complete matrix includes all four publication tools plus `wiki_code_in
 
 - [ ] **Step 5: Bump version and commit Task 8**
 
-Set all four version surfaces to `0.7.127`, then run:
+Set all four version surfaces to `0.7.129`, then run:
 
 ```bash
 uv lock
@@ -1486,7 +1486,7 @@ Expected: all selected tests PASS; PostgreSQL integration tests SKIP only when t
 
 - [ ] **Step 5: Bump version and commit Task 9**
 
-Set all four version surfaces to `0.7.128`; stage only the contract tests and version files, then run:
+Set all four version surfaces to `0.7.130`; stage only the contract tests and version files, then run:
 
 ```bash
 uv lock
@@ -1579,7 +1579,7 @@ read_mode = "sqlite"    # sqlite | postgres | mcp
 max_snapshot_age_seconds = 86400 # 0 disables age rejection
 ```
 
-Document `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` as runtime-only MCP values; direct PostgreSQL reuses `[storage]` and `IWIKI_DB_PASSWORD`. Replace the old single-role example: schema owner/migrator applies migrations through admin commands, hosted service and direct runtime roles are non-owner/non-`BYPASSRLS`, ordinary RLS is enabled without `FORCE`, and both roles receive explicit shared domain grants through `iwiki-mcp principal grant`. Include hosted-domain provisioning before token enablement, the required `token create --hosted-principal ROLE` input with `ROLE` equal to the hosted server's `[storage].user`, privilege inspection, identical HTTP/stdio startup schema checks, `schema rollback-v4-compat` dry-run/confirm sequence, the `compat/postgres-v3-runtime-guard.json` manifest build procedure and its post-rollback maintenance-artifact smoke, later migration reapply, cleanup-on-next-begin behavior, and production stop conditions. State explicitly that the raw pre-v4 commit is not a supported rollback binary because restricted runtime roles hold no schema `CREATE`. Explain local checkout, one domain/repository, non-transferable sessions, target-derived links, atomic visibility, conflicts/retry, remote source unavailability, no fallback, and first publication.
+Document `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` as runtime-only MCP values; direct PostgreSQL reuses `[storage]` and `IWIKI_DB_PASSWORD`. Replace the old single-role example: schema owner/migrator applies migrations through admin commands, hosted service and direct runtime roles are non-owner/non-`BYPASSRLS`, ordinary RLS is enabled without `FORCE`, and both roles receive explicit shared domain grants through `iwiki-mcp principal grant`. Include hosted-domain provisioning before token enablement, the required `token create --hosted-principal ROLE` input with `ROLE` equal to the hosted server's `[storage].user`, privilege inspection, identical HTTP/stdio startup schema checks, `schema rollback-v5-compat` dry-run/confirm sequence, the `compat/postgres-v4-runtime-guard.json` manifest build procedure and its post-rollback maintenance-artifact smoke, later migration reapply, cleanup-on-next-begin behavior, and production stop conditions. State explicitly that the raw pre-code-graph commit is not a supported rollback binary because restricted runtime roles hold no schema `CREATE`. Explain local checkout, one domain/repository, non-transferable sessions, target-derived links, atomic visibility, conflicts/retry, remote source unavailability, no fallback, and first publication.
 
 Document both exact SQLite schema-v2 profiles. Legacy five-table readiness requires the strict sidecar. The publication profile carries authoritative ready evidence in `code_graph_publication` and treats `.metadata.json` as cache-only. SQLite `commit_uncertain` permits only same-process repeated `finalize`, never batch, abort, automatic rollback, or adapter fallback; after process loss, operators inspect status and start a new session. Before rolling back to a pre-publication binary, retain or restore a legacy snapshot or reindex with that binary because it may reject the internal table. Update benchmark report with target mode, batch count/bytes, publication time, active revision, peak Python heap, and generated file count.
 
@@ -1605,7 +1605,7 @@ Expected: SQLite scale reports exactly 20,000 files, PostgreSQL scale reports ex
 
 - [ ] **Step 6: Bump version and commit Task 10**
 
-Set all four version surfaces to `0.7.129`, then run:
+Set all four version surfaces to `0.7.131`, then run:
 
 ```bash
 uv lock
@@ -1624,7 +1624,7 @@ Expected: final implementation commit contains docs, scale evidence, config temp
 **Requirements:** R-001–R-030; AC-01–AC-30.
 **Problem closed:** produce fresh evidence that implementation matches the selected spec and contains no excess behavior.
 **Files:**
-- Inspect only. If a check demonstrates a defect, stop Task 11, return to the owning implementation task, make a focused fix at version `0.7.130` or the next unused patch, synchronize all four version surfaces, commit it, then restart Task 11 from Step 1.
+- Inspect only. If a check demonstrates a defect, stop Task 11, return to the owning implementation task, make a focused fix at version `0.7.132` or the next unused patch, synchronize all four version surfaces, commit it, then restart Task 11 from Step 1.
 
 - [ ] **Step 1: Verify repository scope and versions**
 
