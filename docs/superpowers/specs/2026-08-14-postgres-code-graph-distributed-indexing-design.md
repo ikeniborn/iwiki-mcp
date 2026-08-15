@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 3f99f03931a728f7
+  spec_hash: a03ead3f44947d5d
   last_run: 2026-08-15
   phases:
     structure: { status: passed }
@@ -12,7 +12,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "4.1 Identity, scope, and compatibility"
-      section_hash: c3ad3187b27a65e8
+      section_hash: 9d45f0d42da06186
       fragment: "A direct runtime principal MUST NOT own protected tables"
       text: >-
         The prior design allowed the documented runtime principal to be the
@@ -26,7 +26,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "13. Migration and rollout"
-      section_hash: 94494fe71c657cf2
+      section_hash: 1ee78ed17e3e3908
       fragment: "Application rollback from schema 4 is an explicit operator procedure"
       text: >-
         The prior rollback text did not let a pre-v4 application pass its
@@ -54,7 +54,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "7.3 PostgreSQL runtime scope"
-      section_hash: 3dfd860961e87d10
+      section_hash: 8806873b32b2e264
       fragment: "hosted service principal is a separate trusted application boundary"
       text: >-
         The hosted service principal has no defined RLS policy or principal-domain
@@ -82,7 +82,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "13. Migration and rollout"
-      section_hash: 94494fe71c657cf2
+      section_hash: 1ee78ed17e3e3908
       fragment: "Only the existing admin migration command may apply schema changes"
       text: >-
         The rollout does not explicitly define startup behavior for both hosted HTTP
@@ -153,9 +153,9 @@ The following outcomes and completion rule are copied verbatim from the approved
 ### 4.1 Identity, scope, and compatibility
 
 - **R-001 — One domain, one repository:** Each `(iwiki_id, domain_id)` MUST identify exactly one repository and at most one active code-graph snapshot. Code-graph tools MUST use the bound `primary`; they MUST NOT accept a separate domain or repository argument. **Acceptance:** AC-01.
-- **R-002 — Existing authorization:** Code-graph publication MUST require the bound `primary` in existing wiki write scope. Code-graph query MUST require it in existing wiki read scope. Remote MCP MUST derive `iwiki_id` and domain grants from the existing token. Direct PostgreSQL MUST use the existing restricted runtime principal's wiki-domain grant. The schema owner/migrator, hosted service principal, and direct runtime principal are distinct operational roles. The hosted service principal MUST receive explicit entries in the shared `database_principal_domain_grants` table for every domain served; bearer-token scope remains the application authorization boundary inside that database scope. This separation and mapping are infrastructure, not graph-specific authorization. No code-graph token, role, ACL, or graph-specific grant table may be introduced. **Acceptance:** AC-02.
+- **R-002 — Existing authorization:** Code-graph publication MUST require the bound `primary` in existing wiki write scope. Code-graph query MUST require it in existing wiki read scope. Remote MCP MUST derive `iwiki_id` and domain grants from the existing token. Direct PostgreSQL MUST use the existing restricted runtime principal's wiki-domain grant. The schema owner/migrator, hosted service principal, and direct runtime principal are distinct operational roles. The hosted service principal MUST receive explicit entries in the shared `database_principal_domain_grants` table for every domain served; bearer-token scope remains the application authorization boundary inside that database scope. PostgreSQL token creation MUST name the exact deployed service role through required `--hosted-principal ROLE` input. Before generating or storing token material, the admin path MUST verify that exact existing role is registered as `runtime=hosted`, is a non-owner without `BYPASSRLS`, and has read/write grants covering every requested token domain; another hosted role or an aggregate “some hosted role is ready” check is not a substitute. The command never creates a role or accepts its password. The operator MUST pass the role configured as the hosted server's `[storage].user`, and hosted startup independently validates its actual `session_user`. This separation and mapping are infrastructure, not graph-specific authorization. No code-graph token, role, ACL, or graph-specific grant table may be introduced. **Acceptance:** AC-02.
 - **R-003 — Existing graph compatibility:** Published rows MUST preserve current schema-v2 entity identities, relation semantics, deterministic revision rules, and Python-only behavior. SQLite keeps `SCHEMA_VERSION = 2` and the five public entity tables. The new runtime MUST accept two exact schema-v2 profiles: the legacy five-table profile and a publication profile containing those unchanged tables plus the exact internal `code_graph_publication` table. No other extra table or index is accepted. Public row/query APIs MUST expose only the five entity tables. Existing Git/SQLite behavior and ordinary PostgreSQL wiki contracts MUST remain usable, but a pre-publication binary is not required to accept the extended publication profile; rollback uses a retained legacy snapshot or a reindex with the selected binary. **Acceptance:** AC-03.
-- **R-004 — Tenant integrity:** Every PostgreSQL graph row MUST carry `iwiki_id`, `domain_id`, and `snapshot_id` where applicable. Composite keys and foreign keys MUST reject cross-wiki, cross-domain, and cross-snapshot references. Direct publication MUST use the same immutable local `iwiki_id`, `read`, `write`, and `primary` configuration as direct PostgreSQL Markdown access, and the local publisher MUST reject any requested scope outside it. PostgreSQL row-level security MUST be enabled, but not forced, on protected Markdown and graph tables. Policies MUST independently reject any hosted or direct runtime principal outside its shared wiki-domain grant. Runtime principals MUST NOT own protected tables, hold `BYPASSRLS`, or run migrations; only the non-runtime schema owner may use PostgreSQL's owner exemption. Deployment MUST stop if those properties or required hosted/direct grants cannot be proven. **Acceptance:** AC-04.
+- **R-004 — Tenant integrity:** Every PostgreSQL graph row MUST carry `iwiki_id`, `domain_id`, and `snapshot_id` where applicable. Composite keys and foreign keys MUST reject cross-wiki, cross-domain, and cross-snapshot references. Direct publication MUST use the same immutable local `iwiki_id`, `read`, `write`, and `primary` configuration as direct PostgreSQL Markdown access, and the local publisher MUST reject any requested scope outside it. PostgreSQL row-level security MUST be enabled, but not forced, on protected Markdown and graph tables. Policies MUST independently reject any hosted or direct runtime principal outside its shared wiki-domain grant. Runtime principals MUST NOT own protected tables, hold `BYPASSRLS`, run migrations, or receive database/schema `CREATE` solely for application rollback; only the non-runtime schema owner may use PostgreSQL's owner exemption. Deployment and token issuance MUST stop if those properties, the exact hosted-principal identity, or required hosted/direct grants cannot be proven. **Acceptance:** AC-04.
 
 ### 4.2 Shared publication protocol
 
@@ -297,7 +297,7 @@ A complete copied database backup remains valid after its content and envelope a
 
 Direct mode reuses one restricted PostgreSQL runtime principal for both Markdown and code graph. The configured `iwiki_id` is immutable for the process; `primary` must be inside configured read and write scope. An admin-owned `database_principal_domain_grants` mapping represents that principal's shared Markdown and code-graph scope; it is not graph-specific. Direct runtime logins receive no table ownership, `BYPASSRLS`, role-management, migration, or unrestricted DML privileges. Row-level policies resolve `session_user` and require the mapped read/write flag. The documented direct-mode user MUST be this restricted role, never the schema owner shown in migration commands.
 
-The hosted service principal is also a non-owner, non-`BYPASSRLS` runtime role. Domain provisioning MUST insert or verify its shared read/write grant for each domain served before tokens for that domain are enabled. The hosted application still checks each bearer token's existing read/write/primary scope before SQL; the database grant limits the service role to provisioned hosted domains. Policies use ordinary `ENABLE ROW LEVEL SECURITY`, not `FORCE ROW LEVEL SECURITY`, because the schema owner/migrator is an administration-only role and never a runtime credential. The local adapter also rejects any scope outside its configuration before calling PostgreSQL. Composite constraints enforce relational tenant integrity even inside an allowed scope.
+The hosted service principal is also a non-owner, non-`BYPASSRLS` runtime role. `principal grant --runtime hosted` registers one exact existing role and its shared domain grants; it never provisions login credentials. `token create` requires `--hosted-principal ROLE` and verifies that same named role, not merely any hosted-role row, covers every requested token read/write domain before token material is generated. Operator documentation requires `ROLE` to equal the deployed hosted server's `[storage].user`; startup validates the connected `session_user` against its provisioned domains so a mismatched or under-granted deployment fails closed. The hosted application still checks each bearer token's existing read/write/primary scope before SQL; the database grant limits the service role to provisioned hosted domains. Policies use ordinary `ENABLE ROW LEVEL SECURITY`, not `FORCE ROW LEVEL SECURITY`, because the schema owner/migrator is an administration-only role and never a runtime credential. The local adapter also rejects any scope outside its configuration before calling PostgreSQL. Composite constraints enforce relational tenant integrity even inside an allowed scope.
 
 ## 8. MCP and configuration contracts
 
@@ -404,12 +404,13 @@ Integration tests MUST prove:
 - failed finalize leaves the previous pointer and rows visible;
 - cross-wiki/domain/snapshot inserts and queries fail through constraints and scope checks;
 - existing token read/write/primary grants authorize remote graph operations exactly like Markdown operations;
-- the non-owner hosted service principal can access every provisioned hosted domain through shared grants, cannot access an unprovisioned domain, and remains subject to RLS;
+- token creation rejects missing `--hosted-principal`, an owner, `BYPASSRLS`, direct-only, unknown, or under-granted named roles before inserting a token, and accepts the explicitly named non-owner hosted role only when it covers every requested domain;
+- the accepted non-owner hosted service principal can access every provisioned hosted domain through shared grants, cannot access an unprovisioned domain, and remains subject to RLS;
 - the documented restricted direct PostgreSQL role authorizes Markdown and graph operations through one database-enforced scope, while an owner, `BYPASSRLS`, unmapped, or out-of-scope role is rejected as a valid direct-mode configuration;
 - another writable token cannot take over an existing publication session;
 - lock contention waits for the configured timeout and returns `busy` without changing or renewing the session;
 - status/context expose O(1) generation state while lint reports stored/current canonical Markdown revisions and stale-link state;
-- migration 4 is transactional and idempotent, preserves ordinary wiki data, and its compatibility rollback procedure lets the last pre-v4 application execute its PostgreSQL Markdown CRUD/search smoke suite against the retained data.
+- migration 4 is transactional and idempotent, preserves ordinary wiki data, and its compatibility rollback procedure lets the pinned pre-v4 maintenance build pass both read-only runtime startup guards and execute its PostgreSQL Markdown CRUD/search smoke suite against retained data without database/schema `CREATE` or migration authority.
 
 ### 11.4 Regression and scale
 
@@ -421,9 +422,9 @@ Integration tests MUST prove:
 ## 12. Acceptance criteria
 
 - **AC-01:** Two snapshots cannot be active for one domain; code tools resolve only bound primary.
-- **AC-02:** Existing token plus hosted-service and restricted-direct database-principal tests prove graph read/write scope parity with Markdown and absence of graph-specific auth state.
+- **AC-02:** Existing token plus hosted-service and restricted-direct database-principal tests prove graph read/write scope parity with Markdown and absence of graph-specific auth state; token creation names and validates the exact deployed hosted role before storing token material.
 - **AC-03:** Existing schema-v2 identities and SQLite regression fixtures produce unchanged normalized results; the new runtime accepts the exact legacy and publication schema-v2 profiles, keeps the five public entity-table APIs unchanged, and rejects every other extra schema object. A pre-publication binary rollback uses a retained legacy snapshot or reindexes rather than opening the publication profile.
-- **AC-04:** Composite constraints, row-level policies, privilege inspection, hosted grant provisioning, and direct config tests reject cross-scope rows, runtime owner/`BYPASSRLS` credentials, unprovisioned hosted domains, and a primary outside immutable scope.
+- **AC-04:** Composite constraints, row-level policies, privilege inspection, exact hosted-principal token provisioning, and direct config tests reject cross-scope rows, runtime owner/`BYPASSRLS`/migration-capable credentials, an absent or under-granted named hosted role, unprovisioned hosted domains, and a primary outside immutable scope.
 - **AC-05:** All publication modes pass one lifecycle contract suite with the same serialized fixture.
 - **AC-06:** Payload inspection proves only safe normalized graph rows are transmitted.
 - **AC-07:** Batch replay tests prove idempotent equality and conflicting-hash rejection.
@@ -453,7 +454,7 @@ Integration tests MUST prove:
 
 ## 13. Migration and rollout
 
-1. Provision separate schema-owner/migrator, hosted service, and restricted direct runtime roles. Apply PostgreSQL graph objects, Markdown generation, non-forced row-level policies, and the shared runtime-principal scope mapping in migration 4 under the existing migration framework and lock. Provision explicit hosted-service and direct-role grants before starting either runtime.
+1. Provision separate schema-owner/migrator, hosted service, and restricted direct runtime roles. Apply PostgreSQL graph objects, Markdown generation, non-forced row-level policies, and the shared runtime-principal scope mapping in migration 4 under the existing migration framework and lock. Provision explicit hosted-service and direct-role grants before starting either runtime. Every PostgreSQL token-creation command names the deployed hosted role with `--hosted-principal`; token creation is rejected before persistence when that exact role is absent, unsafe, or lacks any requested domain grant.
 2. Add shared publisher/reader contracts and make the current SQLite path satisfy them without changing public query semantics. New publications use the exact schema-v2 publication profile with internal authority; legacy five-table snapshots remain readable through strict sidecar validation. Before rolling back to a pre-publication binary, retain or restore a legacy snapshot or reindex with that binary because it is not required to accept the internal publication table.
 3. Add PostgreSQL staging, finalize, active-read, and target-link implementations.
 4. Add MCP publication and read adapters over those services.
@@ -464,7 +465,11 @@ No existing code-graph row migration to PostgreSQL is automatic. Operators expli
 
 Runtime startup never applies migrations. Both hosted HTTP `prepare_runtime` and stdio direct PostgreSQL initialization perform the same read-only schema-version-4 check and fail before serving when it is absent or newer than supported. Only the existing operator/admin migration command runs migration 4 with schema-owner credentials. Deployment order is therefore migrate, provision or verify runtime grants, then start hosted and direct runtimes.
 
-Application rollback from schema 4 is an explicit operator procedure, shipped as reviewed idempotent SQL and tested against a disposable database. It stops writers, takes the migration advisory lock, verifies hosted-service and restricted-direct grants, and removes only migration version 4 from `schema_migrations`; graph objects, generation data, policies, grants, and data remain intact. The compatibility smoke exports pinned pre-v4 commit `d4f4e19a50454cb7381268c3fefbcb3135e36929`, launches it with the current test interpreter and installed dependency environment plus an isolated project/server config and disposable DSN, and must prove that startup passes the schema guard before page create/read/update/delete and lexical search pass under the hosted service role. Any other startup failure fails the smoke. Migration 4 statements must tolerate reapplication when the new version returns. Dropping graph tables, policies, generation data, or grants is a destructive down-migration and remains outside scope.
+Application rollback from schema 4 is an explicit operator procedure, shipped as reviewed idempotent SQL and tested against a disposable database. It stops writers, takes the migration advisory lock, verifies the exact named hosted-service and restricted-direct grants, and removes only migration version 4 from `schema_migrations`; graph objects, generation data, policies, grants, and data remain intact.
+
+The supported rollback binary is a reproducible compatibility maintenance artifact, not the raw pre-v4 commit. Repository files `compat/postgres-v3-runtime-guard.json` and `compat/postgres-v3-runtime-guard.patch` are its manifest and reviewed patch. The manifest pins base commit `d4f4e19a50454cb7381268c3fefbcb3135e36929`, `patch_sha256`, and `source_tree_sha256`. The source-tree digest is SHA-256 over canonical JSON containing sorted `[relative_posix_path, file_sha256]` pairs for every file in the exported, patched tree. The patch is limited to a read-only schema-version-3 guard and replacement of runtime `run_migrations` calls in both hosted HTTP `prepare_runtime` and stdio direct PostgreSQL initialization; it MUST NOT add DDL, migration execution, owner credentials, or database/schema `CREATE` requirements. The build procedure exports the pinned commit, verifies the exact patch hash, applies it with `git apply --check` followed by `git apply`, verifies the resulting source-tree digest, and packages that verified tree before rollback begins.
+
+The compatibility smoke reconstructs that artifact from the manifest, launches both patched runtime initialization paths with the current test interpreter and installed dependency environment plus isolated configs and disposable restricted-role DSNs, and writes a distinct sentinel only after each read-only schema guard returns. It then proves page create/read/update/delete and lexical search under the hosted service role. The test asserts the runtime roles lack database/schema `CREATE` and mutation privileges on `schema_migrations`, startup leaves migration history unchanged, and a negative-control launch of the raw unpatched commit fails before its sentinel under the same restricted privileges. Any manifest, patch, digest, import, config, dependency, connection, startup, privilege, CRUD, or search failure fails the smoke. Migration 4 statements must tolerate reapplication when the new version returns. Dropping graph tables, policies, generation data, or grants is a destructive down-migration and remains outside scope.
 
 ## 14. Risks and mitigations
 
@@ -481,15 +486,15 @@ Application rollback from schema 4 is an explicit operator procedure, shipped as
 | Three modes drift into separate implementations | Shared contract and parameterized adapter suite | AC-05, AC-20 |
 | Abandoned sessions consume storage | Lease, terminal states, bounded retention cleanup | AC-11, AC-14 |
 | Broker becomes an operational dependency | Transactions and advisory locks are complete correctness boundary | AC-15 |
-| Runtime principal bypasses or lacks row policies | Non-forced RLS plus explicit hosted/direct grants, non-owner runtime roles, privilege inspection, and deployment stop | AC-02, AC-04 |
-| Previous application rejects schema 4 during rollback | Tested compatibility SQL removes only the v4 migration marker and preserves data/objects for later reapply | PostgreSQL migration integration |
+| Runtime principal bypasses or lacks row policies | Non-forced RLS plus exact hosted-principal token validation, explicit hosted/direct grants, non-owner runtime roles, privilege inspection, and deployment stop | AC-02, AC-04 |
+| Raw pre-v4 startup attempts migrations or requires `CREATE` during rollback | Reproducible pinned maintenance artifact replaces both runtime migration calls with a read-only schema-3 guard; smoke proves restricted-role startup and retained-data CRUD/search | PostgreSQL migration integration |
 | Busy contract returns immediately or waits without bound | Transaction-local lock timeout plus blocking advisory lock and contention test | AC-12, AC-28 |
 
 ## 15. Human checkpoints
 
 - Approve this checked specification before implementation planning.
 - Approve the SQLite `commit_uncertain` retry contract, internal schema-v2 publication profile, pre-publication-binary rollback limitation, and trusted-local-filesystem boundary before Task 2 resumes.
-- Review the concrete PostgreSQL migration, hosted/direct role grants, non-forced row-level policies, runtime schema checks, and compatibility rollback SQL during plan execution before any production deployment.
+- Review the concrete PostgreSQL migration, exact hosted-principal token gate, hosted/direct role grants, non-forced row-level policies, runtime schema checks, compatibility patch manifest, and rollback SQL during plan execution before any production deployment.
 - Provision and test real direct-database credentials outside the repository; no agent may create, expose, or use production credentials.
 - Run production publication only through an operator-controlled deployment procedure after migration and integration evidence passes.
 
