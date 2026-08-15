@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: d55d1196262fd34e
+  plan_hash: e6739c25322aa605
   last_run: 2026-08-15
   phases:
     structure: { status: passed }
@@ -542,7 +542,7 @@ delivery; do not claim the health metric passed.
 
 ```bash
 uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_auth.py tests/postgres/test_admin.py tests/postgres/test_http.py tests/postgres/test_tool_matrix.py tests/test_http_unit.py tests/test_server_write.py tests/test_create_domain_layout.py tests/test_package.py
-uv run flake8 src tests eval
+uv run flake8 src tests eval/auth_grant_latency.py
 uv run python -m compileall -q -x 'tests/fixtures/codegraph/python_syntax_errors/broken\.py' src tests eval
 uv run iwiki-mcp --help
 git diff --check
