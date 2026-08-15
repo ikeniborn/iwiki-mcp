@@ -323,7 +323,7 @@ wheels = [
 
 [[package]]
 name = "iwiki-mcp"
-version = "0.7.122"
+version = "0.7.123"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },
@@ -355,7 +355,7 @@ requires-dist = [
     { name = "filelock", specifier = ">=3.29" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.2.0,<2" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pathspec", specifier = ">=0.12" },
     { name = "pgvector", specifier = ">=0.3" },

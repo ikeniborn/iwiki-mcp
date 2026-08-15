@@ -136,7 +136,7 @@ def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, caps
 
     def reject(dsn):
         raise server._postgres_migrations.MigrationError(
-            "PostgreSQL schema version 4 is required"
+            "PostgreSQL schema version 5 is required"
         )
 
     monkeypatch.setattr(
@@ -159,7 +159,7 @@ def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, caps
 
     captured = capsys.readouterr()
     assert exc.value.code == 1
-    assert "Reason: PostgreSQL schema version 4 is required" in captured.err
+    assert "Reason: PostgreSQL schema version 5 is required" in captured.err
     assert "fixture-secret" not in captured.err
 
 

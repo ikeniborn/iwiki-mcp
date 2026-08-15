@@ -343,6 +343,53 @@ GRAPH_MIGRATION_STATEMENTS = (
     REVOKE ALL ON FUNCTION iwiki.database_principal_runtime_domains(text)
         FROM PUBLIC
     """,
+    """
+    CREATE OR REPLACE FUNCTION iwiki.create_domain_for_principal(
+        requested_iwiki text,
+        requested_slug text
+    ) RETURNS bigint
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, iwiki
+    AS $function$
+    DECLARE
+        created_domain bigint;
+        runtime_kind text;
+    BEGIN
+        SELECT g.runtime INTO runtime_kind
+        FROM iwiki.database_principal_domain_grants g
+        WHERE g.principal = session_user
+          AND g.iwiki_id = requested_iwiki
+        LIMIT 1;
+        IF runtime_kind IS NULL AND EXISTS (
+            SELECT 1
+            FROM iwiki.database_principal_domain_grants g
+            WHERE g.principal = session_user
+        ) THEN
+            RAISE EXCEPTION 'principal is not provisioned for this wiki';
+        END IF;
+        INSERT INTO iwiki.domains (iwiki_id, slug)
+        VALUES (requested_iwiki, requested_slug)
+        ON CONFLICT (iwiki_id, slug) DO NOTHING
+        RETURNING domain_id INTO created_domain;
+        IF created_domain IS NULL THEN
+            RETURN NULL;
+        END IF;
+        IF runtime_kind IS NOT NULL THEN
+            INSERT INTO iwiki.database_principal_domain_grants
+                (principal, iwiki_id, domain_id, runtime, can_read, can_write)
+            VALUES (
+                session_user, requested_iwiki, created_domain, runtime_kind,
+                true, true
+            );
+        END IF;
+        RETURN created_domain;
+    END;
+    $function$
+    """,
+    """
+    REVOKE ALL ON FUNCTION iwiki.create_domain_for_principal(text, text)
+        FROM PUBLIC
+    """,
     *(f"ALTER TABLE iwiki.{table} ENABLE ROW LEVEL SECURITY" for table in (
         "domains", "pages", "chunks", "links", "code_graph_domain_state",
         "code_graph_publication_sessions", "code_graph_snapshots",
@@ -412,9 +459,9 @@ GRAPH_MIGRATION_STATEMENTS = (
 )
 
 
-SCHEMA4_COMPATIBILITY_ROLLBACK_SQL = f"""
+SCHEMA5_COMPATIBILITY_ROLLBACK_SQL = f"""
 SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
-DELETE FROM iwiki.schema_migrations WHERE version = 4;
+DELETE FROM iwiki.schema_migrations WHERE version = 5;
 """
 
 
@@ -594,7 +641,41 @@ MIGRATIONS = (
             "tokens_token_id_key UNIQUE (token_id)",
         ),
     ),
-    Migration(version=4, statements=GRAPH_MIGRATION_STATEMENTS),
+    Migration(
+        version=4,
+        statements=(
+            "ALTER TABLE iwiki.tokens ADD COLUMN "
+            "can_create_domain boolean NOT NULL DEFAULT false",
+            """
+            CREATE TABLE iwiki.token_domain_management_grants (
+                iwiki_id text NOT NULL,
+                token_id text NOT NULL,
+                domain_id bigint NOT NULL,
+                can_manage_grants boolean NOT NULL,
+                PRIMARY KEY (iwiki_id, token_id, domain_id),
+                CONSTRAINT token_domain_management_grants_enabled
+                    CHECK (can_manage_grants),
+                CONSTRAINT token_domain_management_grants_iwiki_token_fk
+                    FOREIGN KEY (iwiki_id, token_id)
+                    REFERENCES iwiki.tokens (iwiki_id, token_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT token_domain_management_grants_iwiki_domain_fk
+                    FOREIGN KEY (iwiki_id, domain_id)
+                    REFERENCES iwiki.domains (iwiki_id, domain_id)
+                    ON DELETE CASCADE
+            )
+            """,
+            """
+            CREATE INDEX token_domain_grants_domain_idx
+                ON iwiki.token_domain_grants (iwiki_id, domain_id)
+            """,
+            """
+            CREATE INDEX token_domain_management_grants_domain_idx
+                ON iwiki.token_domain_management_grants (iwiki_id, domain_id)
+            """,
+        ),
+    ),
+    Migration(version=5, statements=GRAPH_MIGRATION_STATEMENTS),
 )
 
 
@@ -733,7 +814,7 @@ def run_migrations(
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 4,
+    expected_version: int = 5,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -759,7 +840,7 @@ def require_schema_version(
         )
 
 
-def rollback_v4_compatibility(
+def rollback_v5_compatibility(
     settings: MigrationSettings,
     *,
     confirm: bool,
@@ -788,9 +869,9 @@ def rollback_v4_compatibility(
                         "FROM iwiki.schema_migrations"
                     )
                     current = cursor.fetchone()[0]
-                    if current != 4:
+                    if current != 5:
                         raise MigrationError(
-                            "schema version 4 compatibility rollback is unavailable"
+                            "schema version 5 compatibility rollback is unavailable"
                         )
                     cursor.execute(
                         """
@@ -821,11 +902,11 @@ def rollback_v4_compatibility(
                     if not confirm:
                         return {
                             "dry_run": True,
-                            "schema_version": 4,
-                            "would_remove_marker": 4,
+                            "schema_version": 5,
+                            "would_remove_marker": 5,
                         }
                     cursor.execute(
-                        "DELETE FROM iwiki.schema_migrations WHERE version = 4"
+                        "DELETE FROM iwiki.schema_migrations WHERE version = 5"
                     )
                     if cursor.rowcount != 1:
                         raise MigrationError("migration marker removal failed")
@@ -835,6 +916,6 @@ def rollback_v4_compatibility(
         raise MigrationError("compatibility rollback failed") from exc
     return {
         "dry_run": False,
-        "schema_version": 3,
-        "removed_marker": 4,
+        "schema_version": 4,
+        "removed_marker": 5,
     }

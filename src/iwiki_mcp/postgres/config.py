@@ -89,7 +89,7 @@ class ServerConfig:
     storage: PostgresConfig
     models: ModelConfig
     server: HostedServerConfig
-    code_graph: HostedCodeGraphConfig
+    code_graph: HostedCodeGraphConfig = field(default_factory=HostedCodeGraphConfig)
 
 
 _SSLMODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}

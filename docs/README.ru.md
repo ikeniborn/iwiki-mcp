@@ -133,6 +133,10 @@ MCP endpoint — `/mcp`. Размещайте loopback-listener за reverse pro
 браузера `Origin` обязан совпасть с `allowed_origins`; клиенты без `Origin` допустимы,
 но каждый MCP-запрос всё равно требует `Authorization: Bearer <token>`. Ошибки
 credentials, grants, session и storage возвращаются очищенными 401/403/404/503.
+Hosted-режим не отправляет server-initiated notifications: после Bearer-аутентификации
+`GET /mcp` возвращает `405 Method Not Allowed` с `Allow: POST, DELETE`, не входя в MCP
+session manager. Stateful-запросы `POST` и завершение сессии через `DELETE` остаются
+доступны.
 
 Сервер открывает ограниченный connection pool и применяет заданные statement/lock
 timeouts. До открытия listener startup проверяет модель, сверяет её метаданные и
@@ -141,6 +145,14 @@ timeouts. До открытия listener startup проверяет модель
 и размерность — общие метаданные БД: несовпадение останавливает startup; их смена —
 операторская миграция, не автоматический re-embedding. Embedding/rerank credentials
 остаются только на сервере.
+
+Каждый запрос заново читает текущие права токена. Сессия хранит явно выбранный
+`selected` scope отдельно от пересечённого со свежими grants `effective` scope:
+revocation действует на следующем запросе, восстановленное право возвращается только
+если домен оставался selected, а новый grant целевого токена не расширяет существующую
+сессию. Только успешный `wiki_create_domain` расширяет текущую сессию creator-токена.
+Локальные `.iwiki.toml` и `.iwikiignore` по-прежнему создаёт и меняет инициализация
+проекта; hosted-сервер создаёт состояние домена в PostgreSQL и эти файлы не пишет.
 
 ### Подготовка PostgreSQL и минимальные привилегии
 
@@ -165,15 +177,22 @@ iwiki-mcp base disable --iwiki team-wiki
 iwiki-mcp base enable --iwiki team-wiki
 iwiki-mcp domain create --iwiki team-wiki --domain backend
 iwiki-mcp token create --iwiki team-wiki --owner deploy --read-domain backend --write-domain backend
+iwiki-mcp token create --iwiki team-wiki --owner bootstrap --can-create-domain
 iwiki-mcp token list --iwiki team-wiki
+iwiki-mcp token set-create-domain --iwiki team-wiki --token-id <token-id> --enabled
+iwiki-mcp token set-domain-management --iwiki team-wiki --token-id <token-id> --domain backend --enabled
 iwiki-mcp token revoke --token-id <token-id>
 iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
 iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
 ```
 
 `token create` показывает plaintext-токен один раз; сохраните его в secret manager.
-`token list` не возвращает токен. Revoke токена и disable wiki действуют на следующих
-запросах. Команды физического удаления намеренно нет.
+`token list` не возвращает токен и показывает `can_create_domain`, `managed_domains`,
+`read_domains` и `write_domains` как в стандартном JSON, так и с `--json`.
+`set-create-domain` и `set-domain-management` — server-side recovery; требуется ровно
+один флаг `--enabled` или `--disabled`. Revoke токена и disable wiki действуют на
+следующих запросах. Revoke токена атомарно удаляет его content/management grant rows,
+но сохраняет revoked token audit record. Команды физического удаления намеренно нет.
 
 Import читает Git wiki-репозиторий и пишет одну PostgreSQL wiki. Export требует пустой
 каталог, создаёт переносимый Git-репозиторий и первый commit. `--dry-run` только
@@ -185,6 +204,11 @@ Backup БД, шифрование, retention и учебные восстано�
 Используйте штатные PostgreSQL tools и service definition, чтобы credentials не попали
 в shell history. Целевая БД для restore должна существовать заранее.
 
+Миграция v4 — forward-only: она добавляет `can_create_domain`,
+`token_domain_management_grants` и domain-leading индексы grant-таблиц; down migration
+отсутствует. Старый binary отклонит schema v4, поэтому rollback binary требует restore
+резервной копии до v4 либо compatibility release до запуска.
+
 ```bash
 pg_dump --dbname=service=iwiki --format=custom --schema=iwiki --file=/secure/encrypted-volume/iwiki.dump
 pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /secure/encrypted-volume/iwiki.dump
@@ -195,10 +219,40 @@ pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /se
 | Поддержка PostgreSQL | Инструменты |
 | --- | --- |
 | Поддерживаются | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
-| Только Git | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_create_domain`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
+| Только hosted PostgreSQL | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
+| Только Git | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
 
 Git-only инструменты возвращают
 `{"error":"unsupported_storage","storage":"postgres","hint":"use this tool with Git storage"}`.
+Три grant-инструмента вне hosted PostgreSQL возвращают `unsupported_transport` с
+фактическими `storage` и `transport`. `wiki_create_domain(name)` требует
+`can_create_domain`, атомарно создаёт домен, read/write grant creator-токена и строку
+`can_manage_grants`, затем возвращает `created`, `already_existed`, `domain` и полный
+effective scope сессии. Точный retry идемпотентен.
+
+`wiki_list_domain_grants(domain)` показывает owner токена и content/management flags.
+`wiki_set_domain_grant(domain, token_id, can_read, can_write)` и
+`wiki_revoke_domain_grant(domain, token_id)` меняют только content grant другого
+активного токена. Write требует read, пустой grant нужно revoke, self-target запрещён,
+а management authority нельзя делегировать через HTTP: MCP schemas не имеют поля
+записи management authority. После bootstrap выдавать это право может только CLI
+recovery.
+
+Hosted creation возвращает полный scope creator-токена:
+
+```json
+{"created":"new-project","already_existed":false,"domain":"new-project","read":["new-project"],"write":["new-project"],"primary":"new-project"}
+```
+
+Точный retry меняет только `already_existed` на `true`. Grant list возвращает
+`{"domain":<domain>,"grants":[{"token_id":...,"owner":...,"can_read":...,"can_write":...,"can_manage_grants":...}]}`.
+Set возвращает `domain`, `token_id`, `can_read`, `can_write`; revoke — `domain`,
+`token_id`, `revoked`. Отсутствующее право или malformed protected arguments дают HTTP
+403 `{"error":"access denied"}`. Потеря права после dispatch, self-target и
+foreign/missing state внутри транзакции дают HTTP 200 с in-band tool result
+`{"error":"access_denied",...}`. Некорректные syntax/flags дают очищенную MCP/tool
+validation failure.
+
 PostgreSQL `wiki_status` сообщает `storage`, `transport`, эффективные `read`/`write`,
 `primary` и видимые `domains`; локальный stdio также сообщает `project_dir`. DSN и
 credentials не возвращаются:

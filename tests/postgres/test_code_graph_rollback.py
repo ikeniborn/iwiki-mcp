@@ -15,7 +15,7 @@ import pytest
 
 pytestmark = pytest.mark.postgres_integration
 REPOSITORY = Path(__file__).resolve().parents[2]
-MANIFEST_PATH = REPOSITORY / "compat" / "postgres-v3-runtime-guard.json"
+MANIFEST_PATH = REPOSITORY / "compat" / "postgres-v4-runtime-guard.json"
 
 
 def _settings(dsn):
@@ -198,13 +198,13 @@ def _cause(completed, password: str) -> str:
     )
 
 
-def test_rollback_v4_compat_is_dry_run_then_marker_only_and_reapplicable(
+def test_rollback_v5_compat_is_dry_run_then_marker_only_and_reapplicable(
     clean_postgres,
 ):
     import psycopg
 
     from iwiki_mcp.postgres.migrations import (
-        rollback_v4_compatibility,
+        rollback_v5_compatibility,
         run_migrations,
     )
 
@@ -226,22 +226,22 @@ def test_rollback_v4_compat_is_dry_run_then_marker_only_and_reapplicable(
             )
         connection.commit()
 
-    dry_run = rollback_v4_compatibility(_settings(clean_postgres), confirm=False)
+    dry_run = rollback_v5_compatibility(_settings(clean_postgres), confirm=False)
     assert dry_run == {
         "dry_run": True,
-        "schema_version": 4,
-        "would_remove_marker": 4,
+        "schema_version": 5,
+        "would_remove_marker": 5,
     }
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT max(version) FROM iwiki.schema_migrations")
-            assert cursor.fetchone() == (4,)
+            assert cursor.fetchone() == (5,)
 
-    result = rollback_v4_compatibility(_settings(clean_postgres), confirm=True)
+    result = rollback_v5_compatibility(_settings(clean_postgres), confirm=True)
     assert result == {
         "dry_run": False,
-        "schema_version": 3,
-        "removed_marker": 4,
+        "schema_version": 4,
+        "removed_marker": 5,
     }
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
@@ -253,11 +253,11 @@ def test_rollback_v4_compat_is_dry_run_then_marker_only_and_reapplicable(
             assert cursor.fetchone() == ("staged",)
 
     reapplied = run_migrations(_settings(clean_postgres))
-    assert reapplied.applied_versions == (4,)
+    assert reapplied.applied_versions == (5,)
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT count(*) FROM iwiki.schema_migrations WHERE version = 4"
+                "SELECT count(*) FROM iwiki.schema_migrations WHERE version = 5"
             )
             assert cursor.fetchone() == (1,)
             cursor.execute("SELECT snapshot_id FROM iwiki.code_graph_snapshots")
@@ -265,9 +265,9 @@ def test_rollback_v4_compat_is_dry_run_then_marker_only_and_reapplicable(
 
 
 def test_rollback_sql_is_reviewable_marker_only():
-    from iwiki_mcp.postgres.migrations import SCHEMA4_COMPATIBILITY_ROLLBACK_SQL
+    from iwiki_mcp.postgres.migrations import SCHEMA5_COMPATIBILITY_ROLLBACK_SQL
 
-    normalized = " ".join(SCHEMA4_COMPATIBILITY_ROLLBACK_SQL.lower().split())
+    normalized = " ".join(SCHEMA5_COMPATIBILITY_ROLLBACK_SQL.lower().split())
     assert "pg_advisory_xact_lock" in normalized
     assert "delete from iwiki.schema_migrations" in normalized
     assert "drop table" not in normalized
@@ -295,13 +295,13 @@ def test_compatibility_patch_is_read_only_and_reviewable(tmp_path):
         assert forbidden not in added
 
     tree, manifest = _build_maintenance_artifact(tmp_path / "artifact")
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     guarded = (tree / "src" / "iwiki_mcp" / "http.py").read_text(encoding="utf-8")
     assert "require_schema_version(dsn)" in guarded
     assert "run_migrations(" not in guarded
 
 
-def test_compatibility_artifact_serves_pre_v4_runtime_under_restricted_roles(
+def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
     clean_postgres, tmp_path
 ):
     import psycopg
@@ -310,7 +310,7 @@ def test_compatibility_artifact_serves_pre_v4_runtime_under_restricted_roles(
 
     from iwiki_mcp.postgres.auth import AuthStore
     from iwiki_mcp.postgres.migrations import (
-        rollback_v4_compatibility,
+        rollback_v5_compatibility,
         run_migrations,
     )
     from iwiki_mcp.postgres.store import provision_runtime_grant
@@ -359,7 +359,7 @@ def test_compatibility_artifact_serves_pre_v4_runtime_under_restricted_roles(
                     )
                     assert cursor.fetchone() == (False, False, False)
 
-        rollback_v4_compatibility(settings, confirm=True)
+        rollback_v5_compatibility(settings, confirm=True)
         tree, _manifest = _build_maintenance_artifact(tmp_path / "artifact")
         values = conninfo_to_dict(clean_postgres)
         base_environment = {
@@ -436,10 +436,10 @@ def test_compatibility_artifact_serves_pre_v4_runtime_under_restricted_roles(
         with psycopg.connect(clean_postgres) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT version FROM iwiki.schema_migrations ORDER BY 1")
-                assert [row[0] for row in cursor.fetchall()] == [1, 2, 3]
+                assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4]
 
         reapplied = run_migrations(settings)
-        assert reapplied.applied_versions == (4,)
+        assert reapplied.applied_versions == (5,)
     finally:
         with psycopg.connect(clean_postgres, autocommit=True) as connection:
             with connection.cursor() as cursor:

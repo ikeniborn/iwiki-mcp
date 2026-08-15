@@ -107,6 +107,11 @@ def _tool_call(
     )
 
 
+def _tool_result(response):
+    assert response.status_code == 200
+    return json.loads(response.json()["result"]["content"][0]["text"])
+
+
 def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
     runtime = hosted_runtime.runtime
     auth = hosted_runtime.auth
@@ -372,8 +377,8 @@ def test_hosted_runtime_rejects_git_before_listener(
     assert listener_started is False
 
 
-@pytest.mark.parametrize("installed_version", [3, 5])
-def test_hosted_runtime_requires_exact_v4_without_running_migrations(
+@pytest.mark.parametrize("installed_version", [4, 6])
+def test_hosted_runtime_requires_exact_v5_without_running_migrations(
     clean_postgres, tmp_path, monkeypatch, installed_version
 ):
     import psycopg
@@ -391,11 +396,11 @@ def test_hosted_runtime_requires_exact_v4_without_running_migrations(
     )
     selected = migrations.MIGRATIONS[:installed_version]
     migrations.run_migrations(settings, migrations=selected)
-    if installed_version == 5:
+    if installed_version == 6:
         with psycopg.connect(clean_postgres) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO iwiki.schema_migrations (version) VALUES (5)"
+                    "INSERT INTO iwiki.schema_migrations (version) VALUES (6)"
                 )
             connection.commit()
     values = conninfo_to_dict(clean_postgres)
@@ -424,7 +429,7 @@ def test_hosted_runtime_requires_exact_v4_without_running_migrations(
 
     with pytest.raises(
         migrations.MigrationError,
-        match="schema version 4 is required",
+        match="schema version 5 is required",
     ):
         http.prepare_runtime(
             str(config_path), environ=environ, probe=lambda _cfg: None
@@ -491,8 +496,8 @@ def test_hosted_runtime_rejects_an_unprovisioned_session_user(
         drop_runtime_role(clean_postgres, role)
 
 
-@pytest.mark.parametrize("installed_version", [3, 5])
-def test_stdio_runtime_requires_exact_v4_without_running_migrations(
+@pytest.mark.parametrize("installed_version", [4, 6])
+def test_stdio_runtime_requires_exact_v5_without_running_migrations(
     clean_postgres, monkeypatch, installed_version
 ):
     import psycopg
@@ -509,11 +514,11 @@ def test_stdio_runtime_requires_exact_v4_without_running_migrations(
         lock_timeout_ms=5_000,
     )
     migrations.run_migrations(settings, migrations=migrations.MIGRATIONS[:installed_version])
-    if installed_version == 5:
+    if installed_version == 6:
         with psycopg.connect(clean_postgres) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO iwiki.schema_migrations (version) VALUES (5)"
+                    "INSERT INTO iwiki.schema_migrations (version) VALUES (6)"
                 )
             connection.commit()
     binding = type(
@@ -555,6 +560,403 @@ def test_stdio_runtime_requires_exact_v4_without_running_migrations(
 
     with pytest.raises(
         migrations.MigrationError,
-        match="schema version 4 is required",
+        match="schema version 5 is required",
     ):
         server._initialize_postgres_storage(cfg)
+
+
+def test_session_refresh_preserves_selection_without_grant_expansion(
+    hosted_runtime,
+):
+    import psycopg
+
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    created = auth.create_token(
+        "wiki-a",
+        "session-manager",
+        read_domains=["docs", "private"],
+        write_domains=["docs", "private"],
+    )
+    token = created["token"]
+
+    def status(client, session_id):
+        response = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert response.status_code == 200
+        return json.loads(response.json()["result"]["content"][0]["text"])
+
+    def set_private(enabled):
+        with psycopg.connect(auth.dsn) as connection:
+            with connection.cursor() as cursor:
+                if enabled:
+                    cursor.execute(
+                        "INSERT INTO iwiki.token_domain_grants "
+                        "(iwiki_id, token_id, domain_id, can_read, can_write) "
+                        "SELECT %s, %s, domain_id, true, true "
+                        "FROM iwiki.domains WHERE iwiki_id = %s "
+                        "AND slug = 'private' "
+                        "ON CONFLICT (iwiki_id, token_id, domain_id) "
+                        "DO UPDATE SET can_read = true, can_write = true",
+                        ("wiki-a", created["token_id"], "wiki-a"),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM iwiki.token_domain_grants g "
+                        "USING iwiki.domains d WHERE d.iwiki_id = g.iwiki_id "
+                        "AND d.domain_id = g.domain_id AND g.iwiki_id = %s "
+                        "AND g.token_id = %s AND d.slug = 'private'",
+                        ("wiki-a", created["token_id"]),
+                    )
+
+    with TestClient(
+        runtime.app, base_url="http://127.0.0.1:8765"
+    ) as client:
+        initialized = _initialize(client, token)
+        session_id = initialized.headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+
+        set_private(False)
+        assert status(client, session_id)["read"] == ["docs"]
+
+        set_private(True)
+        restored = status(client, session_id)
+        assert restored["read"] == ["docs", "private"]
+        assert restored["write"] == ["docs", "private"]
+
+        auth.create_domain("wiki-a", "new")
+        with psycopg.connect(auth.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO iwiki.token_domain_grants "
+                    "(iwiki_id, token_id, domain_id, can_read, can_write) "
+                    "SELECT %s, %s, domain_id, true, true "
+                    "FROM iwiki.domains WHERE iwiki_id = %s AND slug = 'new'",
+                    ("wiki-a", created["token_id"], "wiki-a"),
+                )
+        assert "new" not in status(client, session_id)["read"]
+
+        narrowed = _tool_call(
+            client,
+            token,
+            "wiki_bind",
+            {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+            session_id=session_id,
+        )
+        assert narrowed.status_code == 200
+        set_private(False)
+        set_private(True)
+        assert status(client, session_id)["read"] == ["docs"]
+
+
+def test_hosted_domain_creation_and_content_grant_lifecycle(hosted_runtime):
+    import psycopg
+
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    creator = auth.create_token(
+        "wiki-a",
+        "creator",
+        read_domains=[],
+        write_domains=[],
+        can_create_domain=True,
+    )
+    target = auth.create_token(
+        "wiki-a",
+        "target",
+        read_domains=["docs"],
+        write_domains=[],
+    )
+    outsider = auth.create_token(
+        "wiki-a",
+        "outsider",
+        read_domains=["docs"],
+        write_domains=[],
+    )
+
+    def initialize(client, token):
+        response = _initialize(client, token)
+        assert response.status_code == 200
+        session_id = response.headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+        return session_id
+
+    def row_counts():
+        with psycopg.connect(auth.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT "
+                    "(SELECT count(*) FROM iwiki.domains "
+                    "WHERE iwiki_id = 'wiki-a' AND slug = 'new-project'), "
+                    "(SELECT count(*) FROM iwiki.token_domain_grants g "
+                    "JOIN iwiki.domains d ON d.iwiki_id = g.iwiki_id "
+                    "AND d.domain_id = g.domain_id "
+                    "WHERE g.iwiki_id = 'wiki-a' AND d.slug = 'new-project'), "
+                    "(SELECT count(*) "
+                    "FROM iwiki.token_domain_management_grants m "
+                    "JOIN iwiki.domains d ON d.iwiki_id = m.iwiki_id "
+                    "AND d.domain_id = m.domain_id "
+                    "WHERE m.iwiki_id = 'wiki-a' "
+                    "AND d.slug = 'new-project')"
+                )
+                return cursor.fetchone()
+
+    with TestClient(
+        runtime.app, base_url="http://127.0.0.1:8765"
+    ) as client:
+        creator_session = initialize(client, creator["token"])
+        target_session = initialize(client, target["token"])
+        outsider_session = initialize(client, outsider["token"])
+
+        listed_tools = _request(
+            client,
+            outsider["token"],
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+            session_id=outsider_session,
+        )
+        names = {
+            tool["name"] for tool in listed_tools.json()["result"]["tools"]
+        }
+        assert {
+            "wiki_create_domain",
+            "wiki_list_domain_grants",
+            "wiki_set_domain_grant",
+            "wiki_revoke_domain_grant",
+        } <= names
+
+        denied_create = _tool_call(
+            client,
+            outsider["token"],
+            "wiki_create_domain",
+            {"name": "denied"},
+            session_id=outsider_session,
+        )
+        denied_list = _tool_call(
+            client,
+            outsider["token"],
+            "wiki_list_domain_grants",
+            {"domain": "docs"},
+            session_id=outsider_session,
+        )
+        assert denied_create.status_code == 403
+        assert denied_list.status_code == 403
+
+        malformed_create = _request(
+            client,
+            creator["token"],
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "wiki_create_domain",
+                    "arguments": [],
+                },
+            },
+            session_id=creator_session,
+        )
+        tenant_override = _tool_call(
+            client,
+            creator["token"],
+            "wiki_create_domain",
+            {"name": "denied", "iwiki_id": "wiki-b"},
+            session_id=creator_session,
+        )
+        assert malformed_create.status_code == 403
+        assert malformed_create.json() == {"error": "access denied"}
+        assert tenant_override.status_code == 403
+
+        invalid_domain = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_create_domain",
+                {"name": "bad/name"},
+                session_id=creator_session,
+            )
+        )
+        assert invalid_domain["error"] == "operation failed"
+
+        created = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_create_domain",
+                {"name": "new-project"},
+                session_id=creator_session,
+            )
+        )
+        assert created == {
+            "created": "new-project",
+            "already_existed": False,
+            "domain": "new-project",
+            "read": ["new-project"],
+            "write": ["new-project"],
+            "primary": "new-project",
+        }
+        counts = row_counts()
+
+        retried = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_create_domain",
+                {"name": "new-project"},
+                session_id=creator_session,
+            )
+        )
+        assert retried == {**created, "already_existed": True}
+        assert row_counts() == counts == (1, 1, 1)
+
+        before_grant = _tool_result(
+            _tool_call(
+                client,
+                target["token"],
+                "wiki_status",
+                {},
+                session_id=target_session,
+            )
+        )
+        assert before_grant["read"] == ["docs"]
+
+        granted = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_set_domain_grant",
+                {
+                    "domain": "new-project",
+                    "token_id": target["token_id"],
+                    "can_read": True,
+                    "can_write": False,
+                },
+                session_id=creator_session,
+            )
+        )
+        assert granted == {
+            "domain": "new-project",
+            "token_id": target["token_id"],
+            "can_read": True,
+            "can_write": False,
+        }
+        assert "new-project" not in _tool_result(
+            _tool_call(
+                client,
+                target["token"],
+                "wiki_status",
+                {},
+                session_id=target_session,
+            )
+        )["read"]
+
+        fresh_target_session = initialize(client, target["token"])
+        assert "new-project" in _tool_result(
+            _tool_call(
+                client,
+                target["token"],
+                "wiki_status",
+                {},
+                session_id=fresh_target_session,
+            )
+        )["read"]
+
+        grants = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_list_domain_grants",
+                {"domain": "new-project"},
+                session_id=creator_session,
+            )
+        )
+        by_token = {row["token_id"]: row for row in grants["grants"]}
+        assert by_token[creator["token_id"]]["can_manage_grants"] is True
+        assert by_token[target["token_id"]]["can_manage_grants"] is False
+
+        invalid = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_set_domain_grant",
+                {
+                    "domain": "new-project",
+                    "token_id": target["token_id"],
+                    "can_read": False,
+                    "can_write": True,
+                },
+                session_id=creator_session,
+            )
+        )
+        assert invalid["error"] == "operation failed"
+
+        self_target = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_revoke_domain_grant",
+                {
+                    "domain": "new-project",
+                    "token_id": creator["token_id"],
+                },
+                session_id=creator_session,
+            )
+        )
+        assert self_target["error"] == "access_denied"
+
+        revoked = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_revoke_domain_grant",
+                {
+                    "domain": "new-project",
+                    "token_id": target["token_id"],
+                },
+                session_id=creator_session,
+            )
+        )
+        assert revoked == {
+            "domain": "new-project",
+            "token_id": target["token_id"],
+            "revoked": True,
+        }
+        assert "new-project" not in _tool_result(
+            _tool_call(
+                client,
+                target["token"],
+                "wiki_status",
+                {},
+                session_id=fresh_target_session,
+            )
+        )["read"]
+
+        stale = auth.authenticate(creator["token"])
+        auth.set_domain_management(
+            "wiki-a", creator["token_id"], "new-project", False
+        )
+        original_authenticate = runtime.app.auth_store.authenticate
+        runtime.app.auth_store.authenticate = lambda _token: stale
+        try:
+            transaction_denied = _tool_result(
+                _tool_call(
+                    client,
+                    creator["token"],
+                    "wiki_list_domain_grants",
+                    {"domain": "new-project"},
+                    session_id=creator_session,
+                )
+            )
+        finally:
+            runtime.app.auth_store.authenticate = original_authenticate
+        assert transaction_denied["error"] == "access_denied"

@@ -79,7 +79,7 @@ def test_parser_keeps_stdio_boundary_and_has_no_destructive_options():
         ]
     )
     rollback = parser.parse_args(
-        ["schema", "rollback-v4-compat", "--config", "server.toml"]
+        ["schema", "rollback-v5-compat", "--config", "server.toml"]
     )
 
     assert stdio.command is None
@@ -95,6 +95,20 @@ def test_parser_keeps_stdio_boundary_and_has_no_destructive_options():
         ["base", "delete", "--iwiki", "wiki-a"],
         ["token", "revoke", "--token", "secret"],
         ["base", "export-git", "--iwiki", "wiki-a", "--force"],
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
+
+    for argv in (
+        [
+            "token", "set-create-domain", "--iwiki", "wiki-a",
+            "--token-id", "token-a",
+        ],
+        [
+            "token", "set-domain-management", "--iwiki", "wiki-a",
+            "--token-id", "token-a", "--domain", "docs",
+            "--enabled", "--disabled",
+        ],
     ):
         with pytest.raises(SystemExit):
             parser.parse_args(argv)
@@ -158,6 +172,17 @@ def test_admin_commands_require_config_or_environment(admin_runtime):
     assert "accepted only for stdio" in stderr
 
 
+def _bare_principal(config, environ):
+    """Create one disposable restricted role with no domain grant yet."""
+    from iwiki_mcp import admin
+
+    from conftest import create_runtime_role
+
+    service = admin._service(str(config), environ)
+    role, _password = create_runtime_role(service.dsn, prefix="bootstrapcli")
+    return role
+
+
 def _hosted_principal(config, environ, iwiki_id, read_domains, write_domains):
     """Provision one disposable hosted role for CLI token creation."""
     from iwiki_mcp import admin
@@ -218,8 +243,10 @@ def test_base_domain_and_token_lifecycle_is_explicit_and_secret_safe(
     assert code == 0
     assert listed == [
         {
+            "can_create_domain": False,
             "created_at": listed[0]["created_at"],
             "last_used_at": None,
+            "managed_domains": [],
             "owner": "alice",
             "read_domains": ["docs"],
             "revoked_at": None,
@@ -318,18 +345,18 @@ def test_principal_grant_inspect_and_schema_rollback_commands(admin_runtime):
         ]
 
         code, output, error = _run(
-            ["schema", "rollback-v4-compat", *prefix, "--json"], environ
+            ["schema", "rollback-v5-compat", *prefix, "--json"], environ
         )
         assert (code, error) == (0, "")
         assert json.loads(output)["dry_run"] is True
         code, output, error = _run(
             [
-                "schema", "rollback-v4-compat", *prefix, "--confirm", "--json",
+                "schema", "rollback-v5-compat", *prefix, "--confirm", "--json",
             ],
             environ,
         )
         assert (code, error) == (0, "")
-        assert json.loads(output)["schema_version"] == 3
+        assert json.loads(output)["schema_version"] == 4
     finally:
         with psycopg.connect(service.dsn, autocommit=True) as connection:
             with connection.cursor() as cursor:
@@ -481,6 +508,209 @@ def service_owner(dsn):
         with connection.cursor() as cursor:
             cursor.execute("SELECT current_user")
             return cursor.fetchone()[0]
+
+
+def test_create_only_token_cli_bootstraps_empty_tenant(admin_runtime):
+    config, environ = admin_runtime
+    prefix = ["--config", str(config)]
+    assert _run(
+        ["base", "create", *prefix, "--iwiki", "wiki-a"], environ
+    )[0] == 0
+
+    bootstrap = _bare_principal(config, environ)
+    code, output, error = _run(
+        [
+            "token", "create", *prefix, "--iwiki", "wiki-a",
+            "--owner", "provisioner", "--can-create-domain",
+            "--hosted-principal", bootstrap,
+        ],
+        environ,
+    )
+
+    assert code == 0
+    assert error == ""
+    token = output.strip()
+    service = __import__("iwiki_mcp.admin", fromlist=["admin"])._service(
+        str(config), environ
+    )
+    context = service.auth.authenticate(token)
+    assert context.can_create_domain is True
+    assert context.read_domains == ()
+
+    code, output, error = _run(
+        [
+            "token", "create", *prefix, "--iwiki", "wiki-a",
+            "--owner", "empty", "--hosted-principal", bootstrap,
+        ],
+        environ,
+    )
+    assert code == 1
+    assert output == ""
+    assert "read grant is required" in error
+
+
+def test_admin_recovers_and_lists_token_management_capabilities(admin_runtime):
+    config, environ = admin_runtime
+    prefix = ["--config", str(config)]
+    assert _run(
+        ["base", "create", *prefix, "--iwiki", "wiki-a"], environ
+    )[0] == 0
+    assert _run(
+        [
+            "domain", "create", *prefix, "--iwiki", "wiki-a",
+            "--domain", "docs",
+        ],
+        environ,
+    )[0] == 0
+    code, token, _error = _run(
+        [
+            "token", "create", *prefix, "--iwiki", "wiki-a",
+            "--owner", "manager", "--read-domain", "docs",
+            "--hosted-principal",
+            _hosted_principal(config, environ, "wiki-a", ["docs"], []),
+        ],
+        environ,
+    )
+    assert code == 0
+    service = __import__("iwiki_mcp.admin", fromlist=["admin"])._service(
+        str(config), environ
+    )
+    token_id = service.auth.parse_token(token.strip())[0]
+
+    for _repeat in range(2):
+        code, output, error = _run(
+            [
+                "token", "set-create-domain", *prefix,
+                "--iwiki", "wiki-a", "--token-id", token_id,
+                "--enabled",
+            ],
+            environ,
+        )
+        assert code == 0
+        assert json.loads(output)["can_create_domain"] is True
+        assert error == ""
+        code, output, error = _run(
+            [
+                "token", "set-domain-management", *prefix,
+                "--iwiki", "wiki-a", "--token-id", token_id,
+                "--domain", "docs", "--enabled",
+            ],
+            environ,
+        )
+        assert code == 0
+        assert json.loads(output)["can_manage_grants"] is True
+        assert error == ""
+
+    code, output, _error = _run(
+        ["token", "list", *prefix, "--iwiki", "wiki-a"], environ
+    )
+    listed = json.loads(output)
+    assert code == 0
+    assert listed[0]["can_create_domain"] is True
+    assert listed[0]["managed_domains"] == ["docs"]
+    assert listed[0]["read_domains"] == ["docs"]
+    assert listed[0]["write_domains"] == []
+    assert token.strip() not in output
+    assert "digest" not in output
+    code, json_output, _error = _run(
+        ["token", "list", *prefix, "--iwiki", "wiki-a", "--json"],
+        environ,
+    )
+    assert code == 0
+    assert json.loads(json_output) == listed
+
+    for _repeat in range(2):
+        code, output, _error = _run(
+            [
+                "token", "set-domain-management", *prefix,
+                "--iwiki", "wiki-a", "--token-id", token_id,
+                "--domain", "docs", "--disabled",
+            ],
+            environ,
+        )
+        assert code == 0
+        assert json.loads(output)["can_manage_grants"] is False
+        code, output, _error = _run(
+            [
+                "token", "set-create-domain", *prefix,
+                "--iwiki", "wiki-a", "--token-id", token_id,
+                "--disabled",
+            ],
+            environ,
+        )
+        assert code == 0
+        assert json.loads(output)["can_create_domain"] is False
+
+
+def test_admin_recovery_rejects_wrong_tenant_domain_and_token(admin_runtime):
+    config, environ = admin_runtime
+    prefix = ["--config", str(config)]
+    for wiki in ("wiki-a", "wiki-b"):
+        assert _run(
+            ["base", "create", *prefix, "--iwiki", wiki], environ
+        )[0] == 0
+        assert _run(
+            [
+                "domain", "create", *prefix, "--iwiki", wiki,
+                "--domain", "docs",
+            ],
+            environ,
+        )[0] == 0
+    code, token, _error = _run(
+        [
+            "token", "create", *prefix, "--iwiki", "wiki-a",
+            "--owner", "alice", "--read-domain", "docs",
+            "--hosted-principal",
+            _hosted_principal(config, environ, "wiki-a", ["docs"], []),
+        ],
+        environ,
+    )
+    assert code == 0
+    service = __import__("iwiki_mcp.admin", fromlist=["admin"])._service(
+        str(config), environ
+    )
+    token_id = service.auth.parse_token(token.strip())[0]
+
+    invalid_commands = (
+        [
+            "token", "set-create-domain", *prefix,
+            "--iwiki", "wiki-b", "--token-id", token_id, "--enabled",
+        ],
+        [
+            "token", "set-domain-management", *prefix,
+            "--iwiki", "wiki-a", "--token-id", token_id,
+            "--domain", "missing", "--enabled",
+        ],
+        [
+            "token", "set-domain-management", *prefix,
+            "--iwiki", "wiki-a", "--token-id", "missing-token",
+            "--domain", "docs", "--enabled",
+        ],
+        [
+            "token", "set-domain-management", *prefix,
+            "--iwiki", "wiki-a", "--token-id", token_id,
+            "--domain", ".hidden", "--enabled",
+        ],
+    )
+    for command in invalid_commands:
+        code, output, error = _run(command, environ)
+        assert code == 1
+        assert output == ""
+        assert error.startswith("iwiki-mcp: ")
+
+    assert _run(
+        ["token", "revoke", *prefix, "--token-id", token_id], environ
+    )[0] == 0
+    code, output, error = _run(
+        [
+            "token", "set-create-domain", *prefix,
+            "--iwiki", "wiki-a", "--token-id", token_id, "--enabled",
+        ],
+        environ,
+    )
+    assert code == 1
+    assert output == ""
+    assert "active token not found" in error
 
 
 def test_explicit_config_precedes_environment_config(admin_runtime, tmp_path):

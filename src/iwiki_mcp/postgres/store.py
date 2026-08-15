@@ -145,7 +145,8 @@ def provision_runtime_grant(
             cursor.execute(
                 sql.SQL(
                     "GRANT SELECT ON iwiki.schema_migrations, iwiki.iwikis, "
-                    "iwiki.tokens, iwiki.token_domain_grants, iwiki.domains, "
+                    "iwiki.tokens, iwiki.token_domain_grants, "
+                    "iwiki.token_domain_management_grants, iwiki.domains, "
                     "iwiki.pages, iwiki.chunks, iwiki.links, "
                     "iwiki.code_graph_domain_state, "
                     "iwiki.code_graph_publication_sessions, "
@@ -161,8 +162,15 @@ def provision_runtime_grant(
             )
             cursor.execute(
                 sql.SQL(
+                    "GRANT UPDATE (markdown_generation) ON iwiki.domains TO {}"
+                ).format(role)
+            )
+            cursor.execute(
+                sql.SQL(
                     "GRANT INSERT, UPDATE, DELETE ON iwiki.pages, iwiki.chunks, "
-                    "iwiki.links, iwiki.code_graph_domain_state, "
+                    "iwiki.links, iwiki.token_domain_grants, "
+                    "iwiki.token_domain_management_grants, "
+                    "iwiki.code_graph_domain_state, "
                     "iwiki.code_graph_publication_sessions, "
                     "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
                     "iwiki.code_graph_files, iwiki.code_graph_symbols, "
@@ -180,7 +188,8 @@ def provision_runtime_grant(
                 sql.SQL(
                     "GRANT EXECUTE ON FUNCTION "
                     "iwiki.database_principal_can_access(text, bigint, boolean), "
-                    "iwiki.database_principal_runtime_domains(text) TO {}"
+                    "iwiki.database_principal_runtime_domains(text), "
+                    "iwiki.create_domain_for_principal(text, text) TO {}"
                 ).format(role)
             )
     return {
@@ -227,12 +236,18 @@ def require_hosted_principal(
     read_domains: list[str],
     write_domains: list[str],
 ) -> None:
-    """Reject token issuance unless this exact hosted role covers every domain."""
+    """Reject token issuance unless this exact hosted role covers every domain.
+
+    A create-only bootstrap token requests no domain, so only the restricted
+    role shape is provable before the first domain exists.
+    """
     with psycopg.connect(admin_dsn) as connection:
         with connection.cursor() as cursor:
             exists, invalid = _principal_shape(cursor, principal)
             if not exists or invalid:
                 raise ValueError("invalid hosted principal")
+            if not read_domains and not write_domains:
+                return
             cursor.execute(
                 "SELECT d.slug, g.can_read, g.can_write "
                 "FROM iwiki.database_principal_domain_grants g "

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Lock
 import time
 from typing import Any, Mapping
@@ -26,6 +26,7 @@ from .postgres.auth import (
     AuthStore,
     authenticate_bearer,
     authorize_domains,
+    validate_domain_identifier,
 )
 from .postgres.config import ConfigError, ServerConfig, load_server_config
 from .postgres.migrations import require_schema_version
@@ -44,7 +45,11 @@ _WRITE_DOMAIN_TOOLS = {
     "wiki_delete_page",
     "wiki_index",
 }
-_ADMIN_ONLY_TOOLS = {"wiki_create_domain"}
+_DOMAIN_GRANT_TOOLS = {
+    "wiki_list_domain_grants",
+    "wiki_set_domain_grant",
+    "wiki_revoke_domain_grant",
+}
 _SESSION_IDLE_SECONDS = 1800.0
 
 
@@ -161,6 +166,17 @@ async def _send_service_unavailable(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _send_method_not_allowed(send) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [(b"allow", b"POST, DELETE")],
+        }
+    )
+    await send({"type": "http.response.body", "body": b""})
+
+
 def _binding(
     config: ServerConfig, context: AuthContext, project_dir: str
 ) -> base.PostgresBinding:
@@ -183,6 +199,28 @@ def _binding(
     )
 
 
+def _effective_binding(
+    selected: base.PostgresBinding, context: AuthContext
+) -> base.PostgresBinding:
+    read = tuple(
+        domain for domain in selected.read if domain in context.read_domains
+    )
+    write = tuple(
+        domain
+        for domain in selected.write
+        if domain in context.write_domains and domain in read
+    )
+    primary = selected.primary if selected.primary in write else None
+    if primary is None and write:
+        primary = write[0]
+    return replace(
+        selected,
+        read=read,
+        write=write,
+        primary=primary,
+    )
+
+
 def _string_domains(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
@@ -198,13 +236,33 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         return
     params = request.get("params")
     if not isinstance(params, dict):
-        return
-    name = params.get("name")
-    arguments = params.get("arguments", {})
-    if not isinstance(arguments, dict):
-        return
-    if "iwiki_id" in arguments or name in _ADMIN_ONLY_TOOLS:
         raise AccessError(403)
+    name = params.get("name")
+    protected = name == "wiki_create_domain" or name in _DOMAIN_GRANT_TOOLS
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        if protected:
+            raise AccessError(403)
+        return
+    if "iwiki_id" in arguments:
+        raise AccessError(403)
+    if name == "wiki_create_domain":
+        if not context.can_create_domain:
+            raise AccessError(403)
+        return
+    if name in _DOMAIN_GRANT_TOOLS:
+        if "domain" not in arguments:
+            raise AccessError(403)
+        domain = arguments["domain"]
+        try:
+            validate_domain_identifier(domain)
+        except ValueError:
+            if not context.managed_domains:
+                raise AccessError(403)
+            return
+        if not context.can_manage_grants(domain):
+            raise AccessError(403)
+        return
 
     read_domains: tuple[str, ...] = ()
     write_domains: tuple[str, ...] = ()
@@ -311,6 +369,9 @@ class AuthenticatedMCPMiddleware:
                     scopes=[],
                 )
             )
+            if scope.get("method") == "GET":
+                await _send_method_not_allowed(send)
+                return
             session_id = _one_header(scope, b"mcp-session-id")
             initial = _binding(self.config, context, self.project_dir)
 
@@ -318,54 +379,74 @@ class AuthenticatedMCPMiddleware:
 
             state = self.sessions.resolve(session_id, context)
             if state is None:
-                state = server._HostedBindingState(initial)
-            current = state.get()
-            effective_context = AuthContext(
-                iwiki_id=context.iwiki_id,
-                token_id=context.token_id,
-                read_domains=tuple(current.read),
-                write_domains=tuple(current.write),
-                primary=current.primary,
-            )
+                selected = server._HostedSelectedState(initial)
+                state = server._HostedBindingState(selected, initial)
 
-            messages = await _request_messages(receive)
-            _authorize_tool(effective_context, _request_json(messages))
-            iterator = iter(messages)
-
-            async def replay_receive():
+            async with state.request_lock():
+                selected = state.selected_state()
+                current = _effective_binding(selected.get(), context)
+                effective_context = replace(
+                    context,
+                    read_domains=tuple(current.read),
+                    write_domains=tuple(current.write),
+                    primary=current.primary,
+                )
+                state.set_effective(current, effective_context)
                 try:
-                    return next(iterator)
-                except StopIteration:
-                    return await receive()
+                    messages = await _request_messages(receive)
+                    _authorize_tool(effective_context, _request_json(messages))
+                    iterator = iter(messages)
 
-            binding_token = server._SESSION_BINDING.set(state)
+                    async def replay_receive():
+                        try:
+                            return next(iterator)
+                        except StopIteration:
+                            return await receive()
 
-            async def capture_send(message):
-                if message["type"] == "http.response.start":
-                    response_session = next(
-                        (
-                            value.decode("latin-1")
-                            for key, value in message.get("headers", ())
-                            if key.lower() == b"mcp-session-id"
-                        ),
-                        None,
-                    )
-                    if response_session is not None:
-                        self.sessions.store(response_session, context, state)
-                    if scope.get("method") == "DELETE" and message["status"] < 400:
-                        self.sessions.remove(session_id)
-                await send(message)
+                    auth_token = server._AUTH_CONTEXT.set(effective_context)
+                    binding_token = server._SESSION_BINDING.set(state)
 
-            try:
-                inner_scope = dict(scope)
-                inner_scope["headers"] = [
-                    (key, value)
-                    for key, value in scope.get("headers", ())
-                    if key.lower() not in {b"authorization", b"origin"}
-                ]
-                await self.app(inner_scope, replay_receive, capture_send)
-            finally:
-                server._SESSION_BINDING.reset(binding_token)
+                    async def capture_send(message):
+                        if message["type"] == "http.response.start":
+                            response_session = next(
+                                (
+                                    value.decode("latin-1")
+                                    for key, value in message.get("headers", ())
+                                    if key.lower() == b"mcp-session-id"
+                                ),
+                                None,
+                            )
+                            if (
+                                scope.get("method") == "DELETE"
+                                and message["status"] < 400
+                            ):
+                                self.sessions.remove(session_id)
+                            elif message["status"] < 400:
+                                target_session = response_session or session_id
+                                if target_session is not None:
+                                    self.sessions.store(
+                                        target_session,
+                                        context,
+                                        state,
+                                    )
+                        await send(message)
+
+                    try:
+                        inner_scope = dict(scope)
+                        inner_scope["headers"] = [
+                            (key, value)
+                            for key, value in scope.get("headers", ())
+                            if key.lower()
+                            not in {b"authorization", b"origin"}
+                        ]
+                        await self.app(
+                            inner_scope, replay_receive, capture_send
+                        )
+                    finally:
+                        server._SESSION_BINDING.reset(binding_token)
+                        server._AUTH_CONTEXT.reset(auth_token)
+                finally:
+                    state.reset_effective()
         except AccessError as exc:
             await _send_error(send, exc)
         except psycopg.Error:

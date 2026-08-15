@@ -1,8 +1,0 @@
-{
-  "base_commit": "d4f4e19a50454cb7381268c3fefbcb3135e36929",
-  "patch": "compat/postgres-v3-runtime-guard.patch",
-  "patch_sha256": "fcb119a5a3443f8b0f34dd75c6beb2adcccefe4163743473b351de12ab45b4ed",
-  "purpose": "read-only schema-version-3 guard for pre-v4 application rollback",
-  "schema_version": 3,
-  "source_tree_sha256": "4dfa52fce2bc48f0ffba4cf438360dd93570f9933fe31a81e6bee8a597611d28"
-}

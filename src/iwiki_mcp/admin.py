@@ -16,12 +16,12 @@ from psycopg.conninfo import make_conninfo
 
 from .engine.config import Config
 from .engine.embed import EmbedError, embed_texts
-from .postgres.auth import AuthStore
+from .postgres.auth import AuthStore, validate_domain_identifier
 from .postgres.config import ConfigError, ServerConfig, load_server_config
 from .postgres.migrations import (
     MigrationError,
     MigrationSettings,
-    rollback_v4_compatibility,
+    rollback_v5_compatibility,
     run_migrations,
 )
 from .postgres.store import (
@@ -99,9 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config(token_create)
     token_create.add_argument("--iwiki", required=True)
     token_create.add_argument("--owner", required=True)
-    token_create.add_argument("--read-domain", action="append", required=True)
+    token_create.add_argument("--read-domain", action="append", default=[])
     token_create.add_argument("--write-domain", action="append", default=[])
     token_create.add_argument("--hosted-principal", required=True)
+    token_create.add_argument("--can-create-domain", action="store_true")
     token_list = token_commands.add_parser("list")
     _add_config(token_list)
     token_list.add_argument("--iwiki", required=True)
@@ -131,10 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
     schema_commands = schema.add_subparsers(
         dest="schema_command", required=True, parser_class=_StrictArgumentParser
     )
-    rollback = schema_commands.add_parser("rollback-v4-compat")
+    rollback = schema_commands.add_parser("rollback-v5-compat")
     _add_config(rollback)
     rollback.add_argument("--confirm", action="store_true")
     rollback.add_argument("--json", action="store_true")
+
+    for name in ("set-create-domain", "set-domain-management"):
+        action = token_commands.add_parser(name)
+        _add_config(action)
+        action.add_argument("--iwiki", required=True)
+        action.add_argument("--token-id", required=True)
+        if name == "set-domain-management":
+            action.add_argument("--domain", required=True)
+        state = action.add_mutually_exclusive_group(required=True)
+        state.add_argument("--enabled", action="store_true")
+        state.add_argument("--disabled", action="store_true")
     return parser
 
 
@@ -164,10 +176,7 @@ def _integer_env(
 
 
 def _domain_identifier(value: str) -> str:
-    domain = _validate_identifier(value, "domain")
-    if domain.startswith(".") or "/" in domain:
-        raise ValueError("invalid domain")
-    return domain
+    return validate_domain_identifier(value)
 
 
 def _engine_config(
@@ -438,6 +447,7 @@ class AdminService:
         read_domains: list[str],
         write_domains: list[str],
         hosted_principal: str,
+        can_create_domain: bool = False,
     ) -> dict:
         iwiki_id = _validate_identifier(iwiki_id, "iwiki id")
         require_hosted_principal(
@@ -452,13 +462,14 @@ class AdminService:
             owner,
             read_domains=read_domains,
             write_domains=write_domains,
+            can_create_domain=can_create_domain,
         )
 
     def inspect_principal(self, principal: str) -> dict:
         return inspect_runtime_principal(self.dsn, principal)
 
-    def rollback_schema_v4(self, *, confirm: bool) -> dict:
-        return rollback_v4_compatibility(
+    def rollback_schema_v5(self, *, confirm: bool) -> dict:
+        return rollback_v5_compatibility(
             MigrationSettings(
                 dsn=self.dsn,
                 embed_model=self.config.models.embed_model,
@@ -569,6 +580,7 @@ def _dispatch(args, service: AdminService):
                 read_domains=args.read_domain,
                 write_domains=args.write_domain,
                 hosted_principal=args.hosted_principal,
+                can_create_domain=args.can_create_domain,
             )
         if args.token_command == "list":
             return service.auth.list_tokens(args.iwiki)
@@ -576,6 +588,17 @@ def _dispatch(args, service: AdminService):
             if not service.auth.revoke_token(args.token_id):
                 raise ValueError("token not found or already revoked")
             return {"revoked": args.token_id}
+        if args.token_command == "set-create-domain":
+            return service.auth.set_create_domain(
+                args.iwiki, args.token_id, args.enabled
+            )
+        if args.token_command == "set-domain-management":
+            return service.auth.set_domain_management(
+                args.iwiki,
+                args.token_id,
+                args.domain,
+                args.enabled,
+            )
     if args.command == "principal":
         if args.principal_command == "grant":
             return service.grant_principal(
@@ -587,8 +610,8 @@ def _dispatch(args, service: AdminService):
             )
         if args.principal_command == "inspect":
             return service.inspect_principal(args.principal)
-    if args.command == "schema" and args.schema_command == "rollback-v4-compat":
-        return service.rollback_schema_v4(confirm=args.confirm)
+    if args.command == "schema" and args.schema_command == "rollback-v5-compat":
+        return service.rollback_schema_v5(confirm=args.confirm)
     raise ValueError("unsupported administration command")
 
 
