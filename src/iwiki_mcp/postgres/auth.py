@@ -26,20 +26,26 @@ class AccessError(PermissionError):
         super().__init__(message)
 
 
+def validate_domain_identifier(value: str) -> str:
+    """Return one strict PostgreSQL domain identifier."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or value.startswith(".")
+        or "/" in value
+        or "\\" in value
+    ):
+        raise ValueError("domain identifier is invalid")
+    return value
+
+
 def _unique_domains(values) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise ValueError("domain grants must be arrays")
     result = []
     for value in values:
-        if (
-            not isinstance(value, str)
-            or not value
-            or value != value.strip()
-            or value.startswith(".")
-            or "/" in value
-            or "\\" in value
-        ):
-            raise ValueError("domain grant is invalid")
+        validate_domain_identifier(value)
         if value not in result:
             result.append(value)
     return tuple(result)
@@ -54,6 +60,8 @@ class AuthContext:
     read_domains: tuple[str, ...]
     write_domains: tuple[str, ...]
     primary: str | None = None
+    can_create_domain: bool = False
+    managed_domains: tuple[str, ...] = ()
 
     def can_read(self, domain: str) -> bool:
         return domain in self.read_domains
@@ -67,6 +75,13 @@ class AuthContext:
 
     def require_write(self, domain: str) -> None:
         if not self.can_write(domain):
+            raise AccessError(403)
+
+    def can_manage_grants(self, domain: str) -> bool:
+        return domain in self.managed_domains
+
+    def require_manage_grants(self, domain: str) -> None:
+        if not self.can_manage_grants(domain):
             raise AccessError(403)
 
     def narrow(
@@ -99,6 +114,8 @@ class AuthContext:
             read_domains=read,
             write_domains=write,
             primary=selected,
+            can_create_domain=self.can_create_domain,
+            managed_domains=self.managed_domains,
         )
 
 

@@ -24,7 +24,7 @@ def _settings(dsn, *, model="lemonade-embeddings-bge-m3-q8", dimensions=1024):
 def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
     import psycopg
 
-    from iwiki_mcp.postgres.migrations import run_migrations
+    from iwiki_mcp.postgres.migrations import MIGRATIONS, run_migrations
 
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
@@ -49,7 +49,9 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
             tables = {row[0] for row in cursor.fetchall()}
 
     assert schemas_after - schemas_before == {"iwiki"}
-    assert result.applied_versions == (1, 2, 3)
+    assert result.applied_versions == tuple(
+        migration.version for migration in MIGRATIONS
+    )
     assert tables == {
         "chunks",
         "domains",
@@ -60,6 +62,7 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
         "schema_migrations",
         "storage_metadata",
         "token_domain_grants",
+        "token_domain_management_grants",
         "tokens",
     }
 
@@ -67,7 +70,7 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
 def test_repeated_and_concurrent_startup_applies_one_ordered_history(clean_postgres):
     import psycopg
 
-    from iwiki_mcp.postgres.migrations import run_migrations
+    from iwiki_mcp.postgres.migrations import MIGRATIONS, run_migrations
 
     settings = _settings(clean_postgres)
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -81,9 +84,10 @@ def test_repeated_and_concurrent_startup_applies_one_ordered_history(clean_postg
             )
             versions = tuple(row[0] for row in cursor.fetchall())
 
-    assert sorted(result.applied_versions for result in results) == [(), (1, 2, 3)]
+    all_versions = tuple(migration.version for migration in MIGRATIONS)
+    assert sorted(result.applied_versions for result in results) == [(), all_versions]
     assert repeated.applied_versions == ()
-    assert versions == (1, 2, 3)
+    assert versions == all_versions
 
 
 def test_unrelated_schema_survives_migration(clean_postgres):
@@ -122,7 +126,7 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
     run_migrations(_settings(clean_postgres))
     broken = MIGRATIONS + (
         Migration(
-            version=4,
+            version=MIGRATIONS[-1].version + 1,
             statements=(
                 "CREATE TABLE iwiki.must_roll_back (id integer PRIMARY KEY)",
                 "THIS IS NOT VALID SQL",
@@ -140,7 +144,51 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
                 "array_agg(version ORDER BY version) "
                 "FROM iwiki.schema_migrations"
             )
-            assert cursor.fetchone() == (None, [1, 2, 3])
+            assert cursor.fetchone() == (
+                None,
+                [migration.version for migration in MIGRATIONS],
+            )
+
+
+def test_migration_history_includes_domain_authority_v4():
+    from iwiki_mcp.postgres.migrations import MIGRATIONS
+
+    assert tuple(migration.version for migration in MIGRATIONS) == (1, 2, 3, 4)
+    statements = "\n".join(MIGRATIONS[-1].statements)
+    assert "can_create_domain" in statements
+    assert "token_domain_management_grants" in statements
+    assert "token_domain_grants_domain_idx" in statements
+    assert "token_domain_management_grants_domain_idx" in statements
+
+
+def test_schema_adds_separate_domain_management_authority(clean_postgres):
+    import psycopg
+
+    from iwiki_mcp.postgres.migrations import run_migrations
+
+    run_migrations(_settings(clean_postgres))
+    with psycopg.connect(clean_postgres) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT column_default, is_nullable "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'iwiki' AND table_name = 'tokens' "
+                "AND column_name = 'can_create_domain'"
+            )
+            assert cursor.fetchone() == ("false", "NO")
+            cursor.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = 'iwiki' AND indexname IN ("
+                "'token_domain_grants_domain_idx', "
+                "'token_domain_management_grants_domain_idx')"
+            )
+            indexes = dict(cursor.fetchall())
+
+    assert set(indexes) == {
+        "token_domain_grants_domain_idx",
+        "token_domain_management_grants_domain_idx",
+    }
+    assert all("(iwiki_id, domain_id)" in index for index in indexes.values())
 
 
 def test_newer_schema_version_refuses_startup(clean_postgres):
@@ -296,4 +344,6 @@ def test_schema_uses_tenant_composite_constraints(clean_postgres):
         "tokens_token_id_key",
         "token_domain_grants_iwiki_token_fk",
         "token_domain_grants_iwiki_domain_fk",
+        "token_domain_management_grants_iwiki_token_fk",
+        "token_domain_management_grants_iwiki_domain_fk",
     } <= constraints

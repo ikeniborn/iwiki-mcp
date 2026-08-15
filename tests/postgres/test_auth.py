@@ -112,8 +112,41 @@ def test_authentication_returns_immutable_one_wiki_context(auth_store):
     assert context.iwiki_id == "wiki-a"
     assert context.read_domains == ("docs", "private")
     assert context.write_domains == ("docs",)
+    assert context.can_create_domain is False
+    assert context.managed_domains == ()
+    assert context.can_manage_grants("docs") is False
     with pytest.raises(FrozenInstanceError):
         context.iwiki_id = "wiki-b"
+
+
+def test_domain_identifier_is_strict_and_shared():
+    from iwiki_mcp.postgres.auth import validate_domain_identifier
+
+    assert validate_domain_identifier("new-project") == "new-project"
+    for value in ("", " docs", "docs ", ".hidden", "a/b", "a\\b"):
+        with pytest.raises(ValueError, match="domain identifier is invalid"):
+            validate_domain_identifier(value)
+
+
+def test_context_narrowing_preserves_management_authority():
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs",),
+        write_domains=("docs",),
+        primary="docs",
+        can_create_domain=True,
+        managed_domains=("private",),
+    )
+
+    narrowed = context.narrow(read_domains=("docs",), write_domains=())
+
+    assert narrowed.primary is None
+    assert narrowed.can_create_domain is True
+    assert narrowed.managed_domains == ("private",)
+    assert narrowed.can_manage_grants("private") is True
 
 
 @pytest.mark.parametrize(
