@@ -1,8 +1,9 @@
 import dataclasses
-from importlib.metadata import version
+from importlib.metadata import requires, version
 from pathlib import Path
 
 import iwiki_mcp
+from packaging.requirements import Requirement
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 
 
@@ -10,8 +11,19 @@ def test_package_version_matches_distribution_metadata():
     assert iwiki_mcp.__version__ == version("iwiki-mcp")
 
 
+def test_package_metadata_rejects_mcp_v2():
+    dependencies = requires("iwiki-mcp") or []
+    mcp_requirement = next(
+        Requirement(dependency)
+        for dependency in dependencies
+        if Requirement(dependency).name == "mcp"
+    )
+
+    assert not mcp_requirement.specifier.contains("2.0.0")
+
+
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.121"
+    assert iwiki_mcp.__version__ == "0.7.122"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
