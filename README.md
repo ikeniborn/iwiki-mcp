@@ -133,6 +133,10 @@ terminates public TLS, forwards the exact `Origin`, and does not log `Authorizat
 Browser requests must match `allowed_origins`; clients without an `Origin` are allowed,
 but every MCP request still needs `Authorization: Bearer <token>`. Invalid credentials,
 grants, sessions, and unavailable storage return sanitized 401/403/404/503 responses.
+Hosted mode does not emit server-initiated notifications: after Bearer authentication,
+`GET /mcp` returns `405 Method Not Allowed` with `Allow: POST, DELETE` without entering
+the MCP session manager. Stateful `POST` requests and `DELETE` session termination remain
+available.
 
 The server opens a bounded connection pool and applies the configured statement and
 lock timeouts. Startup probes the model endpoint, validates model metadata, and applies

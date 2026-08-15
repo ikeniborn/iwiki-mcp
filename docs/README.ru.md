@@ -133,6 +133,10 @@ MCP endpoint — `/mcp`. Размещайте loopback-listener за reverse pro
 браузера `Origin` обязан совпасть с `allowed_origins`; клиенты без `Origin` допустимы,
 но каждый MCP-запрос всё равно требует `Authorization: Bearer <token>`. Ошибки
 credentials, grants, session и storage возвращаются очищенными 401/403/404/503.
+Hosted-режим не отправляет server-initiated notifications: после Bearer-аутентификации
+`GET /mcp` возвращает `405 Method Not Allowed` с `Allow: POST, DELETE`, не входя в MCP
+session manager. Stateful-запросы `POST` и завершение сессии через `DELETE` остаются
+доступны.
 
 Сервер открывает ограниченный connection pool и применяет заданные statement/lock
 timeouts. До открытия listener startup проверяет модель, сверяет её метаданные и

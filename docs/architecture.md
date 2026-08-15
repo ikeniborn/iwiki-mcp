@@ -93,6 +93,10 @@ The listener accepts loopback hosts only. Browser `Origin` must exactly match th
 normalized allowlist; non-browser clients may omit it, but bearer authentication remains
 mandatory. Database, authentication, and authorization failures cross the HTTP boundary
 only as sanitized 503, 401, or 403 responses; invalid or mismatched sessions use 404.
+Because hosted mode has no server-initiated notifications, authenticated `GET /mcp`
+stops at the outer middleware with 405 and `Allow: POST, DELETE`; it never acquires the
+per-session request lock or enters FastMCP. Stateful POST dispatch and DELETE termination
+continue through the session manager.
 
 Git-only tools fail early with stable `unsupported_storage` data when PostgreSQL is
 active. PostgreSQL update/delete require `expected_revision`; a lost optimistic-lock
