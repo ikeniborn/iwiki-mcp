@@ -1,7 +1,7 @@
 ---
 review:
-  plan_hash: 75cabef334ee0a9a
-  last_run: 2026-08-14
+  plan_hash: e61bff7101f60eb5
+  last_run: 2026-08-15
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -23,7 +23,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 86d0aeb040b72cab
+      section_hash: 63d3a26227f0e043
       fragment: "Do not implement resume, reattach, transfer, supersession, or fencing fields."
       text: "The prior fencing token had no ownership-transfer operation and therefore no protective effect."
       fix: "Remove fencing and make sessions non-transferable with fixed owner and lease checks."
@@ -33,7 +33,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 5: Target Markdown revision and code-to-wiki link derivation"
-      section_hash: 906c62202cea6823
+      section_hash: 9ceb913212d1ba9a
       fragment: "PostgreSQL `lint_domain` and local `engine.lint` explicitly compute the current canonical hash"
       text: "R-019 lint output had no implementation owner or test."
       fix: "Assign PostgreSQL/local lint implementation and exact revision/stale-link tests to Task 5."
@@ -43,7 +43,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "reject owner/`BYPASSRLS` roles"
       text: "The documented application/table-owner role could bypass RLS."
       fix: "Separate migrator, hosted service, and restricted direct roles; provision and validate shared grants."
@@ -53,7 +53,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "schema rollback-v4-compat --confirm"
       text: "Schema-v4 rollback could not start the previous application."
       fix: "Ship compatibility rollback, pinned pre-v4 smoke, and idempotent v4 reapplication."
@@ -63,7 +63,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 86d0aeb040b72cab
+      section_hash: 63d3a26227f0e043
       fragment: "SET LOCAL lock_timeout = <lock_timeout_ms>"
       text: "pg_try_advisory_xact_lock could not satisfy configured busy timeout semantics."
       fix: "Use blocking advisory lock, transaction-local timeout, SQLSTATE mapping, and real contention test."
@@ -72,8 +72,8 @@ review:
     - id: F-007
       phase: coverage
       severity: CRITICAL
-      section: "Task 2: Portable snapshot builder and SQLite adapter"
-      section_hash: 6e47653ec7073f58
+      section: "Task 2: Portable snapshot builder and atomic SQLite publication profile"
+      section_hash: 7d1bbbc508fd23d7
       fragment: "Generate one ephemeral publisher-instance identity"
       text: "SQLite ownership and lease checks were left to later defect discovery."
       fix: "Make fixed ownership, lease, expiry, and replacement-process rejection Task 2 requirements."
@@ -83,7 +83,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 86d0aeb040b72cab
+      section_hash: 63d3a26227f0e043
       fragment: "call cleanup_staging(now) before session creation"
       text: "Retention cleanup existed without an operational call site."
       fix: "Invoke bounded per-domain cleanup from every begin and test active-data preservation."
@@ -93,7 +93,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 8: Runtime composition and MCP tool surface"
-      section_hash: a95be9a77ee14c86
+      section_hash: d25928ef2ad33b68
       fragment: "`_code_publication_service` returns `unsupported_storage` unless the current call is authenticated hosted PostgreSQL"
       text: "Publication-tool behavior for Git/SQLite and wiki_code_index matrix entries was undefined."
       fix: "Specify static registration, hosted-only execution, local direct adapter use, and complete matrix tests."
@@ -103,7 +103,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: 1f4f83404ab33346
+      section_hash: 707676f37492b28f
       fragment: "real initialize/tool JSON-RPC requests through /mcp"
       text: "The MCP lifecycle branch could degrade into a fake argument-mapping test."
       fix: "Run the same lifecycle through the real in-process hosted ASGI/MCP stack and disposable PostgreSQL."
@@ -113,7 +113,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 86d0aeb040b72cab
+      section_hash: 63d3a26227f0e043
       fragment: "test_finalize_recomputes_header_graph_revision"
       text: "Target-side revision_mismatch had no explicit implementation test."
       fix: "Make header the single source and require independent target recomputation with a forged-revision test."
@@ -123,7 +123,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "hosted service role is rls scoped"
       text: "Hosted service access was undefined after RLS enabled protected tables."
       fix: "Provision explicit shared hosted-domain grants and test a non-owner service role against allowed and unprovisioned domains."
@@ -133,7 +133,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "server._initialize_postgres_storage"
       text: "Stdio direct PostgreSQL would still migrate at startup while hosted startup became read-only."
       fix: "Apply one require_schema_version helper to both server.py and http.py and test that neither calls run_migrations."
@@ -143,7 +143,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 4: PostgreSQL publication sessions and atomic activation"
-      section_hash: 86d0aeb040b72cab
+      section_hash: 63d3a26227f0e043
       fragment: "Do not implement resume, reattach, transfer, supersession, or fencing fields."
       text: "Plan fencing fields contradicted the revised non-transferable-session specification."
       fix: "Remove fencing from types, schema, adapters, MCP signatures, tests, and coverage evidence."
@@ -153,7 +153,7 @@ review:
       phase: dependencies
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "move the reusable store_factory"
       text: "Cross-module tests referenced fixtures local to test_store.py and test_http.py."
       fix: "Move store_factory, hosted_runtime, and shared graph builders into tests/postgres/conftest.py before dependent tests."
@@ -163,7 +163,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "SCHEMA_GUARD_PASSED"
       text: "The pre-v4 rollback subprocess could pass or fail for unrelated interpreter, dependency, config, or startup reasons."
       fix: "Pin interpreter, PYTHONPATH, dependency environment, isolated config/DSN, schema-guard sentinel, and exact CRUD/search assertions."
@@ -173,7 +173,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 6: PostgreSQL ready/fresh reader"
-      section_hash: 8fd749338ab77c51
+      section_hash: 7a3114100e2015fc
       fragment: "byte-for-byte equal normalized search results across all nine ranks"
       text: "Reader equivalence checked only entity order and could miss rank, field, or tie-break drift."
       fix: "Use the authoritative rank table and compare complete normalized SQLite/PostgreSQL results for all nine ranks."
@@ -193,7 +193,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 3: PostgreSQL migration and shared runtime-principal scope"
-      section_hash: b9049f563f179111
+      section_hash: 8b775ce58253daa4
       fragment: "Replace runtime migration calls in both"
       text: "Hosted startup migration removal was not shared by stdio and was absent from the prior approved rollout contract."
       fix: "Revise the spec and plan to use operator-only migrations plus identical read-only runtime schema guards."
@@ -213,7 +213,7 @@ review:
       phase: coverage
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: 1f4f83404ab33346
+      section_hash: 707676f37492b28f
       fragment: "Assert the three closed sets independently"
       text: "A combined adapter/readiness error type erased the route-specific closed sets in R-028."
       fix: "Define publication, adapter, and readiness types/constants separately and test each route independently."
@@ -223,7 +223,7 @@ review:
       phase: verifiability
       severity: CRITICAL
       section: "Task 10: Operator documentation and 20,000-file evidence"
-      section_hash: 6361d2060108aeef
+      section_hash: 34858c04f8bf392e
       fragment: "test_postgres_publication_respects_server_ceilings"
       text: "Scale evidence covered only SQLite and did not exercise distributed server ceilings."
       fix: "Keep the 20,000-file SQLite boundary and add a real 2,000-file PostgreSQL ceiling/query-bound run required before result reconciliation."
@@ -242,8 +242,8 @@ review:
     - id: F-024
       phase: structure
       severity: CRITICAL
-      section: "Task 2: Portable snapshot builder and SQLite adapter"
-      section_hash: 6e47653ec7073f58
+      section: "Task 2: Portable snapshot builder and atomic SQLite publication profile"
+      section_hash: 7d1bbbc508fd23d7
       fragment: "1870-1906"
       text: "The previous codegraph/store.py anchor extended beyond the current 1906-line file."
       fix: "Use the verified 1870-1906 anchor."
@@ -253,7 +253,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "Task 9: Cross-adapter concurrency, integrity, and safe-error suite"
-      section_hash: 1f4f83404ab33346
+      section_hash: 707676f37492b28f
       fragment: "stage only the contract tests and version files"
       text: "The prior commit command pre-staged implementation files even when no demonstrated defect changed them."
       fix: "Return demonstrated defects to their owning task and stage only Task 9 contract tests in Task 9."
@@ -263,7 +263,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "1. Delivery rules and acceptance source"
-      section_hash: 493ccc98201420d1
+      section_hash: 3027725226f66a0f
       fragment: "all four version surfaces"
       text: "Plan commits updated distribution metadata but omitted the runtime version and fixed package-version assertion, leaving the approved baseline failing."
       fix: "Add a checked 0.7.114 baseline repair, synchronize all four version surfaces in every later commit, and shift Task 1 through Task 10 versions."
@@ -273,7 +273,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "1. Delivery rules and acceptance source"
-      section_hash: 493ccc98201420d1
+      section_hash: 3027725226f66a0f
       fragment: "strict `<500 ms`"
       text: "The existing strict startup gate of 100 ms rejected repeated healthy environment measurements between 101.742654 and 133.499218 ms."
       fix: "Apply the user-approved strict 500 ms startup gate through a failing boundary test, include it in the 0.7.114 baseline repair, and require the full suite to pass."
@@ -289,7 +289,7 @@ chain:
 
 **Goal:** Let a local Python indexer publish one atomic code-graph snapshot through SQLite, direct PostgreSQL, or remote MCP and let PostgreSQL-backed servers query it without a checkout.
 
-**Architecture:** Keep extraction local, add one versioned row-native `SnapshotPublisher`/`CodeGraphReader` contract, and place SQLite, PostgreSQL, and MCP adapters behind it. PostgreSQL stages immutable tenant/domain snapshots, derives wiki links from target Markdown, then switches one active pointer under a short advisory transaction lock and optimistic graph/Markdown revision checks.
+**Architecture:** Keep extraction local, add one versioned row-native `SnapshotPublisher`/`CodeGraphReader` contract, and place SQLite, PostgreSQL, and MCP adapters behind it. SQLite activates entity rows and an internal ready envelope with one atomic database replacement and reports explicit `commit_uncertain` when directory durability cannot be confirmed. PostgreSQL stages immutable tenant/domain snapshots, derives wiki links from target Markdown, then switches one active pointer under a short advisory transaction lock and optimistic graph/Markdown revision checks.
 
 **Tech Stack:** Python 3.10+, dataclasses and `Protocol`, SQLite, psycopg 3, PostgreSQL transactions/advisory locks, FastMCP and the MCP Streamable HTTP client, pytest/pytest-asyncio.
 
@@ -298,12 +298,12 @@ chain:
 ## 1. Delivery rules and acceptance source
 
 - Approved intent: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/intents/2026-08-14-postgres-code-graph-distributed-indexing-intent.md` with body hash `a626f91a91ecfa50`.
-- Approved spec: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/specs/2026-08-14-postgres-code-graph-distributed-indexing-design.md` with body hash `fb3b4aaac667f3e5` and commit `f62232d`.
+- Approved spec: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/specs/2026-08-14-postgres-code-graph-distributed-indexing-design.md` with body hash `3f99f03931a728f7` and commit `c1fa05d`.
 - Plan artifact: `/home/ikeniborn/Documents/Project/iwiki-mcp/docs/superpowers/plans/2026-08-14-postgres-code-graph-distributed-indexing.md`.
 - Implement requirements `R-001` through `R-030` and prove acceptance criteria `AC-01` through `AC-30` without changing the approved intent or spec.
 - Preserve one repository per bound primary domain, Python-only extraction, existing SQLite query behavior, and ordinary PostgreSQL wiki behavior.
 - Use TDD for every behavior change: focused failing test, observed failure, minimal implementation, focused pass, broader regression, version bump, commit.
-- Every repository commit updates the same version in `pyproject.toml`, `uv.lock`, `src/iwiki_mcp/__init__.py`, and the fixed package-version assertion in `tests/test_package.py`. This plan correction prepares `0.7.114`; Tasks 1–10 use `0.7.115` through `0.7.124` respectively. Any defect commit after Task 10 uses the next unused patch version.
+- Every repository commit updates the same version in `pyproject.toml`, `uv.lock`, `src/iwiki_mcp/__init__.py`, and the fixed package-version assertion in `tests/test_package.py`. Existing branch history uses baseline `0.7.114`, Task 1 `0.7.115`, the initial Task 2 slice `0.7.116`, and the approved specification correction `0.7.117`. This checked plan revision prepares `0.7.118`; the Task 2 atomic-recovery commit uses `0.7.119`; Tasks 3–10 use `0.7.120` through `0.7.127`. Any demonstrated defect after Task 10 uses `0.7.128` or the next unused patch version.
 - Before Task 1, repair the already reproduced baseline mismatch by setting all four version surfaces to `0.7.114`, and raise the existing code-graph startup release gate from strict `<100 ms` to user-approved strict `<500 ms` in the benchmark implementation and boundary test. Run `uv lock`, require `uv run pytest -q tests/test_package.py`, the focused startup boundary test, and `uv run pytest -q` to pass, then commit this checked plan correction with the synchronized version files, benchmark gate, and test. The observed pre-repair failures were `iwiki_mcp.__version__ == "0.7.108"` versus distribution metadata `0.7.113`, followed by environment startup measurements of `133.499218`, `125.841149`, `101.742654`, and `106.770350` ms against the old `<100 ms` gate.
 - Do not push, publish production snapshots, create production credentials, or run destructive database operations outside the disposable `*_test` database.
 - Parent agent alone updates iwiki task/wiki pages. Workers return repository paths and check evidence; they never call wiki write tools.
@@ -315,7 +315,8 @@ chain:
 | `src/iwiki_mcp/codegraph/canonical.py` | Sole public canonical JSON bytes/hash implementation reused by fingerprints, SQLite, PostgreSQL, and wire batches |
 | `src/iwiki_mcp/codegraph/publication.py` | Versioned rows, canonical serialization, batching, session/result types, publisher protocol |
 | `src/iwiki_mcp/codegraph/reader.py` | Shared ready/fresh status and reader protocol |
-| `src/iwiki_mcp/codegraph/sqlite_adapter.py` | Shared-protocol SQLite publisher/reader over existing store/query/context |
+| `src/iwiki_mcp/codegraph/schema.py` | Exact legacy/publication schema-v2 profiles and internal `code_graph_publication` DDL |
+| `src/iwiki_mcp/codegraph/sqlite_adapter.py` | Shared-protocol SQLite publisher/reader, atomic embedded authority, reconciliation, and ordered locks |
 | `src/iwiki_mcp/codegraph/mcp_adapter.py` | Authenticated Streamable HTTP publisher/reader client |
 | `src/iwiki_mcp/codegraph/config.py` | Explicit modes, freshness, batch/session bounds, secret-free config validation |
 | `src/iwiki_mcp/codegraph/indexer.py` | Local extraction to portable row set; no target-specific transport logic |
@@ -333,7 +334,8 @@ chain:
 | `src/iwiki_mcp/__init__.py` | Runtime package version synchronized in every repository commit |
 | `src/iwiki_mcp/engine/lint.py` | SQLite stored/current canonical Markdown revision and stale-link diagnostics |
 | `tests/codegraph/test_publication.py` | Canonical protocol, batching, lease/error contract |
-| `tests/codegraph/test_sqlite_adapter.py` | SQLite publisher/reader contract and compatibility |
+| `tests/codegraph/test_schema.py` | Exact legacy/publication schema-v2 profiles and arbitrary-extra rejection |
+| `tests/codegraph/test_sqlite_adapter.py` | SQLite publisher/reader atomicity, recovery, lock, integrity, and compatibility contract |
 | `tests/codegraph/test_mcp_adapter.py` | Outbound MCP transport mapping and redaction |
 | `tests/codegraph/publication_contract_support.py` | Adapter-neutral lifecycle harness used by SQLite/PostgreSQL/real hosted MCP |
 | `tests/postgres/conftest.py` | Shared migrated store, hosted runtime, and graph fixtures used across PostgreSQL test modules |
@@ -345,6 +347,7 @@ chain:
 | `tests/postgres/test_code_graph_scale.py` | Reduced generated PostgreSQL publication run proving server batch/query ceilings |
 | `tests/postgres/test_code_graph_rollback.py` | Schema-v4 compatibility rollback and pre-v4 PostgreSQL smoke |
 | `tests/eval/test_code_graph_publication_scale.py` | Generated 20,000-file publication evidence |
+| `tests/test_server_import_closure.py` | Live-server eager import closure for the SQLite adapter |
 | `eval/code_graph/runner.py` | Code-graph benchmark implementation, including the strict `<500 ms` startup release gate |
 | `tests/eval/test_code_graph_runner.py` | Startup release-gate boundary and benchmark report evidence |
 | `tests/test_package.py` | Distribution/runtime version equality and fixed release assertion synchronized in every commit |
@@ -538,112 +541,172 @@ git commit -m "feat(codegraph): add shared publication protocol"
 
 Expected: one commit containing only shared types/config/tests; no PostgreSQL or server behavior yet.
 
-### Task 2: Portable snapshot builder and SQLite adapter
+### Task 2: Portable snapshot builder and atomic SQLite publication profile
 
-**Depends on:** Task 1 shared types and config.
-**Requirements:** R-003, R-005–R-011, R-013–R-020, R-025, R-029.
-**Problem closed:** local SQLite must use the same chunk, fixed ownership, lease, cleanup, and atomic-replacement lifecycle without losing existing identities, queries, or guarded local source reads.
+**Depends on:** Task 1 shared types and config plus approved specification hash `3f99f03931a728f7`.
+**Requirements:** R-003, R-005–R-011, R-013–R-020, R-025, R-028–R-029.
+**Problem closed:** local SQLite must use the shared row lifecycle while one database replacement activates entity rows and ready evidence together, directory-sync uncertainty is explicit and retryable, and legacy query/source behavior remains available.
 **Files:**
-- Create: `src/iwiki_mcp/codegraph/sqlite_adapter.py`
-- Create: `tests/codegraph/test_sqlite_adapter.py`
-- Modify: `src/iwiki_mcp/codegraph/indexer.py:435-1470`
-- Modify: `src/iwiki_mcp/codegraph/store.py:892-958, 1484-1616, 1870-1906`
-- Modify: `src/iwiki_mcp/codegraph/runtime.py:275-365, 984-1415`
+- Modify: `src/iwiki_mcp/codegraph/publication.py`
+- Modify: `src/iwiki_mcp/codegraph/schema.py`
+- Modify: `src/iwiki_mcp/codegraph/indexer.py`
+- Modify: `src/iwiki_mcp/codegraph/store.py`
+- Modify: `src/iwiki_mcp/codegraph/sqlite_adapter.py`
+- Modify: `src/iwiki_mcp/server.py`
+- Modify: `tests/codegraph/test_publication.py`
+- Create: `tests/codegraph/test_schema.py`
 - Modify: `tests/codegraph/test_indexer_runtime.py`
 - Modify: `tests/codegraph/test_store.py`
+- Modify: `tests/codegraph/test_sqlite_adapter.py`
+- Modify: `tests/test_server_import_closure.py`
 - Modify: `pyproject.toml:3`
 - Modify: `src/iwiki_mcp/__init__.py:2`
 - Modify: `tests/test_package.py:8-15`
 
-- [ ] **Step 1: Write a failing SQLite contract test**
+- [ ] **Step 1: Write failing schema, recovery, and uncertainty tests**
 
-Use the existing Python fixture and local wiki selector fixture, publish with `max_batch_rows=1`, then assert the same canonical revision/search/context as the current store and prove replay/conflicting batch behavior:
+Add exact-profile tests in `tests/codegraph/test_schema.py`. `create_schema()` remains the legacy five-table constructor; the new `create_publication_schema()` constructs the same public tables and indexes plus only `code_graph_publication`:
 
 ```python
-def test_sqlite_adapter_uses_shared_batches_and_atomic_replace(graph_fixture):
-    publisher, reader, rows = graph_fixture.sqlite_contract(max_batch_rows=1)
-    session = publisher.begin(rows.header)
-    batches = tuple(iter_snapshot_batches(rows.tables, max_rows=1, max_bytes=4096))
-    for batch in batches:
-        assert publisher.publish_batch(session, batch)["accepted"] is True
-        assert publisher.publish_batch(session, batch)["accepted"] is True
+def test_schema_v2_accepts_only_legacy_or_publication_profile(tmp_path):
+    legacy = sqlite3.connect(tmp_path / "legacy.db")
+    create_schema(legacy)
+    validate_schema(legacy)
+
+    published = sqlite3.connect(tmp_path / "published.db")
+    create_publication_schema(published)
+    validate_schema(published)
+    public_tables = tuple(sorted(
+        row[0]
+        for row in published.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+        if row[0] != "code_graph_publication"
+    ))
+    assert public_tables == tuple(sorted(TABLES))
+
+    published.execute("CREATE TABLE unexpected(value TEXT)")
+    with pytest.raises(CodeGraphSchemaError):
+        validate_schema(published)
+```
+
+Extend the real `graph_fixture` in `tests/codegraph/test_sqlite_adapter.py`; it may inject clock and failure hooks but MUST use actual files, locks, `CodeGraphStore`, selector resolver, publisher, and reader. Add these observable cases:
+
+```python
+def test_directory_sync_failure_reconciles_by_active_session(
+    graph_fixture, monkeypatch,
+):
+    publisher, reader, built = graph_fixture.sqlite_contract()
+    session = graph_fixture.publish_batches(publisher, built)
+    monkeypatch.setattr(
+        publisher, "_sync_canonical_directory", graph_fixture.raise_os_error
+    )
+    first = publisher.finalize(session)
+    assert first["error"] == "commit_uncertain"
+    assert reader.status()["snapshot_revision"] == first["snapshot_revision"]
+
+    monkeypatch.setattr(
+        publisher, "_sync_canonical_directory", graph_fixture.sync_directory
+    )
+    second = publisher.finalize(session)
+    assert second["state"] == "ready"
+    assert second["snapshot_revision"] == first["snapshot_revision"]
+
+
+def test_post_replace_journal_failure_uses_embedded_terminal_result(
+    graph_fixture, monkeypatch,
+):
+    publisher, reader, built = graph_fixture.sqlite_contract()
+    session = graph_fixture.publish_batches(publisher, built)
+    monkeypatch.setattr(
+        publisher, "_record_external_terminal", graph_fixture.raise_store_error
+    )
     result = publisher.finalize(session)
     assert result["state"] == "ready"
     assert reader.status()["snapshot_revision"] == result["snapshot_revision"]
-    assert reader.search(graph_fixture.search_request)["results"]
 
 
-def test_sqlite_session_rejects_expiry_and_replacement_owner(graph_fixture):
-    publisher, _, rows = graph_fixture.sqlite_contract()
-    session = publisher.begin(rows.header)
-    assert publisher.with_clock_after_lease().publish_batch(
-        session, graph_fixture.first_batch(rows)
-    )["error"] == "session_expired"
-    replacement = graph_fixture.replacement_publisher()
-    assert replacement.abort(session)["error"] == "unauthorized"
+def test_publication_profile_preserves_public_rows_and_backup(
+    graph_fixture, tmp_path,
+):
+    publisher, reader, built = graph_fixture.sqlite_contract(
+        git_remote="iwiki-publication:legitimate"
+    )
+    result = graph_fixture.publish_complete(publisher, built)
+    assert reader.store.stable_rows("repositories")[0]["git_remote"] == (
+        "iwiki-publication:legitimate"
+    )
+    backup = tmp_path / "copied.db"
+    shutil.copy2(reader.store.path, backup)
+    copied = graph_fixture.reader_for(backup)
+    assert copied.status()["snapshot_revision"] == result["snapshot_revision"]
 ```
 
-Define `graph_fixture` in `tests/codegraph/test_sqlite_adapter.py` from existing `seed_binding`, a real `CodeGraphIndexer`, a local wiki selector page, and an injectable clock. Its helper methods only assemble real publisher/reader objects; they do not emulate lifecycle behavior.
+Also add named tests for reader pause during cache-sidecar publication, restart after persistent sidecar failure, incomplete/corrupt copy rejection, embedded-envelope corruption, active wrong-domain/revision rejection, activation-time lease expiry, Markdown mutation during derivation, writer interleaving after final hash, reader hash-to-link race, sanitized lock timeout, and startup import closure. Each failure injection asserts old-or-new complete visibility and absence of absolute paths or raw OS text.
 
-- [ ] **Step 2: Run the SQLite contract and observe failure**
+- [ ] **Step 2: Run the revised SQLite contract and observe RED**
 
 Run:
 
 ```bash
-uv run pytest -q tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_indexer_runtime.py tests/codegraph/test_store.py
+uv run pytest -q tests/codegraph/test_publication.py tests/codegraph/test_schema.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_indexer_runtime.py tests/codegraph/test_store.py tests/test_server_import_closure.py
 ```
 
-Expected: FAIL because `SqliteSnapshotPublisher`, `SqliteCodeGraphReader`, and portable indexer output are absent.
+Expected: FAIL because `commit_uncertain`, the publication schema profile, embedded authority, reconciliation, and exact compatibility behavior are absent or contradicted by the current adapter.
 
-- [ ] **Step 3: Extract portable rows and implement SQLite adapter**
+- [ ] **Step 3: Add the exact internal publication profile and safe error**
 
-Add `CodeGraphIndexer.build_rows(*, languages: list[str] | None = None, deadline: float | None = None, control: BuildControl | None = None) -> BuiltSnapshot` that stops after discovery/parse/resolve and returns only safe repository metadata, files, symbols, and relations. Keep `root_path` available only as private local runtime state and remove it from portable repository rows. Implement:
+In `schema.py`, keep `SCHEMA_VERSION = 2` and public `TABLES` unchanged. Add exact `PUBLICATION_TABLE_DDL`, `EXPECTED_PUBLICATION_TABLE_DDL`, and `create_publication_schema(connection)`. The internal table has one row selected by `singleton = 1` and exact typed columns for `format_version`, `state`, `domain`, `repository_id`, `session_id`, `graph_payload_revision`, `snapshot_revision`, `markdown_revision`, canonical `counts_json`, `indexed_at`, canonical `terminal_result_json`, `content_digest`, and `envelope_digest`. `validate_schema()` accepts only the exact legacy object map or exact publication object map; it still rejects every arbitrary table, index, column, or DDL change.
 
-```python
-@dataclass(frozen=True)
-class BuiltSnapshot:
-    header: SnapshotHeader
-    tables: Mapping[RowKind, tuple[Mapping[str, object], ...]]
-    private_root: Path
-    indexed_at: str
-    diagnostics: Mapping[str, object]
+In `publication.py`, add `commit_uncertain` to `PUBLICATION_ERROR_CODES` only. In `store.py`, add focused primitives that write/read one internal envelope, calculate canonical SHA-256 over every persisted column of the five public tables in stable-key order, calculate the envelope digest excluding itself, and validate counts/revisions/digests. Do not add the internal table to `stable_rows()`, `_snapshot_revision`, wire rows, search/context, or exports. Cache a successful full validation only for the same bounded storage stamp; a changed stamp or new process performs full validation again. Keep strict existing database-plus-sidecar validation for a legacy database without the internal table.
 
-# SqliteSnapshotPublisher methods:
-# begin(header: SnapshotHeader) -> PublicationSession
-# publish_batch(session: PublicationSession, batch: SnapshotBatch) -> dict[str, object]
-# finalize(session: PublicationSession) -> dict[str, object]
-# abort(session: PublicationSession) -> dict[str, object]
+- [ ] **Step 4: Implement atomic activation, reconciliation, and ordered locks**
 
-# SqliteCodeGraphReader methods:
-# status() -> dict[str, object]
-# search(request: ValidatedSearchRequest) -> dict[str, object]
-# context(request: ContextRequest) -> dict[str, object]
+Keep the fixed-owner session journal in its unique private staging directory; it is not active readiness authority. Build the publication-profile graph database separately, write and verify its ready envelope, checkpoint it, and prepare any prior backup before activation. Perform batch decode, normalized-row validation, selector capture, link derivation, SQLite construction, content/envelope digesting, and backup outside graph exclusive.
+
+For activation, acquire Wiki shared, recompute the canonical Markdown hash, then acquire graph exclusive. Inside that ordered section repeat owner, staging state, lease, active graph revision, and Markdown revision checks immediately before `os.replace`. No graph-to-Wiki acquisition is allowed. Map every lock `Timeout` to sanitized `busy`. An expired session returns `session_expired` and cannot activate.
+
+Treat successful `os.replace` as the logical commit point. Successful directory sync returns the embedded ready result. `CodeGraphPublishedError` or its exact directory-sync equivalent returns `commit_uncertain`; do not hide it as ready and do not roll back. Repeated same-owner `finalize` reads the active envelope: matching session/revision retries directory sync, different active revision returns `snapshot_conflict`, and another sync failure remains `commit_uncertain`. No batch or abort is accepted after uncertainty. If external journal persistence fails after a confirmed replacement, the matching embedded terminal result wins. After process loss, another adapter never resumes the old session and status reports the complete active database.
+
+Reader `status`, `search`, and `context` acquire Wiki shared then graph read from current Markdown-hash comparison through response materialization. A later Markdown change suppresses links without hiding non-Wiki graph rows. The cache sidecar is best-effort for the publication profile and can be regenerated from the embedded envelope; absence, staleness, or failure cannot make a valid new snapshot non-ready. Preserve guarded local `include_source=true`. Add only the eager import required by `tests/test_server_import_closure.py`; Task 8 still owns runtime/tool composition.
+
+- [ ] **Step 5: Run focused GREEN and lock-structure probes**
+
+Run:
+
+```bash
+uv run pytest -q tests/codegraph/test_publication.py tests/codegraph/test_schema.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_indexer_runtime.py tests/codegraph/test_store.py tests/test_server_import_closure.py
 ```
 
-Generate one ephemeral publisher-instance identity when the SQLite adapter is created. Store fixed owner ID, state, lease, captured canonical Markdown hash, and accepted batches in the unique staging database/session metadata. Validate owner/state/lease in the same SQLite transaction or file-lock critical section as every mutation. Do not implement resume, reattach, transfer, supersession, or a fencing field; a replacement adapter must create a new session. Accepted batches renew the lease; rejected operations and failed finalize do not. `begin` removes at most `staging_cleanup_limit` eligible retained staging sessions before creating the new one. At finalize, reconstruct normalized rows, independently recompute the header-owned counts and `graph_payload_revision` through `canonical.py`, call existing `_validate_normalized_rows`, derive local links with the captured selector snapshot, calculate existing `_snapshot_revision`, and use `publish_staging`. Preserve old metadata durability checks and local `include_source=true` containment/hash/budget path.
+Expected: PASS. Structural probes record batch decoding, validation, link derivation, SQLite build, digest calculation, and backup outside graph exclusive; the only activation order observed is Wiki shared then graph exclusive.
 
-- [ ] **Step 4: Run SQLite contract plus full existing code-graph suite**
+- [ ] **Step 6: Run complete SQLite and repository regressions**
 
 Run:
 
 ```bash
 uv run pytest -q tests/codegraph
+uv run pytest -q
+uv run flake8 src tests
+uv lock --check
+uv run iwiki-mcp --help
 ```
 
-Expected: PASS; existing tool shapes, stable IDs, atomic replacement, recovery, concurrency, search, context, linking, and source-safety tests remain green.
+Expected: all tests and lint pass, CLI help exits zero, lockfile is current, legacy/query/source behavior is unchanged, and no aggregate-only timing failure remains unexplained.
 
-- [ ] **Step 5: Bump version and commit Task 2**
+- [ ] **Step 7: Bump version and commit Task 2 recovery**
 
-Set all four version surfaces to `0.7.116`, then run:
+Set all four version surfaces to `0.7.119`, then run:
 
 ```bash
 uv lock
-git add pyproject.toml uv.lock src/iwiki_mcp/__init__.py tests/test_package.py src/iwiki_mcp/codegraph/indexer.py src/iwiki_mcp/codegraph/store.py src/iwiki_mcp/codegraph/runtime.py src/iwiki_mcp/codegraph/sqlite_adapter.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_indexer_runtime.py tests/codegraph/test_store.py
+git add pyproject.toml uv.lock src/iwiki_mcp/__init__.py tests/test_package.py src/iwiki_mcp/codegraph/publication.py src/iwiki_mcp/codegraph/schema.py src/iwiki_mcp/codegraph/indexer.py src/iwiki_mcp/codegraph/store.py src/iwiki_mcp/codegraph/sqlite_adapter.py src/iwiki_mcp/server.py tests/codegraph/test_publication.py tests/codegraph/test_schema.py tests/codegraph/test_indexer_runtime.py tests/codegraph/test_store.py tests/codegraph/test_sqlite_adapter.py tests/test_server_import_closure.py
 git diff --cached --check
-git commit -m "refactor(codegraph): publish SQLite through shared protocol"
+git commit -m "fix(codegraph): make SQLite publication atomic"
 ```
 
-Expected: one compatibility-preserving SQLite commit with all `tests/codegraph` passing.
+Expected: one Task 2 recovery commit with internal ready authority, explicit uncertainty, exact legacy/publication profiles, and full regression evidence; no Task 8 composition.
 
 ### Task 3: PostgreSQL migration and shared runtime-principal scope
 
@@ -777,7 +840,7 @@ Parent reviews staged SQL, role grants, RLS policies, startup change, and compat
 
 - [ ] **Step 7: Bump version and commit Task 3**
 
-Set all four version surfaces to `0.7.117`, then run:
+Set all four version surfaces to `0.7.120`, then run:
 
 ```bash
 uv lock
@@ -897,7 +960,7 @@ Expected: all configured tests PASS; two domains finalize concurrently, same-dom
 
 - [ ] **Step 5: Bump version and commit Task 4**
 
-Set all four version surfaces to `0.7.118`, then run:
+Set all four version surfaces to `0.7.121`, then run:
 
 ```bash
 uv lock
@@ -1012,7 +1075,7 @@ Expected: target links match selector provenance, any intervening Markdown conte
 
 - [ ] **Step 5: Bump version and commit Task 5**
 
-Set all four version surfaces to `0.7.119`, then run:
+Set all four version surfaces to `0.7.122`, then run:
 
 ```bash
 uv lock
@@ -1095,7 +1158,7 @@ Expected: SQLite and PostgreSQL return byte-for-byte equal normalized search res
 
 - [ ] **Step 5: Bump version and commit Task 6**
 
-Set all four version surfaces to `0.7.120`, then run:
+Set all four version surfaces to `0.7.123`, then run:
 
 ```bash
 uv lock
@@ -1185,7 +1248,7 @@ Expected: exact tool mapping passes, cross-token session takeover returns `unaut
 
 - [ ] **Step 5: Bump version and commit Task 7**
 
-Set all four version surfaces to `0.7.121`, then run:
+Set all four version surfaces to `0.7.124`, then run:
 
 ```bash
 uv lock
@@ -1293,7 +1356,7 @@ Expected: complete matrix includes all four publication tools plus `wiki_code_in
 
 - [ ] **Step 5: Bump version and commit Task 8**
 
-Set all four version surfaces to `0.7.122`, then run:
+Set all four version surfaces to `0.7.125`, then run:
 
 ```bash
 uv lock
@@ -1349,7 +1412,43 @@ def test_error_codes_stay_in_their_routes(publication_adapter):
     assert publication_adapter.publication_error_codes == PUBLICATION_ERROR_CODES
     assert publication_adapter.adapter_error_codes == ADAPTER_ERROR_CODES
     assert publication_adapter.readiness_error_codes == READINESS_ERROR_CODES
+
+
+def test_commit_uncertain_allows_only_sqlite_finalize_reconciliation(
+    sqlite_publication_adapter,
+):
+    session = sqlite_publication_adapter.begin("uncertain")
+    sqlite_publication_adapter.publish_complete_batches(session)
+    sqlite_publication_adapter.fail_next_directory_sync()
+    first = sqlite_publication_adapter.finalize(session)
+    assert first["error"] == "commit_uncertain"
+    assert sqlite_publication_adapter.reader.status()["snapshot_revision"] == (
+        first["snapshot_revision"]
+    )
+
+    for rejected in (
+        sqlite_publication_adapter.publish_one(session),
+        sqlite_publication_adapter.abort(session),
+    ):
+        assert rejected.get("accepted") is not True
+        assert rejected["error"] in PUBLICATION_ERROR_CODES
+        assert rejected["error"] != "commit_uncertain"
+
+    sqlite_publication_adapter.restore_directory_sync()
+    assert sqlite_publication_adapter.finalize(session)["state"] == "ready"
+
+
+@pytest.mark.parametrize("publication_adapter", ["postgres", "mcp"], indirect=True)
+def test_commit_uncertain_is_not_emitted_by_distributed_routes(
+    publication_adapter,
+):
+    assert publication_adapter.supports_commit_uncertain is False
+    assert "commit_uncertain" not in publication_adapter.observable_failure_codes()
 ```
+
+The harness exposes `supports_commit_uncertain` and
+`observable_failure_codes()` from real injected route failures; neither may be a
+hard-coded copy of the shared constant tuple.
 
 - [ ] **Step 2: Run the adversarial suite and retain every observed failure**
 
@@ -1377,7 +1476,7 @@ Expected: all selected tests PASS; PostgreSQL integration tests SKIP only when t
 
 - [ ] **Step 5: Bump version and commit Task 9**
 
-Set all four version surfaces to `0.7.123`; stage only the contract tests and version files, then run:
+Set all four version surfaces to `0.7.126`; stage only the contract tests and version files, then run:
 
 ```bash
 uv lock
@@ -1470,7 +1569,9 @@ read_mode = "sqlite"    # sqlite | postgres | mcp
 max_snapshot_age_seconds = 86400 # 0 disables age rejection
 ```
 
-Document `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` as runtime-only MCP values; direct PostgreSQL reuses `[storage]` and `IWIKI_DB_PASSWORD`. Replace the old single-role example: schema owner/migrator applies migrations through admin commands, hosted service and direct runtime roles are non-owner/non-`BYPASSRLS`, ordinary RLS is enabled without `FORCE`, and both roles receive explicit shared domain grants through `iwiki-mcp principal grant`. Include hosted-domain provisioning before token enablement, privilege inspection, identical HTTP/stdio startup schema checks, `schema rollback-v4-compat` dry-run/confirm sequence, post-rollback pre-v4 smoke, later migration reapply, cleanup-on-next-begin behavior, and production stop conditions. Explain local checkout, one domain/repository, non-transferable sessions, target-derived links, atomic visibility, conflicts/retry, remote source unavailability, no fallback, and first publication. Update benchmark report with target mode, batch count/bytes, publication time, active revision, peak Python heap, and generated file count.
+Document `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` as runtime-only MCP values; direct PostgreSQL reuses `[storage]` and `IWIKI_DB_PASSWORD`. Replace the old single-role example: schema owner/migrator applies migrations through admin commands, hosted service and direct runtime roles are non-owner/non-`BYPASSRLS`, ordinary RLS is enabled without `FORCE`, and both roles receive explicit shared domain grants through `iwiki-mcp principal grant`. Include hosted-domain provisioning before token enablement, privilege inspection, identical HTTP/stdio startup schema checks, `schema rollback-v4-compat` dry-run/confirm sequence, post-rollback pre-v4 smoke, later migration reapply, cleanup-on-next-begin behavior, and production stop conditions. Explain local checkout, one domain/repository, non-transferable sessions, target-derived links, atomic visibility, conflicts/retry, remote source unavailability, no fallback, and first publication.
+
+Document both exact SQLite schema-v2 profiles. Legacy five-table readiness requires the strict sidecar. The publication profile carries authoritative ready evidence in `code_graph_publication` and treats `.metadata.json` as cache-only. SQLite `commit_uncertain` permits only same-process repeated `finalize`, never batch, abort, automatic rollback, or adapter fallback; after process loss, operators inspect status and start a new session. Before rolling back to a pre-publication binary, retain or restore a legacy snapshot or reindex with that binary because it may reject the internal table. Update benchmark report with target mode, batch count/bytes, publication time, active revision, peak Python heap, and generated file count.
 
 Keep `anyio` in direct dependencies from Task 7; the `slow` marker was already registered by Task 1.
 
@@ -1494,7 +1595,7 @@ Expected: SQLite scale reports exactly 20,000 files, PostgreSQL scale reports ex
 
 - [ ] **Step 6: Bump version and commit Task 10**
 
-Set all four version surfaces to `0.7.124`, then run:
+Set all four version surfaces to `0.7.127`, then run:
 
 ```bash
 uv lock
@@ -1513,7 +1614,7 @@ Expected: final implementation commit contains docs, scale evidence, config temp
 **Requirements:** R-001–R-030; AC-01–AC-30.
 **Problem closed:** produce fresh evidence that implementation matches the selected spec and contains no excess behavior.
 **Files:**
-- Inspect only. If a check demonstrates a defect, stop Task 11, return to the owning implementation task, make a focused fix at version `0.7.125` or the next unused patch, synchronize all four version surfaces, commit it, then restart Task 11 from Step 1.
+- Inspect only. If a check demonstrates a defect, stop Task 11, return to the owning implementation task, make a focused fix at version `0.7.128` or the next unused patch, synchronize all four version surfaces, commit it, then restart Task 11 from Step 1.
 
 - [ ] **Step 1: Verify repository scope and versions**
 
@@ -1532,7 +1633,7 @@ Expected: clean worktree, ordered task commits, and no whitespace errors.
 Run:
 
 ```bash
-uv run pytest -q tests/codegraph/test_publication.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_mcp_adapter.py tests/postgres/test_code_graph_contract.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_code_graph_rollback.py tests/postgres/test_code_graph_publication.py tests/postgres/test_code_graph_reader.py tests/postgres/test_code_graph_http.py tests/postgres/test_tool_matrix.py tests/codegraph/test_lint.py tests/engine/test_lint.py
+uv run pytest -q tests/codegraph/test_publication.py tests/codegraph/test_schema.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_mcp_adapter.py tests/test_server_import_closure.py tests/postgres/test_code_graph_contract.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_code_graph_rollback.py tests/postgres/test_code_graph_publication.py tests/postgres/test_code_graph_reader.py tests/postgres/test_code_graph_http.py tests/postgres/test_tool_matrix.py tests/codegraph/test_lint.py tests/engine/test_lint.py
 ```
 
 Expected: zero failures and no PostgreSQL skips when `IWIKI_TEST_POSTGRES_DSN` points to the approved disposable `*_test` database.
