@@ -1,7 +1,7 @@
 ---
 review:
-  spec_hash: fb3b4aaac667f3e5
-  last_run: 2026-08-14
+  spec_hash: 3f99f03931a728f7
+  last_run: 2026-08-15
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -12,7 +12,7 @@ review:
       phase: consistency
       severity: CRITICAL
       section: "4.1 Identity, scope, and compatibility"
-      section_hash: 93829393125b176b
+      section_hash: c3ad3187b27a65e8
       fragment: "A direct runtime principal MUST NOT own protected tables"
       text: >-
         The prior design allowed the documented runtime principal to be the
@@ -21,12 +21,12 @@ review:
         Require separate migrator, hosted service, and restricted direct roles;
         reject owner or BYPASSRLS credentials for direct mode.
       verdict: fixed
-      verdict_at: 2026-08-14
+      verdict_at: 2026-08-15
     - id: F-002
       phase: consistency
       severity: CRITICAL
       section: "13. Migration and rollout"
-      section_hash: 83295a0a32cdb8b2
+      section_hash: 94494fe71c657cf2
       fragment: "Application rollback from schema 4 is an explicit operator procedure"
       text: >-
         The prior rollback text did not let a pre-v4 application pass its
@@ -35,12 +35,12 @@ review:
         Define and test an idempotent compatibility rollback that retains data
         and objects but removes the v4 migration marker under the migration lock.
       verdict: fixed
-      verdict_at: 2026-08-14
+      verdict_at: 2026-08-15
     - id: F-003
       phase: clarity
       severity: CRITICAL
       section: "4.3 Sessions, concurrency, and atomic visibility"
-      section_hash: b66bfdcdee6d6970
+      section_hash: a54ba96a715083d5
       fragment: "SET LOCAL lock_timeout = <configured milliseconds>"
       text: >-
         The prior design required a configurable wait but the plan selected
@@ -49,7 +49,7 @@ review:
         Specify blocking pg_advisory_xact_lock under transaction-local timeout
         and map only SQLSTATE 55P03 from lock acquisition to busy.
       verdict: fixed
-      verdict_at: 2026-08-14
+      verdict_at: 2026-08-15
     - id: F-004
       phase: coverage
       severity: CRITICAL
@@ -63,12 +63,12 @@ review:
         Define hosted service-role grants and policy behavior, including whether
         FORCE ROW LEVEL SECURITY is used and how hosted domain access is provisioned.
       verdict: fixed
-      verdict_at: 2026-08-14
+      verdict_at: 2026-08-15
     - id: F-005
       phase: coverage
       severity: CRITICAL
       section: "4.3 Sessions, concurrency, and atomic visibility"
-      section_hash: b66bfdcdee6d6970
+      section_hash: a54ba96a715083d5
       fragment: "After expiry or supersession, an old publisher MUST NOT append or finalize"
       text: >-
         The protocol has no resume, reattach, or supersession operation, so its
@@ -77,12 +77,12 @@ review:
         Either remove fencing and supersession from the first-release contract or
         define an ownership re-establishment operation that rotates the token atomically.
       verdict: fixed
-      verdict_at: 2026-08-14
+      verdict_at: 2026-08-15
     - id: F-006
       phase: coverage
       severity: CRITICAL
       section: "13. Migration and rollout"
-      section_hash: 83295a0a32cdb8b2
+      section_hash: 94494fe71c657cf2
       fragment: "Only the existing admin migration command may apply schema changes"
       text: >-
         The rollout does not explicitly define startup behavior for both hosted HTTP
@@ -91,7 +91,7 @@ review:
         Define one runtime startup rule for both entry points and the separate
         operator migration workflow before changing either implementation.
       verdict: fixed
-      verdict_at: 2026-08-14
+      verdict_at: 2026-08-15
 chain:
   intent: docs/superpowers/intents/2026-08-14-postgres-code-graph-distributed-indexing-intent.md
   spec: null
@@ -154,7 +154,7 @@ The following outcomes and completion rule are copied verbatim from the approved
 
 - **R-001 — One domain, one repository:** Each `(iwiki_id, domain_id)` MUST identify exactly one repository and at most one active code-graph snapshot. Code-graph tools MUST use the bound `primary`; they MUST NOT accept a separate domain or repository argument. **Acceptance:** AC-01.
 - **R-002 — Existing authorization:** Code-graph publication MUST require the bound `primary` in existing wiki write scope. Code-graph query MUST require it in existing wiki read scope. Remote MCP MUST derive `iwiki_id` and domain grants from the existing token. Direct PostgreSQL MUST use the existing restricted runtime principal's wiki-domain grant. The schema owner/migrator, hosted service principal, and direct runtime principal are distinct operational roles. The hosted service principal MUST receive explicit entries in the shared `database_principal_domain_grants` table for every domain served; bearer-token scope remains the application authorization boundary inside that database scope. This separation and mapping are infrastructure, not graph-specific authorization. No code-graph token, role, ACL, or graph-specific grant table may be introduced. **Acceptance:** AC-02.
-- **R-003 — Existing graph compatibility:** Published rows MUST preserve current schema-v2 entity identities, relation semantics, deterministic revision rules, and Python-only behavior. Existing Git/SQLite code-graph and ordinary PostgreSQL wiki contracts MUST remain usable. **Acceptance:** AC-03.
+- **R-003 — Existing graph compatibility:** Published rows MUST preserve current schema-v2 entity identities, relation semantics, deterministic revision rules, and Python-only behavior. SQLite keeps `SCHEMA_VERSION = 2` and the five public entity tables. The new runtime MUST accept two exact schema-v2 profiles: the legacy five-table profile and a publication profile containing those unchanged tables plus the exact internal `code_graph_publication` table. No other extra table or index is accepted. Public row/query APIs MUST expose only the five entity tables. Existing Git/SQLite behavior and ordinary PostgreSQL wiki contracts MUST remain usable, but a pre-publication binary is not required to accept the extended publication profile; rollback uses a retained legacy snapshot or a reindex with the selected binary. **Acceptance:** AC-03.
 - **R-004 — Tenant integrity:** Every PostgreSQL graph row MUST carry `iwiki_id`, `domain_id`, and `snapshot_id` where applicable. Composite keys and foreign keys MUST reject cross-wiki, cross-domain, and cross-snapshot references. Direct publication MUST use the same immutable local `iwiki_id`, `read`, `write`, and `primary` configuration as direct PostgreSQL Markdown access, and the local publisher MUST reject any requested scope outside it. PostgreSQL row-level security MUST be enabled, but not forced, on protected Markdown and graph tables. Policies MUST independently reject any hosted or direct runtime principal outside its shared wiki-domain grant. Runtime principals MUST NOT own protected tables, hold `BYPASSRLS`, or run migrations; only the non-runtime schema owner may use PostgreSQL's owner exemption. Deployment MUST stop if those properties or required hosted/direct grants cannot be proven. **Acceptance:** AC-04.
 
 ### 4.2 Shared publication protocol
@@ -168,9 +168,9 @@ The following outcomes and completion rule are copied verbatim from the approved
 ### 4.3 Sessions, concurrency, and atomic visibility
 
 - **R-010 — Staging sessions:** `begin` MUST create a staging session scoped to one `(iwiki_id, domain_id)`, capture the current active `snapshot_revision` and authoritative Markdown change token, issue an opaque session ID, and establish a configurable lease expiry. PostgreSQL uses `markdown_generation`; SQLite uses the canonical Markdown hash. The graph is completely built and canonically serialized before `begin`, minimizing the Markdown-conflict window. Multiple staging sessions MAY coexist for the same domain. **Acceptance:** AC-10.
-- **R-011 — Lease and non-transferable ownership:** Every SQLite, direct PostgreSQL, and remote MCP mutating session operation MUST validate session ownership, state, and lease in the same transaction or SQLite critical section as its mutation. A session MUST NOT be resumed, reattached, transferred, or superseded by another publisher. After expiry, the original publisher MUST NOT append or finalize and MUST start a new session. No database lock may be held between calls. **Acceptance:** AC-11.
+- **R-011 — Lease and non-transferable ownership:** Every SQLite, direct PostgreSQL, and remote MCP mutating session operation MUST validate session ownership, state, and lease in the same transaction or SQLite critical section as its mutation. SQLite MUST repeat that validation in the final activation critical section after all unbounded work and immediately before replacement. A session MUST NOT be resumed, reattached, transferred, or superseded by another publisher. After expiry, the original publisher MUST NOT append or activate and MUST start a new session. A `commit_uncertain` session accepts only an idempotent `finalize` reconciliation by its original in-memory owner. No database lock may be held between calls. **Acceptance:** AC-11.
 - **R-012 — Optimistic finalize:** `finalize` MUST take only a short transaction-scoped advisory lock keyed by a reserved constant namespace and a database-assigned unique domain lock ID. PostgreSQL MUST wait for that lock under `SET LOCAL lock_timeout = <configured milliseconds>` and map only SQLSTATE `55P03` from that acquisition to `busy`. Under the lock it MUST compare the captured graph revision and target-specific Markdown change token with current values. Any change MUST return `snapshot_conflict` and leave the active snapshot unchanged; last-writer-wins is forbidden. **Acceptance:** AC-12.
-- **R-013 — Atomic pointer switch:** After complete validation and target-side link derivation, `finalize` MUST mark the staged snapshot ready and switch the domain's active pointer in one transaction. Readers MUST see either the previous ready snapshot or the new ready snapshot, never staging or partial rows. Different domains MUST publish concurrently. **Acceptance:** AC-13.
+- **R-013 — Atomic activation:** After complete validation and target-side link derivation, PostgreSQL `finalize` MUST mark the staged snapshot ready and switch the domain's active pointer in one transaction. SQLite MUST write ready publication evidence into the staging database and use one atomic `os.replace` as its activation linearization point. A separate SQLite session journal or metadata sidecar MUST NOT determine active readiness after replacement. Readers MUST see either the previous complete ready snapshot or the new complete ready snapshot, never staging, partial rows, or a gap caused by sidecar publication. Different domains MUST publish concurrently. **Acceptance:** AC-13.
 - **R-014 — Cleanup:** `abort` MUST be idempotent and make a session non-finalizable. Every `begin` MUST run bounded opportunistic cleanup for the selected domain before creating a session. Cleanup MUST remove at most the configured row/session limit and only expired, aborted, conflicted, or invalid staging data older than the configurable retention period; it MUST NOT affect an active snapshot. **Acceptance:** AC-14.
 - **R-015 — Database-only coordination:** PostgreSQL transactions, constraints, and advisory locks are the only mandatory coordination primitives. Correctness MUST NOT depend on NATS, another broker, `LISTEN/NOTIFY`, process affinity, or sticky MCP sessions. **Acceptance:** AC-15.
 
@@ -178,7 +178,7 @@ The following outcomes and completion rule are copied verbatim from the approved
 
 - **R-016 — Authoritative Markdown:** The publication payload MUST exclude `wiki_code_links`. During `finalize`, the target MUST read the authoritative Markdown/selectors for the same `(iwiki_id, domain_id)` and derive links with the existing selector and provenance rules. **Acceptance:** AC-16.
 - **R-017 — Target-local link derivation:** SQLite finalization MUST use the local wiki base; direct PostgreSQL and remote MCP finalization MUST use Markdown rows in the target PostgreSQL database. A target without readable authoritative Markdown MUST reject finalization with `markdown_unavailable`. **Acceptance:** AC-17.
-- **R-018 — Revision binding:** Every target MUST define canonical `markdown_revision` as SHA-256 over ordered `(page_slug, SHA-256(markdown UTF-8 bytes))` records for all pages in the domain. PostgreSQL domains MUST additionally carry a monotonically increasing `markdown_generation` updated in the same transaction as every authoritative Markdown create, update, delete, or import. PostgreSQL `begin` captures the generation; SQLite `begin` captures the canonical hash. `finalize` rechecks the captured token, reads authoritative Markdown once for link derivation, computes the canonical hash, and stores the token and hash in the ready snapshot. A concurrent Markdown mutation between `begin` and activation MUST produce `snapshot_conflict`; the publisher must start a new session. **Acceptance:** AC-18.
+- **R-018 — Revision binding:** Every target MUST define canonical `markdown_revision` as SHA-256 over ordered `(page_slug, SHA-256(markdown UTF-8 bytes))` records for all pages in the domain. PostgreSQL domains MUST additionally carry a monotonically increasing `markdown_generation` updated in the same transaction as every authoritative Markdown create, update, delete, or import. PostgreSQL `begin` captures the generation; SQLite `begin` captures the canonical hash without holding the graph writer lock. SQLite `finalize` captures immutable Markdown selectors and a hash under the Wiki shared lock, derives links outside the graph writer lock, then reacquires the Wiki shared lock and recomputes the canonical hash before taking the graph lock. It holds Wiki shared then graph exclusive through the final owner/state/lease, graph-revision, and Markdown-revision checks and activation. The ready snapshot stores the target token and hash. A concurrent Markdown mutation between `begin` and activation MUST produce `snapshot_conflict`; the publisher must start a new session. **Acceptance:** AC-18.
 - **R-019 — Markdown independence:** Publishing a graph MUST NOT mutate Markdown, chunks, vectors, or ordinary wiki links. Later Markdown writes MUST retain their current transaction behavior and MAY make derived code-to-wiki links stale. Search and non-wiki graph context MUST remain available, but context MUST omit derived wiki links and report `wiki_links_stale` until graph republish. PostgreSQL status/context MUST expose stored/current `markdown_generation` plus stored canonical `markdown_revision` without scanning all pages; SQLite MAY compare canonical hashes because its Markdown base is local. Lint MUST compute and expose stored/current canonical Markdown revisions and the `wiki_links_stale` flag for either storage. **Acceptance:** AC-19.
 
 ### 4.5 Reads, freshness, and source safety
@@ -194,7 +194,7 @@ The following outcomes and completion rule are copied verbatim from the approved
 
 - **R-026 — Publication tools:** Remote MCP MUST expose `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, and `wiki_code_publish_abort`. Each tool MUST use the request's authenticated `iwiki_id`, bound primary, and write scope; none accepts tenant or domain override fields. **Acceptance:** AC-26.
 - **R-027 — Local indexing tool:** `wiki_code_index` MUST remain a local extraction operation. It MUST feed the shared publisher selected by `publish_mode`. When the running process lacks a checkout, it MUST return `source_unavailable` and direct the operator to run a local indexer; it MUST NOT create an empty snapshot. **Acceptance:** AC-27.
-- **R-028 — Stable safe errors:** New publication paths MUST use the closed codes `unauthorized`, `scope_mismatch`, `unsupported_storage`, `busy`, `session_expired`, `invalid_batch`, `batch_conflict`, `snapshot_incomplete`, `revision_mismatch`, `snapshot_conflict`, and `markdown_unavailable`. Adapter/config/index paths add only `invalid_config`, `remote_mcp_failed`, and `source_unavailable`; read readiness adds only `missing_snapshot` and `stale_snapshot`. Existing query-validation codes remain compatible. Errors MUST contain no token, DSN, password, SQL text, absolute path, source text, or cross-scope identifiers. **Acceptance:** AC-28.
+- **R-028 — Stable safe errors:** New publication paths MUST use the closed codes `unauthorized`, `scope_mismatch`, `unsupported_storage`, `busy`, `session_expired`, `invalid_batch`, `batch_conflict`, `snapshot_incomplete`, `revision_mismatch`, `snapshot_conflict`, `markdown_unavailable`, and `commit_uncertain`. `commit_uncertain` is SQLite-only and means canonical replacement may have occurred but directory durability was not confirmed; it claims neither success nor rollback and permits only repeated `finalize` reconciliation. Adapter/config/index paths add only `invalid_config`, `remote_mcp_failed`, and `source_unavailable`; read readiness adds only `missing_snapshot` and `stale_snapshot`. Existing query-validation codes remain compatible. Errors MUST contain no token, DSN, password, SQL text, absolute path, source text, filesystem error, or cross-scope identifiers. **Acceptance:** AC-28.
 - **R-029 — Trust boundaries:** Remote sessions MUST be owned by the authenticated token identity that created them; another token MUST NOT append, abort, or finalize them even when it has write access to the same domain. Direct PostgreSQL and SQLite adapters MUST bind sessions to an ephemeral publisher-instance identity generated for the current indexing run and kept out of repository configuration. A replacement process receives a different identity and MUST create a new session. **Acceptance:** AC-29.
 - **R-030 — First-release bounds:** Discovery MUST keep the existing `max_total_files` default and hard support target of 20,000 indexed files. Publication batch bounds, session TTL, staging retention, freshness, and query limits MUST be configurable within validated server-side ceilings. **Acceptance:** AC-30.
 
@@ -226,7 +226,7 @@ The local indexer ends after normalized graph construction; it does not know whe
 3. After graph construction and canonical serialization are complete, the selected publisher calls `begin` and receives a leased session with captured graph revision and target-specific Markdown change token.
 4. The shared serializer emits bounded row-native batches in repository, file, symbol, and relation order. The adapter persists each batch idempotently.
 5. `finalize` validates completeness, recomputes `graph_payload_revision`, derives code-to-wiki links from the captured authoritative Markdown, computes `snapshot_revision`, and validates the complete staged snapshot without holding the domain lock.
-6. The target waits for the short domain advisory lock under the configured transaction-local lock timeout, rechecks active snapshot revision and target-specific Markdown change token, and atomically switches the active pointer.
+6. PostgreSQL waits for the short domain advisory lock under the configured transaction-local lock timeout, rechecks active snapshot revision and target-specific Markdown change token, and atomically switches the active pointer. SQLite performs the same final checks under Wiki-shared then graph-exclusive locks and activates one self-describing ready database with `os.replace`.
 7. Readers resolve the selected adapter, require the active ready snapshot and freshness policy, then run existing bounded status/search/context behavior.
 
 ## 6. Shared publication contract
@@ -252,11 +252,15 @@ staging -> aborted
 staging -> expired
 staging -> conflicted
 staging -> failed
+staging -> commit_uncertain -> ready
+commit_uncertain -> conflicted
 ```
 
-Only `staging` accepts batches or finalization. `ready`, `aborted`, `expired`, `conflicted`, and `failed` are terminal. Retrying a completed `finalize` for the same session returns its stored terminal result without another pointer switch.
+Only `staging` accepts batches or a first finalization. `ready`, `aborted`, `expired`, `conflicted`, and `failed` are terminal. `commit_uncertain` is a SQLite reconciliation-only state: it accepts no batch or abort and permits only repeated `finalize` by the same in-memory owner. Retrying a completed `finalize` for the same session returns its stored terminal result without another pointer switch.
 
-The lease is renewed only by an accepted batch. Rejected operations, `busy`, and failed finalization do not extend it. A successful finalization makes the session terminal. Ownership is fixed at `begin`: remote MCP uses the authenticated token identity, while direct PostgreSQL and SQLite use an ephemeral publisher-instance identity held by the creating adapter. There is no resume, reattach, ownership transfer, supersession, or fencing token. A publisher that loses its in-memory session handle starts a new session; retention cleanup later removes the abandoned one.
+The lease is renewed only by an accepted batch. Rejected operations, `busy`, `commit_uncertain`, and failed finalization do not extend it. A successful finalization makes the session terminal. Ownership is fixed at `begin`: remote MCP uses the authenticated token identity, while direct PostgreSQL and SQLite use an ephemeral publisher-instance identity held by the creating adapter. There is no resume, reattach, ownership transfer, supersession, or fencing token. A publisher that loses its in-memory session handle starts a new session; retention cleanup later removes the abandoned one.
+
+SQLite writes the complete ready envelope, including the session identity and terminal result, into the staging database before activation. `os.replace` is the logical commit point. A successful directory sync returns `ready`. If replacement may have occurred but directory sync fails, `finalize` returns `commit_uncertain` without claiming success or rollback. A repeated `finalize` reads the active envelope: when its session and revision match, it retries directory sync and returns `ready` only after confirmation; a different active revision returns `snapshot_conflict`; unresolved durability returns `commit_uncertain` again. Failure to update a separate staging journal after confirmed activation cannot change a matching embedded ready result. After process loss, a replacement owner does not resume the session; status reports whichever complete snapshot is actually active.
 
 ## 7. Storage model
 
@@ -279,7 +283,15 @@ Migration 4 is transactional under the existing migration lock and all its objec
 
 ### 7.2 SQLite realization
 
-SQLite keeps the current separate graph database and schema-v2 rows. The publisher writes a unique staging database plus fixed owner, state, lease, batch, and captured-revision metadata, validates it through the shared contract, derives links from the local wiki base, and uses the existing atomic replacement boundary. Batch recording and hashes use the same protocol even though all calls occur in one local process. This preserves one publication implementation above the adapter boundary.
+SQLite keeps the current separate graph database, `SCHEMA_VERSION = 2`, and the five public entity tables `repositories`, `files`, `symbols`, `relations`, and `wiki_code_links`. The validator accepts two exact profiles: the legacy profile with those five tables and existing indexes, and the publication profile with the same public objects plus one exact internal `code_graph_publication` table. The internal table is not added to the public `TABLES` set, canonical entity-row APIs, row-native payload, or query/export results. Arbitrary extra tables or indexes remain incompatible.
+
+The publisher records fixed owner, staging state, lease, accepted batches, and captured revisions in its unique staging database. At finalize it writes exactly one ready `code_graph_publication` row before activation. That row contains a format version, domain and repository identity, publisher session ID, graph payload revision, canonical snapshot revision, canonical Markdown revision, counts, indexed timestamp, ready terminal result, a `content_digest`, and an `envelope_digest`. The content digest is canonical SHA-256 over every persisted column of the five public tables in stable-key order; it is separate from the existing schema-v2 `_snapshot_revision`. The envelope digest is canonical SHA-256 over all publication fields except itself. Both use the shared canonical JSON implementation.
+
+The complete staging database is validated and checkpointed before activation. The publisher performs unbounded batch materialization, graph validation, link derivation, SQLite construction, digest calculation, and prior backup outside the graph writer lock. It captures immutable Markdown selectors and their hash under the Wiki shared lock, performs link derivation after releasing that lock, then reacquires Wiki shared, recomputes the canonical Markdown hash, and acquires graph exclusive. Inside that ordered critical section it repeats owner/state/lease, active graph revision, and Markdown revision checks, then performs only the prepared `os.replace` and directory sync. No inverse graph-to-Wiki lock acquisition is allowed.
+
+Readers of the publication profile treat the embedded row as readiness authority. They validate the exact internal schema, envelope, revisions, counts, and content digest. Full content validation occurs on first open and whenever the bounded storage stamp changes; a process-local cache may reuse a successful validation while the stamp is unchanged. Status, search, and context hold Wiki shared then graph read from current Markdown-hash comparison through response materialization so stale derived links cannot escape. The existing `.metadata.json` path is a best-effort cache for the publication profile: it may be absent, stale, corrupt, or regenerated without changing readiness. A legacy snapshot without the internal table continues to require the existing strict database-plus-sidecar storage-stamp validation.
+
+A complete copied database backup remains valid after its content and envelope are revalidated; device and inode are not authority. Accidental mutation, incomplete copy, malformed internal state, or digest mismatch fails closed as `missing_snapshot`. The local threat boundary trusts a principal that can rewrite the graph database: digests detect corruption, not a malicious local writer that can also recompute them. Batch recording and hashes still use the shared protocol even though all calls occur in one local process.
 
 ### 7.3 PostgreSQL runtime scope
 
@@ -327,9 +339,12 @@ Existing code-graph discovery, parser, file-size, file-count, language, and cont
 | Graph payload revision mismatch | `revision_mismatch` | unchanged |
 | Active graph or Markdown revision changed | `snapshot_conflict` | unchanged |
 | Markdown unavailable at target | `markdown_unavailable` | unchanged |
+| SQLite replace may have succeeded but directory sync failed | `commit_uncertain` | complete previous or complete new snapshot |
 | Selected adapter unavailable | sanitized mode-specific failure | unchanged |
 
-`busy` is returned only when `pg_advisory_xact_lock(namespace, domain_lock_id)` raises SQLSTATE `55P03` under the configured `SET LOCAL lock_timeout`. It is retryable against the same still-valid session and does not renew its lease. `snapshot_conflict` is not retryable within that session; the caller must begin again and republish. Storage or validation failure marks the staging session failed when safe, rolls back the finalize transaction, and preserves the previous active pointer.
+`busy` is returned for SQLite lock-acquisition timeout or when PostgreSQL `pg_advisory_xact_lock(namespace, domain_lock_id)` raises SQLSTATE `55P03` under the configured `SET LOCAL lock_timeout`. It is retryable against the same still-valid session and does not renew its lease. Every adapter sanitizes lock and filesystem paths. `snapshot_conflict` is not retryable within that session; the caller must begin again and republish. A storage or validation failure before the activation linearization point marks the staging session failed when safe and preserves the previous active snapshot.
+
+`commit_uncertain` is returned only after SQLite replacement may have taken effect but durable namespace sync was not confirmed. The publisher MUST NOT hide it as `ready`, attempt an automatic rollback, accept another batch, or fall back to another adapter. The same in-memory owner retries `finalize`, which reconciles the embedded active `session_id` and revision and retries directory sync. Status and readers independently report the complete snapshot that validates as active; they never expose a partial or staging state. If the publishing process is lost, a new owner starts a new session and uses status to observe the active revision.
 
 ## 10. Security and trust analysis
 
@@ -343,6 +358,7 @@ Existing code-graph discovery, parser, file-size, file-count, language, and cont
 - Direct credentials are deployment-invalid if their principal owns a protected table or has `BYPASSRLS`; tests use the same restricted role shape documented for operators.
 - Advisory lock keys use a reserved integer namespace plus a database-assigned unique domain lock ID, not a hash of untrusted strings.
 - Logs use safe IDs and counts only; token values, token digests, DSNs, SQL payloads, source rows, and absolute paths are excluded.
+- A local principal that can rewrite the SQLite graph database is inside the trusted boundary. The internal content and envelope digests detect accidental corruption and incomplete copies, not a malicious writer that can recompute them. No graph-specific HMAC secret or device/inode binding is introduced, and a complete copied backup can be restored and revalidated.
 
 ## 11. Testing and verification
 
@@ -360,7 +376,24 @@ Run one parameterized publisher/reader contract suite against SQLite and direct 
 - fresh, stale, and age-check-disabled behavior;
 - no source text or absolute path in persisted rows, responses, errors, or logs.
 
-### 11.2 PostgreSQL integration
+### 11.2 SQLite atomicity and recovery
+
+SQLite tests MUST prove:
+
+- a reader paused across activation observes one complete previous or new snapshot and never depends on sidecar timing;
+- process loss or a persistent sidecar failure after replacement leaves the embedded new snapshot readable after restart;
+- injected directory-sync failure returns sanitized `commit_uncertain`, and repeated `finalize` reconciles the matching embedded session and returns `ready` only after sync succeeds;
+- failure to update the staging session journal after replacement is reconciled to the embedded ready terminal result;
+- a pre-replacement failure leaves the previous snapshot byte-for-byte authoritative;
+- a complete copied backup restores successfully, while an incomplete copy, corrupt entity row, corrupt envelope, wrong domain/repository/revision, or digest mismatch fails closed;
+- a legitimate `git_remote` beginning with any implementation-reserved-looking prefix remains unchanged, and raw stable-row/query/export APIs expose no publication envelope;
+- expiry during unbounded finalize work is caught by the activation-time owner/state/lease check;
+- Markdown mutation during derivation conflicts, a writer cannot interleave between the final hash and replacement, and reader materialization cannot return stale Wiki links;
+- structural lock probes show batch materialization, graph validation, link derivation, SQLite build, digest calculation, and backup occur outside graph exclusive, with Wiki-shared then graph-exclusive as the only activation order;
+- every SQLite lock timeout maps to safe `busy` without an internal path;
+- the legacy five-table sidecar profile, the extended publication profile, startup import closure, local source safety, and the full existing code-graph suite remain compatible.
+
+### 11.3 PostgreSQL integration
 
 Integration tests MUST prove:
 
@@ -378,7 +411,7 @@ Integration tests MUST prove:
 - status/context expose O(1) generation state while lint reports stored/current canonical Markdown revisions and stale-link state;
 - migration 4 is transactional and idempotent, preserves ordinary wiki data, and its compatibility rollback procedure lets the last pre-v4 application execute its PostgreSQL Markdown CRUD/search smoke suite against the retained data.
 
-### 11.3 Regression and scale
+### 11.4 Regression and scale
 
 - Existing SQLite code-graph tests remain green, including local `include_source=true` safety.
 - Existing ordinary PostgreSQL wiki tool-matrix, authentication, page mutation, search, and migration tests remain green.
@@ -389,7 +422,7 @@ Integration tests MUST prove:
 
 - **AC-01:** Two snapshots cannot be active for one domain; code tools resolve only bound primary.
 - **AC-02:** Existing token plus hosted-service and restricted-direct database-principal tests prove graph read/write scope parity with Markdown and absence of graph-specific auth state.
-- **AC-03:** Existing schema-v2 identities and SQLite regression fixtures produce unchanged normalized results.
+- **AC-03:** Existing schema-v2 identities and SQLite regression fixtures produce unchanged normalized results; the new runtime accepts the exact legacy and publication schema-v2 profiles, keeps the five public entity-table APIs unchanged, and rejects every other extra schema object. A pre-publication binary rollback uses a retained legacy snapshot or reindexes rather than opening the publication profile.
 - **AC-04:** Composite constraints, row-level policies, privilege inspection, hosted grant provisioning, and direct config tests reject cross-scope rows, runtime owner/`BYPASSRLS` credentials, unprovisioned hosted domains, and a primary outside immutable scope.
 - **AC-05:** All publication modes pass one lifecycle contract suite with the same serialized fixture.
 - **AC-06:** Payload inspection proves only safe normalized graph rows are transmitted.
@@ -397,14 +430,14 @@ Integration tests MUST prove:
 - **AC-08:** Missing, extra, out-of-order, oversized, and invalid rows cannot activate a snapshot.
 - **AC-09:** Target recomputation rejects a forged graph payload revision and produces the existing canonical snapshot revision after link derivation.
 - **AC-10:** Parallel staging sessions capture explicit graph revision and target-specific Markdown change tokens after graph construction is complete.
-- **AC-11:** SQLite, direct PostgreSQL, and MCP expiry/ownership tests prove an expired, replacement, or different publisher cannot mutate or finalize and that no session can be transferred, with no lock retained between calls.
+- **AC-11:** SQLite, direct PostgreSQL, and MCP expiry/ownership tests prove an expired, replacement, or different publisher cannot mutate or activate and that no session can be transferred, with no lock retained between calls; SQLite repeats the check after unbounded work immediately before replacement and restricts `commit_uncertain` to same-owner reconciliation.
 - **AC-12:** Concurrent graph or Markdown mutation produces a stable conflict and preserves active state.
-- **AC-13:** Concurrent readers observe only complete old or complete new snapshots; separate domains finalize concurrently.
+- **AC-13:** Concurrent readers observe only complete old or complete new snapshots; SQLite pause/crash, sidecar-failure, directory-sync-failure, and post-replace-journal-failure tests preserve that visibility, while separate domains finalize concurrently.
 - **AC-14:** Abort is retry-safe, and a subsequent `begin` invokes bounded retention cleanup that removes only eligible non-active staging data.
 - **AC-15:** Integration tests pass without broker or pub/sub services configured.
 - **AC-16:** Publisher payload rejects `wiki_code_links`; target-generated links preserve selector provenance.
 - **AC-17:** Each target uses its authoritative Markdown source and rejects unavailable Markdown.
-- **AC-18:** Ready metadata records graph payload, canonical snapshot, target-specific Markdown change token, and exact canonical Markdown hash; any intervening Markdown mutation conflicts.
+- **AC-18:** Ready metadata records graph payload, canonical snapshot, target-specific Markdown change token, and exact canonical Markdown hash; any intervening Markdown mutation conflicts, activation follows Wiki-shared then graph-exclusive order, and reader materialization cannot emit stale derived links.
 - **AC-19:** Graph publication leaves Markdown/chunks/vectors unchanged; a later change-token mismatch suppresses derived links, appears in context/status, and lint independently reports stored/current canonical hashes.
 - **AC-20:** All readers pass shared status/search/context compatibility fixtures.
 - **AC-21:** Config tests cover every explicit mode and prove failures do not cross-fallback.
@@ -414,14 +447,14 @@ Integration tests MUST prove:
 - **AC-25:** PostgreSQL/MCP `include_source=true` returns `source_unavailable` and no source bytes.
 - **AC-26:** Remote publication tools enforce implicit authenticated tenant/domain scope.
 - **AC-27:** Remote server indexing without a checkout returns `source_unavailable` and creates no session/snapshot.
-- **AC-28:** Error snapshots cover the complete R-028 code set and prove secret/path/source redaction.
+- **AC-28:** Error snapshots cover the complete R-028 code set, including SQLite `commit_uncertain` plus reconciliation, and prove secret/path/source/filesystem-error redaction.
 - **AC-29:** Cross-token and stale-local-session takeover attempts fail.
 - **AC-30:** The 20,000-file fixture and server-side ceiling tests pass under recorded benchmark conditions.
 
 ## 13. Migration and rollout
 
 1. Provision separate schema-owner/migrator, hosted service, and restricted direct runtime roles. Apply PostgreSQL graph objects, Markdown generation, non-forced row-level policies, and the shared runtime-principal scope mapping in migration 4 under the existing migration framework and lock. Provision explicit hosted-service and direct-role grants before starting either runtime.
-2. Add shared publisher/reader contracts and make the current SQLite path satisfy them without changing public query semantics.
+2. Add shared publisher/reader contracts and make the current SQLite path satisfy them without changing public query semantics. New publications use the exact schema-v2 publication profile with internal authority; legacy five-table snapshots remain readable through strict sidecar validation. Before rolling back to a pre-publication binary, retain or restore a legacy snapshot or reindex with that binary because it is not required to accept the internal publication table.
 3. Add PostgreSQL staging, finalize, active-read, and target-link implementations.
 4. Add MCP publication and read adapters over those services.
 5. Replace current PostgreSQL `unsupported_storage` results for `wiki_code_status`, `wiki_code_search`, and `wiki_code_context`; enable MCP publication tools only on authenticated hosted PostgreSQL; make `wiki_code_index` publish from a local checkout and fail with `source_unavailable` without one.
@@ -438,6 +471,9 @@ Application rollback from schema 4 is an explicit operator procedure, shipped as
 | Risk | Mitigation | Evidence |
 |---|---|---|
 | Partial or corrupt upload becomes visible | Complete staging validation plus atomic active pointer | AC-08, AC-13 |
+| SQLite database and sidecar disagree during activation | Embedded ready authority switches with the database; sidecar is cache-only | AC-03, AC-13 |
+| SQLite replacement is visible but directory durability is unknown | Explicit `commit_uncertain`, same-owner reconciliation, and no hidden rollback | AC-13, AC-28 |
+| Local backup is rejected or accidental corruption is accepted | Content/envelope digest validation without device/inode binding; local filesystem writer is trusted | AC-03, AC-13 |
 | Concurrent developers overwrite each other | Captured base revisions, short domain lock, optimistic conflict | AC-10, AC-12 |
 | Stale local Markdown creates wrong links | Target-only link derivation and Markdown revision binding | AC-16–AC-19 |
 | Tenant data crosses scope | Existing token auth, shared hosted/direct RLS grants, and composite tenant/domain/snapshot constraints | AC-02, AC-04 |
@@ -452,6 +488,7 @@ Application rollback from schema 4 is an explicit operator procedure, shipped as
 ## 15. Human checkpoints
 
 - Approve this checked specification before implementation planning.
+- Approve the SQLite `commit_uncertain` retry contract, internal schema-v2 publication profile, pre-publication-binary rollback limitation, and trusted-local-filesystem boundary before Task 2 resumes.
 - Review the concrete PostgreSQL migration, hosted/direct role grants, non-forced row-level policies, runtime schema checks, and compatibility rollback SQL during plan execution before any production deployment.
 - Provision and test real direct-database credentials outside the repository; no agent may create, expose, or use production credentials.
 - Run production publication only through an operator-controlled deployment procedure after migration and integration evidence passes.
