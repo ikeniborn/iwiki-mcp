@@ -383,6 +383,7 @@ def test_publication_contract_values_are_closed_and_immutable():
         "revision_mismatch",
         "snapshot_conflict",
         "markdown_unavailable",
+        "commit_uncertain",
     )
     assert ADAPTER_ERROR_CODES == (
         "invalid_config",

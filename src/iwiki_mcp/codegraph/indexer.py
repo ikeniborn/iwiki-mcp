@@ -127,6 +127,10 @@ _READY_METADATA_KEYS = frozenset({
     "unicode_data_version",
     "warnings",
 })
+_PUBLICATION_READY_METADATA_KEYS = frozenset({
+    "graph_payload_revision",
+    "markdown_revision",
+})
 
 _DATABASE_STAMP_KEYS = frozenset({
     "change_counter",
@@ -388,8 +392,20 @@ def exact_ready_metadata(metadata: Mapping[str, object]) -> bool:
     """Validate the complete final metadata envelope and its diagnostics."""
     timings = _safe_phase_timings(metadata.get("phase_timings_ms"))
     warnings = metadata.get("warnings")
+    keys = set(metadata)
+    extended = _READY_METADATA_KEYS | _PUBLICATION_READY_METADATA_KEYS
+    publication_fields_valid = (
+        keys == _READY_METADATA_KEYS
+        or (
+            keys == extended
+            and _is_canonical_revision(
+                metadata.get("graph_payload_revision")
+            )
+            and _is_canonical_revision(metadata.get("markdown_revision"))
+        )
+    )
     return (
-        set(metadata) == _READY_METADATA_KEYS
+        publication_fields_valid
         and metadata.get("state") == "ready"
         and metadata.get("fresh") is True
         and metadata.get("publication_phase") == "pending_final_verify"

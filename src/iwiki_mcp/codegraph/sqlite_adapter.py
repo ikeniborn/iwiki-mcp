@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from contextlib import closing, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 import json
 from pathlib import Path
 import sqlite3
@@ -11,12 +12,20 @@ import threading
 from typing import Callable, Iterator, Mapping
 import uuid
 
+from filelock import Timeout
+
 from .canonical import canonical_bytes_sha256, canonical_json_bytes, canonical_sha256
 from .config import CodeGraphConfig
 from .context import (
     CodeGraphContext,
     ContextRequest,
     capture_project_root,
+)
+from .indexer import (
+    _seal_ready_metadata,
+    _selector_read_lock,
+    _wiki_read_lock,
+    exact_ready_metadata,
 )
 from .linking import (
     SelectorError,
@@ -33,11 +42,20 @@ from .publication import (
     graph_payload_revision,
 )
 from .query import CodeGraphQuery, ValidatedSearchRequest
-from .schema import SCHEMA_VERSION, CodeGraphStoreError
+from .schema import (
+    SCHEMA_VERSION,
+    CodeGraphStoreError,
+    configure,
+    create_publication_schema,
+)
 from .store import (
+    CodeGraphPublishedError,
     CodeGraphStore,
+    _read_publication_envelope,
     _snapshot_revision,
+    _table_rows,
     _validate_normalized_rows,
+    _write_publication_envelope,
     code_graph_read_lock,
     code_graph_write_lock,
 )
@@ -50,6 +68,24 @@ _ROW_KINDS: tuple[RowKind, ...] = (
     "relations",
 )
 _KIND_ORDER = {kind: index for index, kind in enumerate(_ROW_KINDS)}
+
+
+def _map_busy(method):
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except Timeout:
+            return {"error": "busy"}
+        except sqlite3.OperationalError as exc:
+            if getattr(exc, "sqlite_errorcode", None) in {
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            }:
+                return {"error": "busy"}
+            raise
+
+    return wrapped
 
 
 def _utc_now() -> datetime:
@@ -87,6 +123,100 @@ def _markdown_revision(snapshot) -> str:
     return canonical_sha256(rows, prefix=True)
 
 
+def _metadata_path(store: CodeGraphStore) -> Path:
+    return store.path.with_name(f"{store.path.stem}.metadata.json")
+
+
+def _publication_metadata(path: Path) -> Mapping[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _legacy_metadata_matches_snapshot(
+    connection: sqlite3.Connection,
+    domain: str,
+    metadata: Mapping[str, object],
+) -> bool:
+    repositories = _table_rows(connection, "repositories")
+    if len(repositories) != 1:
+        return False
+    repository = repositories[0]
+    fingerprints = metadata.get("fingerprints")
+    if not isinstance(fingerprints, Mapping):
+        return False
+    if (
+        repository.get("repository_id") != domain
+        or repository.get("state") != "ready"
+        or repository.get("revision") != metadata.get("revision")
+        or repository.get("indexed_at") != metadata.get("indexed_at")
+        or repository.get("git_commit") != metadata.get("git_commit")
+        or repository.get("source_fingerprint") != fingerprints.get("source")
+        or repository.get("config_fingerprint") != fingerprints.get("config")
+        or repository.get("parser_fingerprint") != fingerprints.get("parser")
+        or repository.get("normalizer_version")
+        != metadata.get("normalizer_version")
+        or repository.get("unicode_data_version")
+        != metadata.get("unicode_data_version")
+    ):
+        return False
+    revision = _snapshot_revision(
+        repository,
+        _table_rows(connection, "files"),
+        _table_rows(connection, "symbols"),
+        _table_rows(connection, "relations"),
+        _table_rows(connection, "wiki_code_links"),
+    )
+    return revision == metadata.get("revision")
+
+
+def _ready_publication_metadata(
+    connection: sqlite3.Connection,
+    *,
+    store: CodeGraphStore,
+    metadata_path: Path,
+    domain: str,
+) -> Mapping[str, object] | None:
+    embedded = _read_publication_envelope(connection)
+    if embedded is not None:
+        if (
+            embedded["domain"] != domain
+            or embedded["repository_id"] != domain
+        ):
+            raise CodeGraphStoreError(
+                "invalid code graph publication identity"
+            )
+        terminal = dict(embedded["terminal_result"])
+        return {
+            **terminal,
+            "domain": domain,
+            "revision": embedded["snapshot_revision"],
+            "graph_payload_revision": embedded[
+                "graph_payload_revision"
+            ],
+            "markdown_revision": embedded["markdown_revision"],
+        }
+    metadata = _publication_metadata(metadata_path)
+    repository = connection.execute(
+        "SELECT state, revision FROM repositories WHERE repository_id = ?",
+        (domain,),
+    ).fetchone()
+    if (
+        metadata is None
+        or repository is None
+        or repository[0] != "ready"
+        or not exact_ready_metadata(metadata)
+        or metadata.get("domain") != domain
+        or metadata.get("revision") != repository[1]
+        or metadata.get("storage_stamp") != store.storage_stamp()
+        or not _legacy_metadata_matches_snapshot(connection, domain, metadata)
+    ):
+        return None
+    return metadata
+
+
 @dataclass
 class _SessionRecord:
     session_id: str
@@ -94,6 +224,8 @@ class _SessionRecord:
     selector_snapshot: object | None
     created_at: datetime
     updated_at: datetime
+    publication_directory: Path | None = None
+    prior_backup: Path | None = None
 
 
 class SqliteSnapshotPublisher:
@@ -108,26 +240,30 @@ class SqliteSnapshotPublisher:
         selector_resolver: WikiSelectorResolver,
         lock_path: Path,
         config: CodeGraphConfig,
+        diagnostics: Mapping[str, object],
+        git_remote: str | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._store = store
         self._domain = domain
         self._private_root = Path(private_root).resolve()
         self._selector_resolver = selector_resolver
+        self._wiki_base = str(selector_resolver.base_dir)
         self._lock_path = Path(lock_path)
         self._config = config
+        self._diagnostics = dict(diagnostics)
+        self._git_remote = git_remote
         self._clock = clock
+        self._metadata_path = _metadata_path(store)
         self._owner_id = uuid.uuid4().hex
         self._sessions: dict[str, _SessionRecord] = {}
         self._terminal: dict[str, dict[str, object]] = {}
+        self._uncertain: dict[str, dict[str, object]] = {}
         self._mutex = threading.RLock()
 
     @contextmanager
     def _critical_section(self) -> Iterator[None]:
-        with self._mutex, code_graph_write_lock(
-            self._lock_path,
-            timeout=self._config.max_rebuild_seconds,
-        ):
+        with self._mutex:
             yield
 
     def _close_selector(self, record: _SessionRecord) -> None:
@@ -210,30 +346,138 @@ class SqliteSnapshotPublisher:
             return None
         return row[1] if row is not None and row[0] == "ready" else None
 
+    def _current_ready_metadata(self) -> Mapping[str, object]:
+        if not self._store.path.exists():
+            return {}
+        try:
+            with self._store.read_lease() as connection:
+                return _ready_publication_metadata(
+                    connection,
+                    store=self._store,
+                    metadata_path=self._metadata_path,
+                    domain=self._domain,
+                ) or {}
+        except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+            return {}
+
+    def _write_ready_envelope(
+        self,
+        staging: Path,
+        *,
+        session_id: str,
+        result: Mapping[str, object],
+    ) -> None:
+        with closing(sqlite3.connect(staging)) as connection:
+            persisted = _write_publication_envelope(
+                connection,
+                domain=self._domain,
+                repository_id=self._domain,
+                session_id=session_id,
+                graph_payload_revision=str(
+                    result["graph_payload_revision"]
+                ),
+                snapshot_revision=str(result["snapshot_revision"]),
+                markdown_revision=str(result["markdown_revision"]),
+                counts=dict(result["counts"]),
+                indexed_at=str(result["indexed_at"]),
+                terminal_result=result,
+            )
+            if _read_publication_envelope(connection) != {
+                **persisted,
+                "counts": dict(result["counts"]),
+                "terminal_result": dict(result),
+            }:
+                raise CodeGraphStoreError(
+                    "cannot verify code graph publication envelope"
+                )
+
+    def _sync_canonical_directory(self) -> None:
+        self._store.sync_canonical_directory()
+
+    def _record_external_terminal(
+        self,
+        record: _SessionRecord,
+        *,
+        state: str,
+        now: datetime,
+    ) -> None:
+        self._set_state(record, state, now)
+
+    def _publish_metadata_cache(
+        self, metadata: Mapping[str, object]
+    ) -> None:
+        cached = {
+            **metadata,
+            "storage_stamp": self._store.storage_stamp(),
+        }
+        _seal_ready_metadata(cached)
+        if not exact_ready_metadata(cached):
+            raise CodeGraphStoreError(
+                "invalid code graph publication metadata cache"
+            )
+        staging = self._store.prepare_metadata(self._metadata_path, cached)
+        try:
+            self._store.publish_metadata(self._metadata_path, staging)
+        except CodeGraphStoreError:
+            try:
+                self._store.discard_metadata(staging)
+            except CodeGraphStoreError:
+                pass
+            raise
+
+    def _current_markdown_revision(self, record: _SessionRecord) -> str:
+        snapshot = self._selector_resolver.capture(
+            domain=self._domain,
+            max_bytes=selector_capture_budget(
+                self._config.max_file_bytes,
+                self._config.max_total_files,
+            ),
+        )
+        try:
+            revision = _markdown_revision(snapshot)
+        finally:
+            self._selector_resolver.close_snapshot(snapshot)
+        self._selector_resolver.verify_snapshot(record.selector_snapshot)
+        return revision
+
+    @_map_busy
     def begin(self, header: SnapshotHeader) -> PublicationSession:
+        if header.repository_id != self._domain:
+            return {"error": "scope_mismatch"}
         if (
             header.protocol_version != 1
             or header.schema_version != SCHEMA_VERSION
-            or header.repository_id != self._domain
             or tuple(header.languages) != ("python",)
         ):
-            raise ValueError("invalid snapshot header")
-        now = self._clock()
-        with self._critical_section():
+            return {"error": "snapshot_incomplete"}
+        selector_snapshot = None
+        with self._mutex:
+            now = self._clock()
             self._cleanup(now)
             try:
-                selector_snapshot = self._selector_resolver.capture(
-                    domain=self._domain,
-                    max_bytes=selector_capture_budget(
-                        self._config.max_file_bytes,
-                        self._config.max_total_files,
-                    ),
-                )
-            except SelectorError as exc:
-                raise CodeGraphStoreError(
-                    "authoritative Markdown is unavailable"
-                ) from exc
-            markdown_revision = _markdown_revision(selector_snapshot)
+                with _wiki_read_lock(
+                    self._wiki_base,
+                    self._config.max_rebuild_seconds,
+                ):
+                    selector_snapshot = self._selector_resolver.capture(
+                        domain=self._domain,
+                        max_bytes=selector_capture_budget(
+                            self._config.max_file_bytes,
+                            self._config.max_total_files,
+                        ),
+                    )
+                    markdown_revision = _markdown_revision(selector_snapshot)
+                    with code_graph_read_lock(self._lock_path):
+                        base_revision = self._base_snapshot_revision()
+                    self._selector_resolver.verify_snapshot(selector_snapshot)
+            except SelectorError:
+                if selector_snapshot is not None:
+                    self._selector_resolver.close_snapshot(selector_snapshot)
+                return {"error": "markdown_unavailable"}
+            except BaseException:
+                if selector_snapshot is not None:
+                    self._selector_resolver.close_snapshot(selector_snapshot)
+                raise
             staging = self._store.create_staging_path()
             session_id = uuid.uuid4().hex
             lease_expires = now + timedelta(
@@ -275,7 +519,7 @@ class SqliteSnapshotPublisher:
                             canonical_json_bytes(_header_mapping(header)).decode(
                                 "utf-8"
                             ),
-                            self._base_snapshot_revision(),
+                            base_revision,
                             markdown_revision,
                             _timestamp(now),
                             _timestamp(now),
@@ -296,7 +540,7 @@ class SqliteSnapshotPublisher:
             return PublicationSession(
                 session_id=session_id,
                 lease_expires_at=_timestamp(lease_expires),
-                base_snapshot_revision=self._base_snapshot_revision(),
+                base_snapshot_revision=base_revision,
                 base_markdown_token=markdown_revision,
             )
 
@@ -338,14 +582,30 @@ class SqliteSnapshotPublisher:
         except (KeyError, TypeError, UnicodeError, ValueError):
             return None
 
+    @_map_busy
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
     ) -> dict[str, object]:
-        record = self._owned_record(session)
-        if record is None:
-            return {"error": "unauthorized"}
-        now = self._clock()
-        with self._critical_section(), closing(self._connect(record)) as connection:
+        with self._critical_section():
+            terminal = self._terminal.get(
+                getattr(session, "session_id", "")
+            )
+            if terminal is not None:
+                return dict(terminal)
+            record = self._owned_record(session)
+            if record is None:
+                return {"error": "unauthorized"}
+            if record.session_id in self._uncertain:
+                return {"error": "session_expired"}
+            return self._publish_batch_locked(record, batch, self._clock())
+
+    def _publish_batch_locked(
+        self,
+        record: _SessionRecord,
+        batch: SnapshotBatch,
+        now: datetime,
+    ) -> dict[str, object]:
+        with closing(self._connect(record)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             owner_id, state, lease_text, header_json, _base, _markdown = (
                 self._session_row(connection)
@@ -445,9 +705,19 @@ class SqliteSnapshotPublisher:
         now: datetime,
     ) -> dict[str, object]:
         self._set_state(record, state, now)
+        self._discard_prior_backup(record)
         result = {"error": error}
         self._terminal[record.session_id] = result
         return result
+
+    def _discard_prior_backup(self, record: _SessionRecord) -> None:
+        if record.prior_backup is None:
+            return
+        try:
+            self._store.discard_staging(record.prior_backup)
+        except CodeGraphStoreError:
+            pass
+        record.prior_backup = None
 
     def _read_batches(
         self, connection: sqlite3.Connection
@@ -465,33 +735,131 @@ class SqliteSnapshotPublisher:
             tables[kind] = tuple(rows)
         return tables
 
+    def _finish_ready(
+        self,
+        record: _SessionRecord,
+        result: Mapping[str, object],
+        *,
+        now: datetime,
+        ready_metadata: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        completed = dict(result)
+        self._uncertain.pop(record.session_id, None)
+        self._terminal[record.session_id] = completed
+        self._close_selector(record)
+        try:
+            self._record_external_terminal(
+                record,
+                state="ready",
+                now=now,
+            )
+        except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+            pass
+        try:
+            self._store.discard_staging(record.staging)
+        except CodeGraphStoreError:
+            pass
+        self._discard_prior_backup(record)
+        if record.publication_directory is not None:
+            try:
+                self._store.discard_published_staging_directory(
+                    record.publication_directory
+                )
+            except CodeGraphStoreError:
+                pass
+            record.publication_directory = None
+        self._sessions.pop(record.session_id, None)
+        if ready_metadata is not None:
+            try:
+                self._publish_metadata_cache(ready_metadata)
+            except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+                pass
+        return completed
+
+    def _reconcile_uncertain(
+        self,
+        record: _SessionRecord,
+        result: Mapping[str, object],
+    ) -> dict[str, object]:
+        try:
+            with self._store.read_lease() as connection:
+                envelope = _read_publication_envelope(connection)
+        except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+            envelope = None
+        if (
+            envelope is None
+            or envelope.get("domain") != self._domain
+            or envelope.get("repository_id") != self._domain
+            or envelope.get("session_id") != record.session_id
+            or envelope.get("snapshot_revision")
+            != result.get("snapshot_revision")
+        ):
+            now = self._clock()
+            self._uncertain.pop(record.session_id, None)
+            return self._finish_error(
+                record,
+                state="conflicted",
+                error="snapshot_conflict",
+                now=now,
+            )
+        try:
+            self._sync_canonical_directory()
+        except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+            return {
+                "error": "commit_uncertain",
+                "snapshot_revision": result["snapshot_revision"],
+            }
+        return self._finish_ready(
+            record,
+            result,
+            now=self._clock(),
+        )
+
+    @_map_busy
     def finalize(self, session: PublicationSession) -> dict[str, object]:
+        with self._mutex:
+            return self._finalize_serialized(session)
+
+    def _finalize_serialized(
+        self, session: PublicationSession
+    ) -> dict[str, object]:
         terminal = self._terminal.get(getattr(session, "session_id", ""))
         if terminal is not None:
             return dict(terminal)
         record = self._owned_record(session)
         if record is None:
             return {"error": "unauthorized"}
-        now = self._clock()
-        with self._critical_section(), closing(self._connect(record)) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            owner_id, state, lease_text, header_json, base_revision, markdown = (
-                self._session_row(connection)
-            )
-            if owner_id != self._owner_id:
-                connection.rollback()
-                return {"error": "unauthorized"}
-            if state != "staging" or now >= _parse_timestamp(str(lease_text)):
-                connection.rollback()
-                return self._finish_error(
-                    record,
-                    state="expired",
-                    error="session_expired",
-                    now=now,
-                )
-            header = SnapshotHeader(**json.loads(str(header_json)))
-            tables = self._read_batches(connection)
-            connection.commit()
+        uncertain = self._uncertain.get(record.session_id)
+        if uncertain is not None:
+            return self._reconcile_uncertain(record, uncertain)
+        with self._mutex:
+            now = self._clock()
+            with closing(self._connect(record)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                (
+                    owner_id,
+                    state,
+                    lease_text,
+                    header_json,
+                    base_revision,
+                    markdown,
+                ) = self._session_row(connection)
+                if owner_id != self._owner_id:
+                    connection.rollback()
+                    return {"error": "unauthorized"}
+                if state != "staging" or now >= _parse_timestamp(
+                    str(lease_text)
+                ):
+                    connection.rollback()
+                    return self._finish_error(
+                        record,
+                        state="expired",
+                        error="session_expired",
+                        now=now,
+                    )
+                header = SnapshotHeader(**json.loads(str(header_json)))
+                tables = self._read_batches(connection)
+                connection.commit()
 
             if any(
                 len(tables[kind]) != header.expected_counts[kind]
@@ -550,8 +918,7 @@ class SqliteSnapshotPublisher:
                     now=now,
                 )
 
-            current_revision = self._base_snapshot_revision()
-            if current_revision != base_revision:
+            if self._base_snapshot_revision() != base_revision:
                 return self._finish_error(
                     record,
                     state="conflicted",
@@ -559,18 +926,7 @@ class SqliteSnapshotPublisher:
                     now=now,
                 )
             try:
-                current_snapshot = self._selector_resolver.capture(
-                    domain=self._domain,
-                    max_bytes=selector_capture_budget(
-                        self._config.max_file_bytes,
-                        self._config.max_total_files,
-                    ),
-                )
-                try:
-                    current_markdown = _markdown_revision(current_snapshot)
-                finally:
-                    self._selector_resolver.close_snapshot(current_snapshot)
-                self._selector_resolver.verify_snapshot(record.selector_snapshot)
+                current_markdown = self._current_markdown_revision(record)
             except SelectorSnapshotChanged:
                 current_markdown = None
             except SelectorError:
@@ -610,7 +966,7 @@ class SqliteSnapshotPublisher:
             persisted_repository = {
                 **repository,
                 "root_path": str(self._private_root),
-                "git_remote": None,
+                "git_remote": self._git_remote,
                 "revision": header.graph_payload_revision,
                 "state": "rebuilding",
             }
@@ -621,15 +977,44 @@ class SqliteSnapshotPublisher:
                 tables["relations"],
                 links,
             )
+            previous_metadata = self._current_ready_metadata()
+            previous_generation = previous_metadata.get("generation")
+            generation = (
+                previous_generation + 1
+                if type(previous_generation) is int
+                and previous_generation >= 0
+                else 0
+            )
+            ready_metadata = {
+                **self._diagnostics,
+                "state": "ready",
+                "fresh": True,
+                "revision": snapshot_revision,
+                "generation": generation,
+                "publication_phase": "pending_final_verify",
+                "pending_final_verify": True,
+                "recovery_policy": "failed",
+                "graph_payload_revision": header.graph_payload_revision,
+                "markdown_revision": markdown,
+            }
+            ready_metadata.pop("metadata_digest", None)
+            ready_metadata.pop("storage_stamp", None)
+            result = {
+                "state": "ready",
+                "snapshot_revision": snapshot_revision,
+                "graph_payload_revision": header.graph_payload_revision,
+                "markdown_revision": markdown,
+                "counts": dict(header.expected_counts),
+                "indexed_at": repository["indexed_at"],
+            }
+            graph_staging = None
             try:
-                with closing(self._connect(record)) as staging_connection:
-                    staging_connection.executescript(
-                        "DROP TABLE publication_batches;"
-                        "DROP TABLE publication_session;"
-                        "PRAGMA user_version = 0;"
-                    )
-                    staging_connection.commit()
-                staging_store = CodeGraphStore(record.staging)
+                graph_staging = self._store.create_staging_path()
+                record.publication_directory = graph_staging.parent
+                with closing(sqlite3.connect(graph_staging)) as connection:
+                    configure(connection)
+                    create_publication_schema(connection)
+                staging_store = CodeGraphStore(graph_staging)
                 staging_store.insert_snapshot({
                     "repositories": (persisted_repository,),
                     "files": tables["files"],
@@ -643,40 +1028,182 @@ class SqliteSnapshotPublisher:
                     indexed_at=str(repository["indexed_at"]),
                     wiki_code_links=links,
                 )
-                self._store.publish_staging(
-                    record.staging,
+                self._write_ready_envelope(
+                    graph_staging,
+                    session_id=record.session_id,
+                    result=result,
+                )
+                self._store.prepare_staging(
+                    graph_staging,
                     repository_id=self._domain,
                     expected_revision=snapshot_revision,
                 )
+                record.prior_backup = self._store.prepare_prior_backup(
+                    repository_id=self._domain,
+                    expected_revision=base_revision,
+                )
+                activation_error = None
+                activation_now = now
+                sync_uncertain = False
+                with self._mutex:
+                    with _wiki_read_lock(
+                        self._wiki_base,
+                        self._config.max_rebuild_seconds,
+                    ):
+                        try:
+                            final_markdown = self._current_markdown_revision(
+                                record
+                            )
+                        except SelectorSnapshotChanged:
+                            final_markdown = None
+                        if final_markdown != markdown:
+                            activation_error = "snapshot_conflict"
+                        if activation_error is None:
+                            with code_graph_write_lock(
+                                self._lock_path,
+                                timeout=self._config.max_rebuild_seconds,
+                            ):
+                                if (
+                                    self._base_snapshot_revision()
+                                    != base_revision
+                                ):
+                                    activation_error = "snapshot_conflict"
+                                else:
+                                    with closing(
+                                        self._connect(record)
+                                    ) as activation:
+                                        activation.execute("BEGIN IMMEDIATE")
+                                        (
+                                            owner_id,
+                                            state,
+                                            lease_text,
+                                            *_rest,
+                                        ) = self._session_row(activation)
+                                        activation_now = self._clock()
+                                        if owner_id != self._owner_id:
+                                            activation.rollback()
+                                            activation_error = "unauthorized"
+                                        elif (
+                                            state != "staging"
+                                            or activation_now
+                                            >= _parse_timestamp(
+                                                str(lease_text)
+                                            )
+                                        ):
+                                            activation.rollback()
+                                            activation_error = (
+                                                "session_expired"
+                                            )
+                                        else:
+                                            activation.rollback()
+                                            try:
+                                                self._store.replace_staging_logical(
+                                                    graph_staging
+                                                )
+                                                graph_staging = None
+                                                self._sync_canonical_directory()
+                                            except CodeGraphPublishedError:
+                                                graph_staging = None
+                                                sync_uncertain = True
+                                            except (
+                                                OSError,
+                                                sqlite3.DatabaseError,
+                                                CodeGraphStoreError,
+                                            ):
+                                                if graph_staging is None:
+                                                    sync_uncertain = True
+                                                else:
+                                                    raise
+                if activation_error is not None:
+                    if graph_staging is not None:
+                        self._store.discard_staging(graph_staging)
+                        graph_staging = None
+                    if activation_error == "unauthorized":
+                        return {"error": "unauthorized"}
+                    return self._finish_error(
+                        record,
+                        state=(
+                            "conflicted"
+                            if activation_error == "snapshot_conflict"
+                            else "expired"
+                        ),
+                        error=activation_error,
+                        now=activation_now,
+                    )
+                if sync_uncertain:
+                    self._uncertain[record.session_id] = dict(result)
+                    record.updated_at = activation_now
+                    try:
+                        self._set_state(
+                            record,
+                            "commit_uncertain",
+                            activation_now,
+                        )
+                    except (
+                        OSError,
+                        sqlite3.DatabaseError,
+                        CodeGraphStoreError,
+                    ):
+                        pass
+                    self._discard_prior_backup(record)
+                    if record.publication_directory is not None:
+                        try:
+                            self._store.discard_published_staging_directory(
+                                record.publication_directory
+                            )
+                        except CodeGraphStoreError:
+                            pass
+                        record.publication_directory = None
+                    return {
+                        "error": "commit_uncertain",
+                        "snapshot_revision": snapshot_revision,
+                    }
+            except Timeout:
+                if graph_staging is not None:
+                    try:
+                        self._store.discard_staging(graph_staging)
+                    except CodeGraphStoreError:
+                        pass
+                self._discard_prior_backup(record)
+                raise
             except (KeyError, OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+                if graph_staging is not None:
+                    try:
+                        self._store.discard_staging(graph_staging)
+                    except CodeGraphStoreError:
+                        pass
                 return self._finish_error(
                     record,
                     state="failed",
                     error="snapshot_incomplete",
                     now=now,
                 )
-            self._close_selector(record)
-            result = {
-                "state": "ready",
-                "snapshot_revision": snapshot_revision,
-                "graph_payload_revision": header.graph_payload_revision,
-                "markdown_revision": markdown,
-                "counts": dict(header.expected_counts),
-                "indexed_at": repository["indexed_at"],
-            }
-            self._terminal[record.session_id] = result
-            self._sessions.pop(record.session_id, None)
-            return dict(result)
+            return self._finish_ready(
+                record,
+                result,
+                now=activation_now,
+                ready_metadata=ready_metadata,
+            )
 
+    @_map_busy
     def abort(self, session: PublicationSession) -> dict[str, object]:
-        terminal = self._terminal.get(getattr(session, "session_id", ""))
-        if terminal is not None:
-            return dict(terminal)
-        record = self._owned_record(session)
-        if record is None:
-            return {"error": "unauthorized"}
-        now = self._clock()
-        with self._critical_section(), closing(self._connect(record)) as connection:
+        with self._critical_section():
+            terminal = self._terminal.get(
+                getattr(session, "session_id", "")
+            )
+            if terminal is not None:
+                return dict(terminal)
+            record = self._owned_record(session)
+            if record is None:
+                return {"error": "unauthorized"}
+            if record.session_id in self._uncertain:
+                return {"error": "session_expired"}
+            return self._abort_locked(record, self._clock())
+
+    def _abort_locked(
+        self, record: _SessionRecord, now: datetime
+    ) -> dict[str, object]:
+        with closing(self._connect(record)) as connection:
             connection.execute("BEGIN IMMEDIATE")
             owner_id, state, lease_text, _header, _base, _markdown = (
                 self._session_row(connection)
@@ -731,6 +1258,52 @@ class SqliteCodeGraphReader:
         self._context_root = capture_project_root(str(private_root))
         self._max_file_bytes = max_file_bytes
         self._selector_resolver = selector_resolver
+        self._wiki_base = str(selector_resolver.base_dir)
+        self._metadata_path = _metadata_path(store)
+        self._validated_storage_stamp: Mapping[str, object] | None = None
+        self._validated_metadata: Mapping[str, object] | None = None
+
+    def _ready_metadata(
+        self, connection: sqlite3.Connection
+    ) -> Mapping[str, object] | None:
+        publication_profile = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'code_graph_publication'"
+        ).fetchone() is not None
+        if not publication_profile:
+            return _ready_publication_metadata(
+                connection,
+                store=self._store,
+                metadata_path=self._metadata_path,
+                domain=self._domain,
+            )
+        stamp = self._store.storage_stamp()
+        if (
+            self._validated_metadata is not None
+            and self._validated_storage_stamp == stamp
+        ):
+            return dict(self._validated_metadata)
+        metadata = _ready_publication_metadata(
+            connection,
+            store=self._store,
+            metadata_path=self._metadata_path,
+            domain=self._domain,
+        )
+        self._validated_storage_stamp = stamp if metadata is not None else None
+        self._validated_metadata = dict(metadata) if metadata is not None else None
+        return metadata
+
+    def _current_markdown_revision(self) -> str | None:
+        try:
+            snapshot = self._selector_resolver.capture(
+                domain=self._domain,
+            )
+        except SelectorError:
+            return None
+        try:
+            return _markdown_revision(snapshot)
+        finally:
+            self._selector_resolver.close_snapshot(snapshot)
 
     def _status(self, connection: sqlite3.Connection) -> dict[str, object]:
         repository = connection.execute(
@@ -743,26 +1316,60 @@ class SqliteCodeGraphReader:
                 "fresh": False,
                 "error": "missing_snapshot",
             }
+        snapshot_revision = str(repository[1])
+        metadata = self._ready_metadata(connection)
+        if metadata is None or metadata.get("revision") != snapshot_revision:
+            return {
+                "state": "missing",
+                "fresh": False,
+                "error": "missing_snapshot",
+            }
         counts = {
             kind: connection.execute(
                 f"SELECT COUNT(*) FROM {kind}"
             ).fetchone()[0]
             for kind in _ROW_KINDS
         }
+        stored_markdown_revision = None
+        graph_payload_revision = None
+        if (
+            metadata.get("domain") == self._domain
+            and metadata.get("revision") == snapshot_revision
+        ):
+            stored = metadata.get("markdown_revision")
+            payload_revision = metadata.get("graph_payload_revision")
+            if isinstance(stored, str):
+                stored_markdown_revision = stored
+            if isinstance(payload_revision, str):
+                graph_payload_revision = payload_revision
+        current_markdown_revision = self._current_markdown_revision()
         return {
             "domain": self._domain,
             "state": "ready",
             "fresh": True,
-            "revision": str(repository[1]),
-            "snapshot_revision": str(repository[1]),
+            "revision": snapshot_revision,
+            "snapshot_revision": snapshot_revision,
+            "graph_payload_revision": graph_payload_revision,
+            "markdown_revision": stored_markdown_revision,
+            "stored_markdown_revision": stored_markdown_revision,
+            "current_markdown_revision": current_markdown_revision,
+            "wiki_links_stale": (
+                stored_markdown_revision != current_markdown_revision
+            ),
             "counts": counts,
         }
 
     def status(self) -> dict[str, object]:
         try:
-            with code_graph_read_lock(self._lock_path):
+            with _selector_read_lock(self._wiki_base, self._lock_path, 0):
                 with self._store.read_lease() as connection:
                     return self._status(connection)
+        except Timeout:
+            return {
+                "state": "missing",
+                "fresh": False,
+                "error": "busy",
+            }
         except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
             return {
                 "state": "missing",
@@ -772,7 +1379,7 @@ class SqliteCodeGraphReader:
 
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
         try:
-            with code_graph_read_lock(self._lock_path):
+            with _selector_read_lock(self._wiki_base, self._lock_path, 0):
                 with self._store.read_lease() as connection:
                     status = self._status(connection)
                     if status.get("state") != "ready":
@@ -780,6 +1387,13 @@ class SqliteCodeGraphReader:
                     results = CodeGraphQuery(self._domain).search(
                         connection, request
                     )
+        except Timeout:
+            return {
+                "state": "missing",
+                "fresh": False,
+                "error": "busy",
+                "results": [],
+            }
         except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
             return {
                 "state": "missing",
@@ -796,7 +1410,7 @@ class SqliteCodeGraphReader:
                 self._context_root,
                 self._max_file_bytes,
             )
-            with code_graph_read_lock(self._lock_path):
+            with _selector_read_lock(self._wiki_base, self._lock_path, 0):
                 with self._store.read_lease() as connection:
                     status = self._status(connection)
                     if status.get("state") != "ready":
@@ -809,7 +1423,24 @@ class SqliteCodeGraphReader:
                             "wiki_pages": [],
                             "warnings": [],
                         }
-                    response = engine.context(connection, request)
+                    effective_request = request
+                    if status["wiki_links_stale"] and request.include_wiki:
+                        effective_request = replace(request, include_wiki=False)
+                    response = engine.context(connection, effective_request)
+                    if status["wiki_links_stale"] and request.include_wiki:
+                        response["warnings"].append("wiki_links_stale")
+        except Timeout:
+            return {
+                "state": "missing",
+                "fresh": False,
+                "error": "busy",
+                "seeds": list(request.seeds),
+                "nodes": [],
+                "relations": [],
+                "files": [],
+                "wiki_pages": [],
+                "warnings": [],
+            }
         except (OSError, sqlite3.DatabaseError, CodeGraphStoreError):
             return {
                 "state": "missing",

@@ -1,7 +1,7 @@
 """SQLite lifecycle and publication primitives for the code graph cache."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -113,6 +113,170 @@ def _table_rows(
             f'SELECT * FROM "{table}" ORDER BY "{primary_key}"'
         )
     )
+
+
+def _publication_content_digest(connection: sqlite3.Connection) -> str:
+    """Hash every persisted public-table column in stable identity order."""
+    return canonical_sha256(
+        {table: _table_rows(connection, table) for table in TABLES},
+        prefix=True,
+    )
+
+
+def _canonical_json_text(value: object) -> str:
+    return canonical_json_bytes(value).decode("utf-8")
+
+
+def _publication_envelope_digest(envelope: Mapping[str, object]) -> str:
+    return canonical_sha256(
+        {
+            key: value
+            for key, value in envelope.items()
+            if key != "envelope_digest"
+        },
+        prefix=True,
+    )
+
+
+def _write_publication_envelope(
+    connection: sqlite3.Connection,
+    *,
+    domain: str,
+    repository_id: str,
+    session_id: str,
+    graph_payload_revision: str,
+    snapshot_revision: str,
+    markdown_revision: str,
+    counts: Mapping[str, int],
+    indexed_at: str,
+    terminal_result: Mapping[str, object],
+) -> dict[str, object]:
+    """Persist one canonical ready envelope inside a publication profile."""
+    envelope: dict[str, object] = {
+        "singleton": 1,
+        "format_version": 1,
+        "state": "ready",
+        "domain": domain,
+        "repository_id": repository_id,
+        "session_id": session_id,
+        "graph_payload_revision": graph_payload_revision,
+        "snapshot_revision": snapshot_revision,
+        "markdown_revision": markdown_revision,
+        "counts_json": _canonical_json_text(dict(counts)),
+        "indexed_at": indexed_at,
+        "terminal_result_json": _canonical_json_text(dict(terminal_result)),
+        "content_digest": _publication_content_digest(connection),
+    }
+    envelope["envelope_digest"] = _publication_envelope_digest(envelope)
+    connection.execute(
+        "INSERT INTO code_graph_publication ("
+        "singleton, format_version, state, domain, repository_id, session_id, "
+        "graph_payload_revision, snapshot_revision, markdown_revision, "
+        "counts_json, indexed_at, terminal_result_json, content_digest, "
+        "envelope_digest) VALUES ("
+        ":singleton, :format_version, :state, :domain, :repository_id, "
+        ":session_id, :graph_payload_revision, :snapshot_revision, "
+        ":markdown_revision, :counts_json, :indexed_at, "
+        ":terminal_result_json, :content_digest, :envelope_digest)",
+        envelope,
+    )
+    connection.commit()
+    return envelope
+
+
+def _read_publication_envelope(
+    connection: sqlite3.Connection,
+) -> dict[str, object] | None:
+    """Fully validate embedded publication authority, or return legacy None."""
+    present = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'code_graph_publication'"
+    ).fetchone()
+    if present is None:
+        return None
+    cursor = connection.execute(
+        "SELECT singleton, format_version, state, domain, repository_id, "
+        "session_id, graph_payload_revision, snapshot_revision, "
+        "markdown_revision, counts_json, indexed_at, terminal_result_json, "
+        "content_digest, envelope_digest FROM code_graph_publication"
+    )
+    columns = tuple(item[0] for item in cursor.description)
+    rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise CodeGraphStoreError("invalid code graph publication envelope")
+    envelope = dict(zip(columns, rows[0]))
+    scalar_fields = (
+        "domain",
+        "repository_id",
+        "session_id",
+        "indexed_at",
+    )
+    revision_fields = (
+        "graph_payload_revision",
+        "snapshot_revision",
+        "markdown_revision",
+        "content_digest",
+        "envelope_digest",
+    )
+    if (
+        envelope["singleton"] != 1
+        or envelope["format_version"] != 1
+        or envelope["state"] != "ready"
+        or any(
+            not isinstance(envelope[field], str) or not envelope[field]
+            for field in scalar_fields
+        )
+        or any(not _is_canonical_revision(envelope[field]) for field in revision_fields)
+        or envelope["envelope_digest"]
+        != _publication_envelope_digest(envelope)
+    ):
+        raise CodeGraphStoreError("invalid code graph publication envelope")
+    try:
+        counts = json.loads(str(envelope["counts_json"]))
+        terminal = json.loads(str(envelope["terminal_result_json"]))
+    except (TypeError, ValueError) as exc:
+        raise CodeGraphStoreError(
+            "invalid code graph publication envelope"
+        ) from exc
+    if (
+        not isinstance(counts, dict)
+        or not isinstance(terminal, dict)
+        or _canonical_json_text(counts) != envelope["counts_json"]
+        or _canonical_json_text(terminal) != envelope["terminal_result_json"]
+        or set(counts) != {"repositories", "files", "symbols", "relations"}
+        or any(type(value) is not int or value < 0 for value in counts.values())
+        or any(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            != counts[table]
+            for table in counts
+        )
+        or terminal.get("state") != "ready"
+        or terminal.get("snapshot_revision") != envelope["snapshot_revision"]
+        or terminal.get("graph_payload_revision")
+        != envelope["graph_payload_revision"]
+        or terminal.get("markdown_revision") != envelope["markdown_revision"]
+        or terminal.get("counts") != counts
+        or terminal.get("indexed_at") != envelope["indexed_at"]
+        or envelope["content_digest"] != _publication_content_digest(connection)
+    ):
+        raise CodeGraphStoreError("invalid code graph publication envelope")
+    repositories = _table_rows(connection, "repositories")
+    if (
+        len(repositories) != 1
+        or repositories[0]["repository_id"] != envelope["repository_id"]
+        or repositories[0]["state"] != "ready"
+        or repositories[0]["revision"] != envelope["snapshot_revision"]
+    ):
+        raise CodeGraphStoreError("invalid code graph publication envelope")
+    validate_integrity(connection)
+    _validate_persisted_snapshot(
+        connection,
+        str(envelope["repository_id"]),
+        str(envelope["snapshot_revision"]),
+    )
+    envelope["counts"] = counts
+    envelope["terminal_result"] = terminal
+    return envelope
 
 
 def _timestamp_ns(status: os.stat_result, name: str) -> int:
@@ -1382,7 +1546,13 @@ class CodeGraphStore:
                             now >= lease
                             and (now - lease).total_seconds() >= retention_seconds
                         )
-                    elif state in {"aborted", "expired", "conflicted", "failed"}:
+                    elif state in {
+                        "aborted",
+                        "commit_uncertain",
+                        "expired",
+                        "conflicted",
+                        "failed",
+                    }:
                         eligible = (
                             now - terminal_at
                         ).total_seconds() >= retention_seconds
@@ -1594,6 +1764,43 @@ class CodeGraphStore:
             self.discard_staging(staging_path)
             raise CodeGraphStoreError("cannot prepare code graph staging") from exc
 
+    def prepare_prior_backup(
+        self,
+        *,
+        repository_id: str,
+        expected_revision: str | None,
+    ) -> Path | None:
+        """Copy and revalidate the complete prior canonical snapshot."""
+        if expected_revision is None:
+            return None
+        backup = self.create_staging_path()
+        try:
+            with self.read_lease() as source:
+                if self.repository_state(source, repository_id) != (
+                    "ready",
+                    expected_revision,
+                ):
+                    raise CodeGraphStoreError(
+                        "code graph prior snapshot changed"
+                    )
+                with self._secure_paths(backup, create=False) as secured:
+                    with closing(sqlite3.connect(secured[0])) as destination:
+                        source.backup(destination)
+            self.prepare_staging(
+                backup,
+                repository_id=repository_id,
+                expected_revision=expected_revision,
+            )
+            return backup
+        except CodeGraphStoreError:
+            self.discard_staging(backup)
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            self.discard_staging(backup)
+            raise CodeGraphStoreError(
+                "cannot prepare code graph prior backup"
+            ) from exc
+
     def canonical_handles_available(self) -> bool:
         """Return whether no replace-incompatible canonical sidecar is present."""
         sidecars = tuple(
@@ -1710,6 +1917,109 @@ class CodeGraphStore:
             raise CodeGraphStoreError("cannot publish code graph staging") from exc
         finally:
             self._staging_identities.pop(staging_path, None)
+
+    def replace_staging_logical(self, staging: str | Path) -> None:
+        """Commit a prepared snapshot with one replace, before directory sync."""
+        staging_path = self._absolute(Path(staging))
+        identity = self._staging_identities.get(staging_path)
+        if identity is None:
+            raise CodeGraphStoreError("invalid code graph staging database")
+        published = False
+        try:
+            self._validate_staging_identity(staging_path, identity)
+            if not self.canonical_handles_available():
+                raise CodeGraphStoreError(
+                    "code graph canonical database is in use"
+                )
+            canonical = self._absolute(self.path)
+            with self._secure_paths(
+                identity.directory, staging_path, canonical, create=True
+            ) as secured:
+                secure_directory, secure_staging, secure_canonical = secured
+                source_flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                source_descriptor = os.open(secure_directory, source_flags)
+                try:
+                    destination_flags = (
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    )
+                    destination_descriptor = os.open(
+                        secure_canonical.parent, destination_flags
+                    )
+                    try:
+                        self._validate_staging_identity(
+                            staging_path, identity
+                        )
+                        os.replace(
+                            secure_staging.name,
+                            secure_canonical.name,
+                            src_dir_fd=source_descriptor,
+                            dst_dir_fd=destination_descriptor,
+                        )
+                        published = True
+                    finally:
+                        os.close(destination_descriptor)
+                finally:
+                    os.close(source_descriptor)
+        except CodeGraphStoreError as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph snapshot publication outcome is uncertain"
+                ) from exc
+            self.discard_staging(staging_path)
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            if published:
+                raise CodeGraphPublishedError(
+                    "code graph snapshot publication outcome is uncertain"
+                ) from exc
+            self.discard_staging(staging_path)
+            raise CodeGraphStoreError(
+                "cannot publish code graph staging"
+            ) from exc
+        finally:
+            self._staging_identities.pop(staging_path, None)
+
+    def sync_canonical_directory(self) -> None:
+        """Confirm durability of the canonical database namespace entry."""
+        self._fsync_directory(self._absolute(self.path).parent)
+
+    def discard_published_staging_directory(
+        self, directory: str | Path
+    ) -> None:
+        """Remove one now-empty owned publication staging directory."""
+        canonical = self._absolute(self.path)
+        candidate = self._absolute(Path(directory))
+        prefix = f"{canonical.name}.staging-"
+        try:
+            if (
+                candidate.parent != canonical.parent
+                or not candidate.name.startswith(prefix)
+                or len(candidate.name) <= len(prefix)
+            ):
+                raise CodeGraphStoreError(
+                    "invalid code graph staging directory"
+                )
+            status = os.lstat(candidate)
+            if (
+                not stat.S_ISDIR(status.st_mode)
+                or stat.S_IMODE(status.st_mode) != 0o700
+            ):
+                raise CodeGraphStoreError(
+                    "invalid code graph staging directory"
+                )
+            candidate.rmdir()
+        except FileNotFoundError:
+            return
+        except CodeGraphStoreError:
+            raise
+        except OSError as exc:
+            raise CodeGraphStoreError(
+                "cannot discard code graph staging directory"
+            ) from exc
 
     def prepare_metadata(
         self,

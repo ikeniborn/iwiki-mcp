@@ -43,6 +43,7 @@ from .codegraph import location as _codegraph_location  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
 from .codegraph import runtime as _codegraph_runtime  # noqa: F401
 from .codegraph import schema as _codegraph_schema  # noqa: F401
+from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401

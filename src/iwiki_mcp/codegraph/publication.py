@@ -30,6 +30,7 @@ PublicationErrorCode = Literal[
     "revision_mismatch",
     "snapshot_conflict",
     "markdown_unavailable",
+    "commit_uncertain",
 ]
 AdapterErrorCode = Literal[
     "invalid_config",
@@ -50,6 +51,7 @@ PUBLICATION_ERROR_CODES: tuple[PublicationErrorCode, ...] = (
     "revision_mismatch",
     "snapshot_conflict",
     "markdown_unavailable",
+    "commit_uncertain",
 )
 ADAPTER_ERROR_CODES: tuple[AdapterErrorCode, ...] = (
     "invalid_config",
