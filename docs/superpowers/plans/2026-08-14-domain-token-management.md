@@ -1,7 +1,7 @@
 ---
 review:
-  plan_hash: 57b872844382f221
-  last_run: 2026-08-14
+  plan_hash: d55d1196262fd34e
+  last_run: 2026-08-15
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -541,9 +541,9 @@ delivery; do not claim the health metric passed.
 - [ ] **Step 1: Run focused contract suites**
 
 ```bash
-uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_auth.py tests/postgres/test_admin.py tests/test_http_unit.py tests/postgres/test_http.py tests/postgres/test_tool_matrix.py tests/test_server_write.py tests/test_create_domain_layout.py tests/test_package.py
+uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_auth.py tests/postgres/test_admin.py tests/postgres/test_http.py tests/postgres/test_tool_matrix.py tests/test_http_unit.py tests/test_server_write.py tests/test_create_domain_layout.py tests/test_package.py
 uv run flake8 src tests eval
-uv run python -m compileall -q src tests eval
+uv run python -m compileall -q -x 'tests/fixtures/codegraph/python_syntax_errors/broken\.py' src tests eval
 uv run iwiki-mcp --help
 git diff --check
 ```
