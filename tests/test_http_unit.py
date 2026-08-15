@@ -1,6 +1,8 @@
 """Offline unit checks for hosted HTTP boundary helpers."""
 from dataclasses import replace
 
+import pytest
+
 
 def _binding(*, read=("docs",), write=("docs",), primary="docs"):
     from iwiki_mcp import base
@@ -191,3 +193,129 @@ async def test_middleware_installs_full_context_and_persists_request_session():
     assert server._AUTH_CONTEXT.get() is None
     assert server._SESSION_BINDING.get() is None
     assert sent[0]["status"] == 200
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"method": "tools/call", "params": []},
+        {
+            "method": "tools/call",
+            "params": {"name": "wiki_create_domain"},
+        },
+        {
+            "method": "tools/call",
+            "params": {
+                "name": "wiki_create_domain",
+                "arguments": [],
+            },
+        },
+        {
+            "method": "tools/call",
+            "params": {
+                "name": "wiki_list_domain_grants",
+                "arguments": {},
+            },
+        },
+    ],
+)
+def test_protected_tool_envelopes_fail_closed(payload):
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext("wiki-a", "token-a", ("docs",), (), None)
+
+    with pytest.raises(AccessError) as error:
+        http._authorize_tool(context, payload)
+
+    assert error.value.status_code == 403
+
+
+def test_protected_tools_require_their_distinct_capabilities():
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext("wiki-a", "token-a", ("docs",), (), None)
+    create = {
+        "method": "tools/call",
+        "params": {
+            "name": "wiki_create_domain",
+            "arguments": {"name": "new-project"},
+        },
+    }
+    manage = {
+        "method": "tools/call",
+        "params": {
+            "name": "wiki_set_domain_grant",
+            "arguments": {
+                "domain": "docs",
+                "token_id": "target",
+                "can_read": True,
+                "can_write": False,
+            },
+        },
+    }
+
+    with pytest.raises(AccessError):
+        http._authorize_tool(context, create)
+    with pytest.raises(AccessError):
+        http._authorize_tool(context, manage)
+
+    creator = replace(context, can_create_domain=True)
+    manager = replace(context, managed_domains=("docs",))
+    http._authorize_tool(creator, create)
+    http._authorize_tool(manager, manage)
+
+
+def test_protected_authorization_rejects_tenant_override_but_not_validation():
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext(
+        "wiki-a",
+        "token-a",
+        (),
+        (),
+        None,
+        can_create_domain=True,
+        managed_domains=("docs",),
+    )
+    create = {
+        "method": "tools/call",
+        "params": {
+            "name": "wiki_create_domain",
+            "arguments": {"name": "bad/name"},
+        },
+    }
+    invalid_grant = {
+        "method": "tools/call",
+        "params": {
+            "name": "wiki_set_domain_grant",
+            "arguments": {
+                "domain": "bad/name",
+                "token_id": "target",
+                "can_read": False,
+                "can_write": True,
+            },
+        },
+    }
+    override = {
+        "method": "tools/call",
+        "params": {
+            "name": "wiki_set_domain_grant",
+            "arguments": {
+                **invalid_grant["params"]["arguments"],
+                "iwiki_id": "wiki-b",
+            },
+        },
+    }
+
+    http._authorize_tool(context, create)
+    http._authorize_tool(context, invalid_grant)
+    with pytest.raises(AccessError):
+        http._authorize_tool(context, override)
+
+    http._authorize_tool(
+        context,
+        {"method": "tools/call", "params": {"name": "unknown"}},
+    )

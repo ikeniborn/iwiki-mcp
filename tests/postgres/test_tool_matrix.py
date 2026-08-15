@@ -27,6 +27,9 @@ TOOLS = {
     "wiki_delete_page": "supported",
     "wiki_index": "supported",
     "wiki_create_domain": "unsupported",
+    "wiki_list_domain_grants": "unsupported",
+    "wiki_set_domain_grant": "unsupported",
+    "wiki_revoke_domain_grant": "unsupported",
     "wiki_bind": "supported",
     "wiki_lint": "supported",
     "wiki_remediation_plan": "unsupported",
@@ -146,10 +149,28 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 22
+    assert len(TOOLS) == 25
     assert registered == set(TOOLS)
-    git_matrix = {name: "supported" for name in TOOLS}
-    assert all(behavior == "supported" for behavior in git_matrix.values())
+
+
+def test_grant_tool_schemas_expose_content_authority_only():
+    protected = {
+        "wiki_list_domain_grants",
+        "wiki_set_domain_grant",
+        "wiki_revoke_domain_grant",
+    }
+    tools = {
+        tool.name: tool
+        for tool in server.mcp._tool_manager.list_tools()
+        if tool.name in protected
+    }
+
+    assert set(tools) == protected
+    for tool in tools.values():
+        properties = tool.parameters["properties"]
+        assert "iwiki_id" not in properties
+        assert "can_manage_grants" not in properties
+        assert all("management" not in name for name in properties)
 
 
 @pytest.mark.parametrize(
@@ -177,6 +198,45 @@ def test_postgres_unsupported_tools_fail_before_local_access(
         "storage": "postgres",
         "hint": "use this tool with Git storage",
     }
+
+
+def test_grant_tools_reject_postgres_stdio(postgres_server):
+    expected = {
+        "error": "unsupported_transport",
+        "storage": "postgres",
+        "transport": "stdio",
+        "hint": "use hosted Streamable HTTP with PostgreSQL storage",
+    }
+
+    assert server.wiki_list_domain_grants("docs") == expected
+    assert server.wiki_set_domain_grant(
+        "docs", "target", True, False
+    ) == expected
+    assert server.wiki_revoke_domain_grant("docs", "target") == expected
+
+
+def test_grant_tools_reject_git_stdio(tmp_path, monkeypatch):
+    binding = server.base.Binding(
+        base=str(tmp_path),
+        read=("docs",),
+        write=("docs",),
+        primary="docs",
+        project_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(server, "_LOCAL_POSTGRES_BINDING", None)
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    expected = {
+        "error": "unsupported_transport",
+        "storage": "git",
+        "transport": "stdio",
+        "hint": "use hosted Streamable HTTP with PostgreSQL storage",
+    }
+
+    assert server.wiki_list_domain_grants("docs") == expected
+    assert server.wiki_set_domain_grant(
+        "docs", "target", True, False
+    ) == expected
+    assert server.wiki_revoke_domain_grant("docs", "target") == expected
 
 
 def test_postgres_supported_handlers_use_store_without_local_access(postgres_server):

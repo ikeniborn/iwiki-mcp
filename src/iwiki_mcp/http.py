@@ -26,6 +26,7 @@ from .postgres.auth import (
     AuthStore,
     authenticate_bearer,
     authorize_domains,
+    validate_domain_identifier,
 )
 from .postgres.config import ConfigError, ServerConfig, load_server_config
 from .postgres.migrations import MigrationSettings, run_migrations
@@ -43,7 +44,11 @@ _WRITE_DOMAIN_TOOLS = {
     "wiki_delete_page",
     "wiki_index",
 }
-_ADMIN_ONLY_TOOLS = {"wiki_create_domain"}
+_DOMAIN_GRANT_TOOLS = {
+    "wiki_list_domain_grants",
+    "wiki_set_domain_grant",
+    "wiki_revoke_domain_grant",
+}
 _SESSION_IDLE_SECONDS = 1800.0
 
 
@@ -219,13 +224,33 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         return
     params = request.get("params")
     if not isinstance(params, dict):
-        return
-    name = params.get("name")
-    arguments = params.get("arguments", {})
-    if not isinstance(arguments, dict):
-        return
-    if "iwiki_id" in arguments or name in _ADMIN_ONLY_TOOLS:
         raise AccessError(403)
+    name = params.get("name")
+    protected = name == "wiki_create_domain" or name in _DOMAIN_GRANT_TOOLS
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        if protected:
+            raise AccessError(403)
+        return
+    if "iwiki_id" in arguments:
+        raise AccessError(403)
+    if name == "wiki_create_domain":
+        if not context.can_create_domain:
+            raise AccessError(403)
+        return
+    if name in _DOMAIN_GRANT_TOOLS:
+        if "domain" not in arguments:
+            raise AccessError(403)
+        domain = arguments["domain"]
+        try:
+            validate_domain_identifier(domain)
+        except ValueError:
+            if not context.managed_domains:
+                raise AccessError(403)
+            return
+        if not context.can_manage_grants(domain):
+            raise AccessError(403)
+        return
 
     read_domains: tuple[str, ...] = ()
     write_domains: tuple[str, ...] = ()
