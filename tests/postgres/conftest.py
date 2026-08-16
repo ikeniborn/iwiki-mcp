@@ -355,7 +355,9 @@ class GraphFixture:
     staging_cleanup_limit = 2
     lock_timeout_ms = 500
 
-    def __init__(self, dsn, admin_dsn, iwiki_id, domain, *, owner_id=None):
+    def __init__(
+        self, dsn, admin_dsn, iwiki_id, domain, *, owner_id=None, rows=None
+    ):
         from iwiki_mcp.codegraph import publication
         from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
 
@@ -365,7 +367,7 @@ class GraphFixture:
         self.domain = domain
         self.owner_id = owner_id or f"owner-{secrets.token_hex(4)}"
         self._offset = 0.0
-        self.rows = _graph_rows(domain)
+        self.rows = _graph_rows(domain) if rows is None else rows
         self.expected_counts = {
             kind: len(rows) for kind, rows in self.rows.items()
         }
@@ -452,7 +454,11 @@ class GraphFixture:
 
     def reopen_with_new_ephemeral_owner(self):
         return GraphFixture(
-            self.dsn, self.admin_dsn, self.iwiki_id, self.domain
+            self.dsn,
+            self.admin_dsn,
+            self.iwiki_id,
+            self.domain,
+            rows=self.rows,
         )
 
     def for_domain(self, domain):
@@ -588,6 +594,50 @@ class GraphFixture:
                 (self.iwiki_id, self.domain),
             )
 
+    def ready_at(self):
+        return self._query(
+            "SELECT s.ready_at FROM iwiki.code_graph_domain_state d "
+            "JOIN iwiki.code_graph_snapshots s "
+            "ON s.iwiki_id = d.iwiki_id AND s.domain_id = d.domain_id "
+            "AND s.snapshot_id = d.active_snapshot_id "
+            "WHERE d.iwiki_id = %s AND d.domain_id = %s",
+            (self.iwiki_id, self._domain_id()),
+            admin=True,
+        )[0][0]
+
+    def indexed_at_plus(self, seconds):
+        import datetime
+
+        return self.ready_at() + datetime.timedelta(seconds=seconds)
+
+    def reader(self, *, max_snapshot_age_seconds=0, now=None):
+        from iwiki_mcp.postgres.codegraph import PostgresCodeGraphReader
+
+        return PostgresCodeGraphReader(
+            self.dsn,
+            self.iwiki_id,
+            self.domain,
+            max_snapshot_age_seconds=max_snapshot_age_seconds,
+            clock=(lambda: now) if now is not None else self._now,
+        )
+
+    @property
+    def search_request(self):
+        from iwiki_mcp.codegraph.query import validate_search_request
+
+        return validate_search_request(_RANKED_QUERY, limit=20)
+
+    def context_request(self, **overrides):
+        from iwiki_mcp.codegraph.context import validate_context_request
+
+        arguments = {
+            "seeds": [_ranked_entity_id("file", "source")],
+            "direction": "out",
+            "depth": 1,
+        }
+        arguments.update(overrides)
+        return validate_context_request(**arguments)
+
     @contextmanager
     def hold_domain_advisory_lock(self):
         import psycopg
@@ -670,8 +720,222 @@ def _graph_rows(repository_id):
     }
 
 
-@pytest.fixture
-def pg_graph(clean_postgres, runtime_principal):
+_RANKED_QUERY = "needle"
+
+
+def _ranked_entity_id(kind, identity):
+    """Return one canonical typed entity ID accepted by context validation."""
+    import hashlib
+
+    digest = hashlib.sha256(f"{kind}:{identity}".encode("utf-8")).hexdigest()
+    return f"py:{kind}:{digest}"
+
+
+def _ranked_file(repository_id, identity, path, *, module=None):
+    from iwiki_mcp.codegraph import models
+
+    local_name = path.rsplit("/", 1)[-1]
+    return {
+        "file_id": _ranked_entity_id("file", identity),
+        "repository_id": repository_id,
+        "path": path,
+        "path_casefold": models.compact_casefold(path),
+        "file_local_name": local_name,
+        "file_name_tokens_casefold": models.token_key(local_name),
+        "language": "python",
+        "content_hash": f"hash:{identity}",
+        "parser_version": "fixture",
+        "size_bytes": 10,
+        "start_line": 1,
+        "end_line": 1,
+        "start_byte": 0,
+        "end_byte": 10,
+        "module_key": path,
+        "module_id": None if module is None else _ranked_entity_id(
+            "module", identity
+        ),
+        "module_qualified_name": module,
+        "module_local_name": (
+            None if module is None else module.rsplit(".", 1)[-1]
+        ),
+        "module_name_tokens_casefold": (
+            None
+            if module is None
+            else models.token_key(module, module.rsplit(".", 1)[-1])
+        ),
+    }
+
+
+def _ranked_symbol(identity, file_identity, qualified, local, *, signature="()"):
+    from iwiki_mcp.codegraph import models
+
+    return {
+        "symbol_id": _ranked_entity_id("symbol", identity),
+        "file_id": _ranked_entity_id("file", file_identity),
+        "kind": "method",
+        "qualified_name": qualified,
+        "local_name": local,
+        "name_tokens_casefold": models.token_key(qualified, local),
+        "start_line": 1,
+        "end_line": 1,
+        "start_byte": 0,
+        "end_byte": 10,
+        "signature": signature,
+        "signature_casefold": models.compact_casefold(signature),
+        "visibility": "public",
+        "content_hash": f"symbol-hash:{identity}",
+        "metadata_json": "{}",
+    }
+
+
+def _ranked_alias(
+    identity, alias, *, target_module=None, target_symbol=None, start_byte=0
+):
+    from iwiki_mcp.codegraph import models
+
+    return {
+        "relation_id": _ranked_entity_id("symbol", f"relation:{identity}"),
+        "source_file_id": _ranked_entity_id("file", "source"),
+        "source_module_id": None,
+        "source_symbol_id": None,
+        "target_module_id": target_module,
+        "target_symbol_id": target_symbol,
+        "target_reference": None,
+        "relation_type": "IMPORTS",
+        "source_start_line": 1,
+        "source_end_line": 1,
+        "source_start_byte": start_byte,
+        "source_end_byte": start_byte + 1,
+        "binding_name": alias,
+        "binding_kind": "explicit_alias",
+        "binding_name_tokens_casefold": models.token_key(alias),
+        "confidence": 1.0,
+        "resolution_state": "resolved",
+        "metadata_json": "{}",
+    }
+
+
+def _ranked_rows(repository_id):
+    """Seed one distinct hit for every declared search rank in both stores."""
+    files = [
+        _ranked_file(repository_id, "qualified-file", "needle"),
+        _ranked_file(
+            repository_id, "local-module", "typed/local.py", module="pkg.needle"
+        ),
+        _ranked_file(repository_id, "alias-exact", "typed/alias_exact.py"),
+        _ranked_file(repository_id, "canonical-prefix", "typed/prefix.py"),
+        _ranked_file(repository_id, "alias-prefix", "typed/alias_prefix.py"),
+        _ranked_file(repository_id, "canonical-lexical", "typed/lexical.py"),
+        _ranked_file(
+            repository_id,
+            "alias-lexical",
+            "typed/alias_lexical.py",
+            module="pkg.AliasLexical",
+        ),
+        _ranked_file(repository_id, "signature", "typed/signature.py"),
+        _ranked_file(repository_id, "path", "typed/needle-assets/asset.py"),
+        _ranked_file(repository_id, "source", "typed/source.py"),
+    ]
+    symbols = [
+        _ranked_symbol(
+            "alias-exact", "alias-exact", "pkg.AliasExact", "alias_exact_target"
+        ),
+        _ranked_symbol(
+            "canonical-prefix", "canonical-prefix", "needle.prefix",
+            "prefix_target",
+        ),
+        _ranked_symbol(
+            "alias-prefix", "alias-prefix", "pkg.AliasPrefix",
+            "alias_prefix_target",
+        ),
+        _ranked_symbol(
+            "canonical-lexical", "canonical-lexical", "pkg.canonical_needle",
+            "canonical_needle",
+        ),
+        _ranked_symbol(
+            "signature", "signature", "pkg.Signature", "signature_target",
+            signature="(needle: str)",
+        ),
+    ]
+    relations = [
+        _ranked_alias(
+            "needle-exact",
+            "needle",
+            target_symbol=_ranked_entity_id("symbol", "alias-exact"),
+        ),
+        _ranked_alias(
+            "needle-prefix",
+            "needle_alias",
+            target_symbol=_ranked_entity_id("symbol", "alias-prefix"),
+            start_byte=10,
+        ),
+        _ranked_alias(
+            "needle-lexical",
+            "alias_needle",
+            target_module=_ranked_entity_id("module", "alias-lexical"),
+            start_byte=20,
+        ),
+    ]
+    repositories = [
+        {
+            "repository_id": repository_id,
+            "root_path": ".",
+            "git_remote": None,
+            "git_commit": "0" * 40,
+            "source_fingerprint": "source-fixture",
+            "config_fingerprint": "config-fixture",
+            "parser_fingerprint": "parser-fixture",
+            "normalizer_version": "normalizer-1",
+            "unicode_data_version": "15.1",
+            "revision": "sha256:fixture",
+            "state": "ready",
+            "indexed_at": "2026-08-16T00:00:00+00:00",
+        }
+    ]
+    return {
+        "repositories": repositories,
+        "files": files,
+        "symbols": symbols,
+        "relations": relations,
+    }
+
+
+class SqliteRankedReader:
+    """Rank the shared fixture through the authoritative SQLite query path."""
+
+    def __init__(self, connection, domain):
+        self._connection = connection
+        self._domain = domain
+
+    def search(self, request):
+        from dataclasses import asdict
+
+        from iwiki_mcp.codegraph.query import CodeGraphQuery
+
+        results = CodeGraphQuery(self._domain).search(self._connection, request)
+        return {"results": [asdict(item) for item in results]}
+
+
+class PostgresRankedReader:
+    """Project the PostgreSQL reader response onto its ranked result list."""
+
+    def __init__(self, reader):
+        self._reader = reader
+
+    def search(self, request):
+        return {"results": self._reader.search(request)["results"]}
+
+
+class RankedPair:
+    """Hold both ranked readers over one identical nine-rank fixture."""
+
+    def __init__(self, sqlite, postgres, request):
+        self.sqlite = sqlite
+        self.postgres = postgres
+        self.request = request
+
+
+def _provisioned_graph(clean_postgres, runtime_principal, rows=None):
     from iwiki_mcp.postgres.auth import AuthStore
     from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
 
@@ -695,4 +959,39 @@ def pg_graph(clean_postgres, runtime_principal):
     role_dsn = SecretDsn(
         make_conninfo(**{**values, "user": role, "password": password})
     )
-    return GraphFixture(role_dsn, clean_postgres, "wiki-a", "docs")
+    return GraphFixture(role_dsn, clean_postgres, "wiki-a", "docs", rows=rows)
+
+
+@pytest.fixture
+def pg_graph(clean_postgres, runtime_principal):
+    return _provisioned_graph(clean_postgres, runtime_principal)
+
+
+@pytest.fixture
+def pg_ranked_graph(clean_postgres, runtime_principal):
+    return _provisioned_graph(
+        clean_postgres, runtime_principal, rows=_ranked_rows("docs")
+    )
+
+
+@pytest.fixture
+def pg_ready_graph(pg_ranked_graph):
+    result = pg_ranked_graph.finalize(pg_ranked_graph.complete_session())
+    assert result["state"] == "ready"
+    return pg_ranked_graph
+
+
+@pytest.fixture
+def ranked_graph_pair(pg_ready_graph, tmp_path):
+    from iwiki_mcp.codegraph.store import CodeGraphStore
+
+    snapshot = {**_ranked_rows(pg_ready_graph.domain), "wiki_code_links": ()}
+    store = CodeGraphStore(tmp_path / "ranked-code.sqlite3")
+    store.insert_snapshot(snapshot)
+    connection = store.open_existing()
+    yield RankedPair(
+        SqliteRankedReader(connection, pg_ready_graph.domain),
+        PostgresRankedReader(pg_ready_graph.reader()),
+        pg_ready_graph.search_request,
+    )
+    connection.close()

@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import stat
-from typing import Literal
+from typing import Any, Literal
 
 from .models import CodeGraphError, ContextNode, ContextRelation
 
@@ -169,7 +169,7 @@ def _nodes(
     }
 
 
-def _relation(row: sqlite3.Row | tuple[object, ...]) -> ContextRelation:
+def relation_from_row(row: sqlite3.Row | tuple[Any, ...]) -> ContextRelation:
     source_entity_id = row[3] or row[2] or row[1]
     target_entity_id = row[4] or row[5]
     return ContextRelation(
@@ -250,7 +250,7 @@ def _frontier_relations(
             f"WHERE relation_type IN ({slots}) AND ({' OR '.join(arms)})"
         )
         for row in connection.execute(sql, parameters):
-            item = _relation(row)
+            item = relation_from_row(row)
             candidates[item.relation_id] = item
     return tuple(sorted(candidates.values(), key=lambda item: (
         item.relation_type,

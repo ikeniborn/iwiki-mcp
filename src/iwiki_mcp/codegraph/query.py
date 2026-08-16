@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import sqlite3
+from typing import Any
 
 from .models import (
     _TOKENS,
@@ -61,6 +62,32 @@ class ValidatedSearchRequest:
     language: str
     limit: int
     tokens: tuple[str, ...]
+
+
+def search_result_from_row(row: tuple[Any, ...]) -> SearchResult:
+    """Map one ranked entity row onto the shared public search result."""
+    rank = int(row[17])
+    matched_alias = row[18]
+    return SearchResult(
+        entity_id=str(row[0]),
+        entity_type=str(row[1]),
+        file_id=None if row[2] is None else str(row[2]),
+        module_id=None if row[3] is None else str(row[3]),
+        symbol_id=None if row[4] is None else str(row[4]),
+        kind=str(row[5]),
+        qualified_name=str(row[6]),
+        local_name=str(row[7]),
+        signature=None if row[9] is None else str(row[9]),
+        path=str(row[11]),
+        start_line=int(row[13]),
+        end_line=int(row[14]),
+        start_byte=int(row[15]),
+        end_byte=int(row[16]),
+        match=_MATCH_BY_RANK[rank],
+        matched_alias=None if matched_alias is None else str(matched_alias),
+        alias_ambiguous=int(row[19]) > 1,
+        alias_target_count=int(row[19]),
+    )
 
 
 def result_key(item: SearchResult) -> tuple[int, str, str]:
@@ -589,32 +616,9 @@ class CodeGraphQuery:
                 )
                 rows = connection.execute(sql, [*parameters, remaining])
                 for row in rows:
-                    rank = int(row[17])
-                    matched_alias = row[18]
-                    item = SearchResult(
-                        entity_id=str(row[0]),
-                        entity_type=str(row[1]),
-                        file_id=None if row[2] is None else str(row[2]),
-                        module_id=None if row[3] is None else str(row[3]),
-                        symbol_id=None if row[4] is None else str(row[4]),
-                        kind=str(row[5]),
-                        qualified_name=str(row[6]),
-                        local_name=str(row[7]),
-                        signature=None if row[9] is None else str(row[9]),
-                        path=str(row[11]),
-                        start_line=int(row[13]),
-                        end_line=int(row[14]),
-                        start_byte=int(row[15]),
-                        end_byte=int(row[16]),
-                        match=_MATCH_BY_RANK[rank],
-                        matched_alias=(
-                            None if matched_alias is None else str(matched_alias)
-                        ),
-                        alias_ambiguous=int(row[19]) > 1,
-                        alias_target_count=int(row[19]),
-                    )
+                    item = search_result_from_row(row)
                     winner_key = (
-                        rank,
+                        MATCH_RANK[item.match],
                         item.qualified_name,
                         item.entity_id,
                         item.matched_alias or "",
@@ -637,5 +641,6 @@ __all__ = [
     "MATCH_RANK",
     "ValidatedSearchRequest",
     "result_key",
+    "search_result_from_row",
     "validate_search_request",
 ]
