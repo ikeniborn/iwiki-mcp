@@ -1,6 +1,7 @@
 """Fixtures for explicitly provisioned PostgreSQL integration tests."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import json
 import secrets
@@ -344,3 +345,312 @@ def hosted_runtime(clean_postgres, tmp_path, monkeypatch):
                 )
             )
             cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(hosted_role)))
+
+
+class GraphFixture:
+    """Deterministic publication driver over one restricted PostgreSQL role."""
+
+    session_ttl_seconds = 30
+    staging_retention_seconds = 60
+    staging_cleanup_limit = 2
+    lock_timeout_ms = 500
+
+    def __init__(self, dsn, admin_dsn, iwiki_id, domain, *, owner_id=None):
+        from iwiki_mcp.codegraph import publication
+        from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+        self.dsn = dsn
+        self.admin_dsn = admin_dsn
+        self.iwiki_id = iwiki_id
+        self.domain = domain
+        self.owner_id = owner_id or f"owner-{secrets.token_hex(4)}"
+        self._offset = 0.0
+        self.rows = _graph_rows(domain)
+        self.expected_counts = {
+            kind: len(rows) for kind, rows in self.rows.items()
+        }
+        self.header = publication.SnapshotHeader(
+            protocol_version=1,
+            schema_version=2,
+            repository_id=domain,
+            source_fingerprint="source-fixture",
+            parser_fingerprint="parser-fixture",
+            normalizer_version="normalizer-1",
+            unicode_data_version="15.1",
+            languages=("python",),
+            expected_counts=self.expected_counts,
+            graph_payload_revision=publication.graph_payload_revision(self.rows),
+        )
+        self.batches = tuple(
+            publication.iter_snapshot_batches(
+                self.rows, max_rows=1000, max_bytes=1_000_000
+            )
+        )
+        self.store = PostgresCodeGraphStore(
+            dsn,
+            iwiki_id,
+            domain,
+            self.owner_id,
+            lock_timeout_ms=self.lock_timeout_ms,
+            session_ttl_seconds=self.session_ttl_seconds,
+            staging_retention_seconds=self.staging_retention_seconds,
+            staging_cleanup_limit=self.staging_cleanup_limit,
+            clock=self._now,
+        )
+
+    def __repr__(self):
+        return f"<graph fixture {self.iwiki_id}/{self.domain}>"
+
+    def _now(self):
+        import datetime
+
+        return datetime.datetime.now(datetime.timezone.utc) + (
+            datetime.timedelta(seconds=self._offset)
+        )
+
+    def advance_clock(self, seconds):
+        self._offset += seconds
+
+    def header_with_revision(self, revision):
+        from dataclasses import replace
+
+        return replace(self.header, graph_payload_revision=revision)
+
+    def tampered(self, batch):
+        from dataclasses import replace
+
+        from iwiki_mcp.codegraph.canonical import canonical_bytes_sha256
+
+        payload = batch.payload[:-1] + b" ]"
+        return replace(
+            batch,
+            payload=payload,
+            byte_count=len(payload),
+            payload_hash=canonical_bytes_sha256(payload, prefix=True),
+        )
+
+    def begin(self, header=None):
+        return self.store.begin(header or self.header)
+
+    def publish_batch(self, session, batch):
+        return self.store.publish_batch(session, batch)
+
+    def finalize(self, session):
+        return self.store.finalize(session)
+
+    def abort(self, session):
+        return self.store.abort(session)
+
+    def upload_all(self, session):
+        for batch in self.batches:
+            self.publish_batch(session, batch)
+
+    def complete_session(self, header=None):
+        session = self.begin(header)
+        self.upload_all(session)
+        return session
+
+    def reopen_with_new_ephemeral_owner(self):
+        return GraphFixture(
+            self.dsn, self.admin_dsn, self.iwiki_id, self.domain
+        )
+
+    def for_domain(self, domain):
+        return GraphFixture(self.dsn, self.admin_dsn, self.iwiki_id, domain)
+
+    def _query(self, statement, parameters=(), *, admin=False):
+        import psycopg
+
+        with psycopg.connect(self.admin_dsn if admin else self.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(statement, parameters)
+                return cursor.fetchall()
+
+    def _domain_id(self):
+        return self._query(
+            "SELECT domain_id FROM iwiki.domains "
+            "WHERE iwiki_id = %s AND slug = %s",
+            (self.iwiki_id, self.domain),
+            admin=True,
+        )[0][0]
+
+    def session(self, session):
+        rows = self._query(
+            "SELECT state, owner_id, lease_expires_at "
+            "FROM iwiki.code_graph_publication_sessions "
+            "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
+            (self.iwiki_id, self._domain_id(), session.session_id),
+            admin=True,
+        )
+        if not rows:
+            return None
+        return {
+            "state": rows[0][0],
+            "owner_id": rows[0][1],
+            "lease_expires_at": rows[0][2].isoformat(),
+        }
+
+    def snapshot_state(self, session):
+        return self._query(
+            "SELECT s.state FROM iwiki.code_graph_snapshots s "
+            "JOIN iwiki.code_graph_publication_sessions p "
+            "ON p.iwiki_id = s.iwiki_id AND p.domain_id = s.domain_id "
+            "AND p.snapshot_id = s.snapshot_id "
+            "WHERE p.session_id = %s AND p.iwiki_id = %s "
+            "AND p.domain_id = %s",
+            (session.session_id, self.iwiki_id, self._domain_id()),
+            admin=True,
+        )[0][0]
+
+    def batch_count(self, session):
+        return self._query(
+            "SELECT count(*) FROM iwiki.code_graph_batches "
+            "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
+            (self.iwiki_id, self._domain_id(), session.session_id),
+            admin=True,
+        )[0][0]
+
+    def reader_status(self):
+        return self.store.status()
+
+    def active_rows(self):
+        domain_id = self._domain_id()
+        active = self._query(
+            "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
+            "WHERE iwiki_id = %s AND domain_id = %s",
+            (self.iwiki_id, domain_id),
+            admin=True,
+        )
+        snapshot_id = active[0][0] if active else None
+        counts = {"repositories": 1 if snapshot_id else 0}
+        for kind, table in (
+            ("files", "code_graph_files"),
+            ("symbols", "code_graph_symbols"),
+            ("relations", "code_graph_relations"),
+        ):
+            counts[kind] = self._query(
+                f"SELECT count(*) FROM iwiki.{table} "
+                "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
+                (self.iwiki_id, domain_id, snapshot_id),
+                admin=True,
+            )[0][0]
+        return counts
+
+    def bump_markdown_generation(self):
+        import psycopg
+
+        with psycopg.connect(self.admin_dsn, autocommit=True) as connection:
+            connection.execute(
+                "UPDATE iwiki.domains SET markdown_generation = "
+                "markdown_generation + 1 WHERE iwiki_id = %s AND slug = %s",
+                (self.iwiki_id, self.domain),
+            )
+
+    @contextmanager
+    def hold_domain_advisory_lock(self):
+        import psycopg
+
+        lock_id = self._query(
+            "SELECT domain_lock_id FROM iwiki.code_graph_domain_state "
+            "WHERE iwiki_id = %s AND domain_id = %s",
+            (self.iwiki_id, self._domain_id()),
+            admin=True,
+        )[0][0]
+        with psycopg.connect(self.admin_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    (0x4957494B, lock_id),
+                )
+                try:
+                    yield
+                finally:
+                    connection.rollback()
+
+
+def _graph_rows(repository_id):
+    files = [
+        {
+            "file_id": f"file-{index}",
+            "repository_id": repository_id,
+            "path": f"src/pkg/module_{index}.py",
+            "path_casefold": f"src/pkg/module_{index}.py",
+            "language": "python",
+            "content_hash": f"sha256:{index:064d}",
+            "size_bytes": 128 + index,
+            "start_line": 1,
+            "end_line": 20,
+            "module_id": f"module-{index}",
+            "module_qualified_name": f"pkg.module_{index}",
+        }
+        for index in range(2)
+    ]
+    symbols = [
+        {
+            "symbol_id": f"symbol-{index}",
+            "file_id": f"file-{index}",
+            "kind": "function",
+            "qualified_name": f"pkg.module_{index}.run",
+            "local_name": "run",
+            "start_line": 3,
+            "end_line": 8,
+        }
+        for index in range(2)
+    ]
+    relations = [
+        {
+            "relation_id": "relation-0",
+            "source_file_id": "file-0",
+            "source_symbol_id": "symbol-0",
+            "target_symbol_id": "symbol-1",
+            "kind": "calls",
+            "resolution": "resolved",
+        }
+    ]
+    repositories = [
+        {
+            "repository_id": repository_id,
+            "git_commit": "0" * 40,
+            "source_fingerprint": "source-fixture",
+            "config_fingerprint": "config-fixture",
+            "parser_fingerprint": "parser-fixture",
+            "normalizer_version": "normalizer-1",
+            "unicode_data_version": "15.1",
+            "state": "ready",
+            "indexed_at": "2026-08-16T00:00:00+00:00",
+        }
+    ]
+    return {
+        "repositories": repositories,
+        "files": files,
+        "symbols": symbols,
+        "relations": relations,
+    }
+
+
+@pytest.fixture
+def pg_graph(clean_postgres, runtime_principal):
+    from iwiki_mcp.postgres.auth import AuthStore
+    from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
+
+    run_migrations(
+        MigrationSettings(
+            dsn=clean_postgres,
+            embed_model="fixture-model",
+            embed_dimensions=3,
+            statement_timeout_ms=30_000,
+            lock_timeout_ms=5_000,
+        )
+    )
+    auth = AuthStore(clean_postgres)
+    auth.create_wiki("wiki-a", "wiki-a")
+    auth.create_domain("wiki-a", "docs")
+    auth.create_domain("wiki-a", "private")
+    role, password = runtime_principal(["docs", "private"], ["docs", "private"])
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    values = conninfo_to_dict(clean_postgres)
+    role_dsn = SecretDsn(
+        make_conninfo(**{**values, "user": role, "password": password})
+    )
+    return GraphFixture(role_dsn, clean_postgres, "wiki-a", "docs")
