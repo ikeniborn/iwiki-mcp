@@ -209,6 +209,22 @@ class SnapshotPublisher(Protocol):
     def abort(self, session: PublicationSession) -> dict[str, object]: ...
 
 
+def header_payload(header: SnapshotHeader) -> dict[str, object]:
+    """Return the portable header mapping shared by every publication target."""
+    return {
+        "protocol_version": header.protocol_version,
+        "schema_version": header.schema_version,
+        "repository_id": header.repository_id,
+        "source_fingerprint": header.source_fingerprint,
+        "parser_fingerprint": header.parser_fingerprint,
+        "normalizer_version": header.normalizer_version,
+        "unicode_data_version": header.unicode_data_version,
+        "languages": list(header.languages),
+        "expected_counts": dict(header.expected_counts),
+        "graph_payload_revision": header.graph_payload_revision,
+    }
+
+
 def _portable_row(kind: RowKind, row: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(row, Mapping):
         raise ValueError("snapshot rows must be mappings")

@@ -29,6 +29,7 @@ from ..codegraph.publication import (
     SnapshotBatch,
     SnapshotHeader,
     graph_payload_revision,
+    header_payload,
 )
 from ..codegraph.query import (
     MATCH_RANK,
@@ -239,7 +240,7 @@ class PostgresCodeGraphStore:
                     self.iwiki_id,
                     domain_id,
                     snapshot_id,
-                    Jsonb(_header_json(header)),
+                    Jsonb(header_payload(header)),
                     header.graph_payload_revision,
                     f"generation:{generation}",
                     generation,
@@ -692,21 +693,6 @@ class PostgresCodeGraphStore:
             ),
         )
         return result
-
-
-def _header_json(header: SnapshotHeader) -> dict[str, object]:
-    return {
-        "protocol_version": header.protocol_version,
-        "schema_version": header.schema_version,
-        "repository_id": header.repository_id,
-        "source_fingerprint": header.source_fingerprint,
-        "parser_fingerprint": header.parser_fingerprint,
-        "normalizer_version": header.normalizer_version,
-        "unicode_data_version": header.unicode_data_version,
-        "languages": list(header.languages),
-        "expected_counts": dict(header.expected_counts),
-        "graph_payload_revision": header.graph_payload_revision,
-    }
 
 
 def _validate_references(rows) -> dict[str, object] | None:

@@ -77,6 +77,18 @@ class AuthContext:
         if not self.can_write(domain):
             raise AccessError(403)
 
+    def require_primary_read(self) -> str:
+        """Return the bound primary a code-graph read is authorized against."""
+        if self.primary is None or not self.can_read(self.primary):
+            raise AccessError(403)
+        return self.primary
+
+    def require_primary_write(self) -> str:
+        """Return the bound primary a code-graph publication writes to."""
+        if self.primary is None or not self.can_write(self.primary):
+            raise AccessError(403)
+        return self.primary
+
     def can_manage_grants(self, domain: str) -> bool:
         return domain in self.managed_domains
 
