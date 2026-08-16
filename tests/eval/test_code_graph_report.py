@@ -37,6 +37,18 @@ def _report():
                 "file_count": 1_000,
             },
         },
+        "publication": {
+            "target_mode": "sqlite",
+            "state": "ready",
+            "active_revision": "sha256:" + "a" * 64,
+            "generated_files": 400,
+            "publication_seconds": 1.5,
+            "peak_python_heap_bytes": 1_048_576,
+            "batch_count": 3,
+            "batch_bytes": 4_096,
+            "max_batch_rows_observed": 200,
+            "max_batch_bytes_observed": 2_048,
+        },
         "golden_truth": {
             "normalization": "none",
             "unicode_token_key": "\x1fpkg\x1fstrasse\x1f",

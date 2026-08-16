@@ -51,6 +51,10 @@ _PROJECT_CONFIG_TEMPLATE = """\
 # iwiki_id = "team-wiki"
 
 # --- Optional local code graph ---
+# The graph is always built from this local checkout. publish_mode and read_mode
+# select exactly one target each and never fall back to another mode.
+# MCP mode reads IWIKI_CODE_GRAPH_MCP_URL and IWIKI_CODE_GRAPH_MCP_TOKEN from the
+# environment; PostgreSQL mode reuses [storage] and IWIKI_DB_PASSWORD.
 # [code_graph]
 # enabled = true
 # languages = ["python"]
@@ -60,6 +64,14 @@ _PROJECT_CONFIG_TEMPLATE = """\
 # max_total_files = 20000
 # include_tests = true
 # exclude = []
+# publish_mode = "sqlite"  # sqlite | postgres | mcp
+# read_mode = "sqlite"     # sqlite | postgres | mcp
+# max_snapshot_age_seconds = 86400  # 0 disables age rejection
+# max_batch_rows = 1000
+# max_batch_bytes = 1000000
+# publication_session_ttl_seconds = 900
+# staging_retention_seconds = 86400
+# staging_cleanup_limit = 100
 """
 
 
