@@ -32,6 +32,7 @@ from . import http as _http  # noqa: F401
 from .postgres import migrations as _postgres_migrations  # noqa: F401
 from .postgres import auth as _postgres_auth  # noqa: F401
 from .postgres import store as _postgres_store  # noqa: F401
+from .postgres import codegraph as _postgres_codegraph  # noqa: F401
 # Code graph adapters join the full startup import closure; their grammar and
 # parser initialization remains lazy until an adapter parses source.
 from .codegraph import config as _codegraph_config  # noqa: F401
@@ -40,9 +41,12 @@ from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
 from .codegraph import indexer as _codegraph_indexer
 from .codegraph import linking as _codegraph_linking
 from .codegraph import location as _codegraph_location  # noqa: F401
+from .codegraph import mcp_adapter as _codegraph_mcp_adapter  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
+from .codegraph import publication as _codegraph_publication  # noqa: F401
 from .codegraph import runtime as _codegraph_runtime  # noqa: F401
 from .codegraph import schema as _codegraph_schema  # noqa: F401
+from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401
@@ -342,19 +346,22 @@ _AUTH_CONTEXT: ContextVar[_postgres_auth.AuthContext | None] = ContextVar(
 _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
 _HOSTED_POOL = None
 _HOSTED_CONFIG: Config | None = None
+_HOSTED_CODE_GRAPH = None
 
 
-def _install_hosted_runtime(pool, cfg: Config) -> None:
-    global _HOSTED_POOL, _HOSTED_CONFIG
+def _install_hosted_runtime(pool, cfg: Config, code_graph=None) -> None:
+    global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
     _HOSTED_POOL = pool
     _HOSTED_CONFIG = cfg
+    _HOSTED_CODE_GRAPH = code_graph
 
 
 def _clear_hosted_runtime(pool) -> None:
-    global _HOSTED_POOL, _HOSTED_CONFIG
+    global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
     if _HOSTED_POOL is pool:
         _HOSTED_POOL = None
         _HOSTED_CONFIG = None
+        _HOSTED_CODE_GRAPH = None
 
 
 def _resolved_binding() -> base.Binding | base.PostgresBinding:
@@ -405,6 +412,7 @@ def _postgres_store_for_binding(binding: base.PostgresBinding):
         connection_factory=(
             _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
         ),
+        require_database_principal=True,
     )
 
 
@@ -807,12 +815,228 @@ def _invalid_code_config() -> dict:
     }
 
 
+_CODE_SOURCE_UNAVAILABLE = {
+    "error": "source_unavailable",
+    "hint": (
+        "run wiki_code_index on a local MCP server with the repository checkout"
+    ),
+}
+_CODE_UNAUTHORIZED = {
+    "error": "unauthorized",
+    "hint": "publish through a writable bound primary",
+}
+
+
+def _hosted_code_graph_settings():
+    """Return the hosted code-graph bounds a remote client cannot raise."""
+    from .postgres.config import HostedCodeGraphConfig
+
+    return _HOSTED_CODE_GRAPH or HostedCodeGraphConfig()
+
+
+def _postgres_code_reader(binding: base.PostgresBinding):
+    settings = _hosted_code_graph_settings()
+    return _postgres_codegraph.PostgresCodeGraphReader(
+        binding.connection_dsn(),
+        binding.iwiki_id,
+        binding.primary,
+        max_snapshot_age_seconds=settings.max_snapshot_age_seconds,
+    )
+
+
+# Bound wait for the domain activation lock. It is deliberately separate from
+# the server statement/lock timeouts: activation contends only with another
+# publication of the same domain and must fail fast as retryable busy.
+_CODE_PUBLICATION_LOCK_TIMEOUT_MS = 5000
+
+
+def _postgres_code_store(binding: base.PostgresBinding, owner_id: str):
+    settings = _hosted_code_graph_settings()
+    return _postgres_codegraph.PostgresCodeGraphStore(
+        binding.connection_dsn(),
+        binding.iwiki_id,
+        binding.primary,
+        owner_id,
+        lock_timeout_ms=_CODE_PUBLICATION_LOCK_TIMEOUT_MS,
+        session_ttl_seconds=settings.publication_session_ttl_seconds,
+        staging_retention_seconds=settings.staging_retention_seconds,
+        staging_cleanup_limit=settings.staging_cleanup_limit,
+    )
+
+
+# The SQLite factory returns None on purpose: local SQLite publication is the
+# indexer's own atomic path, so no external publisher object exists for it.
+_code_publisher_factories = {
+    "sqlite": lambda binding, config: None,
+    "postgres": lambda binding, config: _postgres_code_store(
+        binding, secrets.token_hex(16)
+    ),
+    "mcp": lambda binding, config: _codegraph_mcp_adapter.McpSnapshotPublisher(
+        _codegraph_mcp_adapter.RemoteMcpTransport()
+    ),
+}
+
+
+def _code_publisher(binding, mode: str, config=None):
+    """Build exactly the publisher the selected mode names, without fallback."""
+    factory = _code_publisher_factories.get(mode)
+    if factory is None:
+        raise _codegraph_models.CodeGraphError("unknown publish mode")
+    return factory(binding, config)
+
+
+def _session_reference(session_id: str):
+    return _codegraph_publication.PublicationSession(
+        session_id=session_id,
+        lease_expires_at="",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+    )
+
+
+class _UnsupportedPublication:
+    """Answer every publication call with one fixed safe refusal."""
+
+    def __init__(self, result: dict) -> None:
+        self._result = result
+
+    def begin_from_mapping(self, _header) -> dict:
+        return dict(self._result)
+
+    def publish_from_mapping(self, *_arguments) -> dict:
+        return dict(self._result)
+
+    def finalize_from_mapping(self, _session_id) -> dict:
+        return dict(self._result)
+
+    def abort_from_mapping(self, _session_id) -> dict:
+        return dict(self._result)
+
+
+class _HostedPublication:
+    """Validate remote publication input before any PostgreSQL dispatch."""
+
+    def __init__(self, store, settings) -> None:
+        self._store = store
+        self._settings = settings
+
+    def begin_from_mapping(self, header) -> dict:
+        if not isinstance(header, dict):
+            return dict(_CODE_INVALID_HEADER)
+        try:
+            parsed = _codegraph_publication.SnapshotHeader(
+                protocol_version=header["protocol_version"],
+                schema_version=header["schema_version"],
+                repository_id=header["repository_id"],
+                source_fingerprint=header["source_fingerprint"],
+                parser_fingerprint=header["parser_fingerprint"],
+                normalizer_version=header["normalizer_version"],
+                unicode_data_version=header["unicode_data_version"],
+                languages=tuple(header["languages"]),
+                expected_counts=header["expected_counts"],
+                graph_payload_revision=header["graph_payload_revision"],
+            )
+        except (KeyError, TypeError, ValueError):
+            return dict(_CODE_INVALID_HEADER)
+        if parsed.repository_id != self._store.domain:
+            return {
+                "error": "scope_mismatch",
+                "hint": "publish the bound primary domain only",
+            }
+        session = self._store.begin(parsed)
+        if isinstance(session, dict):
+            return session
+        return {
+            "session_id": session.session_id,
+            "lease_expires_at": session.lease_expires_at,
+            "base_snapshot_revision": session.base_snapshot_revision,
+            "base_markdown_token": session.base_markdown_token,
+        }
+
+    def publish_from_mapping(
+        self, session_id, kind, ordinal, rows, payload_hash
+    ) -> dict:
+        if (
+            not isinstance(rows, list)
+            or len(rows) > self._settings.max_batch_rows
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            return dict(_CODE_INVALID_BATCH)
+        try:
+            batch = _codegraph_publication.canonical_batch(kind, ordinal, rows)
+        except (TypeError, ValueError):
+            return dict(_CODE_INVALID_BATCH)
+        if (
+            batch.payload_hash != payload_hash
+            or batch.byte_count > self._settings.max_batch_bytes
+        ):
+            return dict(_CODE_INVALID_BATCH)
+        return self._store.publish_batch(_session_reference(session_id), batch)
+
+    def finalize_from_mapping(self, session_id) -> dict:
+        return self._store.finalize(_session_reference(session_id))
+
+    def abort_from_mapping(self, session_id) -> dict:
+        return self._store.abort(_session_reference(session_id))
+
+
+_CODE_INVALID_BATCH = {
+    "error": "invalid_batch",
+    "hint": "send batches that match the declared header",
+}
+_CODE_INVALID_HEADER = {
+    "error": "snapshot_incomplete",
+    "hint": "publish every expected batch before finalizing",
+}
+
+
+def _publish_local_snapshot(runtime, binding, config) -> dict:
+    """Send the freshly indexed local snapshot to the selected publisher."""
+    publisher = _code_publisher(binding, config.publish_mode, config)
+    if publisher is None:
+        return {}
+    exported = runtime.export_snapshot()
+    if isinstance(exported, dict):
+        return exported
+    header, rows = exported
+    session = publisher.begin(header)
+    if isinstance(session, dict):
+        return session
+    for batch in _codegraph_publication.iter_snapshot_batches(
+        rows,
+        max_rows=config.max_batch_rows,
+        max_bytes=config.max_batch_bytes,
+    ):
+        accepted = publisher.publish_batch(session, batch)
+        if "error" in accepted:
+            publisher.abort(session)
+            return accepted
+    return publisher.finalize(session)
+
+
+def _code_publication_service(binding):
+    """Resolve the only publication target this authenticated call may use."""
+    if not _is_postgres(binding):
+        return _UnsupportedPublication(_unsupported_storage())
+    context = _request_auth_context()
+    if context is None or not context.token_id:
+        return _UnsupportedPublication(_unsupported_hosted_transport(binding))
+    if binding.primary is None or binding.primary not in binding.write:
+        return _UnsupportedPublication(dict(_CODE_UNAUTHORIZED))
+    return _HostedPublication(
+        _postgres_code_store(binding, context.token_id),
+        _hosted_code_graph_settings(),
+    )
+
+
 @_safe
 @_code_safe
 def wiki_code_status() -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
-        return _unsupported_storage()
+        if bind.primary is None:
+            return _missing_code_primary()
+        return _postgres_code_reader(bind).status()
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).status()
@@ -830,10 +1054,22 @@ def wiki_code_index(
         return _invalid_code_config()
     bind = _resolved_binding()
     if _is_postgres(bind):
-        return _unsupported_storage()
+        return dict(_CODE_SOURCE_UNAVAILABLE)
     if bind.primary is None:
         return _missing_code_primary()
-    return _code_runtime(bind).index(force=force, languages=languages)
+    runtime = _code_runtime(bind)
+    result = runtime.index(force=force, languages=languages)
+    config = runtime.config
+    if (
+        config is None
+        or config.publish_mode == "sqlite"
+        or result.get("state") != "ready"
+    ):
+        return result
+    return {
+        **result,
+        "publication": _publish_local_snapshot(runtime, bind, config),
+    }
 
 
 @_safe
@@ -854,7 +1090,17 @@ def wiki_code_search(
     )
     bind = _resolved_binding()
     if _is_postgres(bind):
-        return _unsupported_storage()
+        if bind.primary is None:
+            return _missing_code_primary()
+        return _postgres_code_reader(bind).search(
+            _codegraph_runtime.validate_search_request(
+                query,
+                kinds=kinds,
+                path=path,
+                languages=languages,
+                limit=limit,
+            )
+        )
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).search(
@@ -892,7 +1138,21 @@ def wiki_code_context(
     )
     bind = _resolved_binding()
     if _is_postgres(bind):
-        return _unsupported_storage()
+        if bind.primary is None:
+            return _missing_code_primary()
+        return _postgres_code_reader(bind).context(
+            _codegraph_runtime.validate_context_request(
+                seeds,
+                direction=direction,
+                depth=depth,
+                relations=relations,
+                include_source=include_source,
+                include_wiki=include_wiki,
+                max_nodes=max_nodes,
+                max_files=max_files,
+                max_source_bytes=max_source_bytes,
+            )
+        )
     if bind.primary is None:
         return _missing_code_primary()
     return _code_runtime(bind).context(
@@ -905,6 +1165,48 @@ def wiki_code_context(
         max_nodes=max_nodes,
         max_files=max_files,
         max_source_bytes=max_source_bytes,
+    )
+
+
+@_safe
+@_code_safe
+def wiki_code_publish_begin(header: dict) -> dict:
+    """Open one owned publication session for the authenticated primary."""
+    return _code_publication_service(_resolved_binding()).begin_from_mapping(
+        header
+    )
+
+
+@_safe
+@_code_safe
+def wiki_code_publish_batch(
+    session_id: str,
+    kind: str,
+    ordinal: int,
+    rows: list[dict],
+    payload_hash: str,
+) -> dict:
+    """Accept one canonical row batch of an owned publication session."""
+    return _code_publication_service(_resolved_binding()).publish_from_mapping(
+        session_id, kind, ordinal, rows, payload_hash
+    )
+
+
+@_safe
+@_code_safe
+def wiki_code_publish_finalize(session_id: str) -> dict:
+    """Recompute revisions and activate one complete staged snapshot."""
+    return _code_publication_service(_resolved_binding()).finalize_from_mapping(
+        session_id
+    )
+
+
+@_safe
+@_code_safe
+def wiki_code_publish_abort(session_id: str) -> dict:
+    """Discard one owned staging session without touching the active snapshot."""
+    return _code_publication_service(_resolved_binding()).abort_from_mapping(
+        session_id
     )
 
 
@@ -2846,6 +3148,10 @@ mcp.tool()(wiki_code_status)
 mcp.tool()(wiki_code_index)
 mcp.tool()(wiki_code_search)
 mcp.tool()(wiki_code_context)
+mcp.tool()(wiki_code_publish_begin)
+mcp.tool()(wiki_code_publish_batch)
+mcp.tool()(wiki_code_publish_finalize)
+mcp.tool()(wiki_code_publish_abort)
 mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)
@@ -2911,15 +3217,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     binding = base.resolve_storage_binding(project_dir)
     if not _is_postgres(binding):
         return
-    _postgres_migrations.run_migrations(
-        _postgres_migrations.MigrationSettings(
-            dsn=binding.connection_dsn(),
-            embed_model=cfg.embed_model,
-            embed_dimensions=cfg.dimensions,
-            statement_timeout_ms=30_000,
-            lock_timeout_ms=5_000,
-        )
-    )
+    _postgres_migrations.require_schema_version(binding.connection_dsn())
 
 
 def main() -> None:

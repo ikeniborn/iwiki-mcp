@@ -13,10 +13,14 @@ from iwiki_mcp.storage import PostgresBinding
 
 TOOLS = {
     "wiki_status": "supported",
-    "wiki_code_status": "unsupported",
-    "wiki_code_index": "unsupported",
-    "wiki_code_search": "unsupported",
-    "wiki_code_context": "unsupported",
+    "wiki_code_status": "supported",
+    "wiki_code_index": "source_unavailable_without_checkout",
+    "wiki_code_search": "supported",
+    "wiki_code_context": "supported",
+    "wiki_code_publish_begin": "supported",
+    "wiki_code_publish_batch": "supported",
+    "wiki_code_publish_finalize": "supported",
+    "wiki_code_publish_abort": "supported",
     "wiki_list_domains": "supported",
     "wiki_list_pages": "supported",
     "wiki_read_page": "supported",
@@ -149,7 +153,7 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 25
+    assert len(TOOLS) == 29
     assert registered == set(TOOLS)
 
 
@@ -176,10 +180,6 @@ def test_grant_tool_schemas_expose_content_authority_only():
 @pytest.mark.parametrize(
     ("handler", "args", "kwargs"),
     [
-        (server.wiki_code_status, (), {}),
-        (server.wiki_code_index, (), {}),
-        (server.wiki_code_search, ("query",), {}),
-        (server.wiki_code_context, (["py:module:" + "a" * 64],), {}),
         (server.wiki_create_domain, ("new-domain",), {}),
         (server.wiki_remediation_plan, (), {}),
         (server.wiki_migrate_okf, (), {}),
@@ -394,7 +394,7 @@ def test_hosted_concurrent_bind_narrowing_is_atomic(
 
 @pytest.mark.postgres_integration
 def test_real_postgres_handlers_preserve_revision_and_conflict(
-    clean_postgres, monkeypatch
+    clean_postgres, runtime_principal, monkeypatch
 ):
     from psycopg.conninfo import conninfo_to_dict
 
@@ -423,11 +423,19 @@ def test_real_postgres_handlers_preserve_revision_and_conflict(
         )
     )
     values = conninfo_to_dict(clean_postgres)
+    admin_store = server._postgres_store.PostgresStore(
+        clean_postgres,
+        "wiki-a",
+        cfg,
+    )
+    admin_store.create_wiki("wiki-a")
+    admin_store.create_domain("docs")
+    role, password = runtime_principal(("docs",), ("docs",))
     binding = PostgresBinding(
         host=values["host"],
         port=int(values.get("port", 5432)),
         database=values["dbname"],
-        user=values["user"],
+        user=role,
         sslmode=values.get("sslmode", "prefer"),
         iwiki_id="wiki-a",
         read=("docs",),
@@ -437,7 +445,7 @@ def test_real_postgres_handlers_preserve_revision_and_conflict(
         embed_model=cfg.embed_model,
         embed_dimensions=cfg.dimensions,
         rerank_model="",
-        password=values["password"],
+        password=password,
     )
     monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
     monkeypatch.setattr(server.Config, "load", lambda: cfg)
@@ -446,13 +454,6 @@ def test_real_postgres_handlers_preserve_revision_and_conflict(
         "embed_texts",
         lambda _cfg, texts: [[1.0, 0.0, 0.0] for _text in texts],
     )
-    admin_store = server._postgres_store.PostgresStore(
-        clean_postgres,
-        "wiki-a",
-        cfg,
-    )
-    admin_store.create_wiki("wiki-a")
-    admin_store.create_domain("docs")
     store = server._postgres_store_for_binding(binding)
     store._embedder = lambda _cfg, texts: [
         [1.0, 0.0, 0.0] for _text in texts

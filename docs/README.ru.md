@@ -214,13 +214,87 @@ pg_dump --dbname=service=iwiki --format=custom --schema=iwiki --file=/secure/enc
 pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /secure/encrypted-volume/iwiki.dump
 ```
 
+#### Runtime-принципалы для code graph
+
+Три роли базы данных остаются раздельными. Владелец схемы и мигратор — только
+административные учётные данные: он владеет схемой `iwiki` и применяет миграции через
+admin-команды, и он никогда не настраивается как логин работающего сервера. Hosted
+service principal — роль, под которой подключается hosted-сервер. Direct runtime
+principal — роль локального индексера в прямом режиме PostgreSQL. Обе runtime-роли не
+являются владельцем, не имеют `BYPASSRLS`, не выполняют миграции и не получают `CREATE`
+на базу или схему. Row-level security включается обычным
+`ENABLE ROW LEVEL SECURITY`, никогда `FORCE`, поскольку владелец — административная роль.
+
+Регистрируйте каждую runtime-роль и её доменные гранты явно. `principal grant` никогда
+не создаёт роль и не принимает её пароль; создавайте логин отдельно теми учётными
+данными, которыми управляет ваша платформа.
+
+```bash
+iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal inspect --principal iwiki_hosted --json
+```
+
+Подготовьте домены до включения токенов, затем выпускайте токены против точной
+развёрнутой hosted-роли. `token create` требует `--hosted-principal ROLE`, где `ROLE`
+равен `[storage].user` hosted-сервера. Команда проверяет, что именно эта роль
+зарегистрирована как `runtime=hosted`, не является владельцем, не имеет `BYPASSRLS` и уже
+покрывает каждый запрошенный домен чтения и записи, до генерации любого материала
+токена. Другая hosted-роль или общая проверка «какая-то hosted-роль существует» заменой
+не является.
+
+```bash
+iwiki-mcp domain create --iwiki team-wiki --domain backend
+iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp token create --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp serve --transport streamable-http
+```
+
+Старт выполняет одинаковую проверку схемы для hosted HTTP и stdio: сервер сверяет точную
+ожидаемую версию схемы и собственный подключённый `session_user` с выданными грантами и
+иначе отказывается стартовать. Миграции неявно не выполняются никогда.
+
+#### Откат схемы v5 и артефакт совместимости
+
+Миграция v5 добавляет таблицы code graph. Откат приложения на релиз до code graph — это
+процедура обслуживания, а не развёртывание произвольного старого коммита: сырой коммит
+до code graph не является поддерживаемым бинарём отката, поскольку ограниченная
+runtime-роль не имеет `CREATE` на схему и такой бинарь попытается создать объекты схемы
+при старте.
+
+Поддерживаемый путь — закреплённый артефакт обслуживания
+`compat/postgres-v4-runtime-guard.json` вместе с его патчем. Манифест фиксирует базовый
+коммит, дайджест патча, дайджест дерева исходников и версию схемы, которую принимает
+пропатченный runtime. Пересоберите и проверьте его: переключитесь на записанный базовый
+коммит, примените записанный патч и подтвердите оба дайджеста до развёртывания.
+
+```bash
+iwiki-mcp schema rollback-v5-compat --json
+iwiki-mcp schema rollback-v5-compat --confirm --json
+```
+
+Сухой прогон сообщает, какой маркер он удалил бы, и ничего не меняет. Только `--confirm`
+удаляет маркер схемы 5, оставляя таблицы code graph на месте и неиспользуемыми. После
+отката прогоните smoke пропатченного артефакта обслуживания против базы: он обязан
+стартовать только на чтение под ограниченной runtime-ролью и не иметь привилегий
+`CREATE` или изменения `schema_migrations`. Повторное применение миграции v5 позже —
+обычная прямая миграция, она идемпотентна.
+
+Останавливайте вывод в production, а не обходите его, когда точный hosted-принципал
+недоказуем, когда отсутствует необходимый доменный грант, когда подключённый
+`session_user` отличается от выданной роли, когда версия схемы не совпадает точно или
+когда дайджесты артефакта обслуживания не воспроизводятся.
+
 ### Контракт MCP-инструментов PostgreSQL
 
 | Поддержка PostgreSQL | Инструменты |
 | --- | --- |
 | Поддерживаются | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
 | Только hosted PostgreSQL | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
-| Только Git | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
+| Поддерживается code graph | `wiki_code_status`, `wiki_code_search`, `wiki_code_context` |
+| Только hosted PostgreSQL | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort` |
+| Только локальный checkout | `wiki_code_index` |
+| Только Git | `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
 
 Git-only инструменты возвращают
 `{"error":"unsupported_storage","storage":"postgres","hint":"use this tool with Git storage"}`.
@@ -318,7 +392,8 @@ exclude = []
 failed кэш возвращает typed diagnostics, не ломая обычные wiki-операции. Кэш
 schema-v1 несовместим и заменяется детерминированным полным rebuild.
 
-Сервер MCP предоставляет ровно четыре code-graph инструмента:
+Сервер MCP предоставляет восемь code-graph инструментов; четыре инструмента
+публикации описаны ниже в разделе распределённой публикации:
 
 | Инструмент | Контракт |
 | --- | --- |
@@ -336,6 +411,104 @@ code graph. Default: direction `both`, depth `1`, максимум 50 nodes, 20 
 Incremental indexing is not part of the Python MVP.
 TypeScript is not part of the Python MVP.
 Для каждого нужна отдельная specification и delivery.
+
+### Распределённая публикация code graph
+
+Code graph всегда строится из локального checkout, но полученный снапшот может жить в
+другом месте. Машина с репозиторием индексирует его и публикует один неизменяемый
+снапшот; сервер без checkout отвечает на `wiki_code_status`, `wiki_code_search` и
+`wiki_code_context` из активного снапшота.
+
+Выберите ровно одну цель публикации и одну цель чтения в `.iwiki.toml` привязанного
+проекта. Fallback отсутствует: сбой выбранного режима возвращается вызывающей стороне и
+никогда не повторяется через другой режим.
+
+```toml
+[code_graph]
+publish_mode = "sqlite" # sqlite | postgres | mcp
+read_mode = "sqlite"    # sqlite | postgres | mcp
+max_snapshot_age_seconds = 86400 # 0 отключает отбраковку по возрасту
+max_batch_rows = 1000
+max_batch_bytes = 1000000
+publication_session_ttl_seconds = 900
+staging_retention_seconds = 86400
+staging_cleanup_limit = 100
+```
+
+Готовый снапшот старше положительного `max_snapshot_age_seconds` возвращает
+`stale_snapshot` без строк, при этом status продолжает сообщать возраст и отметки
+времени. Значение `0` полностью отключает отбраковку по возрасту. Hosted-сервер
+применяет собственные проверенные потолки для числовых полей; удалённый клиент не может
+их поднять.
+
+Секреты никогда не попадают в `.iwiki.toml`. Режим MCP читает
+`IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` только из окружения
+исполнения, и оба отсутствуют в status, логах, заголовках снапшота, ошибках и repr
+объектов. Прямой режим PostgreSQL переиспользует существующий блок `[storage]` и
+`IWIKI_DB_PASSWORD`.
+
+| Режим | Публикует в | Требует |
+| --- | --- | --- |
+| `sqlite` | Локальный кэш code graph рядом с базой wiki | Локальный checkout |
+| `postgres` | Настроенную базу PostgreSQL wiki | Локальный checkout плюс `[storage]` и `IWIKI_DB_PASSWORD` |
+| `mcp` | Аутентифицированный удалённый сервер iwiki | Локальный checkout плюс `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` |
+
+`wiki_code_index` остаётся локальной операцией извлечения. На сервере без checkout он
+возвращает `source_unavailable` и не создаёт ни сессии, ни снапшота; запускайте индексер
+на машине с репозиторием. Один primary-домен соответствует ровно одному репозиторию.
+
+Удалённая публикация — жизненный цикл из четырёх вызовов поверх существующей
+авторизации по bearer-токену: `wiki_code_publish_begin`, повторяемый
+`wiki_code_publish_batch`, затем `wiki_code_publish_finalize` или
+`wiki_code_publish_abort`. Ни один из них не принимает поле арендатора или домена;
+сервер выводит `iwiki_id` и связанный primary из токена, который обязан иметь право
+записи в этот primary. Сессия принадлежит создавшей её личности: другой токен с правом
+записи в тот же домен не может дополнить, прервать или завершить её, а процесс-замена
+обязан открыть новую сессию.
+
+Батчи несут только строки — никогда файл базы, текст исходников, абсолютный путь
+checkout, учётные данные или сформированные издателем wiki-ссылки. Цель пересчитывает
+ревизию полезной нагрузки, выводит ссылки code-to-wiki из собственного Markdown
+назначения и активирует снапшот одним коммитом. Поэтому читатели видят либо предыдущую
+полную ревизию, либо новую, но никогда частичную загрузку. Повтор принятого ordinal с
+теми же строками идемпотентно успешен; повтор с другими строками возвращает
+`batch_conflict`.
+
+Повторяйте публикацию целиком после `busy`, `session_expired`, `snapshot_conflict`,
+`revision_mismatch` или `markdown_unavailable`: откройте новую сессию и отправьте
+заново. `snapshot_conflict` означает, что активный снапшот или Markdown назначения
+изменились, пока сессия была открыта, поэтому перестроенный граф нужно публиковать
+против текущего состояния. Истёкшие staging-сессии убираются ограниченными порциями при
+открытии следующей сессии; фоновый демон не работает.
+
+Для чтений PostgreSQL или удалённого MCP `include_source=true` возвращает контекст графа
+без исходников плюс `source_unavailable`; сервер никогда не запрашивает исходники у
+издателя. Локальные чтения SQLite сохраняют существующее защищённое поведение с
+локальными исходниками. Лимиты search и context применяются для каждого адаптера чтения,
+поэтому удалённый вызывающий не может запросить неограниченный результат или неявно
+загрузить весь граф.
+
+Первая публикация в пустой домен — обычная сессия: status сообщает `missing_snapshot`,
+пока первый `finalize` не завершится успешно.
+
+### Профили снапшота SQLite и неопределённость коммита
+
+Локальный кэш SQLite имеет ровно два принимаемых профиля схемы v2. Legacy-профиль
+содержит пять публичных таблиц сущностей и требует строгой проверки storage stamp по
+базе плюс sidecar. Профиль публикации добавляет внутреннюю таблицу
+`code_graph_publication`, которая и несёт авторитетное свидетельство готовности; в этом
+профиле `.metadata.json` — только кэш, он может отсутствовать, устареть или быть
+пересоздан без изменения готовности.
+
+Публикация SQLite может вернуть `commit_uncertain`. Это означает, что каноническая
+замена могла произойти, но устойчивость каталога не подтверждена. Она не утверждает ни
+успех, ни откат и допускает ровно одно восстановление: повтор `finalize` в том же
+процессе. Batch, abort, автоматический откат и подмена адаптера запрещены. Если процесс
+потерян до сверки, проверьте `wiki_code_status` и откройте новую сессию. Прямой
+PostgreSQL и удалённый MCP никогда не выдают `commit_uncertain`.
+
+Перед откатом на бинарь до публикации сохраните или восстановите legacy-снапшот либо
+переиндексируйте этим бинарём, поскольку он может отвергнуть внутреннюю таблицу.
 
 ### Code graph benchmark
 

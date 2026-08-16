@@ -47,10 +47,49 @@ class HostedServerConfig:
 
 
 @dataclass(frozen=True)
+class HostedCodeGraphConfig:
+    max_snapshot_age_seconds: int = 86400
+    max_batch_rows: int = 1000
+    max_batch_bytes: int = 1_000_000
+    publication_session_ttl_seconds: int = 900
+    staging_retention_seconds: int = 86400
+    staging_cleanup_limit: int = 100
+
+    def __post_init__(self) -> None:
+        bounds = {
+            "max_snapshot_age_seconds": (0, None),
+            "max_batch_rows": (1, 5000),
+            "max_batch_bytes": (1, 5_000_000),
+            "publication_session_ttl_seconds": (1, 3600),
+            "staging_retention_seconds": (1, 604800),
+            "staging_cleanup_limit": (1, 1000),
+        }
+        for name, (minimum, maximum) in bounds.items():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(f"{name} must be an integer")
+            if value < minimum or (maximum is not None and value > maximum):
+                if maximum is None:
+                    raise ConfigError(f"{name} must be at least {minimum}")
+                raise ConfigError(
+                    f"{name} must be between {minimum} and {maximum}"
+                )
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "HostedCodeGraphConfig":
+        if not isinstance(config, Mapping):
+            raise ConfigError("top-level storage, server, and code_graph must be tables")
+        if set(config) - _HOSTED_CODE_GRAPH_FIELDS:
+            raise ConfigError("code_graph configuration contains keys that are not allowed")
+        return cls(**dict(config))
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     storage: PostgresConfig
     models: ModelConfig
     server: HostedServerConfig
+    code_graph: HostedCodeGraphConfig = field(default_factory=HostedCodeGraphConfig)
 
 
 _SSLMODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
@@ -80,7 +119,15 @@ _SERVER_FIELDS = {
     "statement_timeout_ms",
     "lock_timeout_ms",
 }
-_SERVER_TOP_LEVEL_FIELDS = {"storage", "server"}
+_HOSTED_CODE_GRAPH_FIELDS = {
+    "max_snapshot_age_seconds",
+    "max_batch_rows",
+    "max_batch_bytes",
+    "publication_session_ttl_seconds",
+    "staging_retention_seconds",
+    "staging_cleanup_limit",
+}
+_SERVER_TOP_LEVEL_FIELDS = {"storage", "server", "code_graph"}
 
 
 def _required_string(config: Mapping[str, Any], name: str) -> str:
@@ -283,8 +330,12 @@ def load_server_config(
         ),
         lock_timeout_ms=_bounded_integer(server, "lock_timeout_ms", 1, 300000),
     )
+    code_graph = data.get("code_graph", {})
+    if not isinstance(code_graph, dict):
+        raise ConfigError("top-level storage, server, and code_graph must be tables")
     return ServerConfig(
         storage=load_postgres_config(storage, environ),
         models=load_model_config(environ),
         server=hosted,
+        code_graph=HostedCodeGraphConfig.from_mapping(code_graph),
     )

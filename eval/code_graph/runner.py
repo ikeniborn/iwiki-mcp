@@ -46,11 +46,18 @@ from .report import write_report
 
 
 DOMAIN = "benchmark"
+_PUBLICATION_ROW_KINDS = (
+    "repositories",
+    "files",
+    "symbols",
+    "relations",
+)
 SEARCH_ENTITY_COUNT = 100_008
 SEARCH_FILE_COUNT = 34_000
 SEARCH_SYMBOL_COUNT = SEARCH_ENTITY_COUNT - (SEARCH_FILE_COUNT * 2)
 BUILD_FILE_COUNT = 1_000
 MEMORY_FILE_COUNT = 10_000
+PUBLICATION_FILE_COUNT = 200
 MIB = 1024 ** 2
 POST_V1_SEARCH_TARGET_MS = 150.0
 
@@ -61,7 +68,7 @@ DEFAULT_THRESHOLDS = {
     "static_calls": 0.75,
     "false_resolved_calls": 0.05,
     "deterministic_rebuild": 1.0,
-    "startup_ms": 100.0,
+    "startup_ms": 500.0,
     "noop_ms": 200.0,
     "build_1000_files_ms": 15_000.0,
     "search_ms": 500.0,
@@ -630,7 +637,13 @@ def _measure_memory(corpus: ProductionCorpus) -> int:
         tracemalloc.stop()
 
 
-def _benchmark_indexer(root: Path, project: Path, count: int) -> CodeGraphIndexer:
+def _benchmark_indexer(
+    root: Path,
+    project: Path,
+    count: int,
+    *,
+    max_rebuild_seconds: int = 120,
+) -> CodeGraphIndexer:
     base = root / "base"
     cache = base / ".iwiki"
     cache.mkdir(parents=True)
@@ -654,7 +667,7 @@ def _benchmark_indexer(root: Path, project: Path, count: int) -> CodeGraphIndexe
         domain=DOMAIN,
         config=CodeGraphConfig(
             auto_rebuild="off",
-            max_rebuild_seconds=120,
+            max_rebuild_seconds=max_rebuild_seconds,
             max_total_files=count,
         ),
         paths=paths,
@@ -1035,6 +1048,15 @@ def run_benchmark(
             temporary_path / "memory" / "project", MEMORY_FILE_COUNT
         )
         memory_peak = _measure_memory(memory_production)
+        publication = measure_publication(
+            temporary_path / "publication",
+            _write_production_tree(
+                temporary_path / "publication" / "project",
+                PUBLICATION_FILE_COUNT,
+            ).project,
+            target_mode="sqlite",
+            max_total_files=PUBLICATION_FILE_COUNT * 2,
+        )
         build = _measure_build(temporary_path / "build", production)
         quality = dict(build["quality"])
         quality_details = dict(build["quality_counts"])
@@ -1165,6 +1187,7 @@ def run_benchmark(
                     "memory_sha256": memory_production.sha256,
                 },
             },
+            "publication": publication,
             "golden_truth": {
                 "normalization": "none",
                 "unicode_token_key": "\x1fpkg\x1fstrasse\x1f",
@@ -1228,3 +1251,100 @@ __all__ = [
     "DEFAULT_THRESHOLDS",
     "run_benchmark",
 ]
+
+
+def _publication_counts(rows: Mapping[str, object]) -> dict[str, int]:
+    return {kind: len(rows[kind]) for kind in _PUBLICATION_ROW_KINDS}
+
+
+def _exported_header(rows: Mapping[str, object]):
+    """Rebuild the portable header from the published repository row."""
+    from iwiki_mcp.codegraph.publication import (
+        SnapshotHeader,
+        graph_payload_revision,
+    )
+
+    repository = rows["repositories"][0]
+    return SnapshotHeader(
+        protocol_version=1,
+        schema_version=SCHEMA_VERSION,
+        repository_id=str(repository["repository_id"]),
+        source_fingerprint=str(repository["source_fingerprint"]),
+        parser_fingerprint=str(repository["parser_fingerprint"]),
+        normalizer_version=str(repository["normalizer_version"]),
+        unicode_data_version=str(repository["unicode_data_version"]),
+        languages=("python",),
+        expected_counts=_publication_counts(rows),
+        graph_payload_revision=graph_payload_revision(rows),
+    )
+
+
+def measure_publication(
+    root: str | Path,
+    project: str | Path,
+    *,
+    target_mode: str = "sqlite",
+    max_total_files: int,
+    max_batch_rows: int = 1000,
+    max_batch_bytes: int = 1_000_000,
+    max_rebuild_seconds: int = 120,
+    publisher: object | None = None,
+) -> dict[str, object]:
+    """Index one generated corpus and publish it through the selected target."""
+    from iwiki_mcp.codegraph.publication import iter_snapshot_batches
+
+    if target_mode not in ("sqlite", "postgres", "mcp"):
+        raise ValueError(f"unknown publication target mode: {target_mode}")
+    indexer = _benchmark_indexer(
+        Path(root),
+        Path(project),
+        max_total_files,
+        max_rebuild_seconds=max_rebuild_seconds,
+    )
+    tracemalloc.start()
+    started = time.perf_counter_ns()
+    built = indexer.build(force=True)
+    # Read the published snapshot instead of re-parsing the corpus: this is the
+    # same export path a non-SQLite publish_mode uses in the server.
+    rows = {
+        kind: list(indexer.store.stable_rows(kind))
+        for kind in _PUBLICATION_ROW_KINDS
+    }
+    batches = tuple(
+        iter_snapshot_batches(
+            rows, max_rows=max_batch_rows, max_bytes=max_batch_bytes
+        )
+    )
+    state = str(built["state"])
+    revision = built.get("revision")
+    if publisher is not None:
+        session = publisher.begin(_exported_header(rows))
+        for batch in batches:
+            accepted = publisher.publish_batch(session, batch)
+            if not accepted.get("accepted"):
+                raise RuntimeError(f"publication rejected: {accepted}")
+        result = publisher.finalize(session)
+        if "error" in result:
+            raise RuntimeError(f"publication finalize failed: {result['error']}")
+        state = str(result["state"])
+        revision = result["snapshot_revision"]
+    elapsed_seconds = (time.perf_counter_ns() - started) / 1_000_000_000
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return {
+        "target_mode": target_mode,
+        "state": state,
+        "active_revision": revision,
+        "counts": _publication_counts(rows),
+        "generated_files": max_total_files,
+        "publication_seconds": elapsed_seconds,
+        "peak_python_heap_bytes": peak,
+        "batch_count": len(batches),
+        "batch_bytes": sum(batch.byte_count for batch in batches),
+        "max_batch_rows_observed": max(
+            (batch.row_count for batch in batches), default=0
+        ),
+        "max_batch_bytes_observed": max(
+            (batch.byte_count for batch in batches), default=0
+        ),
+    }

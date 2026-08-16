@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from iwiki_mcp import base
+from .publication import PublishMode
 
 try:
     import tomllib
@@ -27,8 +28,27 @@ _FIELDS = {
     "max_total_files",
     "include_tests",
     "exclude",
+    "publish_mode",
+    "read_mode",
+    "max_snapshot_age_seconds",
+    "max_batch_rows",
+    "max_batch_bytes",
+    "publication_session_ttl_seconds",
+    "staging_retention_seconds",
+    "staging_cleanup_limit",
 }
-_FORBIDDEN_FIELDS = {"database", "project_id", "project_uuid", "incremental"}
+_FORBIDDEN_FIELDS = {
+    "database",
+    "project_id",
+    "project_uuid",
+    "incremental",
+    "dsn",
+    "mcp_token",
+    "mcp_url",
+    "password",
+    "token",
+    "url",
+}
 
 
 def _bool(value: Any, field: str) -> bool:
@@ -40,6 +60,22 @@ def _bool(value: Any, field: str) -> bool:
 def _positive_int(value: Any, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise CodeGraphConfigError(f"code_graph.{field} must be a positive integer")
+    return value
+
+
+def _non_negative_int(value: Any, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise CodeGraphConfigError(
+            f"code_graph.{field} must be a non-negative integer"
+        )
+    return value
+
+
+def _mode(value: Any, field: str) -> PublishMode:
+    if value not in ("sqlite", "postgres", "mcp"):
+        raise CodeGraphConfigError(
+            f"code_graph.{field} must be sqlite, postgres, or mcp"
+        )
     return value
 
 
@@ -74,6 +110,14 @@ class CodeGraphConfig:
     max_total_files: int = 20_000
     include_tests: bool = True
     exclude: tuple[str, ...] = ()
+    publish_mode: PublishMode = "sqlite"
+    read_mode: PublishMode = "sqlite"
+    max_snapshot_age_seconds: int = 86400
+    max_batch_rows: int = 1000
+    max_batch_bytes: int = 1_000_000
+    publication_session_ttl_seconds: int = 900
+    staging_retention_seconds: int = 86400
+    staging_cleanup_limit: int = 100
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "enabled", _bool(self.enabled, "enabled"))
@@ -93,6 +137,23 @@ class CodeGraphConfig:
         )
         object.__setattr__(self, "include_tests", _bool(self.include_tests, "include_tests"))
         object.__setattr__(self, "exclude", _exclude(self.exclude))
+        object.__setattr__(self, "publish_mode", _mode(self.publish_mode, "publish_mode"))
+        object.__setattr__(self, "read_mode", _mode(self.read_mode, "read_mode"))
+        object.__setattr__(
+            self,
+            "max_snapshot_age_seconds",
+            _non_negative_int(
+                self.max_snapshot_age_seconds, "max_snapshot_age_seconds"
+            ),
+        )
+        for field in (
+            "max_batch_rows",
+            "max_batch_bytes",
+            "publication_session_ttl_seconds",
+            "staging_retention_seconds",
+            "staging_cleanup_limit",
+        ):
+            object.__setattr__(self, field, _positive_int(getattr(self, field), field))
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CodeGraphConfig":
@@ -101,9 +162,7 @@ class CodeGraphConfig:
         keys = set(raw)
         forbidden = keys & _FORBIDDEN_FIELDS
         if forbidden:
-            raise CodeGraphConfigError(
-                f"code_graph.{sorted(forbidden)[0]} is not supported"
-            )
+            raise CodeGraphConfigError("code_graph connection fields are not supported")
         unknown = keys - _FIELDS
         if unknown:
             raise CodeGraphConfigError(

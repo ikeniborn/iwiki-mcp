@@ -5,6 +5,7 @@ from io import StringIO
 import json
 from pathlib import Path
 import subprocess
+import secrets
 
 import pytest
 
@@ -69,10 +70,23 @@ def test_parser_keeps_stdio_boundary_and_has_no_destructive_options():
     parser = admin.build_parser()
     stdio = parser.parse_args(["--project", "/tmp/project"])
     serve = parser.parse_args(["serve", "--config", "server.toml"])
+    grant = parser.parse_args(
+        [
+            "principal", "grant", "--config", "server.toml",
+            "--principal", "runtime", "--iwiki", "wiki-a",
+            "--read-domain", "docs", "--write-domain", "docs",
+            "--runtime", "direct",
+        ]
+    )
+    rollback = parser.parse_args(
+        ["schema", "rollback-v5-compat", "--config", "server.toml"]
+    )
 
     assert stdio.command is None
     assert stdio.project == "/tmp/project"
     assert serve.transport == "streamable-http"
+    assert grant.principal_command == "grant"
+    assert rollback.confirm is False
     for argv in (
         ["serve", "--project", "/tmp/project"],
         ["base", "list", "--project", "/tmp/project"],
@@ -158,6 +172,37 @@ def test_admin_commands_require_config_or_environment(admin_runtime):
     assert "accepted only for stdio" in stderr
 
 
+def _bare_principal(config, environ):
+    """Create one disposable restricted role with no domain grant yet."""
+    from iwiki_mcp import admin
+
+    from tests.postgres.conftest import create_runtime_role
+
+    service = admin._service(str(config), environ)
+    role, _password = create_runtime_role(service.dsn, prefix="bootstrapcli")
+    return role
+
+
+def _hosted_principal(config, environ, iwiki_id, read_domains, write_domains):
+    """Provision one disposable hosted role for CLI token creation."""
+    from iwiki_mcp import admin
+    from iwiki_mcp.postgres.store import provision_runtime_grant
+
+    from tests.postgres.conftest import create_runtime_role
+
+    service = admin._service(str(config), environ)
+    role, _password = create_runtime_role(service.dsn, prefix="hostedcli")
+    provision_runtime_grant(
+        service.dsn,
+        principal=role,
+        iwiki_id=iwiki_id,
+        read_domains=list(read_domains),
+        write_domains=list(write_domains),
+        runtime="hosted",
+    )
+    return role
+
+
 def test_base_domain_and_token_lifecycle_is_explicit_and_secret_safe(
     admin_runtime,
 ):
@@ -179,10 +224,12 @@ def test_base_domain_and_token_lifecycle_is_explicit_and_secret_safe(
         ["domain", "create", *prefix, "--iwiki", "wiki-a", "--domain", "docs"],
         environ,
     )[0] == 0
+    hosted_a = _hosted_principal(config, environ, "wiki-a", ["docs"], ["docs"])
     code, output, _error = _run(
         [
             "token", "create", *prefix, "--iwiki", "wiki-a", "--owner", "alice",
             "--read-domain", "docs", "--write-domain", "docs",
+            "--hosted-principal", hosted_a,
         ],
         environ,
     )
@@ -223,10 +270,12 @@ def test_base_domain_and_token_lifecycle_is_explicit_and_secret_safe(
         ["domain", "create", *prefix, "--iwiki", "wiki-b", "--domain", "docs"],
         environ,
     )[0] == 0
+    hosted_b = _hosted_principal(config, environ, "wiki-b", ["docs"], [])
     code, second_token, _error = _run(
         [
             "token", "create", *prefix, "--iwiki", "wiki-b", "--owner", "bob",
             "--read-domain", "docs",
+            "--hosted-principal", hosted_b,
         ],
         environ,
     )
@@ -243,6 +292,224 @@ def test_base_domain_and_token_lifecycle_is_explicit_and_secret_safe(
     assert service.auth.authenticate(second_token.strip()) is None
 
 
+def test_principal_grant_inspect_and_schema_rollback_commands(admin_runtime):
+    import psycopg
+    from psycopg import sql
+
+    from iwiki_mcp import admin
+
+    config, environ = admin_runtime
+    prefix = ["--config", str(config)]
+    assert _run(["base", "create", *prefix, "--iwiki", "wiki-a"], environ)[0] == 0
+    assert _run(
+        ["domain", "create", *prefix, "--iwiki", "wiki-a", "--domain", "docs"],
+        environ,
+    )[0] == 0
+    role = f"iwiki_t3_cli_{secrets.token_hex(5)}"
+    service = admin._service(str(config), environ)
+    with psycopg.connect(service.dsn, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("CREATE ROLE {} LOGIN NOBYPASSRLS").format(
+                    sql.Identifier(role)
+                )
+            )
+    try:
+        code, output, error = _run(
+            [
+                "principal", "grant", *prefix, "--principal", role,
+                "--iwiki", "wiki-a", "--read-domain", "docs",
+                "--write-domain", "docs", "--runtime", "direct", "--json",
+            ],
+            environ,
+        )
+        assert (code, error) == (0, "")
+        assert json.loads(output)["principal"] == role
+        code, output, error = _run(
+            [
+                "principal", "inspect", *prefix, "--principal", role, "--json",
+            ],
+            environ,
+        )
+        assert (code, error) == (0, "")
+        inspected = json.loads(output)
+        assert inspected["valid_runtime_shape"] is True
+        assert inspected["grants"] == [
+            {
+                "can_read": True,
+                "can_write": True,
+                "domain": "docs",
+                "iwiki": "wiki-a",
+                "runtime": "direct",
+            }
+        ]
+
+        code, output, error = _run(
+            ["schema", "rollback-v5-compat", *prefix, "--json"], environ
+        )
+        assert (code, error) == (0, "")
+        assert json.loads(output)["dry_run"] is True
+        code, output, error = _run(
+            [
+                "schema", "rollback-v5-compat", *prefix, "--confirm", "--json",
+            ],
+            environ,
+        )
+        assert (code, error) == (0, "")
+        assert json.loads(output)["schema_version"] == 4
+    finally:
+        with psycopg.connect(service.dsn, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    sql.SQL("DROP OWNED BY {} CASCADE").format(sql.Identifier(role))
+                )
+                cursor.execute(
+                    sql.SQL("DROP ROLE {}").format(sql.Identifier(role))
+                )
+
+
+def _token_count(dsn):
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM iwiki.tokens")
+            return cursor.fetchone()[0]
+
+
+def test_token_create_requires_the_exact_deployed_hosted_principal(admin_runtime):
+    import psycopg
+    from psycopg import sql
+
+    from iwiki_mcp import admin
+    from iwiki_mcp.postgres.store import provision_runtime_grant
+
+    config, environ = admin_runtime
+    prefix = ["--config", str(config)]
+    assert _run(["base", "create", *prefix, "--iwiki", "wiki-a"], environ)[0] == 0
+    for domain in ("docs", "private"):
+        assert _run(
+            ["domain", "create", *prefix, "--iwiki", "wiki-a", "--domain", domain],
+            environ,
+        )[0] == 0
+
+    service = admin._service(str(config), environ)
+    suffix = secrets.token_hex(5)
+    hosted = f"iwiki_t3_hostedcli_{suffix}"
+    narrow = f"iwiki_t3_narrowcli_{suffix}"
+    direct = f"iwiki_t3_directcli_{suffix}"
+    owner = f"iwiki_t3_ownercli_{suffix}"
+    with psycopg.connect(service.dsn, autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            for role in (hosted, narrow, direct, owner):
+                cursor.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN NOBYPASSRLS").format(
+                        sql.Identifier(role)
+                    )
+                )
+            cursor.execute(
+                sql.SQL("ALTER TABLE iwiki.pages OWNER TO {}").format(
+                    sql.Identifier(owner)
+                )
+            )
+    try:
+        provision_runtime_grant(
+            service.dsn,
+            principal=hosted,
+            iwiki_id="wiki-a",
+            read_domains=["docs", "private"],
+            write_domains=["docs"],
+            runtime="hosted",
+        )
+        provision_runtime_grant(
+            service.dsn,
+            principal=narrow,
+            iwiki_id="wiki-a",
+            read_domains=["docs"],
+            write_domains=[],
+            runtime="hosted",
+        )
+        provision_runtime_grant(
+            service.dsn,
+            principal=direct,
+            iwiki_id="wiki-a",
+            read_domains=["docs", "private"],
+            write_domains=["docs"],
+            runtime="direct",
+        )
+
+        before = _token_count(service.dsn)
+        with pytest.raises(SystemExit) as caught:
+            _run(
+                [
+                    "token", "create", *prefix, "--iwiki", "wiki-a",
+                    "--owner", "alice", "--read-domain", "docs",
+                ],
+                environ,
+            )
+        assert caught.value.code == 2
+        assert _token_count(service.dsn) == before
+
+        for rejected, reason in (
+            (f"iwiki_t3_absent_{suffix}", "unregistered"),
+            (narrow, "under-granted"),
+            (direct, "direct runtime"),
+            (owner, "table owner"),
+        ):
+            code, output, error = _run(
+                [
+                    "token", "create", *prefix, "--iwiki", "wiki-a",
+                    "--owner", "alice", "--read-domain", "docs",
+                    "--write-domain", "docs",
+                    "--hosted-principal", rejected,
+                ],
+                environ,
+            )
+            assert code != 0, reason
+            assert output == ""
+            assert "iwiki_" not in output
+            assert _token_count(service.dsn) == before
+
+        code, output, error = _run(
+            [
+                "token", "create", *prefix, "--iwiki", "wiki-a",
+                "--owner", "alice", "--read-domain", "docs",
+                "--write-domain", "docs",
+                "--hosted-principal", hosted,
+            ],
+            environ,
+        )
+        assert (code, error) == (0, "")
+        assert output.strip().startswith("iwiki_")
+        assert _token_count(service.dsn) == before + 1
+    finally:
+        with psycopg.connect(service.dsn, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    sql.SQL("ALTER TABLE iwiki.pages OWNER TO {}").format(
+                        sql.Identifier(service_owner(service.dsn))
+                    )
+                )
+                for role in (hosted, narrow, direct, owner):
+                    cursor.execute(
+                        sql.SQL("DROP OWNED BY {} CASCADE").format(
+                            sql.Identifier(role)
+                        )
+                    )
+                    cursor.execute(
+                        sql.SQL("DROP ROLE {}").format(sql.Identifier(role))
+                    )
+
+
+def service_owner(dsn):
+    import psycopg
+
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_user")
+            return cursor.fetchone()[0]
+
+
 def test_create_only_token_cli_bootstraps_empty_tenant(admin_runtime):
     config, environ = admin_runtime
     prefix = ["--config", str(config)]
@@ -250,10 +517,12 @@ def test_create_only_token_cli_bootstraps_empty_tenant(admin_runtime):
         ["base", "create", *prefix, "--iwiki", "wiki-a"], environ
     )[0] == 0
 
+    bootstrap = _bare_principal(config, environ)
     code, output, error = _run(
         [
             "token", "create", *prefix, "--iwiki", "wiki-a",
             "--owner", "provisioner", "--can-create-domain",
+            "--hosted-principal", bootstrap,
         ],
         environ,
     )
@@ -271,7 +540,7 @@ def test_create_only_token_cli_bootstraps_empty_tenant(admin_runtime):
     code, output, error = _run(
         [
             "token", "create", *prefix, "--iwiki", "wiki-a",
-            "--owner", "empty",
+            "--owner", "empty", "--hosted-principal", bootstrap,
         ],
         environ,
     )
@@ -297,6 +566,8 @@ def test_admin_recovers_and_lists_token_management_capabilities(admin_runtime):
         [
             "token", "create", *prefix, "--iwiki", "wiki-a",
             "--owner", "manager", "--read-domain", "docs",
+            "--hosted-principal",
+            _hosted_principal(config, environ, "wiki-a", ["docs"], []),
         ],
         environ,
     )
@@ -389,6 +660,8 @@ def test_admin_recovery_rejects_wrong_tenant_domain_and_token(admin_runtime):
         [
             "token", "create", *prefix, "--iwiki", "wiki-a",
             "--owner", "alice", "--read-domain", "docs",
+            "--hosted-principal",
+            _hosted_principal(config, environ, "wiki-a", ["docs"], []),
         ],
         environ,
     )

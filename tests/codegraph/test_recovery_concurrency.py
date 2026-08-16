@@ -35,7 +35,12 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     runtime_pair,
 ):
     first, second = runtime_pair
-    old = first.index(force=True)["revision"]
+    # Seed under a generous rebuild budget: the paused publication below needs
+    # the default two-second budget to prove bounded busy, but the first full
+    # build must not race it.
+    seeded = first.with_config(max_rebuild_seconds=30).index(force=True)
+    assert "revision" in seeded, seeded
+    old = seeded["revision"]
     with first.runtime._store.read_lease() as connection:
         old_names = tuple(
             row[0] for row in connection.execute(
@@ -82,7 +87,10 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
                 observations.append((repository, names))
             except Exception as exc:
                 observations.append(("error", type(exc).__name__))
-            time.sleep(0.005)
+            # Publication refuses to replace the canonical database while a
+            # foreign connection keeps -wal/-shm present, so the poll must
+            # leave the publisher a window instead of starving it.
+            time.sleep(0.05)
         observation_writer.send(observations)
         observation_writer.close()
 
@@ -95,7 +103,7 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
 
         def paused_replace(*args, **kwargs):
             entered.write_text("entered", encoding="utf-8")
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + 30
             while not release_replace.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not release_replace.exists():
@@ -107,7 +115,7 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
             verify_calls += 1
             if verify_calls == 2:
                 verify_pending.write_text("pending", encoding="utf-8")
-                deadline = time.monotonic() + 8
+                deadline = time.monotonic() + 30
                 while (
                     not release_verify.exists()
                     and time.monotonic() < deadline
@@ -140,7 +148,7 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
         competing = second.index(force=True)
         elapsed = time.monotonic() - started
         release_replace.write_text("release", encoding="utf-8")
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 20
         while not verify_pending.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert verify_pending.exists()
@@ -167,7 +175,8 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     observation_reader.close()
     after = second.status()
     assert competing["code"] == "busy"
-    assert elapsed < 3
+    # Bounded by the two-second rebuild budget, never by the paused publication.
+    assert elapsed < 8
     assert {item["state"] for item in during} == {"rebuilding"}
     assert {item["revision"] for item in during} == {
         writer_result["status"]["revision"]
@@ -465,3 +474,36 @@ def test_staging_cleanup_removes_only_callers_registered_artifacts(
     assert second_staging.is_file()
     second.discard_staging(second_staging)
     assert not second_staging.exists()
+
+
+def test_local_build_worker_suspends_crash_recovery(ready_runtime, monkeypatch):
+    """An in-flight local publication must never be recovered as a crash."""
+    from iwiki_mcp.codegraph import runtime as codegraph_runtime
+
+    runtime = ready_runtime.runtime
+    published = ready_runtime.status()
+    metadata = json.loads(
+        ready_runtime.paths.metadata.read_text(encoding="utf-8")
+    )
+    metadata["publication_phase"] = "pending_final_verify"
+    metadata.pop("duration_ms", None)
+    metadata.pop("phase_timings_ms", None)
+    ready_runtime.paths.metadata.write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        codegraph_runtime._BUILD_WORKERS,
+        "is_active",
+        lambda _key: True,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_recover_stale_metadata",
+        lambda _expected: pytest.fail("recovery pre-empted a live publication"),
+    )
+
+    status = runtime.status()
+
+    assert status["state"] == "rebuilding"
+    assert status["revision"] == published["revision"]
+    assert "error" not in status

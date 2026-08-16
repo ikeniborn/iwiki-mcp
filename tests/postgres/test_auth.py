@@ -374,7 +374,7 @@ def test_provision_domain_rolls_back_after_each_bootstrap_write(
             normalized = " ".join(statement.split())
             if normalized.startswith(
                 (
-                    "INSERT INTO iwiki.domains",
+                    "SELECT iwiki.create_domain_for_principal",
                     "INSERT INTO iwiki.token_domain_grants",
                     "INSERT INTO iwiki.token_domain_management_grants",
                 )

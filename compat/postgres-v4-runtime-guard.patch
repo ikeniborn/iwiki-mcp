@@ -1,0 +1,94 @@
+diff --git a/src/iwiki_mcp/http.py b/src/iwiki_mcp/http.py
+index 86920d9..1d11086 100644
+--- a/src/iwiki_mcp/http.py
++++ b/src/iwiki_mcp/http.py
+@@ -29,7 +29,7 @@ from .postgres.auth import (
+     validate_domain_identifier,
+ )
+ from .postgres.config import ConfigError, ServerConfig, load_server_config
+-from .postgres.migrations import MigrationSettings, run_migrations
++from .postgres.migrations import require_schema_version
+ 
+ 
+ _READ_DOMAIN_TOOLS = {
+@@ -496,6 +496,7 @@ def prepare_runtime(
+     cfg = admin._engine_config(config, env)
+     probe(cfg)
+     dsn = admin._dsn(config)
++    require_schema_version(dsn)
+     options = (
+         f"-c statement_timeout={config.server.statement_timeout_ms} "
+         f"-c lock_timeout={config.server.lock_timeout_ms}"
+@@ -510,15 +511,6 @@ def prepare_runtime(
+     )
+     try:
+         pool.open(wait=True)
+-        run_migrations(
+-            MigrationSettings(
+-                dsn=dsn,
+-                embed_model=config.models.embed_model,
+-                embed_dimensions=config.models.embed_dimensions,
+-                statement_timeout_ms=config.server.statement_timeout_ms,
+-                lock_timeout_ms=config.server.lock_timeout_ms,
+-            )
+-        )
+         from . import server
+ 
+         server._install_hosted_runtime(pool, cfg)
+diff --git a/src/iwiki_mcp/postgres/migrations.py b/src/iwiki_mcp/postgres/migrations.py
+index 402f66d..0e47f46 100644
+--- a/src/iwiki_mcp/postgres/migrations.py
++++ b/src/iwiki_mcp/postgres/migrations.py
+@@ -320,6 +320,31 @@ def _validate_metadata(cursor, settings: MigrationSettings) -> None:
+         raise MigrationError("embedding metadata mismatch")
+ 
+ 
++def require_schema_version(
++    dsn: str,
++    expected_version: int = 4,
++    *,
++    connect_timeout_s: int = 10,
++) -> None:
++    """Require one exact installed schema version without mutating the database."""
++    try:
++        with psycopg.connect(dsn, connect_timeout=connect_timeout_s) as connection:
++            with connection.cursor() as cursor:
++                cursor.execute("SET TRANSACTION READ ONLY")
++                cursor.execute(
++                    "SELECT COALESCE(MAX(version), 0) FROM iwiki.schema_migrations"
++                )
++                current = cursor.fetchone()[0]
++    except psycopg.Error as exc:
++        raise MigrationError(
++            f"PostgreSQL schema version {expected_version} is required"
++        ) from exc
++    if current != expected_version:
++        raise MigrationError(
++            f"PostgreSQL schema version {expected_version} is required"
++        )
++
++
+ def run_migrations(
+     settings: MigrationSettings,
+     *,
+diff --git a/src/iwiki_mcp/server.py b/src/iwiki_mcp/server.py
+index 67d9beb..379fc2f 100644
+--- a/src/iwiki_mcp/server.py
++++ b/src/iwiki_mcp/server.py
+@@ -2911,15 +2911,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
+     binding = base.resolve_storage_binding(project_dir)
+     if not _is_postgres(binding):
+         return
+-    _postgres_migrations.run_migrations(
+-        _postgres_migrations.MigrationSettings(
+-            dsn=binding.connection_dsn(),
+-            embed_model=cfg.embed_model,
+-            embed_dimensions=cfg.dimensions,
+-            statement_timeout_ms=30_000,
+-            lock_timeout_ms=5_000,
+-        )
+-    )
++    _postgres_migrations.require_schema_version(binding.connection_dsn())
+ 
+ 
+ def main() -> None:

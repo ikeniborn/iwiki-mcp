@@ -17,6 +17,7 @@ class _FakeRuntime:
     def __init__(self, binding, calls):
         self.binding = binding
         self.calls = calls
+        self.config = None
 
     def status(self):
         self.calls.append(f"status:{self.binding.primary}")
@@ -451,6 +452,10 @@ async def test_fastmcp_registry_has_exact_code_tools():
         "wiki_code_index",
         "wiki_code_search",
         "wiki_code_context",
+        "wiki_code_publish_begin",
+        "wiki_code_publish_batch",
+        "wiki_code_publish_finalize",
+        "wiki_code_publish_abort",
     }
     assert all(
         "domain" not in tool.inputSchema.get("properties", {})
@@ -468,6 +473,16 @@ async def test_fastmcp_registry_has_exact_code_tools():
     assert search_schema["properties"]["languages"]["default"] is None
     assert search_schema["properties"]["limit"]["default"] == 20
     assert "domain" not in search_schema["properties"]
+    assert set(tools["wiki_code_publish_batch"].inputSchema["properties"]) == {
+        "session_id", "kind", "ordinal", "rows", "payload_hash",
+    }
+    assert set(tools["wiki_code_publish_finalize"].inputSchema["properties"]) == {
+        "session_id",
+    }
+    assert all(
+        "iwiki_id" not in tool.inputSchema.get("properties", {})
+        for tool in code_tools.values()
+    )
     context_schema = tools["wiki_code_context"].inputSchema
     assert context_schema["required"] == ["seeds"]
     assert set(context_schema["properties"]) == {
@@ -489,3 +504,209 @@ async def test_fastmcp_registry_has_exact_code_tools():
 
 def test_wiki_search_regression_keeps_existing_function():
     assert server.wiki_search.__name__ == "wiki_search"
+
+
+@pytest.mark.parametrize(
+    ("handler", "args"),
+    [
+        (lambda: server.wiki_code_publish_begin({}), ()),
+        (lambda: server.wiki_code_publish_batch("s", "files", 0, [], "h"), ()),
+        (lambda: server.wiki_code_publish_finalize("s"), ()),
+        (lambda: server.wiki_code_publish_abort("s"), ()),
+    ],
+)
+def test_publication_tools_reject_git_sqlite_runtime(
+    seed_binding, monkeypatch, handler, args
+):
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+
+    assert handler(*args)["error"] == "unsupported_storage"
+
+
+def test_publish_mode_selects_exactly_one_publisher(seed_binding, monkeypatch):
+    selected = []
+
+    class _Publisher:
+        def __init__(self, mode):
+            selected.append(mode)
+
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(
+        server,
+        "_code_publisher_factories",
+        {
+            "sqlite": lambda binding, config: _Publisher("sqlite"),
+            "postgres": lambda binding, config: _Publisher("postgres"),
+            "mcp": lambda binding, config: _Publisher("mcp"),
+        },
+    )
+
+    for mode in ("sqlite", "postgres", "mcp"):
+        server._code_publisher(seed_binding, mode)
+
+    assert selected == ["sqlite", "postgres", "mcp"]
+
+
+class _RecordingPublisher:
+    def __init__(self):
+        self.calls = []
+
+    def begin(self, header):
+        self.calls.append(("begin", header.repository_id))
+        return _publication_session()
+
+    def publish_batch(self, session, batch):
+        self.calls.append(("batch", batch.kind, batch.ordinal))
+        return {"accepted": True}
+
+    def finalize(self, session):
+        self.calls.append(("finalize", session.session_id))
+        return {"state": "ready", "snapshot_revision": "sha256:remote"}
+
+    def abort(self, session):
+        self.calls.append(("abort", session.session_id))
+        return {"state": "aborted"}
+
+
+def _publication_session():
+    from iwiki_mcp.codegraph.publication import PublicationSession
+
+    return PublicationSession(
+        session_id="remote-session",
+        lease_expires_at="2026-08-16T10:00:00+00:00",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+    )
+
+
+def _exported_snapshot():
+    from iwiki_mcp.codegraph.publication import SnapshotHeader
+
+    rows = {
+        "repositories": [{"repository_id": "project", "state": "ready"}],
+        "files": [{"file_id": "py:file:0", "repository_id": "project"}],
+        "symbols": [],
+        "relations": [],
+    }
+    header = SnapshotHeader(
+        protocol_version=1,
+        schema_version=2,
+        repository_id="project",
+        source_fingerprint="source",
+        parser_fingerprint="parser",
+        normalizer_version="normalizer-1",
+        unicode_data_version="15.1",
+        languages=("python",),
+        expected_counts={kind: len(value) for kind, value in rows.items()},
+        graph_payload_revision="sha256:payload",
+    )
+    return header, rows
+
+
+def test_index_publishes_through_the_selected_remote_publisher(
+    seed_binding, monkeypatch
+):
+    from iwiki_mcp.codegraph.config import CodeGraphConfig
+
+    publisher = _RecordingPublisher()
+
+    class _Runtime:
+        config = CodeGraphConfig(publish_mode="postgres")
+
+        def index(self, *, force=False, languages=None):
+            return {"state": "ready", "revision": "sha256:local"}
+
+        def export_snapshot(self):
+            return _exported_snapshot()
+
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(server, "_code_runtime", lambda _binding: _Runtime())
+    monkeypatch.setitem(
+        server._code_publisher_factories,
+        "postgres",
+        lambda binding, config: publisher,
+    )
+
+    result = server.wiki_code_index()
+
+    assert result["state"] == "ready"
+    assert result["publication"] == {
+        "state": "ready",
+        "snapshot_revision": "sha256:remote",
+    }
+    assert publisher.calls[0] == ("begin", "project")
+    assert ("finalize", "remote-session") == publisher.calls[-1]
+    assert any(call[0] == "batch" for call in publisher.calls)
+
+
+def test_index_aborts_the_remote_session_on_a_rejected_batch(
+    seed_binding, monkeypatch
+):
+    from iwiki_mcp.codegraph.config import CodeGraphConfig
+
+    publisher = _RecordingPublisher()
+    publisher.publish_batch = lambda session, batch: {
+        "error": "batch_conflict",
+        "hint": "resend the identical batch or begin a new session",
+    }
+
+    class _Runtime:
+        config = CodeGraphConfig(publish_mode="mcp")
+
+        def index(self, *, force=False, languages=None):
+            return {"state": "ready"}
+
+        def export_snapshot(self):
+            return _exported_snapshot()
+
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(server, "_code_runtime", lambda _binding: _Runtime())
+    monkeypatch.setitem(
+        server._code_publisher_factories,
+        "mcp",
+        lambda binding, config: publisher,
+    )
+
+    result = server.wiki_code_index()
+
+    assert result["publication"]["error"] == "batch_conflict"
+    assert publisher.calls[-1][0] == "abort"
+
+
+def test_sqlite_publish_mode_stays_on_the_local_atomic_path(
+    seed_binding, monkeypatch
+):
+    from iwiki_mcp.codegraph.config import CodeGraphConfig
+
+    class _Runtime:
+        config = CodeGraphConfig()
+
+        def index(self, *, force=False, languages=None):
+            return {"state": "ready", "revision": "sha256:local"}
+
+        def export_snapshot(self):
+            raise AssertionError("SQLite mode must not export a snapshot")
+
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(server, "_code_runtime", lambda _binding: _Runtime())
+
+    assert server.wiki_code_index() == {
+        "state": "ready", "revision": "sha256:local"
+    }
+
+
+def test_export_snapshot_reproduces_the_ready_payload_revision(ready_runtime):
+    from iwiki_mcp.codegraph.publication import graph_payload_revision
+
+    exported = ready_runtime.runtime.export_snapshot()
+
+    assert not isinstance(exported, dict)
+    header, rows = exported
+    assert header.repository_id == ready_runtime.binding.primary
+    assert header.schema_version == 2
+    assert header.languages == ("python",)
+    assert header.expected_counts == {
+        kind: len(value) for kind, value in rows.items()
+    }
+    assert header.graph_payload_revision == graph_payload_revision(rows)
+    assert header.graph_payload_revision.startswith("sha256:")

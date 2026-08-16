@@ -58,64 +58,6 @@ def _write_server_config(path, dsn_values, *, storage_type="postgres"):
     )
 
 
-@pytest.fixture
-def hosted_runtime(clean_postgres, tmp_path, monkeypatch):
-    from psycopg.conninfo import conninfo_to_dict
-
-    from iwiki_mcp import http, server
-    from iwiki_mcp.postgres.auth import AuthStore
-
-    values = conninfo_to_dict(clean_postgres)
-    config_path = tmp_path / "server.toml"
-    _write_server_config(config_path, values)
-    environ = RedactedEnv(
-        {
-            "IWIKI_DB_PASSWORD": values["password"],
-            "IWIKI_LLM_BASE_URL": "http://provider.internal/v1",
-            "IWIKI_LLM_KEY": "server-only-model-key",
-            "IWIKI_EMBED_MODEL": "fixture-model",
-            "IWIKI_EMBED_DIMENSIONS": "3",
-            "IWIKI_RERANK_MODEL": "",
-        }
-    )
-    for name, value in environ.items():
-        monkeypatch.setenv(name, value)
-
-    server.mcp._session_manager = None
-    runtime = http.prepare_runtime(
-        str(config_path), environ=environ, probe=lambda _cfg: None
-    )
-    auth = AuthStore(runtime.dsn)
-    auth.create_wiki("wiki-a", "wiki-a")
-    auth.create_domain("wiki-a", "docs")
-    auth.create_domain("wiki-a", "private")
-    token = auth.create_token(
-        "wiki-a",
-        "alice",
-        read_domains=["docs"],
-        write_domains=["docs"],
-    )["token"]
-    revoked = auth.create_token(
-        "wiki-a",
-        "revoked",
-        read_domains=["docs"],
-        write_domains=[],
-    )
-    auth.revoke_token(revoked["token_id"])
-    disabled = auth.create_token(
-        "wiki-a",
-        "disabled",
-        read_domains=["docs"],
-        write_domains=[],
-    )["token"]
-
-    yield HostedFixture(runtime, auth, token, revoked["token"], disabled)
-
-    auth.set_wiki_active("wiki-a", True)
-    runtime.close()
-    server.mcp._session_manager = None
-
-
 def _request(client, token, payload, *, origin=None, session_id=None):
     headers = {
         "Accept": "application/json, text/event-stream",
@@ -433,6 +375,194 @@ def test_hosted_runtime_rejects_git_before_listener(
         http.run_server(str(config_path), environ=environ)
 
     assert listener_started is False
+
+
+@pytest.mark.parametrize("installed_version", [4, 6])
+def test_hosted_runtime_requires_exact_v5_without_running_migrations(
+    clean_postgres, tmp_path, monkeypatch, installed_version
+):
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict
+
+    from iwiki_mcp import http, server
+    from iwiki_mcp.postgres import migrations
+
+    settings = migrations.MigrationSettings(
+        dsn=clean_postgres,
+        embed_model="fixture-model",
+        embed_dimensions=3,
+        statement_timeout_ms=30_000,
+        lock_timeout_ms=5_000,
+    )
+    selected = migrations.MIGRATIONS[:installed_version]
+    migrations.run_migrations(settings, migrations=selected)
+    if installed_version == 6:
+        with psycopg.connect(clean_postgres) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO iwiki.schema_migrations (version) VALUES (6)"
+                )
+            connection.commit()
+    values = conninfo_to_dict(clean_postgres)
+    config_path = tmp_path / "server.toml"
+    _write_server_config(config_path, values)
+    environ = RedactedEnv(
+        {
+            "IWIKI_DB_PASSWORD": values.get("password", ""),
+            "IWIKI_LLM_BASE_URL": "http://example.invalid/v1",
+            "IWIKI_LLM_KEY": "fixture-key",
+            "IWIKI_EMBED_MODEL": "fixture-model",
+            "IWIKI_EMBED_DIMENSIONS": "3",
+            "IWIKI_RERANK_MODEL": "",
+        }
+    )
+    monkeypatch.setattr(
+        migrations,
+        "run_migrations",
+        lambda *_args, **_kwargs: pytest.fail("runtime must not migrate"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_install_hosted_runtime",
+        lambda *_args, **_kwargs: pytest.fail("runtime must fail before install"),
+    )
+
+    with pytest.raises(
+        migrations.MigrationError,
+        match="schema version 5 is required",
+    ):
+        http.prepare_runtime(
+            str(config_path), environ=environ, probe=lambda _cfg: None
+        )
+
+
+def test_hosted_runtime_rejects_an_unprovisioned_session_user(
+    clean_postgres, tmp_path, monkeypatch
+):
+    from psycopg.conninfo import conninfo_to_dict
+
+    from tests.postgres.conftest import _cfg, create_runtime_role, drop_runtime_role
+
+    from iwiki_mcp import http, server
+    from iwiki_mcp.postgres import migrations
+    from iwiki_mcp.postgres.store import PostgresStore, provision_runtime_grant
+
+    migrations.run_migrations(
+        migrations.MigrationSettings(
+            dsn=clean_postgres,
+            embed_model="fixture-model",
+            embed_dimensions=3,
+            statement_timeout_ms=30_000,
+            lock_timeout_ms=5_000,
+        )
+    )
+    admin_store = PostgresStore(clean_postgres, "wiki-a", _cfg())
+    admin_store.create_wiki("wiki-a")
+    admin_store.create_domain("docs")
+    role, password = create_runtime_role(clean_postgres, prefix="unprovisioned")
+    provision_runtime_grant(
+        clean_postgres,
+        principal=role,
+        iwiki_id="wiki-a",
+        read_domains=["docs"],
+        write_domains=["docs"],
+        runtime="direct",
+    )
+    values = {**conninfo_to_dict(clean_postgres), "user": role, "password": password}
+    config_path = tmp_path / "server.toml"
+    _write_server_config(config_path, values)
+    environ = RedactedEnv(
+        {
+            "IWIKI_DB_PASSWORD": password,
+            "IWIKI_LLM_BASE_URL": "http://example.invalid/v1",
+            "IWIKI_LLM_KEY": "fixture-key",
+            "IWIKI_EMBED_MODEL": "fixture-model",
+            "IWIKI_EMBED_DIMENSIONS": "3",
+            "IWIKI_RERANK_MODEL": "",
+        }
+    )
+    monkeypatch.setattr(
+        server,
+        "_install_hosted_runtime",
+        lambda *_args, **_kwargs: pytest.fail("runtime must fail before install"),
+    )
+
+    try:
+        with pytest.raises(ValueError, match="hosted principal"):
+            http.prepare_runtime(
+                str(config_path), environ=environ, probe=lambda _cfg: None
+            )
+    finally:
+        drop_runtime_role(clean_postgres, role)
+
+
+@pytest.mark.parametrize("installed_version", [4, 6])
+def test_stdio_runtime_requires_exact_v5_without_running_migrations(
+    clean_postgres, monkeypatch, installed_version
+):
+    import psycopg
+
+    from iwiki_mcp import server
+    from iwiki_mcp.engine.config import Config
+    from iwiki_mcp.postgres import migrations
+
+    settings = migrations.MigrationSettings(
+        dsn=clean_postgres,
+        embed_model="fixture-model",
+        embed_dimensions=3,
+        statement_timeout_ms=30_000,
+        lock_timeout_ms=5_000,
+    )
+    migrations.run_migrations(settings, migrations=migrations.MIGRATIONS[:installed_version])
+    if installed_version == 6:
+        with psycopg.connect(clean_postgres) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO iwiki.schema_migrations (version) VALUES (6)"
+                )
+            connection.commit()
+    binding = type(
+        "DisposableBinding",
+        (),
+        {"connection_dsn": lambda self: clean_postgres},
+    )()
+    monkeypatch.setattr(server.base, "resolve_project_dir", lambda: "/tmp/project")
+    monkeypatch.setattr(
+        server.base,
+        "load_project_config",
+        lambda _project: {"storage": {"type": "postgres"}},
+    )
+    monkeypatch.setattr(
+        server.base, "resolve_storage_binding", lambda _project: binding
+    )
+    monkeypatch.setattr(server, "_is_postgres", lambda _binding: True)
+    monkeypatch.setattr(
+        migrations,
+        "run_migrations",
+        lambda *_args, **_kwargs: pytest.fail("runtime must not migrate"),
+    )
+    cfg = Config(
+        base_url="http://example.invalid/v1",
+        api_key="fixture",
+        embed_model="fixture-model",
+        dimensions=3,
+        chunk_size=512,
+        chunk_overlap=64,
+        summary_max=400,
+        top_k=8,
+        score_threshold=0.0,
+        graph_depth=2,
+        ignore=None,
+        seed_top_k=2,
+        bfs_top_k=10,
+        seed_threshold=0.0,
+    )
+
+    with pytest.raises(
+        migrations.MigrationError,
+        match="schema version 5 is required",
+    ):
+        server._initialize_postgres_storage(cfg)
 
 
 def test_session_refresh_preserves_selection_without_grant_expansion(

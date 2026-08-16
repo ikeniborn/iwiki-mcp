@@ -29,7 +29,8 @@ from .postgres.auth import (
     validate_domain_identifier,
 )
 from .postgres.config import ConfigError, ServerConfig, load_server_config
-from .postgres.migrations import MigrationSettings, run_migrations
+from .postgres.migrations import require_schema_version
+from .postgres.store import require_hosted_runtime_principal
 
 
 _READ_DOMAIN_TOOLS = {
@@ -43,6 +44,17 @@ _WRITE_DOMAIN_TOOLS = {
     "wiki_update_page",
     "wiki_delete_page",
     "wiki_index",
+}
+_CODE_PUBLISH_TOOLS = {
+    "wiki_code_publish_begin",
+    "wiki_code_publish_batch",
+    "wiki_code_publish_finalize",
+    "wiki_code_publish_abort",
+}
+_CODE_READ_TOOLS = {
+    "wiki_code_status",
+    "wiki_code_search",
+    "wiki_code_context",
 }
 _DOMAIN_GRANT_TOOLS = {
     "wiki_list_domain_grants",
@@ -238,13 +250,24 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         raise AccessError(403)
     name = params.get("name")
     protected = name == "wiki_create_domain" or name in _DOMAIN_GRANT_TOOLS
+    code_graph = name in _CODE_PUBLISH_TOOLS or name in _CODE_READ_TOOLS
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
         if protected:
             raise AccessError(403)
-        return
+        if not code_graph:
+            return
+        arguments = {}
     if "iwiki_id" in arguments:
         raise AccessError(403)
+    if code_graph:
+        if "domain" in arguments:
+            raise AccessError(403)
+        if name in _CODE_PUBLISH_TOOLS:
+            context.require_primary_write()
+        else:
+            context.require_primary_read()
+        return
     if name == "wiki_create_domain":
         if not context.can_create_domain:
             raise AccessError(403)
@@ -496,6 +519,8 @@ def prepare_runtime(
     cfg = admin._engine_config(config, env)
     probe(cfg)
     dsn = admin._dsn(config)
+    require_schema_version(dsn)
+    require_hosted_runtime_principal(dsn)
     options = (
         f"-c statement_timeout={config.server.statement_timeout_ms} "
         f"-c lock_timeout={config.server.lock_timeout_ms}"
@@ -510,18 +535,9 @@ def prepare_runtime(
     )
     try:
         pool.open(wait=True)
-        run_migrations(
-            MigrationSettings(
-                dsn=dsn,
-                embed_model=config.models.embed_model,
-                embed_dimensions=config.models.embed_dimensions,
-                statement_timeout_ms=config.server.statement_timeout_ms,
-                lock_timeout_ms=config.server.lock_timeout_ms,
-            )
-        )
         from . import server
 
-        server._install_hosted_runtime(pool, cfg)
+        server._install_hosted_runtime(pool, cfg, config.code_graph)
         server.mcp.settings.json_response = True
         server.mcp.settings.stateless_http = False
         server.mcp.settings.transport_security = TransportSecuritySettings(

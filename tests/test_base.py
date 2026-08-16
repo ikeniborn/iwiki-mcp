@@ -143,6 +143,39 @@ def test_resolve_binding_builds_immutable_local_postgres_binding(tmp_path, monke
         bind.iwiki_id = "other"
 
 
+def test_postgres_binding_accepts_code_graph_without_identity_override(
+    tmp_path, monkeypatch
+):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    common = (
+        'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+        '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+        'database = "iwiki"\nuser = "runtime"\nsslmode = "require"\n'
+        'iwiki_id = "personal"\n'
+    )
+    (proj / ".iwiki.toml").write_text(
+        common
+        + '[code_graph]\npublish_mode = "postgres"\nread_mode = "postgres"\n',
+        encoding="utf-8",
+    )
+    _set_postgres_runtime(monkeypatch)
+
+    binding = base.resolve_storage_binding(str(proj))
+
+    assert binding.iwiki_id == "personal"
+    assert binding.read == ("docs",)
+    assert binding.write == ("docs",)
+    assert binding.primary == "docs"
+
+    (proj / ".iwiki.toml").write_text(
+        common + '[code_graph]\niwiki_id = "other"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(base.BaseError, match="cannot override"):
+        base.resolve_storage_binding(str(proj))
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [

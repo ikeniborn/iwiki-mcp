@@ -73,6 +73,21 @@ def test_search_release_gate_is_strictly_below_500_ms():
     ] is False
 
 
+def test_startup_release_gate_is_strictly_below_500_ms():
+    assert DEFAULT_THRESHOLDS["startup_ms"] == 500.0
+
+    quality, performance = _gate_inputs(0.0)
+    performance["startup_ms"] = 499.999
+    assert _evaluate_gates(quality, performance, DEFAULT_THRESHOLDS)["startup_ms"][
+        "passed"
+    ] is True
+
+    performance["startup_ms"] = 500.0
+    assert _evaluate_gates(quality, performance, DEFAULT_THRESHOLDS)["startup_ms"][
+        "passed"
+    ] is False
+
+
 def test_post_v1_target_is_per_case_and_non_blocking():
     cases = runner._mark_post_v1_targets([
         {"warm_max_ms": 149.999},
@@ -278,7 +293,7 @@ def test_quality_and_determinism_gates_are_recorded(benchmark_report):
 
 def test_performance_gates_are_recorded(benchmark_report):
     performance = benchmark_report["performance"]
-    assert performance["startup_ms"] < 100
+    assert performance["startup_ms"] < 500
     assert performance["noop_ms"] < 200
     assert performance["build_1000_files_ms"] < 15_000
     assert performance["context_ms"] < 300

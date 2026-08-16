@@ -1,8 +1,6 @@
 """Deterministic source, configuration, parser, and build fingerprints."""
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 import subprocess
@@ -10,6 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from .config import CodeGraphConfig
+from .canonical import canonical_sha256
 from .discovery import SourceFile
 
 
@@ -24,12 +23,8 @@ class FingerprintSet:
     inputs: str
 
 
-def _canonical_json(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
 def _hash(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value)).hexdigest()
+    return canonical_sha256(value, prefix=False)
 
 
 def _source_rows(files: Iterable[SourceFile]) -> list[tuple[str, str]]:
@@ -43,7 +38,21 @@ def source_fingerprint(files: Iterable[SourceFile]) -> str:
 
 def normalized_config(config: CodeGraphConfig) -> dict[str, Any]:
     """Return all fields canonically while preserving ordered ignore rules."""
-    values = asdict(config)
+    values = {
+        key: value
+        for key, value in asdict(config).items()
+        if key
+        in {
+            "auto_rebuild",
+            "enabled",
+            "exclude",
+            "include_tests",
+            "languages",
+            "max_file_bytes",
+            "max_rebuild_seconds",
+            "max_total_files",
+        }
+    }
     values["languages"] = sorted(set(values["languages"]))
     values["exclude"] = list(values["exclude"])
     return {key: values[key] for key in sorted(values)}

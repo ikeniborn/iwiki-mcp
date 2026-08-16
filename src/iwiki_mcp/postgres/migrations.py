@@ -49,6 +49,422 @@ class MigrationResult:
 _MIGRATION_LOCK = 7595435311942266217
 
 
+GRAPH_MIGRATION_STATEMENTS = (
+    """
+    ALTER TABLE iwiki.domains
+        ADD COLUMN IF NOT EXISTS markdown_generation bigint NOT NULL DEFAULT 0
+    """,
+    """
+    DO $body$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'domains_markdown_generation_nonnegative'
+              AND conrelid = 'iwiki.domains'::regclass
+        ) THEN
+            ALTER TABLE iwiki.domains
+                ADD CONSTRAINT domains_markdown_generation_nonnegative
+                CHECK (markdown_generation >= 0);
+        END IF;
+    END
+    $body$
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.database_principal_domain_grants (
+        principal text NOT NULL,
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        runtime text NOT NULL CHECK (runtime IN ('hosted', 'direct')),
+        can_read boolean NOT NULL,
+        can_write boolean NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (principal, iwiki_id, domain_id),
+        CONSTRAINT database_principal_grants_write_requires_read
+            CHECK (NOT can_write OR can_read),
+        CONSTRAINT database_principal_grants_domain_fk
+            FOREIGN KEY (iwiki_id, domain_id)
+            REFERENCES iwiki.domains (iwiki_id, domain_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE SEQUENCE IF NOT EXISTS iwiki.code_graph_domain_lock_id_seq AS bigint
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_snapshots (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        snapshot_id text NOT NULL,
+        state text NOT NULL CHECK (state IN ('staging', 'ready', 'failed')),
+        header jsonb NOT NULL,
+        graph_payload_revision text NOT NULL,
+        snapshot_revision text,
+        markdown_revision text NOT NULL,
+        markdown_generation bigint NOT NULL CHECK (markdown_generation >= 0),
+        counts jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        ready_at timestamptz,
+        PRIMARY KEY (iwiki_id, domain_id, snapshot_id),
+        CONSTRAINT code_graph_snapshots_domain_fk
+            FOREIGN KEY (iwiki_id, domain_id)
+            REFERENCES iwiki.domains (iwiki_id, domain_id)
+            ON DELETE CASCADE,
+        CONSTRAINT code_graph_snapshots_state_key
+            UNIQUE (iwiki_id, domain_id, snapshot_id, state)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_domain_state (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        domain_lock_id bigint NOT NULL DEFAULT
+            nextval('iwiki.code_graph_domain_lock_id_seq'),
+        active_snapshot_id text,
+        active_snapshot_state text,
+        updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (iwiki_id, domain_id),
+        CONSTRAINT code_graph_domain_state_lock_key UNIQUE (domain_lock_id),
+        CONSTRAINT code_graph_domain_state_domain_fk
+            FOREIGN KEY (iwiki_id, domain_id)
+            REFERENCES iwiki.domains (iwiki_id, domain_id)
+            ON DELETE CASCADE,
+        CONSTRAINT code_graph_domain_state_active_shape
+            CHECK (
+                (active_snapshot_id IS NULL AND active_snapshot_state IS NULL)
+                OR (active_snapshot_id IS NOT NULL AND active_snapshot_state = 'ready')
+            ),
+        CONSTRAINT code_graph_domain_state_active_ready_fk
+            FOREIGN KEY (
+                iwiki_id, domain_id, active_snapshot_id, active_snapshot_state
+            ) REFERENCES iwiki.code_graph_snapshots (
+                iwiki_id, domain_id, snapshot_id, state
+            ) ON DELETE NO ACTION
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_publication_sessions (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        session_id text NOT NULL,
+        snapshot_id text NOT NULL,
+        owner_id text NOT NULL,
+        state text NOT NULL CHECK (
+            state IN ('staging', 'ready', 'aborted', 'failed', 'expired')
+        ),
+        lease_expires_at timestamptz NOT NULL,
+        base_snapshot_revision text,
+        captured_markdown_generation bigint NOT NULL
+            CHECK (captured_markdown_generation >= 0),
+        terminal_result jsonb,
+        created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (iwiki_id, domain_id, session_id),
+        CONSTRAINT code_graph_sessions_snapshot_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id)
+            REFERENCES iwiki.code_graph_snapshots (
+                iwiki_id, domain_id, snapshot_id
+            ) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_batches (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        session_id text NOT NULL,
+        kind text NOT NULL CHECK (
+            kind IN ('repositories', 'files', 'symbols', 'relations')
+        ),
+        ordinal integer NOT NULL CHECK (ordinal >= 0),
+        payload_hash text NOT NULL,
+        row_count integer NOT NULL CHECK (row_count >= 0),
+        byte_count integer NOT NULL CHECK (byte_count >= 0),
+        payload bytea NOT NULL,
+        accepted_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (iwiki_id, domain_id, session_id, kind, ordinal),
+        CONSTRAINT code_graph_batches_session_fk
+            FOREIGN KEY (iwiki_id, domain_id, session_id)
+            REFERENCES iwiki.code_graph_publication_sessions (
+                iwiki_id, domain_id, session_id
+            ) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_files (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        snapshot_id text NOT NULL,
+        file_id text NOT NULL,
+        repository_id text NOT NULL,
+        row_data jsonb NOT NULL,
+        PRIMARY KEY (iwiki_id, domain_id, snapshot_id, file_id),
+        CONSTRAINT code_graph_files_snapshot_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id)
+            REFERENCES iwiki.code_graph_snapshots (
+                iwiki_id, domain_id, snapshot_id
+            ) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_symbols (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        snapshot_id text NOT NULL,
+        symbol_id text NOT NULL,
+        file_id text NOT NULL,
+        row_data jsonb NOT NULL,
+        PRIMARY KEY (iwiki_id, domain_id, snapshot_id, symbol_id),
+        CONSTRAINT code_graph_symbols_snapshot_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id)
+            REFERENCES iwiki.code_graph_snapshots (
+                iwiki_id, domain_id, snapshot_id
+            ) ON DELETE CASCADE,
+        CONSTRAINT code_graph_symbols_file_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id, file_id)
+            REFERENCES iwiki.code_graph_files (
+                iwiki_id, domain_id, snapshot_id, file_id
+            ) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_relations (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        snapshot_id text NOT NULL,
+        relation_id text NOT NULL,
+        source_file_id text NOT NULL,
+        source_symbol_id text,
+        target_symbol_id text,
+        row_data jsonb NOT NULL,
+        PRIMARY KEY (iwiki_id, domain_id, snapshot_id, relation_id),
+        CONSTRAINT code_graph_relations_snapshot_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id)
+            REFERENCES iwiki.code_graph_snapshots (
+                iwiki_id, domain_id, snapshot_id
+            ) ON DELETE CASCADE,
+        CONSTRAINT code_graph_relations_source_file_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id, source_file_id)
+            REFERENCES iwiki.code_graph_files (
+                iwiki_id, domain_id, snapshot_id, file_id
+            ) ON DELETE CASCADE,
+        CONSTRAINT code_graph_relations_source_symbol_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id, source_symbol_id)
+            REFERENCES iwiki.code_graph_symbols (
+                iwiki_id, domain_id, snapshot_id, symbol_id
+            ) ON DELETE CASCADE,
+        CONSTRAINT code_graph_relations_target_symbol_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id, target_symbol_id)
+            REFERENCES iwiki.code_graph_symbols (
+                iwiki_id, domain_id, snapshot_id, symbol_id
+            ) ON DELETE NO ACTION
+    )
+    """,
+    """
+    DO $body$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'pages_iwiki_domain_page_key'
+              AND conrelid = 'iwiki.pages'::regclass
+        ) THEN
+            ALTER TABLE iwiki.pages
+                ADD CONSTRAINT pages_iwiki_domain_page_key
+                UNIQUE (iwiki_id, domain_id, page_id);
+        END IF;
+    END
+    $body$
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_wiki_links (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        snapshot_id text NOT NULL,
+        relation_id text NOT NULL,
+        page_id bigint NOT NULL,
+        selector jsonb NOT NULL,
+        provenance jsonb NOT NULL,
+        PRIMARY KEY (
+            iwiki_id, domain_id, snapshot_id, relation_id, page_id, selector
+        ),
+        CONSTRAINT code_graph_wiki_links_snapshot_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id)
+            REFERENCES iwiki.code_graph_snapshots (
+                iwiki_id, domain_id, snapshot_id
+            ) ON DELETE CASCADE,
+        CONSTRAINT code_graph_wiki_links_relation_fk
+            FOREIGN KEY (iwiki_id, domain_id, snapshot_id, relation_id)
+            REFERENCES iwiki.code_graph_relations (
+                iwiki_id, domain_id, snapshot_id, relation_id
+            ) ON DELETE CASCADE,
+        CONSTRAINT code_graph_wiki_links_page_fk
+            FOREIGN KEY (iwiki_id, domain_id, page_id)
+            REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+            ON DELETE NO ACTION
+    )
+    """,
+    """
+    CREATE OR REPLACE FUNCTION iwiki.database_principal_can_access(
+        requested_iwiki text,
+        requested_domain bigint,
+        requested_write boolean
+    ) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, iwiki
+    AS $function$
+        SELECT EXISTS (
+            SELECT 1
+            FROM iwiki.database_principal_domain_grants g
+            WHERE g.principal = session_user
+              AND g.iwiki_id = requested_iwiki
+              AND g.domain_id = requested_domain
+              AND g.can_read
+              AND (NOT requested_write OR g.can_write)
+        )
+    $function$
+    """,
+    """
+    REVOKE ALL ON FUNCTION iwiki.database_principal_can_access(text, bigint, boolean)
+        FROM PUBLIC
+    """,
+    """
+    CREATE OR REPLACE FUNCTION iwiki.database_principal_runtime_domains(
+        requested_runtime text
+    ) RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, iwiki
+    AS $function$
+        SELECT count(*)
+        FROM iwiki.database_principal_domain_grants g
+        WHERE g.principal = session_user
+          AND g.runtime = requested_runtime
+          AND g.can_read
+    $function$
+    """,
+    """
+    REVOKE ALL ON FUNCTION iwiki.database_principal_runtime_domains(text)
+        FROM PUBLIC
+    """,
+    """
+    CREATE OR REPLACE FUNCTION iwiki.create_domain_for_principal(
+        requested_iwiki text,
+        requested_slug text
+    ) RETURNS bigint
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, iwiki
+    AS $function$
+    DECLARE
+        created_domain bigint;
+        runtime_kind text;
+    BEGIN
+        SELECT g.runtime INTO runtime_kind
+        FROM iwiki.database_principal_domain_grants g
+        WHERE g.principal = session_user
+          AND g.iwiki_id = requested_iwiki
+        LIMIT 1;
+        IF runtime_kind IS NULL AND EXISTS (
+            SELECT 1
+            FROM iwiki.database_principal_domain_grants g
+            WHERE g.principal = session_user
+        ) THEN
+            RAISE EXCEPTION 'principal is not provisioned for this wiki';
+        END IF;
+        INSERT INTO iwiki.domains (iwiki_id, slug)
+        VALUES (requested_iwiki, requested_slug)
+        ON CONFLICT (iwiki_id, slug) DO NOTHING
+        RETURNING domain_id INTO created_domain;
+        IF created_domain IS NULL THEN
+            RETURN NULL;
+        END IF;
+        IF runtime_kind IS NOT NULL THEN
+            INSERT INTO iwiki.database_principal_domain_grants
+                (principal, iwiki_id, domain_id, runtime, can_read, can_write)
+            VALUES (
+                session_user, requested_iwiki, created_domain, runtime_kind,
+                true, true
+            );
+        END IF;
+        RETURN created_domain;
+    END;
+    $function$
+    """,
+    """
+    REVOKE ALL ON FUNCTION iwiki.create_domain_for_principal(text, text)
+        FROM PUBLIC
+    """,
+    *(f"ALTER TABLE iwiki.{table} ENABLE ROW LEVEL SECURITY" for table in (
+        "domains", "pages", "chunks", "links", "code_graph_domain_state",
+        "code_graph_publication_sessions", "code_graph_snapshots",
+        "code_graph_batches", "code_graph_files", "code_graph_symbols",
+        "code_graph_relations", "code_graph_wiki_links",
+    )),
+    """
+    DROP POLICY IF EXISTS database_principal_scope ON iwiki.domains;
+    CREATE POLICY database_principal_scope ON iwiki.domains
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, false))
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """,
+    """
+    DROP POLICY IF EXISTS database_principal_scope ON iwiki.pages;
+    CREATE POLICY database_principal_scope ON iwiki.pages
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, false))
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """,
+    """
+    DROP POLICY IF EXISTS database_principal_scope ON iwiki.chunks;
+    CREATE POLICY database_principal_scope ON iwiki.chunks
+        USING (EXISTS (
+            SELECT 1 FROM iwiki.pages p
+            WHERE p.iwiki_id = chunks.iwiki_id AND p.page_id = chunks.page_id
+              AND iwiki.database_principal_can_access(
+                  p.iwiki_id, p.domain_id, false
+              )
+        ))
+        WITH CHECK (EXISTS (
+            SELECT 1 FROM iwiki.pages p
+            WHERE p.iwiki_id = chunks.iwiki_id AND p.page_id = chunks.page_id
+              AND iwiki.database_principal_can_access(
+                  p.iwiki_id, p.domain_id, true
+              )
+        ))
+    """,
+    """
+    DROP POLICY IF EXISTS database_principal_scope ON iwiki.links;
+    CREATE POLICY database_principal_scope ON iwiki.links
+        USING (EXISTS (
+            SELECT 1 FROM iwiki.pages p
+            WHERE p.iwiki_id = links.iwiki_id
+              AND p.page_id = links.source_page_id
+              AND iwiki.database_principal_can_access(
+                  p.iwiki_id, p.domain_id, false
+              )
+        ))
+        WITH CHECK (EXISTS (
+            SELECT 1 FROM iwiki.pages p
+            WHERE p.iwiki_id = links.iwiki_id
+              AND p.page_id = links.source_page_id
+              AND iwiki.database_principal_can_access(
+                  p.iwiki_id, p.domain_id, true
+              )
+        ))
+    """,
+    *(f"""
+    DROP POLICY IF EXISTS database_principal_scope ON iwiki.{table};
+    CREATE POLICY database_principal_scope ON iwiki.{table}
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, false))
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """ for table in (
+        "code_graph_domain_state", "code_graph_publication_sessions",
+        "code_graph_snapshots", "code_graph_batches", "code_graph_files",
+        "code_graph_symbols", "code_graph_relations", "code_graph_wiki_links",
+    )),
+)
+
+
+SCHEMA5_COMPATIBILITY_ROLLBACK_SQL = f"""
+SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
+DELETE FROM iwiki.schema_migrations WHERE version = 5;
+"""
+
+
 MIGRATIONS = (
     Migration(
         version=1,
@@ -259,6 +675,7 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(version=5, statements=GRAPH_MIGRATION_STATEMENTS),
 )
 
 
@@ -393,3 +810,112 @@ def run_migrations(
         applied_versions=tuple(applied),
         schema_version=latest,
     )
+
+
+def require_schema_version(
+    dsn: str,
+    expected_version: int = 5,
+    *,
+    connect_timeout_s: int = 10,
+) -> None:
+    """Require one exact installed schema version without mutating the database."""
+    try:
+        with psycopg.connect(
+            dsn, connect_timeout=connect_timeout_s
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SET TRANSACTION READ ONLY")
+                cursor.execute(
+                    "SELECT COALESCE(MAX(version), 0) "
+                    "FROM iwiki.schema_migrations"
+                )
+                current = cursor.fetchone()[0]
+    except psycopg.Error as exc:
+        raise MigrationError(
+            f"PostgreSQL schema version {expected_version} is required"
+        ) from exc
+    if current != expected_version:
+        raise MigrationError(
+            f"PostgreSQL schema version {expected_version} is required"
+        )
+
+
+def rollback_v5_compatibility(
+    settings: MigrationSettings,
+    *,
+    confirm: bool,
+) -> dict[str, int | bool]:
+    """Remove only migration marker 4 after validating mapped runtime roles."""
+    try:
+        with psycopg.connect(
+            settings.dsn,
+            connect_timeout=settings.connect_timeout_s,
+        ) as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(settings.statement_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)",
+                        (str(settings.lock_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,)
+                    )
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(version), 0) "
+                        "FROM iwiki.schema_migrations"
+                    )
+                    current = cursor.fetchone()[0]
+                    if current != 5:
+                        raise MigrationError(
+                            "schema version 5 compatibility rollback is unavailable"
+                        )
+                    cursor.execute(
+                        """
+                        SELECT g.principal
+                        FROM iwiki.database_principal_domain_grants g
+                        LEFT JOIN pg_roles r ON r.rolname = g.principal
+                        WHERE r.rolname IS NULL OR r.rolsuper OR r.rolbypassrls
+                           OR EXISTS (
+                               SELECT 1
+                               FROM pg_class c
+                               JOIN pg_namespace n ON n.oid = c.relnamespace
+                               WHERE n.nspname = 'iwiki'
+                                 AND c.relname IN (
+                                     'domains', 'pages', 'chunks', 'links',
+                                     'code_graph_domain_state',
+                                     'code_graph_publication_sessions',
+                                     'code_graph_snapshots', 'code_graph_batches',
+                                     'code_graph_files', 'code_graph_symbols',
+                                     'code_graph_relations', 'code_graph_wiki_links'
+                                 )
+                                 AND c.relowner = r.oid
+                           )
+                        LIMIT 1
+                        """
+                    )
+                    if cursor.fetchone() is not None:
+                        raise MigrationError("runtime principal validation failed")
+                    if not confirm:
+                        return {
+                            "dry_run": True,
+                            "schema_version": 5,
+                            "would_remove_marker": 5,
+                        }
+                    cursor.execute(
+                        "DELETE FROM iwiki.schema_migrations WHERE version = 5"
+                    )
+                    if cursor.rowcount != 1:
+                        raise MigrationError("migration marker removal failed")
+    except MigrationError:
+        raise
+    except psycopg.Error as exc:
+        raise MigrationError("compatibility rollback failed") from exc
+    return {
+        "dry_run": False,
+        "schema_version": 4,
+        "removed_marker": 5,
+    }

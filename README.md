@@ -215,13 +215,86 @@ pg_dump --dbname=service=iwiki --format=custom --schema=iwiki --file=/secure/enc
 pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /secure/encrypted-volume/iwiki.dump
 ```
 
+#### Runtime principals for the code graph
+
+Three database roles stay separate. The schema owner and migrator is an
+administration-only credential: it owns the `iwiki` schema and applies migrations
+through the admin commands, and it is never configured as a running server's login.
+The hosted service principal is the role a hosted server connects as. The direct
+runtime principal is the role a local direct-PostgreSQL indexer connects as. Both
+runtime roles are non-owner, hold no `BYPASSRLS`, run no migrations, and receive no
+database or schema `CREATE`. Row-level security is enabled with ordinary
+`ENABLE ROW LEVEL SECURITY`, never `FORCE`, because the owner is administration-only.
+
+Register each runtime role and its domain grants explicitly. `principal grant` never
+creates a role and never accepts its password; create the login separately with the
+credentials your platform manages.
+
+```bash
+iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal inspect --principal iwiki_hosted --json
+```
+
+Provision domains before enabling tokens, then issue tokens against the exact deployed
+hosted role. `token create` requires `--hosted-principal ROLE`, where `ROLE` equals the
+hosted server's `[storage].user`. It verifies that this named role is registered as
+`runtime=hosted`, is a non-owner without `BYPASSRLS`, and already covers every requested
+read and write domain before any token material is generated. Another hosted role, or a
+generic "some hosted role exists" check, is not a substitute.
+
+```bash
+iwiki-mcp domain create --iwiki team-wiki --domain backend
+iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp token create --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp serve --transport streamable-http
+```
+
+Startup performs the same schema check for hosted HTTP and stdio: the server validates
+the exact expected schema version and its own connected `session_user` against the
+provisioned grants, and refuses to start otherwise. It never runs migrations implicitly.
+
+#### Schema v5 rollback and the compatibility artifact
+
+Migration v5 adds the code-graph tables. Rolling back the application to a
+pre-code-graph release is a maintenance procedure, not a redeploy of an arbitrary older
+commit: the raw pre-code-graph commit is not a supported rollback binary, because a
+restricted runtime role holds no schema `CREATE` and that binary would try to create
+schema objects at startup.
+
+The supported path is the pinned maintenance artifact `compat/postgres-v4-runtime-guard.json`
+with its patch. The manifest records the base commit, the patch digest, the source-tree
+digest, and the schema version the patched runtime accepts. Rebuild and verify it by
+checking out the recorded base commit, applying the recorded patch, and confirming both
+digests before deployment.
+
+```bash
+iwiki-mcp schema rollback-v5-compat --json
+iwiki-mcp schema rollback-v5-compat --confirm --json
+```
+
+The dry run reports the marker it would remove and changes nothing. Only `--confirm`
+removes the schema-5 marker, leaving the code-graph tables in place and unused. After
+the rollback, smoke the patched maintenance artifact against the database: it must start
+read-only under the restricted runtime role and must hold no `CREATE` or
+`schema_migrations` mutation privilege. Re-applying migration v5 later is the ordinary
+forward migration; it is idempotent.
+
+Stop the production rollout, rather than working around it, when the exact hosted
+principal cannot be proven, when a required domain grant is missing, when the connected
+`session_user` differs from the provisioned role, when the schema version does not match
+exactly, or when the maintenance artifact digests do not reproduce.
+
 ### PostgreSQL MCP tool contract
 
 | PostgreSQL support | Tools |
 | --- | --- |
 | Supported | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
 | Hosted PostgreSQL only | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
-| Git only | `wiki_code_status`, `wiki_code_index`, `wiki_code_search`, `wiki_code_context`, `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
+| Supported code graph | `wiki_code_status`, `wiki_code_search`, `wiki_code_context` |
+| Hosted PostgreSQL only | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort` |
+| Local checkout only | `wiki_code_index` |
+| Git only | `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
 
 Git-only tools return
 `{"error":"unsupported_storage","storage":"postgres","hint":"use this tool with Git storage"}`.
@@ -319,7 +392,8 @@ attempted when configured. A missing, incompatible, stale, or failed cache retur
 typed diagnostics and leaves normal wiki operations available. A schema-v1 cache is
 incompatible and is replaced by a deterministic full rebuild.
 
-The MCP server exposes exactly four code-graph tools:
+The MCP server exposes eight code-graph tools; the four publication tools are
+documented under distributed publication below:
 
 | Tool | Contract |
 | --- | --- |
@@ -337,6 +411,100 @@ calls fail safely if the local cache cannot be used.
 Incremental indexing is not part of the Python MVP.
 TypeScript is not part of the Python MVP.
 Each needs a separate specification and delivery.
+
+### Distributed code graph publication
+
+The code graph is always built from a local checkout, but the resulting snapshot may
+live somewhere else. One machine with the repository indexes it and publishes one
+immutable snapshot; a server without the checkout answers `wiki_code_status`,
+`wiki_code_search`, and `wiki_code_context` from the active snapshot.
+
+Select exactly one publication target and one read target in the bound project's
+`.iwiki.toml`. There is no fallback: a failure in the selected mode is returned to the
+caller and never retried against another mode.
+
+```toml
+[code_graph]
+publish_mode = "sqlite" # sqlite | postgres | mcp
+read_mode = "sqlite"    # sqlite | postgres | mcp
+max_snapshot_age_seconds = 86400 # 0 disables age rejection
+max_batch_rows = 1000
+max_batch_bytes = 1000000
+publication_session_ttl_seconds = 900
+staging_retention_seconds = 86400
+staging_cleanup_limit = 100
+```
+
+A ready snapshot older than a positive `max_snapshot_age_seconds` returns
+`stale_snapshot` and no rows, while status keeps reporting age and timestamps. Value
+`0` disables age rejection entirely. The hosted server enforces its own validated
+ceilings for the numeric fields; a remote client cannot raise them.
+
+Secrets never enter `.iwiki.toml`. MCP mode reads `IWIKI_CODE_GRAPH_MCP_URL` and
+`IWIKI_CODE_GRAPH_MCP_TOKEN` from the runtime environment only, and both are absent
+from status, logs, snapshot headers, errors, and object reprs. Direct PostgreSQL mode
+reuses the existing `[storage]` block and `IWIKI_DB_PASSWORD`.
+
+| Mode | Publishes to | Requires |
+| --- | --- | --- |
+| `sqlite` | The local code-graph cache next to the wiki base | A local checkout |
+| `postgres` | The configured PostgreSQL wiki database | A local checkout plus `[storage]` and `IWIKI_DB_PASSWORD` |
+| `mcp` | An authenticated remote iwiki server | A local checkout plus `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` |
+
+`wiki_code_index` stays a local extraction operation. On a server without a checkout it
+returns `source_unavailable` and creates no session and no snapshot; run the indexer on
+a machine that holds the repository. One primary domain maps to exactly one repository.
+
+Remote publication is a four-call lifecycle over the existing bearer-token
+authorization: `wiki_code_publish_begin`, repeated `wiki_code_publish_batch`,
+then `wiki_code_publish_finalize` or `wiki_code_publish_abort`. None of them accepts a
+tenant or domain field; the server derives `iwiki_id` and the bound primary from the
+token, which must hold write access to that primary. A session belongs to the identity
+that created it: another token with write access to the same domain cannot append to,
+abort, or finalize it, and a replacement process must start a new session.
+
+Batches carry rows only — never a database file, source text, an absolute checkout
+path, credentials, or publisher-generated wiki links. The target recomputes the payload
+revision, derives code-to-wiki links from the destination Markdown itself, and activates
+the snapshot in a single commit. Readers therefore observe either the previous complete
+revision or the new one, never a partial upload. Repeating an accepted ordinal with the
+same rows succeeds idempotently; repeating it with different rows returns
+`batch_conflict`.
+
+Retry the whole publication after `busy`, `session_expired`, `snapshot_conflict`,
+`revision_mismatch`, or `markdown_unavailable`: begin a new session and resend. A
+`snapshot_conflict` means the active snapshot or the destination Markdown changed while
+the session was open, so the rebuilt graph must be published against the current state.
+Expired staging sessions are cleaned up in bounded batches when the next session begins;
+no background daemon runs.
+
+For PostgreSQL or remote MCP reads, `include_source=true` returns graph context without
+source plus `source_unavailable`; the server never fetches source from the publisher.
+Local SQLite reads keep their existing guarded local-source behavior. Search and context
+limits are enforced for every read adapter, so a remote caller cannot request an
+unbounded result or load a whole graph implicitly.
+
+The first publication into an empty domain is an ordinary session: status reports
+`missing_snapshot` until the first `finalize` succeeds.
+
+### SQLite snapshot profiles and commit uncertainty
+
+The local SQLite cache has exactly two accepted schema-v2 profiles. The legacy profile
+holds the five public entity tables and requires the strict database-plus-sidecar
+storage-stamp validation. The publication profile adds the internal
+`code_graph_publication` table, which then carries the authoritative ready evidence; on
+that profile `.metadata.json` is a cache only and may be absent, stale, or regenerated
+without changing readiness.
+
+SQLite publication may return `commit_uncertain`. It means the canonical replacement may
+have happened but directory durability was not confirmed. It claims neither success nor
+rollback, and it permits exactly one recovery: repeating `finalize` in the same process.
+Batch, abort, automatic rollback, and adapter fallback are all refused. If the process is
+lost before reconciliation, inspect `wiki_code_status` and start a new session. Direct
+PostgreSQL and remote MCP never emit `commit_uncertain`.
+
+Before rolling back to a pre-publication binary, retain or restore a legacy snapshot, or
+reindex with that binary, because it may reject the internal table.
 
 ### Code graph benchmark
 

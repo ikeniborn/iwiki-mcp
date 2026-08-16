@@ -77,6 +77,18 @@ class AuthContext:
         if not self.can_write(domain):
             raise AccessError(403)
 
+    def require_primary_read(self) -> str:
+        """Return the bound primary a code-graph read is authorized against."""
+        if self.primary is None or not self.can_read(self.primary):
+            raise AccessError(403)
+        return self.primary
+
+    def require_primary_write(self) -> str:
+        """Return the bound primary a code-graph publication writes to."""
+        if self.primary is None or not self.can_write(self.primary):
+            raise AccessError(403)
+        return self.primary
+
     def can_manage_grants(self, domain: str) -> bool:
         return domain in self.managed_domains
 
@@ -355,14 +367,12 @@ class AuthStore:
                 if not self._active_caller(cursor, context, lock=True):
                     raise AccessError(403)
                 cursor.execute(
-                    "INSERT INTO iwiki.domains (iwiki_id, slug) "
-                    "VALUES (%s, %s) ON CONFLICT (iwiki_id, slug) "
-                    "DO NOTHING RETURNING domain_id",
+                    "SELECT iwiki.create_domain_for_principal(%s, %s)",
                     (context.iwiki_id, valid_domain),
                 )
-                inserted = cursor.fetchone()
+                inserted = cursor.fetchone()[0]
                 if inserted is not None:
-                    domain_id = inserted[0]
+                    domain_id = inserted
                     cursor.execute(
                         "INSERT INTO iwiki.token_domain_grants "
                         "(iwiki_id, token_id, domain_id, can_read, can_write) "

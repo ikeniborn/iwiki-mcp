@@ -622,6 +622,24 @@ def test_build_reports_observability_without_source_text(seed_runtime):
     assert seed_runtime.status()["phase_timings_ms"] == out["phase_timings_ms"]
 
 
+def test_build_rows_is_portable_and_does_not_publish(seed_runtime):
+    indexer = seed_runtime.runtime._indexer
+
+    built = indexer.build_rows()
+
+    assert built.header.expected_counts == {
+        kind: len(rows) for kind, rows in built.tables.items()
+    }
+    assert built.header.repository_id == seed_runtime.binding.primary
+    assert built.private_root == Path(seed_runtime.binding.project_dir).resolve()
+    assert set(built.tables) == {
+        "repositories", "files", "symbols", "relations",
+    }
+    assert "root_path" not in built.tables["repositories"][0]
+    assert not seed_runtime.paths.database.exists()
+    assert not seed_runtime.paths.metadata.exists()
+
+
 def test_build_counts_only_file_exclusions_in_observability(
     seed_runtime, monkeypatch
 ):

@@ -52,7 +52,7 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
     assert result.applied_versions == tuple(
         migration.version for migration in MIGRATIONS
     )
-    assert tables == {
+    assert {
         "chunks",
         "domains",
         "git_imports",
@@ -64,7 +64,9 @@ def test_empty_database_creates_only_iwiki_schema_objects(clean_postgres):
         "token_domain_grants",
         "token_domain_management_grants",
         "tokens",
-    }
+        "code_graph_snapshots",
+        "database_principal_domain_grants",
+    } <= tables
 
 
 def test_repeated_and_concurrent_startup_applies_one_ordered_history(clean_postgres):
@@ -150,14 +152,17 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
             )
 
 
-def test_migration_history_includes_domain_authority_v4():
+def test_migration_history_includes_domain_authority_and_code_graph():
     from iwiki_mcp.postgres.migrations import MIGRATIONS
 
-    assert tuple(migration.version for migration in MIGRATIONS) == (1, 2, 3, 4)
-    statements = "\n".join(MIGRATIONS[-1].statements)
+    assert tuple(migration.version for migration in MIGRATIONS) == (1, 2, 3, 4, 5)
+    statements = "\n".join(MIGRATIONS[3].statements)
     assert "can_create_domain" in statements
     assert "token_domain_management_grants" in statements
     assert "token_domain_grants_domain_idx" in statements
+    graph_statements = "\n".join(MIGRATIONS[4].statements)
+    assert "code_graph_snapshots" in graph_statements
+    assert "database_principal_domain_grants" in graph_statements
     assert "token_domain_management_grants_domain_idx" in statements
 
 

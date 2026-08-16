@@ -10,13 +10,14 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
 import sys
-from typing import Callable, Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Protocol, Sequence
 
 from filelock import Timeout
 
 from iwiki_mcp.engine import frontmatter
 from iwiki_mcp.engine.okf_artifacts import RESERVED_OKF
 
+from .canonical import canonical_sha256
 from .models import ParsedFile
 
 
@@ -41,6 +42,38 @@ _HAS_SAFE_DESCRIPTOR_TRAVERSAL = (
     and os.scandir in os.supports_fd
     and bool(getattr(os, "O_NOFOLLOW", 0))
 )
+
+
+@dataclass(frozen=True)
+class MarkdownPageSnapshot:
+    """One immutable target Markdown page used for link derivation."""
+
+    slug: str
+    markdown: str
+
+
+@dataclass(frozen=True)
+class MarkdownDomainSnapshot:
+    """One coherent target Markdown state with its canonical revision."""
+
+    change_token: str | int
+    revision: str
+    pages: tuple["MarkdownPageSnapshot", ...]
+
+
+class MarkdownSnapshotProvider(Protocol):
+    """Target-owned source of immutable Markdown snapshots."""
+
+    def markdown_snapshot(self, domain: str) -> MarkdownDomainSnapshot: ...
+
+
+def markdown_revision(pages: Sequence[MarkdownPageSnapshot]) -> str:
+    """Hash slug-ordered page digests into one canonical Markdown revision."""
+    payload = [
+        [page.slug, hashlib.sha256(page.markdown.encode("utf-8")).hexdigest()]
+        for page in sorted(pages, key=lambda item: item.slug)
+    ]
+    return canonical_sha256(payload, prefix=True)
 
 
 class SelectorError(ValueError):

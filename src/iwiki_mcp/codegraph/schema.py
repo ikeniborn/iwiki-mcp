@@ -184,6 +184,25 @@ TABLE_DDL = {
     """,
 }
 
+PUBLICATION_TABLE_DDL = """
+    CREATE TABLE code_graph_publication (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        format_version INTEGER NOT NULL CHECK (format_version = 1),
+        state TEXT NOT NULL CHECK (state = 'ready'),
+        domain TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        graph_payload_revision TEXT NOT NULL,
+        snapshot_revision TEXT NOT NULL,
+        markdown_revision TEXT NOT NULL,
+        counts_json TEXT NOT NULL,
+        indexed_at TEXT NOT NULL,
+        terminal_result_json TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        envelope_digest TEXT NOT NULL
+    )
+"""
+
 INDEX_DDL = {
     "idx_files_repository_path": (
         "CREATE INDEX idx_files_repository_path ON files(repository_id, path)"
@@ -348,6 +367,23 @@ EXPECTED_COLUMNS = {
     ),
 }
 
+EXPECTED_PUBLICATION_COLUMNS = (
+    ("singleton", "INTEGER", 0, None, 1),
+    ("format_version", "INTEGER", 1, None, 0),
+    ("state", "TEXT", 1, None, 0),
+    ("domain", "TEXT", 1, None, 0),
+    ("repository_id", "TEXT", 1, None, 0),
+    ("session_id", "TEXT", 1, None, 0),
+    ("graph_payload_revision", "TEXT", 1, None, 0),
+    ("snapshot_revision", "TEXT", 1, None, 0),
+    ("markdown_revision", "TEXT", 1, None, 0),
+    ("counts_json", "TEXT", 1, None, 0),
+    ("indexed_at", "TEXT", 1, None, 0),
+    ("terminal_result_json", "TEXT", 1, None, 0),
+    ("content_digest", "TEXT", 1, None, 0),
+    ("envelope_digest", "TEXT", 1, None, 0),
+)
+
 
 def normalize_ddl(statement: str) -> str:
     """Normalize harmless SQLite formatting while preserving the SQL contract."""
@@ -359,6 +395,7 @@ def normalize_ddl(statement: str) -> str:
 EXPECTED_TABLE_DDL = {
     name: normalize_ddl(statement) for name, statement in TABLE_DDL.items()
 }
+EXPECTED_PUBLICATION_TABLE_DDL = normalize_ddl(PUBLICATION_TABLE_DDL)
 EXPECTED_INDEX_DDL = {
     name: normalize_ddl(statement) for name, statement in INDEX_DDL.items()
 }
@@ -386,18 +423,33 @@ def create_schema(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def create_publication_schema(connection: sqlite3.Connection) -> None:
+    """Create exact schema-v2 publication profile in an empty database."""
+    for statement in TABLE_DDL.values():
+        connection.execute(statement)
+    for statement in INDEX_DDL.values():
+        connection.execute(statement)
+    connection.execute(PUBLICATION_TABLE_DDL)
+    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    connection.commit()
+
+
 def validate_schema(connection: sqlite3.Connection) -> None:
     """Reject every table, index, column, or version mismatch."""
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version != SCHEMA_VERSION:
         raise CodeGraphSchemaError("incompatible code graph schema")
 
+    schema_objects = tuple(connection.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%'"
+    ))
+    if any(kind not in {"table", "index"} for kind, _name, _sql in schema_objects):
+        raise CodeGraphSchemaError("incompatible code graph schema")
     table_ddl = {
-        row[0]: normalize_ddl(row[1])
-        for row in connection.execute(
-            "SELECT name, sql FROM sqlite_master "
-            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        )
+        name: normalize_ddl(sql)
+        for kind, name, sql in schema_objects
+        if kind == "table"
     }
     index_ddl = {
         row[0]: normalize_ddl(row[1])
@@ -406,7 +458,14 @@ def validate_schema(connection: sqlite3.Connection) -> None:
             "WHERE type = 'index' AND sql IS NOT NULL"
         )
     }
-    if table_ddl != EXPECTED_TABLE_DDL or index_ddl != EXPECTED_INDEX_DDL:
+    expected_publication = {
+        **EXPECTED_TABLE_DDL,
+        "code_graph_publication": EXPECTED_PUBLICATION_TABLE_DDL,
+    }
+    if (
+        table_ddl not in (EXPECTED_TABLE_DDL, expected_publication)
+        or index_ddl != EXPECTED_INDEX_DDL
+    ):
         raise CodeGraphSchemaError("incompatible code graph schema")
 
     implicit_unique_indexes = tuple(sorted(
@@ -428,7 +487,10 @@ def validate_schema(connection: sqlite3.Connection) -> None:
     if implicit_unique_indexes != EXPECTED_IMPLICIT_UNIQUE_INDEXES:
         raise CodeGraphSchemaError("incompatible code graph schema")
 
-    for table, expected in EXPECTED_COLUMNS.items():
+    expected_columns = dict(EXPECTED_COLUMNS)
+    if "code_graph_publication" in table_ddl:
+        expected_columns["code_graph_publication"] = EXPECTED_PUBLICATION_COLUMNS
+    for table, expected in expected_columns.items():
         actual = tuple(
             (row[1], row[2].upper(), row[3], row[4], row[5])
             for row in connection.execute(f"PRAGMA table_info({table})")

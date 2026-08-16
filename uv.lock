@@ -323,9 +323,10 @@ wheels = [
 
 [[package]]
 name = "iwiki-mcp"
-version = "0.7.122"
+version = "0.7.134"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "filelock" },
     { name = "httpx" },
     { name = "mcp" },
@@ -352,6 +353,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.0" },
     { name = "filelock", specifier = ">=3.29" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "httpx", specifier = ">=0.27" },
