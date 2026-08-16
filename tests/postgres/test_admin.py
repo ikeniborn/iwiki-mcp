@@ -176,7 +176,7 @@ def _bare_principal(config, environ):
     """Create one disposable restricted role with no domain grant yet."""
     from iwiki_mcp import admin
 
-    from conftest import create_runtime_role
+    from tests.postgres.conftest import create_runtime_role
 
     service = admin._service(str(config), environ)
     role, _password = create_runtime_role(service.dsn, prefix="bootstrapcli")
@@ -188,7 +188,7 @@ def _hosted_principal(config, environ, iwiki_id, read_domains, write_domains):
     from iwiki_mcp import admin
     from iwiki_mcp.postgres.store import provision_runtime_grant
 
-    from conftest import create_runtime_role
+    from tests.postgres.conftest import create_runtime_role
 
     service = admin._service(str(config), environ)
     role, _password = create_runtime_role(service.dsn, prefix="hostedcli")

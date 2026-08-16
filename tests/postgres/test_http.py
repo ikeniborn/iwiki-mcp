@@ -441,7 +441,7 @@ def test_hosted_runtime_rejects_an_unprovisioned_session_user(
 ):
     from psycopg.conninfo import conninfo_to_dict
 
-    from conftest import _cfg, create_runtime_role, drop_runtime_role
+    from tests.postgres.conftest import _cfg, create_runtime_role, drop_runtime_role
 
     from iwiki_mcp import http, server
     from iwiki_mcp.postgres import migrations

@@ -464,6 +464,16 @@ class GraphFixture:
     def for_domain(self, domain):
         return GraphFixture(self.dsn, self.admin_dsn, self.iwiki_id, domain)
 
+    def with_owner(self, owner_id):
+        return GraphFixture(
+            self.dsn,
+            self.admin_dsn,
+            self.iwiki_id,
+            self.domain,
+            owner_id=owner_id,
+            rows=self.rows,
+        )
+
     def _query(self, statement, parameters=(), *, admin=False):
         import psycopg
 
@@ -1054,6 +1064,64 @@ def hosted_empty_code(pg_ranked_graph, monkeypatch):
     bound, token = _bind_hosted_code(pg_ranked_graph, monkeypatch)
     yield bound
     server._AUTH_CONTEXT.reset(token)
+
+
+class HostedRankedRuntime:
+    """Hosted HTTP runtime paired with the shared ranked snapshot payload."""
+
+    def __init__(self, runtime, token, graph, admin_dsn):
+        self.runtime = runtime
+        self.token = token
+        self.graph = graph
+        self.admin_dsn = admin_dsn
+
+    def __repr__(self):
+        return "<redacted hosted ranked runtime>"
+
+    def active_rows(self):
+        import psycopg
+
+        with psycopg.connect(self.admin_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT row_data FROM iwiki.code_graph_files "
+                    "UNION ALL SELECT row_data FROM iwiki.code_graph_symbols "
+                    "UNION ALL SELECT row_data FROM iwiki.code_graph_relations"
+                )
+                return {"rows": [row[0] for row in cursor.fetchall()]}
+
+
+class RankedPayload:
+    """Carry the ranked header and rows without owning any publisher."""
+
+    def __init__(self, domain):
+        from iwiki_mcp.codegraph import publication
+
+        self.domain = domain
+        self.rows = _ranked_rows(domain)
+        counts = {kind: len(rows) for kind, rows in self.rows.items()}
+        self.header = publication.SnapshotHeader(
+            protocol_version=1,
+            schema_version=2,
+            repository_id=domain,
+            source_fingerprint="source-fixture",
+            parser_fingerprint="parser-fixture",
+            normalizer_version="normalizer-1",
+            unicode_data_version="15.1",
+            languages=("python",),
+            expected_counts=counts,
+            graph_payload_revision=publication.graph_payload_revision(self.rows),
+        )
+
+
+@pytest.fixture
+def hosted_ranked_runtime(hosted_runtime, clean_postgres):
+    return HostedRankedRuntime(
+        hosted_runtime.runtime,
+        hosted_runtime.token,
+        RankedPayload("docs"),
+        clean_postgres,
+    )
 
 
 @pytest.fixture
