@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Результаты внедрения — postgres-code-graph-distributed-indexing</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg);
+  transition:background .3s, color .3s;
+}
+.theme-btn{
+  position:sticky; top:.5rem; float:right; z-index:5;
+  cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px;
+  background:var(--surface);
+}
+h1{ font-size:1.7rem; margin:.2rem 0 .3rem; }
+h2{ font-size:1.25rem; margin:2.2rem 0 .6rem; border-bottom:2px solid var(--accent); padding-bottom:.25rem; }
+h3{ font-size:1.02rem; margin:1.4rem 0 .4rem; color:var(--muted); }
+.lead{ font-size:1.08rem; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0; }
+.note.ok{ border-left-color:var(--ok); background:color-mix(in srgb, var(--ok) 10%, var(--surface)); }
+.note.warn{ border-left-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+.badge{ display:inline-block; font-size:.72rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); }
+.badge.done{ color:var(--ok-2); border-color:var(--ok); }
+.badge.warn{ color:var(--warn-2); border-color:var(--warn); }
+.badge.info{ color:var(--accent-2); border-color:var(--accent); }
+code{ font-family:ui-monospace, monospace; font-size:.9em; }
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface);
+  margin:1rem 0; font-size:.9rem; border:1px solid var(--border); border-radius:10px;
+  overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.45rem .7rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table tbody tr:hover{ background:color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.rpt-table td code{ white-space:nowrap; }
+.num{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.add{ color:var(--ok-2); } .del{ color:var(--danger-2); }
+.metrics{ display:flex; flex-wrap:wrap; gap:.8rem; margin:1rem 0; }
+.metric{ flex:1 1 190px; background:var(--surface); border:1px solid var(--border);
+  border-radius:10px; padding:.7rem .9rem; box-shadow:0 2px 10px var(--shadow); }
+.metric .k{ color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+.metric .v{ font-size:1.35rem; font-weight:650; }
+details{ background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  padding:.5rem .8rem; margin:.6rem 0; }
+summary{ cursor:pointer; font-weight:600; }
+figure.diagram{ margin:1.2rem 0; }
+figure.diagram svg{ width:100%; height:auto; display:block; overflow:visible; }
+figcaption{ color:var(--muted); font-size:.85rem; margin-top:.35rem; text-align:center; }
+.card{ fill:var(--surface); stroke:var(--border); stroke-width:1.5; filter:url(#dropshadow); transition:stroke .15s, stroke-width .15s; }
+.node:hover .card{ stroke:var(--accent); stroke-width:2.5; }
+.bar-accent{ fill:var(--accent); } .bar-ok{ fill:var(--ok); }
+.bar-warn{ fill:var(--warn); } .bar-term{ fill:var(--danger); }
+.t-title{ fill:var(--fg); font:600 13px system-ui, sans-serif; }
+.t-sub{ fill:var(--muted); font:10.5px system-ui, sans-serif; }
+text{ pointer-events:none; }
+.conn{ fill:none; stroke:var(--line); stroke-width:2; }
+.conn-a{ fill:none; stroke:var(--accent); stroke-width:2; stroke-dasharray:5 5; }
+.conn-term{ fill:none; stroke:var(--danger); stroke-width:2.2; }
+.flow{ fill:none; stroke:var(--accent); stroke-width:2.4; stroke-dasharray:8 6; animation:dash 1.1s linear infinite; }
+.flow-ok{ fill:none; stroke:var(--ok); stroke-width:2.4; stroke-dasharray:8 6; animation:dash 1.1s linear infinite; }
+@keyframes dash{ to{ stroke-dashoffset:-14; } }
+@media (prefers-reduced-motion: reduce){ .flow,.flow-ok{ animation:none; } }
+.lbl-bg{ fill:var(--bg); }
+.lbl{ fill:var(--fg); font:10.5px system-ui, sans-serif; }
+.boundary-rect{ fill:none; stroke:var(--accent); stroke-width:1.6; stroke-dasharray:7 6; opacity:.85; }
+footer{ margin-top:3rem; color:var(--muted); font-size:.82rem; border-top:1px solid var(--border); padding-top:.8rem; }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Переключить тему">🌙 / ☀️</label>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="dropshadow" x="-20%" y="-20%" width="140%" height="160%">
+    <feDropShadow dx="0" dy="2.5" stdDeviation="3.5" flood-color="var(--shadow)" flood-opacity="1"/>
+  </filter>
+  <marker id="arr" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--line)"/></marker>
+  <marker id="arrA" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--accent)"/></marker>
+  <marker id="arrOk" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--ok)"/></marker>
+  <marker id="arrTerm" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--danger)"/></marker>
+</defs></svg>
+
+<main class="report">
+
+<h1>Распределённая публикация code graph — результаты внедрения</h1>
+<p class="lead">Тема <code>postgres-code-graph-distributed-indexing</code>. Один локальный индексер строит граф из checkout и публикует неизменяемый снапшот в SQLite, напрямую в PostgreSQL или через аутентифицированный удалённый MCP; сервер без checkout отвечает на запросы из активного снапшота.</p>
+
+<h2>1. Резюме внедрения</h2>
+
+<table class="rpt-table">
+  <thead><tr><th>Артефакт</th><th>Путь</th><th>Состояние</th></tr></thead>
+  <tbody>
+    <tr><td>Интент</td><td><code>docs/superpowers/intents/2026-08-14-postgres-code-graph-distributed-indexing-intent.md</code></td><td>одобрен, хеш <code>a626f91a91ecfa50</code></td></tr>
+    <tr><td>Спека</td><td><code>docs/superpowers/specs/2026-08-14-postgres-code-graph-distributed-indexing-design.md</code></td><td>одобрена, хеш <code>b9e1cbdffa84c6fa</code></td></tr>
+    <tr><td>План</td><td><code>docs/superpowers/plans/2026-08-14-postgres-code-graph-distributed-indexing.md</code></td><td>одобрен, хеш <code>9e7bfad4a25ba650</code></td></tr>
+    <tr><td>База сверки</td><td><code>origin/master...HEAD</code></td><td>рабочее дерево чистое, <code>git diff HEAD</code> пуст</td></tr>
+  </tbody>
+</table>
+
+<div class="metrics">
+  <div class="metric"><div class="k">Коммитов в ветке</div><div class="v">22</div></div>
+  <div class="metric"><div class="k">Файлов изменено</div><div class="v">66</div></div>
+  <div class="metric"><div class="k">Строк</div><div class="v"><span class="add">+15 943</span> / <span class="del">−303</span></div></div>
+  <div class="metric"><div class="k">Версия</div><div class="v">0.7.133</div></div>
+  <div class="metric"><div class="k">Полный набор тестов</div><div class="v">2260 passed</div></div>
+  <div class="metric"><div class="k">Инструментов MCP</div><div class="v">25 → 29</div></div>
+</div>
+
+<h2>2. Выполненные изменения</h2>
+
+<h3>Реализация</h3>
+<table class="rpt-table">
+  <thead><tr><th>Файл</th><th>Вид</th><th class="num">± строк</th><th>Что делает изменение</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/iwiki_mcp/codegraph/publication.py</code></td><td>добавлен</td><td class="num"><span class="add">+326</span></td><td>Общий протокол публикации: неизменяемый заголовок, канонические строки, ограниченные батчи, замкнутые коды ошибок</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/canonical.py</code></td><td>добавлен</td><td class="num"><span class="add">+27</span></td><td>Канонические JSON-байты и SHA-256 для ревизий полезной нагрузки</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/sqlite_adapter.py</code></td><td>добавлен</td><td class="num"><span class="add">+1459</span></td><td>Атомарная публикация в SQLite: сессии, проверка, замена канонической базы, <code>commit_uncertain</code></td></tr>
+    <tr><td><code>src/iwiki_mcp/postgres/codegraph.py</code></td><td>добавлен</td><td class="num"><span class="add">+1653</span></td><td>Публикатор и читатель PostgreSQL: сессии с непередаваемым владельцем, активация одним коммитом, девять рангов поиска, обход контекста</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/mcp_adapter.py</code></td><td>добавлен</td><td class="num"><span class="add">+249</span></td><td>Удалённый MCP-транспорт: секреты только из окружения, короткоживущая сессия, санитизированный <code>remote_mcp_failed</code></td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/reader.py</code></td><td>добавлен</td><td class="num"><span class="add">+29</span></td><td>Общий протокол читателя и пустые конверты ответа</td></tr>
+    <tr><td><code>src/iwiki_mcp/postgres/migrations.py</code></td><td>изменён</td><td class="num"><span class="add">+526</span></td><td>Миграция 5: таблицы графа, RLS, SECURITY DEFINER-функции, откат совместимости</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/store.py</code></td><td>изменён</td><td class="num"><span class="add">+399</span> / <span class="del">−10</span></td><td>Профиль публикации SQLite, staging, пломбированное чтение, экспорт строк</td></tr>
+    <tr><td><code>src/iwiki_mcp/postgres/store.py</code></td><td>изменён</td><td class="num"><span class="add">+361</span> / <span class="del">−4</span></td><td>Транзакционный <code>markdown_generation</code>, снапшот Markdown, code-graph раздел линта, гранты рантайм-ролей</td></tr>
+    <tr><td><code>src/iwiki_mcp/server.py</code></td><td>изменён</td><td class="num"><span class="add">+315</span> / <span class="del">−17</span></td><td>Композиция адаптеров по режимам, четыре инструмента публикации, чтение из PostgreSQL, <code>source_unavailable</code> без checkout</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/indexer.py</code></td><td>изменён</td><td class="num"><span class="add">+172</span> / <span class="del">−1</span></td><td>Сборка строк снапшота отдельно от публикации</td></tr>
+    <tr><td><code>src/iwiki_mcp/admin.py</code></td><td>изменён</td><td class="num"><span class="add">+118</span> / <span class="del">−5</span></td><td>Команды <code>principal grant/inspect</code>, <code>schema rollback-v5-compat</code>, обязательный <code>--hosted-principal</code></td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/schema.py</code></td><td>изменён</td><td class="num"><span class="add">+69</span> / <span class="del">−7</span></td><td>Второй принимаемый профиль схемы v2 с внутренней таблицей публикации</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/config.py</code></td><td>изменён</td><td class="num"><span class="add">+63</span> / <span class="del">−4</span></td><td><code>publish_mode</code>, <code>read_mode</code>, границы батчей, TTL, свежесть</td></tr>
+    <tr><td><code>src/iwiki_mcp/postgres/config.py</code></td><td>изменён</td><td class="num"><span class="add">+52</span> / <span class="del">−1</span></td><td>Hosted-потолки публикации, которые клиент не может поднять</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/runtime.py</code></td><td>изменён</td><td class="num"><span class="add">+51</span> / <span class="del">−11</span></td><td><code>export_snapshot</code> и приостановка восстановления при живой публикации</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/linking.py</code></td><td>изменён</td><td class="num"><span class="add">+34</span> / <span class="del">−1</span></td><td>Канонический <code>markdown_revision</code> и снапшот страниц назначения</td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/query.py</code></td><td>изменён</td><td class="num"><span class="add">+30</span> / <span class="del">−25</span></td><td>Общий маппер результата поиска для обоих хранилищ</td></tr>
+    <tr><td><code>src/iwiki_mcp/http.py</code></td><td>изменён</td><td class="num"><span class="add">+28</span> / <span class="del">−12</span></td><td>Классификация инструментов публикации и чтения по связанному primary</td></tr>
+    <tr><td><code>src/iwiki_mcp/base.py</code></td><td>изменён</td><td class="num"><span class="add">+20</span> / <span class="del">−1</span></td><td>Блок публикации в шаблоне <code>.iwiki.toml</code></td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/fingerprint.py</code></td><td>изменён</td><td class="num"><span class="add">+17</span> / <span class="del">−8</span></td><td>Отпечаток конфигурации с новыми полями публикации</td></tr>
+    <tr><td><code>src/iwiki_mcp/postgres/auth.py</code></td><td>изменён</td><td class="num"><span class="add">+15</span> / <span class="del">−5</span></td><td><code>require_primary_read</code> и <code>require_primary_write</code></td></tr>
+    <tr><td><code>src/iwiki_mcp/codegraph/context.py</code></td><td>изменён</td><td class="num"><span class="add">+3</span> / <span class="del">−3</span></td><td>Публичный маппер связи для повторного использования</td></tr>
+  </tbody>
+</table>
+
+<details>
+<summary>Тесты, доказательства и документация (43 файла)</summary>
+<table class="rpt-table">
+  <thead><tr><th>Файл</th><th>Вид</th><th class="num">± строк</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>tests/codegraph/test_sqlite_adapter.py</code></td><td>добавлен</td><td class="num"><span class="add">+1916</span></td><td>Контракт атомарной публикации SQLite</td></tr>
+    <tr><td><code>tests/postgres/conftest.py</code></td><td>изменён</td><td class="num"><span class="add">+1071</span></td><td>Ограниченные роли, фикстуры графа, девятиранговый корпус, hosted-привязка</td></tr>
+    <tr><td><code>tests/codegraph/test_publication.py</code></td><td>добавлен</td><td class="num"><span class="add">+486</span></td><td>Общий протокол: заголовок, канонизация, батчи</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_rollback.py</code></td><td>добавлен</td><td class="num"><span class="add">+459</span></td><td>Воспроизводимость артефакта совместимости и откат схемы</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_contract.py</code></td><td>добавлен</td><td class="num"><span class="add">+447</span></td><td>Один контракт на трёх маршрутах, включая живой MCP через JSON-RPC</td></tr>
+    <tr><td><code>tests/codegraph/publication_contract_support.py</code></td><td>добавлен</td><td class="num"><span class="add">+435</span></td><td>Харнесс маршрутов и детерминированный генератор корпуса</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_migrations.py</code></td><td>добавлен</td><td class="num"><span class="add">+320</span></td><td>Тенантные ключи, RLS, ограниченные принципалы</td></tr>
+    <tr><td><code>tests/codegraph/test_mcp_adapter.py</code></td><td>добавлен</td><td class="num"><span class="add">+291</span></td><td>Точное отображение вызовов и редакция секретов</td></tr>
+    <tr><td><code>tests/postgres/test_admin.py</code></td><td>изменён</td><td class="num"><span class="add">+274</span> / <span class="del">−1</span></td><td>Проверка hosted-принципала при выпуске токена</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_publication.py</code></td><td>добавлен</td><td class="num"><span class="add">+269</span></td><td>Жизненный цикл сессий PostgreSQL</td></tr>
+    <tr><td><code>tests/codegraph/test_server_tools.py</code></td><td>изменён</td><td class="num"><span class="add">+221</span></td><td>Выбор издателя по режиму и отказ Git/SQLite</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_http.py</code></td><td>добавлен</td><td class="num"><span class="add">+209</span></td><td>Классификация доступа и hosted round-trip</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_reader.py</code></td><td>добавлен</td><td class="num"><span class="add">+206</span></td><td>Паритет девяти рангов SQLite и PostgreSQL</td></tr>
+    <tr><td><code>tests/postgres/test_http.py</code></td><td>изменён</td><td class="num"><span class="add">+188</span> / <span class="del">−58</span></td><td>Проверка схемы при старте и непровизионированный <code>session_user</code></td></tr>
+    <tr><td><code>tests/codegraph/test_schema.py</code></td><td>добавлен</td><td class="num"><span class="add">+129</span></td><td>Два принимаемых профиля схемы</td></tr>
+    <tr><td><code>tests/eval/test_code_graph_publication_scale.py</code></td><td>добавлен</td><td class="num"><span class="add">+117</span></td><td>Масштаб 20 000 файлов и контракт документации</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_scale.py</code></td><td>добавлен</td><td class="num"><span class="add">+66</span></td><td>Масштаб PostgreSQL под серверными потолками</td></tr>
+    <tr><td><code>README.md</code></td><td>изменён</td><td class="num"><span class="add">+170</span> / <span class="del">−2</span></td><td>Операторский контракт режимов, ролей, отката и профилей снапшота</td></tr>
+    <tr><td><code>docs/README.ru.md</code></td><td>изменён</td><td class="num"><span class="add">+175</span> / <span class="del">−2</span></td><td>Эквивалентный русский текст той же документации</td></tr>
+    <tr><td><code>eval/code_graph/runner.py</code></td><td>изменён</td><td class="num"><span class="add">+123</span> / <span class="del">−3</span></td><td><code>measure_publication</code> и секция публикации в отчёте</td></tr>
+    <tr><td><code>compat/postgres-v4-runtime-guard.json</code>, <code>.patch</code></td><td>добавлены</td><td class="num"><span class="add">+102</span></td><td>Закреплённый артефакт обслуживания для отката схемы</td></tr>
+    <tr><td>прочие тесты и метаданные (22 файла)</td><td>изменены</td><td class="num"><span class="add">+~450</span> / <span class="del">−~130</span></td><td>Матрица инструментов, smoke, конфигурация, версии, <code>uv.lock</code></td></tr>
+  </tbody>
+</table>
+</details>
+
+<h2>3. Результаты</h2>
+
+<h3>Сверка задач плана с диффом</h3>
+<table class="rpt-table">
+  <thead><tr><th>Задача плана</th><th>Статус</th><th>Свидетельство в диффе</th></tr></thead>
+  <tbody>
+    <tr><td>Task 1 — общие типы публикации и конфигурация</td><td><span class="badge done">DONE</span></td><td><code>publication.py</code>, <code>canonical.py</code>, <code>config.py</code>, <code>test_publication.py</code></td></tr>
+    <tr><td>Task 2 — атомарная публикация SQLite</td><td><span class="badge done">DONE</span></td><td><code>sqlite_adapter.py</code>, <code>store.py</code>, <code>schema.py</code>, <code>test_sqlite_adapter.py</code></td></tr>
+    <tr><td>Task 3 — схема PostgreSQL, роли, откат</td><td><span class="badge done">DONE</span></td><td><code>migrations.py</code>, <code>admin.py</code>, <code>compat/*</code>, <code>test_code_graph_migrations.py</code>, <code>test_code_graph_rollback.py</code></td></tr>
+    <tr><td>Task 4 — сессии публикации и атомарная активация</td><td><span class="badge done">DONE</span></td><td><code>postgres/codegraph.py</code>, <code>test_code_graph_publication.py</code></td></tr>
+    <tr><td>Task 5 — ревизия Markdown и вывод wiki-ссылок</td><td><span class="badge done">DONE</span></td><td><code>linking.py</code>, <code>postgres/store.py</code>, <code>_derive_links</code></td></tr>
+    <tr><td>Task 6 — читатель PostgreSQL</td><td><span class="badge done">DONE</span></td><td><code>PostgresCodeGraphReader</code>, <code>query.py</code>, <code>test_code_graph_reader.py</code></td></tr>
+    <tr><td>Task 7 — аутентифицированные MCP-адаптеры</td><td><span class="badge done">DONE</span></td><td><code>mcp_adapter.py</code>, <code>http.py</code>, <code>postgres/auth.py</code>, <code>test_mcp_adapter.py</code></td></tr>
+    <tr><td>Task 8 — композиция рантайма и поверхность инструментов</td><td><span class="badge done">DONE</span></td><td><code>server.py</code>, <code>runtime.py</code>, <code>test_tool_matrix.py</code>, <code>test_mcp_smoke.py</code></td></tr>
+    <tr><td>Task 9 — кросс-адаптерный контрактный набор</td><td><span class="badge done">DONE</span></td><td><code>publication_contract_support.py</code>, <code>test_code_graph_contract.py</code></td></tr>
+    <tr><td>Task 10 — документация и доказательство масштаба</td><td><span class="badge done">DONE</span></td><td><code>README.md</code>, <code>docs/README.ru.md</code>, <code>base.py</code>, <code>eval/code_graph/*</code>, оба scale-теста</td></tr>
+    <tr><td>Task 11 — сверка результата без изменения реализации</td><td><span class="badge done">DONE</span></td><td>только инспекция; настоящий отчёт и блок <code>result_check</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Покрытие интента и спеки</h3>
+<table class="rpt-table">
+  <thead><tr><th>Источник</th><th>Покрытие</th><th>Комментарий</th></tr></thead>
+  <tbody>
+    <tr><td>Desired Outcomes интента</td><td><strong>4 / 4</strong></td><td>Публикация в три цели; удалённое обслуживание search/context без checkout; явный выбор режима потребителем; безопасный ответ вместо частичных данных</td></tr>
+    <tr><td>Требования спеки R-001…R-030</td><td><strong>30 / 30</strong></td><td>Каждое требование закреплено за доставленной задачей матрицей покрытия плана и подтверждено тестами</td></tr>
+    <tr><td>Критерии приёмки AC-01…AC-30</td><td><strong>30 / 30</strong></td><td>Сфокусированные контракты 288 passed, полный набор 2260 passed, оба масштабных случая пройдены</td></tr>
+    <tr><td>Избыточные изменения</td><td><strong>нет</strong></td><td>Все 66 файлов сопоставлены с задачами плана или артефактами цепочки</td></tr>
+  </tbody>
+</table>
+
+<h3>Доказательства прогонов</h3>
+<table class="rpt-table">
+  <thead><tr><th>Проверка</th><th>Результат</th><th>Детали</th></tr></thead>
+  <tbody>
+    <tr><td>Сфокусированные контракты (Step 2)</td><td><span class="badge done">288 passed</span></td><td>Пропусков PostgreSQL нет: одноразовая база <code>*_test</code> сконфигурирована</td></tr>
+    <tr><td>Полный набор (Step 3)</td><td><span class="badge done">2260 passed</span></td><td>51 мин 29 с, включая медленный случай</td></tr>
+    <tr><td>Масштаб SQLite</td><td><span class="badge done">20 000 файлов</span></td><td>41 мин 51 с, снапшот <code>ready</code>, батчи ≤ 1000 строк и ≤ 1 000 000 байт</td></tr>
+    <tr><td>Масштаб PostgreSQL</td><td><span class="badge done">2 001 файл</span></td><td>56 с под потолками 100 строк / 100 000 байт, поиск ограничен 20</td></tr>
+    <tr><td>Редакция секретов (Step 4)</td><td><span class="badge done">passed</span></td><td>Токен, пароль, абсолютный путь и исходники отсутствуют в ошибках и repr</td></tr>
+    <tr><td>Поиск закоммиченных секретов</td><td><span class="badge done">чисто</span></td><td>Присваиваний <code>IWIKI_CODE_GRAPH_MCP_TOKEN</code> / <code>IWIKI_DB_PASSWORD</code> нет</td></tr>
+    <tr><td>CLI</td><td><span class="badge done">exit 0</span></td><td><code>iwiki-mcp --help</code></td></tr>
+    <tr><td>Линт</td><td><span class="badge done">чисто</span></td><td><code>flake8 src tests eval/code_graph</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Находки</h3>
+<div class="note ok"><strong>Критических находок нет.</strong> Ни один шаг плана не отсутствует в диффе, ни одно требование спеки не осталось без свидетельства. Вердикт сверки — <strong>OK</strong>.</div>
+
+<table class="rpt-table">
+  <thead><tr><th>#</th><th>Severity</th><th>Находка</th><th>Основание</th></tr></thead>
+  <tbody>
+    <tr><td>F-R01</td><td><span class="badge warn">WARNING</span></td><td>SQLite возвращает более богатый конверт принятого батча (<code>accepted</code> + <code>ordinal</code> + <code>lease_expires_at</code>), чем PostgreSQL и MCP (<code>{"accepted": true}</code>)</td><td>Спека §8.2 допускает «accepted ordinals … timestamps», идентичности полей не требует. Расхождение между маршрутами зафиксировано, семантика едина</td></tr>
+    <tr><td>F-R02</td><td><span class="badge info">INFO</span></td><td>Ожидание доменной блокировки активации задано константой <code>_CODE_PUBLICATION_LOCK_TIMEOUT_MS = 5000</code> и не конфигурируется</td><td>R-030 перечисляет настраиваемыми границы батчей, TTL сессии, удержание staging, свежесть и лимиты запросов; таймаут активации в список не входит</td></tr>
+    <tr><td>F-R03</td><td><span class="badge info">INFO</span></td><td>Смешанный выборочный вызов pytest, чередующий каталоги <code>tests/</code>, <code>tests/codegraph/</code> и <code>tests/postgres/</code>, теряет conftest каталога и сообщает «fixture not found»</td><td>Дефект коллекции pytest, воспроизводится на файлах, существовавших до ветки; полный прогон и группировка аргументов по каталогам не затронуты</td></tr>
+  </tbody>
+</table>
+
+<h2>4. Влияние на систему</h2>
+
+<table class="rpt-table">
+  <thead><tr><th>Область</th><th>Изменение поведения</th><th>Риски и последующие шаги</th></tr></thead>
+  <tbody>
+    <tr><td>Поверхность MCP</td><td>25 → 29 инструментов: добавлены четыре инструмента публикации; <code>wiki_code_status</code>, <code>wiki_code_search</code>, <code>wiki_code_context</code> под PostgreSQL больше не отвечают <code>unsupported_storage</code></td><td>Клиенты, полагавшиеся на прежний отказ, увидят рабочий ответ. Инструменты публикации доступны только аутентифицированному hosted-вызову с записываемым primary</td></tr>
+    <tr><td>Схема базы</td><td>Миграция 5: таблицы графа, гранты рантайм-принципалов, RLS без <code>FORCE</code>, три SECURITY DEFINER-функции</td><td>Откат только через закреплённый артефакт <code>compat/postgres-v4-runtime-guard</code>; сырой коммит до code graph бинарём отката не является</td></tr>
+    <tr><td>Выпуск токенов</td><td><code>token create</code> требует <code>--hosted-principal ROLE</code> и проверяет именно эту роль до генерации материала</td><td>Существующие процедуры выпуска нужно обновить: без флага команда завершится ошибкой</td></tr>
+    <tr><td>Индексация</td><td><code>wiki_code_index</code> на сервере без checkout возвращает <code>source_unavailable</code>; при <code>publish_mode</code> ≠ <code>sqlite</code> результат содержит вложенный отчёт <code>publication</code></td><td>Сессия и снапшот не создаются, пустой снапшот исключён</td></tr>
+    <tr><td>Markdown и ссылки</td><td>Каждая авторитетная запись страницы увеличивает <code>markdown_generation</code> в той же транзакции; ссылки code-to-wiki выводит цель</td><td>Изменение Markdown во время открытой сессии даёт <code>snapshot_conflict</code> — публикацию нужно повторить целиком</td></tr>
+    <tr><td>Секреты</td><td>Эндпойнт и токен MCP читаются только из окружения и отсутствуют в repr, статусе, логах и ошибках</td><td>Значения обязаны приходить из менеджера секретов; в <code>.iwiki.toml</code> они запрещены</td></tr>
+    <tr><td>Локальный кэш SQLite</td><td>Принимаются два профиля схемы v2; профиль публикации несёт авторитет готовности во внутренней таблице</td><td>Перед откатом на бинарь до публикации нужен сохранённый legacy-снапшот или переиндексация</td></tr>
+    <tr><td>Бенчмарк</td><td>Отчёт получил секцию <code>Publication</code> с режимом, ревизией, временем, пиком кучи и границами батчей</td><td>Потребители JSON-отчёта должны допускать новый ключ</td></tr>
+  </tbody>
+</table>
+
+<h2>5. Схемы</h2>
+
+<figure class="diagram">
+<svg viewBox="0 0 1000 340" role="img" aria-label="Поток публикации снапшота с ветвлениями и повтором">
+  <g class="node">
+    <rect class="card" x="20" y="130" width="150" height="62" rx="12"/>
+    <rect class="bar-ok" x="28" y="143" width="5" height="36" rx="2.5"/>
+    <text class="t-title" x="95" y="157" text-anchor="middle">Локальный индексер</text>
+    <text class="t-sub" x="95" y="175" text-anchor="middle">checkout · граф · строки</text>
+  </g>
+  <path class="flow" marker-end="url(#arrA)" d="M170,161 H208"/>
+  <rect class="lbl-bg" x="172" y="132" width="34" height="14" rx="3"/>
+  <text class="lbl" x="189" y="143" text-anchor="middle">begin</text>
+
+  <g class="node">
+    <rect class="card" x="215" y="130" width="150" height="62" rx="12"/>
+    <rect class="bar-accent" x="223" y="143" width="5" height="36" rx="2.5"/>
+    <text class="t-title" x="290" y="157" text-anchor="middle">Сессия staging</text>
+    <text class="t-sub" x="290" y="175" text-anchor="middle">владелец · аренда</text>
+  </g>
+  <path class="flow" marker-end="url(#arrA)" d="M365,161 H403"/>
+  <rect class="lbl-bg" x="360" y="132" width="52" height="14" rx="3"/>
+  <text class="lbl" x="386" y="143" text-anchor="middle">batch ×N</text>
+
+  <g class="node">
+    <rect class="card" x="410" y="130" width="150" height="62" rx="12"/>
+    <rect class="bar-accent" x="418" y="143" width="5" height="36" rx="2.5"/>
+    <text class="t-title" x="485" y="157" text-anchor="middle">Батчи строк</text>
+    <text class="t-sub" x="485" y="175" text-anchor="middle">канонический хеш</text>
+  </g>
+  <path class="flow" marker-end="url(#arrA)" d="M560,161 H598"/>
+  <rect class="lbl-bg" x="552" y="132" width="54" height="14" rx="3"/>
+  <text class="lbl" x="579" y="143" text-anchor="middle">finalize</text>
+
+  <g class="node">
+    <rect class="card" x="605" y="118" width="165" height="86" rx="12"/>
+    <rect class="bar-warn" x="613" y="131" width="5" height="60" rx="2.5"/>
+    <text class="t-title" x="695" y="147" text-anchor="middle">Проверка цели</text>
+    <text class="t-sub" x="695" y="165" text-anchor="middle">ревизия · ссылки</text>
+    <text class="t-sub" x="695" y="181" text-anchor="middle">блокировка домена</text>
+  </g>
+
+  <path class="flow-ok" marker-end="url(#arrOk)" d="M770,145 H818"/>
+  <rect class="lbl-bg" x="772" y="118" width="46" height="14" rx="3"/>
+  <text class="lbl" x="795" y="129" text-anchor="middle">активация</text>
+  <g class="node">
+    <rect class="card" x="825" y="112" width="155" height="62" rx="12"/>
+    <rect class="bar-ok" x="833" y="125" width="5" height="36" rx="2.5"/>
+    <text class="t-title" x="902" y="139" text-anchor="middle">Активный снапшот</text>
+    <text class="t-sub" x="902" y="157" text-anchor="middle">один коммит · ready</text>
+  </g>
+
+  <path class="conn-term" marker-end="url(#arrTerm)" d="M700,204 V250 H825"/>
+  <rect class="lbl-bg" x="706" y="222" width="104" height="14" rx="3"/>
+  <text class="lbl" x="758" y="233" text-anchor="middle">конфликт · busy · истёк</text>
+  <g class="node">
+    <rect class="card" x="825" y="220" width="155" height="62" rx="12"/>
+    <rect class="bar-term" x="833" y="233" width="5" height="36" rx="2.5"/>
+    <text class="t-title" x="902" y="247" text-anchor="middle">Отказ без эффекта</text>
+    <text class="t-sub" x="902" y="265" text-anchor="middle">снапшот не тронут</text>
+  </g>
+
+  <path class="conn-a" marker-end="url(#arrA)" d="M902,282 V312 H95 V192"/>
+  <rect class="lbl-bg" x="440" y="304" width="118" height="14" rx="3"/>
+  <text class="lbl" x="499" y="315" text-anchor="middle">повтор: новая сессия</text>
+
+  <rect class="boundary-rect" x="205" y="104" width="580" height="112" rx="14"/>
+  <text class="t-sub" x="495" y="98" text-anchor="middle">одна сессия — один непередаваемый владелец</text>
+</svg>
+<figcaption>Жизненный цикл публикации: ветвление на активацию и безэффектный отказ, повтор всегда открывает новую сессию.</figcaption>
+</figure>
+
+<figure class="diagram">
+<svg viewBox="0 0 1000 300" role="img" aria-label="Карта влияния изменённых компонентов">
+  <g class="node">
+    <rect class="card" x="20" y="20" width="180" height="58" rx="12"/>
+    <rect class="bar-accent" x="28" y="32" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="110" y="46" text-anchor="middle">publication.py</text>
+    <text class="t-sub" x="110" y="64" text-anchor="middle">общий протокол</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="20" y="120" width="180" height="58" rx="12"/>
+    <rect class="bar-accent" x="28" y="132" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="110" y="146" text-anchor="middle">runtime.py</text>
+    <text class="t-sub" x="110" y="164" text-anchor="middle">export_snapshot</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="20" y="220" width="180" height="58" rx="12"/>
+    <rect class="bar-accent" x="28" y="232" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="110" y="246" text-anchor="middle">server.py</text>
+    <text class="t-sub" x="110" y="264" text-anchor="middle">выбор адаптера</text>
+  </g>
+
+  <path class="conn" marker-end="url(#arr)" d="M200,49 H288"/>
+  <path class="conn" marker-end="url(#arr)" d="M200,149 H288"/>
+  <path class="conn" marker-end="url(#arr)" d="M200,249 H288"/>
+
+  <g class="node">
+    <rect class="card" x="295" y="20" width="185" height="58" rx="12"/>
+    <rect class="bar-ok" x="303" y="32" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="387" y="46" text-anchor="middle">sqlite_adapter.py</text>
+    <text class="t-sub" x="387" y="64" text-anchor="middle">локальный кэш</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="295" y="120" width="185" height="58" rx="12"/>
+    <rect class="bar-ok" x="303" y="132" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="387" y="146" text-anchor="middle">postgres/codegraph.py</text>
+    <text class="t-sub" x="387" y="164" text-anchor="middle">издатель и читатель</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="295" y="220" width="185" height="58" rx="12"/>
+    <rect class="bar-ok" x="303" y="232" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="387" y="246" text-anchor="middle">mcp_adapter.py</text>
+    <text class="t-sub" x="387" y="264" text-anchor="middle">удалённый транспорт</text>
+  </g>
+
+  <path class="conn" marker-end="url(#arr)" d="M480,49 H568"/>
+  <path class="conn" marker-end="url(#arr)" d="M480,149 H568"/>
+  <path class="conn" marker-end="url(#arr)" d="M480,249 H568"/>
+  <path class="conn-a" marker-end="url(#arrA)" d="M480,140 H540 V60 H568"/>
+
+  <g class="node">
+    <rect class="card" x="575" y="20" width="180" height="58" rx="12"/>
+    <rect class="bar-warn" x="583" y="32" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="665" y="46" text-anchor="middle">migrations.py</text>
+    <text class="t-sub" x="665" y="64" text-anchor="middle">схема 5 · RLS</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="575" y="120" width="180" height="58" rx="12"/>
+    <rect class="bar-warn" x="583" y="132" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="665" y="146" text-anchor="middle">postgres/store.py</text>
+    <text class="t-sub" x="665" y="164" text-anchor="middle">Markdown · линт</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="575" y="220" width="180" height="58" rx="12"/>
+    <rect class="bar-warn" x="583" y="232" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="665" y="246" text-anchor="middle">http.py · auth.py</text>
+    <text class="t-sub" x="665" y="264" text-anchor="middle">права на primary</text>
+  </g>
+
+  <path class="conn" marker-end="url(#arr)" d="M755,49 H843"/>
+  <path class="conn" marker-end="url(#arr)" d="M755,149 H843"/>
+  <path class="conn" marker-end="url(#arr)" d="M755,249 H843"/>
+
+  <g class="node">
+    <rect class="card" x="850" y="20" width="140" height="58" rx="12"/>
+    <rect class="bar-term" x="858" y="32" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="920" y="46" text-anchor="middle">admin.py</text>
+    <text class="t-sub" x="920" y="64" text-anchor="middle">роли · откат</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="850" y="120" width="140" height="58" rx="12"/>
+    <rect class="bar-term" x="858" y="132" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="920" y="146" text-anchor="middle">README ×2</text>
+    <text class="t-sub" x="920" y="164" text-anchor="middle">операторам</text>
+  </g>
+  <g class="node">
+    <rect class="card" x="850" y="220" width="140" height="58" rx="12"/>
+    <rect class="bar-term" x="858" y="232" width="5" height="34" rx="2.5"/>
+    <text class="t-title" x="920" y="246" text-anchor="middle">eval/code_graph</text>
+    <text class="t-sub" x="920" y="264" text-anchor="middle">масштаб</text>
+  </g>
+</svg>
+<figcaption>Карта влияния: общий протокол и композиция сервера питают три адаптера, те опираются на схему, хранилище и авторизацию, а изменения доходят до операторских поверхностей.</figcaption>
+</figure>
+
+<div class="note"><strong>Триггер схем.</strong> Дифф добавляет новые модули (<code>publication.py</code>, <code>sqlite_adapter.py</code>, <code>postgres/codegraph.py</code>, <code>mcp_adapter.py</code>, <code>reader.py</code>, <code>canonical.py</code>), новые связи между компонентами и новый поток управления публикацией — раздел со схемами обязателен.</div>
+
+<footer>
+Отчёт сверки результата IDD→SDD · тема <code>postgres-code-graph-distributed-indexing</code> · база диффа <code>origin/master...HEAD</code> · вердикт <strong>OK</strong> · версия 0.7.133
+</footer>
+
+</main>
+</body>
+</html>

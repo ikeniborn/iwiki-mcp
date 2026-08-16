@@ -282,6 +282,11 @@ review:
 chain:
   intent: docs/superpowers/intents/2026-08-14-postgres-code-graph-distributed-indexing-intent.md
   spec: docs/superpowers/specs/2026-08-14-postgres-code-graph-distributed-indexing-design.md
+result_check:
+  verdict: OK
+  plan_hash: 9e7bfad4a25ba650
+  last_run: 2026-08-17
+  diff_base: origin/master
 ---
 # Distributed PostgreSQL Code Graph Implementation Plan
 
