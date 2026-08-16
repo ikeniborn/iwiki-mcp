@@ -92,3 +92,118 @@ def test_another_writable_token_cannot_reuse_a_session(pg_graph):
     }
     assert replacement.finalize(session)["error"] == "unauthorized"
     assert pg_graph.session(session)["state"] == "staging"
+
+
+EXPECTED_MATCHES = [
+    "qualified_exact",
+    "local_exact",
+    "alias_exact",
+    "canonical_prefix",
+    "alias_prefix",
+    "canonical_lexical",
+    "alias_lexical",
+    "signature",
+    "path",
+]
+
+
+@pytest.mark.postgres_integration
+def test_hosted_reads_answer_from_the_active_snapshot(hosted_ready_code):
+    from iwiki_mcp import server
+
+    status = server.wiki_code_status()
+    assert status["state"] == "ready"
+    assert status["fresh"] is True
+    assert status["domain"] == hosted_ready_code.graph.domain
+
+    results = server.wiki_code_search("needle", limit=20)["results"]
+    assert [item["match"] for item in results] == EXPECTED_MATCHES
+
+
+@pytest.mark.postgres_integration
+def test_hosted_context_never_returns_source(hosted_ready_code):
+    from iwiki_mcp import server
+
+    seed = hosted_ready_code.graph.context_request().seeds[0]
+    result = server.wiki_code_context(
+        [seed], direction="out", depth=1, include_source=True
+    )
+
+    assert result["state"] == "ready"
+    assert result["source_unavailable"] is True
+    assert all("source" not in item for item in result["files"])
+
+
+@pytest.mark.postgres_integration
+def test_hosted_reads_report_missing_before_publication(hosted_empty_code):
+    from iwiki_mcp import server
+
+    assert server.wiki_code_status()["state"] == "missing"
+    assert server.wiki_code_search("needle")["results"] == []
+
+
+@pytest.mark.postgres_integration
+def test_hosted_index_without_checkout_is_safe(hosted_empty_code):
+    from iwiki_mcp import server
+
+    assert server.wiki_code_index(force=True) == {
+        "error": "source_unavailable",
+        "hint": (
+            "run wiki_code_index on a local MCP server with the repository "
+            "checkout"
+        ),
+    }
+
+
+@pytest.mark.postgres_integration
+def test_hosted_publication_round_trip_activates_one_snapshot(hosted_empty_code):
+    from iwiki_mcp import server
+    from iwiki_mcp.codegraph.publication import header_payload
+
+    graph = hosted_empty_code.graph
+    session = server.wiki_code_publish_begin(header_payload(graph.header))
+    assert set(session) >= {"session_id", "lease_expires_at"}
+
+    for batch in graph.batches:
+        import json
+
+        accepted = server.wiki_code_publish_batch(
+            session["session_id"],
+            batch.kind,
+            batch.ordinal,
+            json.loads(bytes(batch.payload).decode("utf-8")),
+            batch.payload_hash,
+        )
+        assert accepted == {"accepted": True}
+
+    result = server.wiki_code_publish_finalize(session["session_id"])
+    assert result["state"] == "ready"
+    assert server.wiki_code_status()["snapshot_revision"] == result[
+        "snapshot_revision"
+    ]
+
+
+@pytest.mark.postgres_integration
+def test_hosted_publication_rejects_a_tampered_batch(hosted_empty_code):
+    import json
+
+    from iwiki_mcp import server
+    from iwiki_mcp.codegraph.publication import header_payload
+
+    graph = hosted_empty_code.graph
+    session = server.wiki_code_publish_begin(header_payload(graph.header))
+    batch = graph.batches[0]
+
+    assert server.wiki_code_publish_batch(
+        session["session_id"],
+        batch.kind,
+        batch.ordinal,
+        json.loads(bytes(batch.payload).decode("utf-8")),
+        "sha256:" + "0" * 64,
+    ) == {
+        "error": "invalid_batch",
+        "hint": "send batches that match the declared header",
+    }
+    assert server.wiki_code_publish_abort(session["session_id"]) == {
+        "state": "aborted"
+    }

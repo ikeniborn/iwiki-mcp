@@ -44,6 +44,7 @@ from .query import (
     CodeGraphQueryError,
     validate_search_request,
 )
+from .publication import SnapshotHeader, graph_payload_revision
 from .schema import SCHEMA_VERSION, CodeGraphStoreError
 from .store import (
     CodeGraphStore,
@@ -688,6 +689,43 @@ class CodeGraphRuntime:
                 "metrics_incomplete",
             ]
         return self._with_rebuilding_state(result)
+
+    def export_snapshot(self) -> tuple[SnapshotHeader, dict] | dict[str, object]:
+        """Return the canonical rows and header of the local ready snapshot."""
+        unavailable = self._unavailable()
+        if unavailable is not None:
+            return unavailable
+        assert self._store is not None
+        try:
+            rows = {
+                kind: list(self._store.stable_rows(kind))
+                for kind in ("repositories", "files", "symbols", "relations")
+            }
+        except CodeGraphStoreError:
+            return self._store_failure_status()
+        repository = next(
+            (
+                row
+                for row in rows["repositories"]
+                if row.get("repository_id") == self.binding.primary
+            ),
+            None,
+        )
+        if repository is None or repository.get("state") != "ready":
+            return _not_configured()
+        header = SnapshotHeader(
+            protocol_version=1,
+            schema_version=SCHEMA_VERSION,
+            repository_id=str(repository["repository_id"]),
+            source_fingerprint=str(repository["source_fingerprint"]),
+            parser_fingerprint=str(repository["parser_fingerprint"]),
+            normalizer_version=str(repository["normalizer_version"]),
+            unicode_data_version=str(repository["unicode_data_version"]),
+            languages=("python",),
+            expected_counts={kind: len(rows[kind]) for kind in rows},
+            graph_payload_revision=graph_payload_revision(rows),
+        )
+        return header, rows
 
     def status(self) -> dict[str, object]:
         """Read metadata and compatible schema only; never discover or parse."""

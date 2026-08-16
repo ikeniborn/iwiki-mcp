@@ -537,7 +537,7 @@ def prepare_runtime(
         pool.open(wait=True)
         from . import server
 
-        server._install_hosted_runtime(pool, cfg)
+        server._install_hosted_runtime(pool, cfg, config.code_graph)
         server.mcp.settings.json_response = True
         server.mcp.settings.stateless_http = False
         server.mcp.settings.transport_security = TransportSecuritySettings(

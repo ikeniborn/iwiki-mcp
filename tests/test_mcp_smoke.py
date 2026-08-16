@@ -22,7 +22,8 @@ EXPECTED_TOOLS = {
     "wiki_lint", "wiki_remediation_plan", "wiki_migrate_okf", "wiki_apply_okf",
     "wiki_export_okf", "wiki_sync",
     "wiki_code_status", "wiki_code_index", "wiki_code_search",
-    "wiki_code_context",
+    "wiki_code_context", "wiki_code_publish_begin", "wiki_code_publish_batch",
+    "wiki_code_publish_finalize", "wiki_code_publish_abort",
 }
 
 
@@ -136,6 +137,10 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                     "wiki_code_index",
                     "wiki_code_search",
                     "wiki_code_context",
+                    "wiki_code_publish_begin",
+                    "wiki_code_publish_batch",
+                    "wiki_code_publish_finalize",
+                    "wiki_code_publish_abort",
                 }
                 assert all(
                     "domain" not in tool.inputSchema.get("properties", {})

@@ -981,6 +981,81 @@ def pg_ready_graph(pg_ranked_graph):
     return pg_ranked_graph
 
 
+class HostedCodeBinding:
+    """Bind one hosted PostgreSQL request context onto the server tool surface."""
+
+    def __init__(self, graph, binding):
+        self.graph = graph
+        self.binding = binding
+
+    def __repr__(self):
+        return "<redacted hosted code graph binding>"
+
+
+def _bind_hosted_code(graph, monkeypatch, token_id="token-a"):
+    from psycopg.conninfo import conninfo_to_dict
+
+    from iwiki_mcp import server
+    from iwiki_mcp.postgres.auth import AuthContext
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.storage import PostgresBinding
+
+    values = conninfo_to_dict(str(graph.dsn))
+    binding = PostgresBinding(
+        host=values.get("host", "127.0.0.1"),
+        port=int(values.get("port", 5432)),
+        database=values["dbname"],
+        user=values["user"],
+        sslmode=values.get("sslmode", "prefer"),
+        password=values.get("password", ""),
+        iwiki_id=graph.iwiki_id,
+        read=(graph.domain,),
+        write=(graph.domain,),
+        primary=graph.domain,
+        project_dir="/hosted-without-checkout",
+        embed_model="fixture-model",
+        embed_dimensions=3,
+        rerank_model="",
+    )
+    monkeypatch.setattr(server, "_LOCAL_POSTGRES_BINDING", None)
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    monkeypatch.setattr(server, "_HOSTED_CODE_GRAPH", HostedCodeGraphConfig())
+    monkeypatch.setattr(server, "_HOSTED_CONFIG", _cfg())
+    token = server._AUTH_CONTEXT.set(
+        AuthContext(
+            iwiki_id=graph.iwiki_id,
+            token_id=token_id,
+            read_domains=(graph.domain,),
+            write_domains=(graph.domain,),
+            primary=graph.domain,
+        )
+    )
+    monkeypatch.setattr(
+        server,
+        "_SESSION_BINDING",
+        server._SESSION_BINDING,
+    )
+    return HostedCodeBinding(graph, binding), token
+
+
+@pytest.fixture
+def hosted_ready_code(pg_ready_graph, monkeypatch):
+    from iwiki_mcp import server
+
+    bound, token = _bind_hosted_code(pg_ready_graph, monkeypatch)
+    yield bound
+    server._AUTH_CONTEXT.reset(token)
+
+
+@pytest.fixture
+def hosted_empty_code(pg_ranked_graph, monkeypatch):
+    from iwiki_mcp import server
+
+    bound, token = _bind_hosted_code(pg_ranked_graph, monkeypatch)
+    yield bound
+    server._AUTH_CONTEXT.reset(token)
+
+
 @pytest.fixture
 def ranked_graph_pair(pg_ready_graph, tmp_path):
     from iwiki_mcp.codegraph.store import CodeGraphStore

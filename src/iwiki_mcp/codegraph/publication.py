@@ -273,6 +273,20 @@ def _batch(
     )
 
 
+def canonical_batch(
+    kind: RowKind, ordinal: int, rows: Sequence[Mapping[str, object]]
+) -> SnapshotBatch:
+    """Re-serialize one received batch through the canonical row projection."""
+    if kind not in _ROW_KINDS:
+        raise ValueError("unknown snapshot row kind")
+    if type(ordinal) is not int or ordinal < 0:
+        raise ValueError("ordinal must be a non-negative integer")
+    projected = [_portable_row(kind, row) for row in rows]
+    return _batch(
+        kind, ordinal, [canonical_json_bytes(row) for row in projected]
+    )
+
+
 def iter_snapshot_batches(
     rows: Mapping[RowKind, Sequence[Mapping[str, object]]],
     *,

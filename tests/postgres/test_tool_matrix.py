@@ -13,10 +13,14 @@ from iwiki_mcp.storage import PostgresBinding
 
 TOOLS = {
     "wiki_status": "supported",
-    "wiki_code_status": "unsupported",
-    "wiki_code_index": "unsupported",
-    "wiki_code_search": "unsupported",
-    "wiki_code_context": "unsupported",
+    "wiki_code_status": "supported",
+    "wiki_code_index": "source_unavailable_without_checkout",
+    "wiki_code_search": "supported",
+    "wiki_code_context": "supported",
+    "wiki_code_publish_begin": "supported",
+    "wiki_code_publish_batch": "supported",
+    "wiki_code_publish_finalize": "supported",
+    "wiki_code_publish_abort": "supported",
     "wiki_list_domains": "supported",
     "wiki_list_pages": "supported",
     "wiki_read_page": "supported",
@@ -149,7 +153,7 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 25
+    assert len(TOOLS) == 29
     assert registered == set(TOOLS)
 
 
@@ -176,10 +180,6 @@ def test_grant_tool_schemas_expose_content_authority_only():
 @pytest.mark.parametrize(
     ("handler", "args", "kwargs"),
     [
-        (server.wiki_code_status, (), {}),
-        (server.wiki_code_index, (), {}),
-        (server.wiki_code_search, ("query",), {}),
-        (server.wiki_code_context, (["py:module:" + "a" * 64],), {}),
         (server.wiki_create_domain, ("new-domain",), {}),
         (server.wiki_remediation_plan, (), {}),
         (server.wiki_migrate_okf, (), {}),
