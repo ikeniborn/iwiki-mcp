@@ -536,6 +536,48 @@ class GraphFixture:
             )[0][0]
         return counts
 
+    def write_markdown_page(self, slug, markdown):
+        """Write one authoritative page through the real Markdown store."""
+        from iwiki_mcp.postgres.auth import AuthContext
+        from iwiki_mcp.postgres.store import PostgresStore
+
+        store = PostgresStore(
+            self.admin_dsn,
+            self.iwiki_id,
+            _cfg(),
+            embedder=_embed,
+            auth_context=AuthContext(
+                iwiki_id=self.iwiki_id,
+                token_id="fixture",
+                read_domains=(self.domain,),
+                write_domains=(self.domain,),
+                primary=self.domain,
+            ),
+        )
+        return store.write_page(self.domain, slug, markdown)
+
+    def lint(self):
+        from iwiki_mcp.postgres.store import PostgresStore
+
+        return PostgresStore(
+            self.admin_dsn, self.iwiki_id, _cfg(), embedder=_embed
+        ).lint_domain(self.domain, [self.domain])
+
+    def markdown_snapshot(self):
+        from iwiki_mcp.postgres.store import PostgresStore
+
+        return PostgresStore(
+            self.admin_dsn, self.iwiki_id, _cfg(), embedder=_embed
+        ).markdown_snapshot(self.domain)
+
+    def wiki_links(self):
+        return self._query(
+            "SELECT relation_id, selector FROM iwiki.code_graph_wiki_links "
+            "WHERE iwiki_id = %s AND domain_id = %s ORDER BY relation_id",
+            (self.iwiki_id, self._domain_id()),
+            admin=True,
+        )
+
     def bump_markdown_generation(self):
         import psycopg
 

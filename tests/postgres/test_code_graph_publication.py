@@ -81,13 +81,13 @@ def test_same_domain_publishers_use_optimistic_conflict(pg_graph):
     ]
 
 
-def test_finalize_detects_markdown_generation_change(pg_graph):
+def test_markdown_change_between_begin_and_finalize_conflicts(pg_graph):
     session = pg_graph.complete_session()
-    pg_graph.bump_markdown_generation()
+    pg_graph.write_markdown_page("architecture", "# Architecture\n\n## Body\ntext\n")
 
     assert pg_graph.finalize(session) == {
-        "error": "markdown_unavailable",
-        "hint": "reindex against the current Markdown revision",
+        "error": "snapshot_conflict",
+        "hint": "begin a new publication session and retry",
     }
     assert pg_graph.reader_status()["state"] == "missing"
 
@@ -191,3 +191,79 @@ def test_readers_never_observe_staging_rows(pg_graph):
     assert status["snapshot_revision"] == ready["snapshot_revision"]
     assert pg_graph.active_rows() == pg_graph.expected_counts
     assert pg_graph.snapshot_state(staged) == "staging"
+
+
+def _selector_page(qualified_name):
+    return (
+        "---\n"
+        "type: concept\n"
+        "title: Architecture\n"
+        "description: architecture page\n"
+        "tags: [fixture]\n"
+        "status: stable\n"
+        "code:\n"
+        "  symbols:\n"
+        f"    - qualified_name: {qualified_name}\n"
+        "---\n"
+        "# Architecture\n\n## Body\ntext\n"
+    )
+
+
+def test_target_owns_derived_links_from_page_selectors(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    ready = pg_graph.finalize(pg_graph.complete_session())
+
+    assert ready["wiki_links"] == 1
+    links = pg_graph.wiki_links()
+    assert [row[0] for row in links] == ["relation-0"]
+    assert links[0][1] == {"kind": "symbol", "source": "pkg.module_0.run"}
+
+
+def test_publisher_batches_cannot_supply_wiki_links(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    session = pg_graph.begin()
+    pg_graph.upload_all(session)
+
+    assert pg_graph.finalize(session)["state"] == "ready"
+    assert [row[0] for row in pg_graph.wiki_links()] == ["relation-0"]
+
+
+def test_snapshot_binds_the_canonical_markdown_revision(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    snapshot = pg_graph.markdown_snapshot()
+    ready = pg_graph.finalize(pg_graph.complete_session())
+
+    assert ready["markdown_revision"] == snapshot.revision
+    assert snapshot.revision.startswith("sha256:")
+    status = pg_graph.reader_status()
+    assert status["markdown_revision"] == snapshot.revision
+    assert status["wiki_links_stale"] is False
+
+
+def test_status_and_lint_report_stale_links_after_markdown_changes(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.write_markdown_page("guide", _selector_page("pkg.module_1.run"))
+
+    status = pg_graph.reader_status()
+    assert status["wiki_links_stale"] is True
+    assert status["stored_markdown_generation"] != status[
+        "current_markdown_generation"
+    ]
+
+    report = pg_graph.lint()["code_graph"]
+    assert report["wiki_links_stale"] is True
+    assert report["stored_markdown_revision"].startswith("sha256:")
+    assert report["current_markdown_revision"].startswith("sha256:")
+    assert report["stored_markdown_revision"] != report[
+        "current_markdown_revision"
+    ]
+    assert report["stored_change_token"] != report["current_change_token"]

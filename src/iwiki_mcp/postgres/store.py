@@ -493,6 +493,7 @@ class PostgresStore:
                     self._replace_derived(
                         cursor, page_id, chunks, records, targets
                     )
+                    self._bump_markdown_generation(cursor, domain)
                 cursor.execute(
                     "UPDATE iwiki.links l SET target_page_id = p.page_id "
                     "FROM iwiki.pages p "
@@ -726,6 +727,47 @@ class PostgresStore:
                 ),
             )
 
+    def _bump_markdown_generation(self, cursor, domain: str) -> None:
+        """Advance the domain change token inside the caller's transaction."""
+        cursor.execute(
+            "UPDATE iwiki.domains SET markdown_generation = "
+            "markdown_generation + 1 WHERE iwiki_id = %s AND slug = %s",
+            (self.iwiki_id, domain),
+        )
+
+    def markdown_snapshot(self, domain: str):
+        """Return one coherent Markdown snapshot with its canonical revision."""
+        from ..codegraph.linking import (
+            MarkdownDomainSnapshot,
+            MarkdownPageSnapshot,
+            markdown_revision,
+        )
+
+        domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT d.markdown_generation, p.slug, p.markdown "
+                    "FROM iwiki.domains d LEFT JOIN iwiki.pages p "
+                    "ON p.iwiki_id = d.iwiki_id AND p.domain_id = d.domain_id "
+                    "WHERE d.iwiki_id = %s AND d.slug = %s ORDER BY p.slug",
+                    (self.iwiki_id, domain),
+                )
+                rows = cursor.fetchall()
+        if not rows:
+            raise ValueError("domain not found")
+        pages = tuple(
+            MarkdownPageSnapshot(slug=slug, markdown=markdown)
+            for _generation, slug, markdown in rows
+            if slug is not None
+        )
+        return MarkdownDomainSnapshot(
+            change_token=rows[0][0],
+            revision=markdown_revision(pages),
+            pages=pages,
+        )
+
     def write_page(self, domain: str, slug: str, markdown: str) -> dict:
         self._require_write(_validate_identifier(domain, "domain"))
         domain, slug, markdown, chunks, records, targets = self._prepare_page(
@@ -755,6 +797,7 @@ class PostgresStore:
                         "hint": "read the page before updating it",
                     }
                 self._replace_derived(cursor, row[0], chunks, records, targets)
+                self._bump_markdown_generation(cursor, domain)
         return {
             "page": f"{domain}/{slug}.md",
             "revision": row[1],
@@ -797,6 +840,7 @@ class PostgresStore:
                     current = cursor.fetchone()
                     return revision_conflict(current[0] if current else None)
                 self._replace_derived(cursor, row[0], chunks, records, targets)
+                self._bump_markdown_generation(cursor, domain)
         return {
             "page": f"{domain}/{slug}.md",
             "revision": row[1],
@@ -835,6 +879,7 @@ class PostgresStore:
                     "DELETE FROM iwiki.pages WHERE iwiki_id = %s AND page_id = %s",
                     (self.iwiki_id, current[0]),
                 )
+                self._bump_markdown_generation(cursor, domain)
         return {"page": f"{domain}/{slug}.md", "deleted": True}
 
     @staticmethod
@@ -1188,11 +1233,54 @@ class PostgresStore:
                 "extra_edges": [],
                 "anchor_mismatches": [],
             },
-            "code_graph": {
+            "code_graph": self._code_graph_lint(domain, pages),
+        }
+
+    def _code_graph_lint(self, domain: str, pages) -> dict:
+        """Report stored and current Markdown revisions for the code graph."""
+        from ..codegraph.linking import MarkdownPageSnapshot, markdown_revision
+
+        current_pages = tuple(
+            MarkdownPageSnapshot(slug=slug, markdown=markdown)
+            for slug, markdown in pages
+        )
+        current_revision = markdown_revision(current_pages)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT s.snapshot_revision, s.markdown_revision, "
+                    "s.markdown_generation, d.markdown_generation "
+                    "FROM iwiki.domains d "
+                    "LEFT JOIN iwiki.code_graph_domain_state g "
+                    "ON g.iwiki_id = d.iwiki_id AND g.domain_id = d.domain_id "
+                    "LEFT JOIN iwiki.code_graph_snapshots s "
+                    "ON s.iwiki_id = g.iwiki_id AND s.domain_id = g.domain_id "
+                    "AND s.snapshot_id = g.active_snapshot_id "
+                    "WHERE d.iwiki_id = %s AND d.slug = %s",
+                    (self.iwiki_id, domain),
+                )
+                row = cursor.fetchone()
+        if row is None or row[0] is None:
+            return {
                 "available": False,
-                "state": "unsupported",
+                "state": "missing_snapshot",
                 "revision": None,
+                "stored_markdown_revision": None,
+                "current_markdown_revision": current_revision,
+                "stored_change_token": None,
+                "current_change_token": row[3] if row else None,
+                "wiki_links_stale": False,
                 "findings": [],
-                "hint": "code graph requires Git storage",
-            },
+                "hint": "publish a code graph snapshot for this domain",
+            }
+        return {
+            "available": True,
+            "state": "ready",
+            "revision": row[0],
+            "stored_markdown_revision": row[1],
+            "current_markdown_revision": current_revision,
+            "stored_change_token": row[2],
+            "current_change_token": row[3],
+            "wiki_links_stale": row[1] != current_revision,
+            "findings": [],
         }
