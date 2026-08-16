@@ -722,17 +722,13 @@ class CodeGraphRuntime:
             if "error" in status:
                 return status
             metadata_state = after.get("state")
-            if metadata_state in {"rebuilding", "recovering"}:
-                try:
-                    recovered = self._recover_stale_metadata(after)
-                except CodeGraphStoreError:
-                    return self._store_failure_status()
-                if recovered:
-                    continue
-                return self._with_rebuilding_state(
-                    status, shared_writer=True
-                )
-            if _pending_final_verify(after):
+            if metadata_state in {"rebuilding", "recovering"} or (
+                _pending_final_verify(after)
+            ):
+                if self._local_build_active():
+                    return self._with_rebuilding_state(
+                        status, shared_writer=True
+                    )
                 try:
                     recovered = self._recover_stale_metadata(after)
                 except CodeGraphStoreError:
@@ -783,6 +779,8 @@ class CodeGraphRuntime:
             metadata.get("state") in {"rebuilding", "recovering"}
             or _pending_final_verify(metadata)
         ):
+            if self._local_build_active():
+                return self._with_rebuilding_state(status, shared_writer=True)
             try:
                 recovered = self._recover_stale_metadata(metadata)
             except CodeGraphStoreError:
@@ -806,6 +804,10 @@ class CodeGraphRuntime:
         status = self._missing_status(normalization_versions)
         status["revision"] = revision if isinstance(revision, str) else None
         return self._with_rebuilding_state(status, shared_writer=True)
+
+    def _local_build_active(self) -> bool:
+        """Report whether this process still owns a live publication worker."""
+        return _BUILD_WORKERS.is_active(self._worker_domain_key)
 
     def _recover_stale_metadata(
         self,

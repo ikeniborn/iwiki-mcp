@@ -474,3 +474,36 @@ def test_staging_cleanup_removes_only_callers_registered_artifacts(
     assert second_staging.is_file()
     second.discard_staging(second_staging)
     assert not second_staging.exists()
+
+
+def test_local_build_worker_suspends_crash_recovery(ready_runtime, monkeypatch):
+    """An in-flight local publication must never be recovered as a crash."""
+    from iwiki_mcp.codegraph import runtime as codegraph_runtime
+
+    runtime = ready_runtime.runtime
+    published = ready_runtime.status()
+    metadata = json.loads(
+        ready_runtime.paths.metadata.read_text(encoding="utf-8")
+    )
+    metadata["publication_phase"] = "pending_final_verify"
+    metadata.pop("duration_ms", None)
+    metadata.pop("phase_timings_ms", None)
+    ready_runtime.paths.metadata.write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        codegraph_runtime._BUILD_WORKERS,
+        "is_active",
+        lambda _key: True,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_recover_stale_metadata",
+        lambda _expected: pytest.fail("recovery pre-empted a live publication"),
+    )
+
+    status = runtime.status()
+
+    assert status["state"] == "rebuilding"
+    assert status["revision"] == published["revision"]
+    assert "error" not in status
