@@ -79,7 +79,7 @@ from .engine.section import (
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
-from .storage import expected_revision_required
+from .storage import expected_revision_required, section_conflict
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1329,6 +1329,23 @@ def _read_section(domain: str, slug: str, body: str, heading: str) -> dict:
     }
 
 
+def _check_section_hash(body: str, heading: str, expected: str | None) -> dict | None:
+    """Return a section_conflict dict if `expected` doesn't match, else None.
+
+    Raises SectionError (propagated like other section lookups) if the
+    heading is missing/ambiguous; callers catch that alongside their
+    existing replace/delete/move SectionError handling.
+    """
+    if expected is None:
+        return None
+    sections = list_sections(body)
+    idx = _locate(sections, heading)
+    current_hash = sha256(sections[idx].body.strip("\n").encode("utf-8")).hexdigest()[:16]
+    if current_hash != expected:
+        return section_conflict(current_hash)
+    return None
+
+
 @_safe
 def wiki_search(
     query: str,
@@ -2044,6 +2061,7 @@ def wiki_update_page(
     description: str | None = None, status: str | None = None,
     new_heading: str | None = None,
     expected_revision: int | None = None,
+    expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -2071,6 +2089,9 @@ def wiki_update_page(
                 "hint": "fix nested code frontmatter before updating",
             }
         try:
+            conflict = _check_section_hash(original_body, heading, expected_section_hash)
+            if conflict is not None:
+                return conflict
             updated_body = replace_section(
                 original_body,
                 heading,
@@ -2157,6 +2178,9 @@ def wiki_update_page(
         }
     new_body = to_markdown_links(new_body)
     try:
+        conflict = _check_section_hash(original_body, heading, expected_section_hash)
+        if conflict is not None:
+            return conflict
         new_body = replace_section(
             original_body, heading, new_body, new_heading=new_heading
         )
@@ -2417,6 +2441,7 @@ def wiki_insert_section(
 def wiki_delete_section(
     domain: str, slug: str, heading: str,
     source: str | None = None, expected_revision: int | None = None,
+    expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -2442,6 +2467,9 @@ def wiki_delete_section(
                 "hint": "fix nested code frontmatter before updating",
             }
         try:
+            conflict = _check_section_hash(original_body, heading, expected_section_hash)
+            if conflict is not None:
+                return conflict
             updated_body = delete_section(original_body, heading)
         except SectionError as exc:
             return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
@@ -2484,6 +2512,9 @@ def wiki_delete_section(
             "hint": "fix nested code frontmatter before updating",
         }
     try:
+        conflict = _check_section_hash(original_body, heading, expected_section_hash)
+        if conflict is not None:
+            return conflict
         new_body = delete_section(original_body, heading)
     except SectionError as e:
         return {"error": str(e), "hint": "check the heading with wiki_read_page"}
@@ -2524,6 +2555,7 @@ def wiki_move_section(
     domain: str, slug: str, heading: str,
     after_heading: str | None = None, before_heading: str | None = None,
     expected_revision: int | None = None,
+    expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -2549,6 +2581,9 @@ def wiki_move_section(
                 "hint": "fix nested code frontmatter before updating",
             }
         try:
+            conflict = _check_section_hash(original_body, heading, expected_section_hash)
+            if conflict is not None:
+                return conflict
             updated_body = move_section(
                 original_body, heading, after=after_heading, before=before_heading
             )
@@ -2593,6 +2628,9 @@ def wiki_move_section(
             "hint": "fix nested code frontmatter before updating",
         }
     try:
+        conflict = _check_section_hash(original_body, heading, expected_section_hash)
+        if conflict is not None:
+            return conflict
         new_body = move_section(
             original_body, heading, after=after_heading, before=before_heading
         )

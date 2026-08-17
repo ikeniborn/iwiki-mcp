@@ -666,3 +666,95 @@ def test_move_section_rejects_both_after_and_before(tmp_path, monkeypatch):
         "backend", "concept/auth", "Notes", after_heading="Overview", before_heading="Flow",
     )
     assert "error" in out
+
+
+def test_delete_section_hash_mismatch_returns_conflict(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_delete_section(
+        "backend", "concept/auth", "Flow", expected_section_hash="0000000000000000",
+    )
+    assert out["error"] == "section_conflict"
+    assert "current_section_hash" in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" in read["markdown"]
+
+
+def test_delete_section_hash_match_succeeds(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    current = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    out = server.wiki_delete_section(
+        "backend", "concept/auth", "Flow", expected_section_hash=current["section_hash"],
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+
+
+def test_delete_section_hash_omitted_behaves_as_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Flow")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+
+
+def test_move_section_hash_mismatch_returns_conflict(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section(
+        "backend", "concept/auth", "Notes", before_heading="Overview",
+        expected_section_hash="0000000000000000",
+    )
+    assert out["error"] == "section_conflict"
+    assert "current_section_hash" in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Overview") < read["markdown"].index("## Notes")
+
+
+def test_move_section_hash_match_succeeds(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    current = server.wiki_read_page("backend", "concept/auth", heading="Notes")
+    out = server.wiki_move_section(
+        "backend", "concept/auth", "Notes", before_heading="Overview",
+        expected_section_hash=current["section_hash"],
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_move_section_hash_omitted_behaves_as_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Notes", before_heading="Overview")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")

@@ -77,8 +77,72 @@ def test_update_public_signature_adds_trailing_optional_new_heading():
         "status",
         "new_heading",
         "expected_revision",
+        "expected_section_hash",
     ]
     assert signature.parameters["new_heading"].default is None
+    assert signature.parameters["expected_section_hash"].default is None
+
+
+def test_update_page_section_hash_mismatch_returns_conflict(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nold\n",
+    )
+    out = server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "new",
+        expected_section_hash="0000000000000000",
+    )
+    assert out["error"] == "section_conflict"
+    assert "current_section_hash" in out
+
+
+def test_update_page_section_hash_match_succeeds(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nold\n",
+    )
+    current = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    out = server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "new",
+        expected_section_hash=current["section_hash"],
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    assert read["body"] == "new"
+
+
+def test_update_page_section_hash_omitted_behaves_as_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nold\n",
+    )
+    out = server.wiki_update_page("backend", "concept/auth", "Flow", "new")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    assert read["body"] == "new"
+
+
+def test_update_page_stale_section_hash_after_concurrent_write(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nold\n",
+    )
+    stale = server.wiki_read_page("backend", "concept/auth", heading="Flow")["section_hash"]
+    # someone else updates the section first
+    server.wiki_update_page("backend", "concept/auth", "Flow", "someone else's edit")
+    out = server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "my edit",
+        expected_section_hash=stale,
+    )
+    assert out["error"] == "section_conflict"
 
 
 def test_update_page_refreshes_only_changed_graph_page(tmp_path, monkeypatch):
