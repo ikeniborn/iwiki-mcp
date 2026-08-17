@@ -220,13 +220,19 @@ SOURCE_CONTENT_MAX_BYTES = 200_000
 _REMEDIATION_NEXT_STEPS = [
     "Regenerate stale wiki markdown from source semantics.",
     "Use wiki_update_page for compatible section-body edits.",
-    "Use wiki_delete_page then wiki_write_page when the article structure must change.",
+    "Use wiki_insert_section, wiki_delete_section, or wiki_move_section for "
+    "section-level structural changes.",
+    "Use wiki_delete_page then wiki_write_page when structural changes go "
+    "beyond section-level (e.g. type migration).",
     "Use wiki_delete_page for missing_source delete candidates.",
     "Run wiki_lint and report planned, updated, deleted, failed, and remaining_lint.",
 ]
 
 _UPDATE_REMEDIATION_TOOLS = [
     "wiki_update_page",
+    "wiki_insert_section",
+    "wiki_delete_section",
+    "wiki_move_section",
     "wiki_delete_page",
     "wiki_write_page",
     "wiki_lint",
@@ -2440,7 +2446,7 @@ def wiki_insert_section(
 @_safe
 def wiki_delete_section(
     domain: str, slug: str, heading: str,
-    source: str | None = None, expected_revision: int | None = None,
+    expected_revision: int | None = None,
     expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
@@ -2473,6 +2479,17 @@ def wiki_delete_section(
             updated_body = delete_section(original_body, heading)
         except SectionError as exc:
             return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
+        blocking = [
+            finding
+            for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+            }
         if meta:
             meta["timestamp"] = _dt.date.today().isoformat()
             updated_markdown = _fm.render(meta) + updated_body
@@ -2518,6 +2535,13 @@ def wiki_delete_section(
         new_body = delete_section(original_body, heading)
     except SectionError as e:
         return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+        }
     cfg = Config.load()
     if meta:
         meta["timestamp"] = _dt.date.today().isoformat()
@@ -2589,6 +2613,17 @@ def wiki_move_section(
             )
         except SectionError as exc:
             return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
+        blocking = [
+            finding
+            for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+            }
         if meta:
             meta["timestamp"] = _dt.date.today().isoformat()
             updated_markdown = _fm.render(meta) + updated_body
@@ -2636,6 +2671,13 @@ def wiki_move_section(
         )
     except SectionError as e:
         return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+        }
     cfg = Config.load()
     if meta:
         meta["timestamp"] = _dt.date.today().isoformat()

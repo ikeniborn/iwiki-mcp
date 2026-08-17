@@ -174,6 +174,8 @@ def move_section(
     sections = list_sections(content)
     idx = _locate(sections, heading)
     target = sections[idx].heading
+    if target.lower() in _fm.RESERVED_SECTIONS or target.lower() == _fm.OVERVIEW_HEADING:
+        raise SectionError(f"cannot move reserved section '## {target}'")
     anchor_name = after if after is not None else before
     if anchor_name is not None and anchor_name.lstrip("#").strip() == target:
         raise SectionError("move target must not be the section itself")

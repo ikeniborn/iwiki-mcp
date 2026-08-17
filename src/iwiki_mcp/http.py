@@ -43,6 +43,9 @@ _WRITE_DOMAIN_TOOLS = {
     "wiki_write_page",
     "wiki_update_page",
     "wiki_delete_page",
+    "wiki_insert_section",
+    "wiki_delete_section",
+    "wiki_move_section",
     "wiki_index",
 }
 _CODE_PUBLISH_TOOLS = {
