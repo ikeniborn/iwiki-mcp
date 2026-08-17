@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import frontmatter as _fm
 from .links import slugify_heading
 
 # Keep in sync with chunk._H2 / validate._H2 / lint._H2.
@@ -104,3 +105,82 @@ def replace_section(
     body_start = sections[idx].body_start + shift
     body_end = sections[idx].body_end + shift
     return renamed[:body_start] + "\n" + new_body.strip("\n") + "\n\n" + renamed[body_end:]
+
+
+def _anchor_collision(content: str, exclude_start: int, anchor: str) -> bool:
+    return any(
+        candidate.start() != exclude_start
+        and slugify_heading(candidate.group(1).strip()) == anchor
+        for candidate in _HEADING.finditer(content)
+    )
+
+
+def _anchor_point(content: str, *, after: str | None, before: str | None) -> int:
+    """Return the insertion offset for `after`/`before`, or EOF for neither."""
+    if after is not None and before is not None:
+        raise SectionError("cannot set both after and before")
+    sections = list_sections(content)
+    if after is not None:
+        idx = _locate(sections, after)
+        return sections[idx].body_end
+    if before is not None:
+        idx = _locate(sections, before)
+        return sections[idx].start
+    return len(content)
+
+
+def insert_section(
+    content: str, heading: str, body: str, *,
+    after: str | None = None, before: str | None = None,
+) -> str:
+    """Insert a new ``## heading`` section at the given anchor point."""
+    target = heading.lstrip("#").strip()
+    if not target:
+        raise SectionError("empty heading")
+    if _H2.search(body):
+        raise SectionError("body must not contain a ## heading")
+    anchor = slugify_heading(target)
+    if not anchor:
+        raise SectionError("empty normalized heading")
+    if _anchor_collision(content, -1, anchor):
+        raise SectionError(f"section heading '{target}' collides with another anchor")
+    point = _anchor_point(content, after=after, before=before)
+    block = f"## {target}\n{body.strip(chr(10))}\n\n"
+    prefix = content[:point]
+    if prefix and not prefix.endswith("\n\n"):
+        prefix = prefix.rstrip("\n") + "\n\n"
+    return prefix + block + content[point:]
+
+
+def delete_section(content: str, heading: str) -> str:
+    """Remove the ``## heading`` section entirely."""
+    sections = list_sections(content)
+    idx = _locate(sections, heading)
+    target = sections[idx].heading
+    if target.lower() in _fm.RESERVED_SECTIONS or target.lower() == _fm.OVERVIEW_HEADING:
+        raise SectionError(f"cannot delete reserved section '## {target}'")
+    if len(sections) <= 1:
+        raise SectionError("cannot delete the last remaining section")
+    return content[:sections[idx].start] + content[sections[idx].body_end:]
+
+
+def move_section(
+    content: str, heading: str, *,
+    after: str | None = None, before: str | None = None,
+) -> str:
+    """Reorder the ``## heading`` section relative to ``after``/``before``."""
+    if after is not None and before is not None:
+        raise SectionError("cannot set both after and before")
+    sections = list_sections(content)
+    idx = _locate(sections, heading)
+    target = sections[idx].heading
+    anchor_name = after if after is not None else before
+    if anchor_name is not None and anchor_name.lstrip("#").strip() == target:
+        raise SectionError("move target must not be the section itself")
+    block = content[sections[idx].start:sections[idx].body_end]
+    remainder = content[:sections[idx].start] + content[sections[idx].body_end:]
+    point = _anchor_point(remainder, after=after, before=before)
+    prefix = remainder[:point]
+    if prefix and not prefix.endswith("\n\n"):
+        prefix = prefix.rstrip("\n") + "\n\n"
+    return prefix + block.rstrip("\n") + "\n\n" + remainder[point:]
