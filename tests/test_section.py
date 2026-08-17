@@ -1,8 +1,18 @@
 import pytest
 
-from iwiki_mcp.engine.section import SectionError, replace_section
+from iwiki_mcp.engine.section import SectionError, list_sections, replace_section
 
 PAGE = "# Auth\n## Overview\nsummary\n## Flow\nold body here\n## Notes\nkeep\n"
+
+
+def test_list_sections_returns_heading_and_body_in_order():
+    sections = list_sections(PAGE)
+    assert [s.heading for s in sections] == ["Overview", "Flow", "Notes"]
+    assert sections[1].body.strip() == "old body here"
+
+
+def test_list_sections_empty_content_returns_empty_list():
+    assert list_sections("# Title\nno sections here\n") == []
 
 
 def test_replace_section_swaps_only_target_body():
