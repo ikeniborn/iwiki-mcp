@@ -9,6 +9,10 @@ review:
     consistency: passed
     alignment: passed
   findings: []
+result_check:
+  verdict: OK
+  intent_hash: 91a75be426033452
+  last_run: 2026-08-17
 ---
 # Intent: tool-contract-consistency
 
