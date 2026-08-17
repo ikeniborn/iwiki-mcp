@@ -19,7 +19,7 @@ from ..engine.config import Config
 from ..engine.embed import embed_texts
 from ..engine.links import parse_link_targets
 from ..engine.related import related
-from ..engine.store import Record, dequantize
+from ..engine.store import SCHEMA_VERSION, Record, dequantize, make_record
 from ..engine.validate import validate_page
 from ..storage import expected_revision_required, revision_conflict
 from .auth import AccessError, AuthContext
@@ -623,7 +623,103 @@ class PostgresStore:
             "revision": row[1],
         }
 
-    def _prepare_page(self, domain: str, slug: str, markdown: str):
+    # Incremental chunk reuse
+    # -----------------------
+    # A chunk row is addressed by its *slot* inside the page:
+    #
+    #     (kind, heading, chunk index)
+    #
+    # ``chunk_markdown`` numbers windows per heading across the whole page, so
+    # the slot stays unique when a page repeats a heading or a long section is
+    # word-split into several windows; ``kind`` only separates the frontmatter
+    # summary chunk from a section that happens to carry an empty heading. The
+    # slot survives a section moving up or down the page, which is exactly the
+    # reuse we want.
+    #
+    # ``Chunk.hash`` is ``sha256(text)[:16]``, so equal hashes mean equal
+    # embedded text: a slot whose stored hash still matches keeps its vector —
+    # and its ``chunk_id`` — untouched, mirroring the ``prev.hash == c.hash``
+    # check ``indexer.index_domain`` already does on the Git path. Every other
+    # slot is replaced in place, inserted, or deleted, so a page always ends up
+    # with exactly one row per chunk.
+    #
+    # The reuse decision is taken twice, from two independent reads: once in
+    # ``_prepare_page`` (outside the write transaction, to skip embedder calls)
+    # and once in ``_replace_derived`` (inside it, to drive the SQL). They can
+    # only disagree under a concurrent write, and disagreeing is harmless: a
+    # stored vector is reused only when its hash matches the current text, and
+    # every DELETE/INSERT decision comes from the in-transaction read.
+
+    @staticmethod
+    def _chunk_slot(chunk) -> tuple:
+        return (chunk.kind, chunk.heading, chunk.chunk)
+
+    @staticmethod
+    def _row_slot(section_id: str, heading: str) -> tuple:
+        metadata = json.loads(section_id)
+        return (metadata.get("kind", "section"), heading, metadata["chunk"])
+
+    @staticmethod
+    def _vector_is_current(
+        stored_hash: str, stored_dim: int, target_hash: str, target_dim: int
+    ) -> bool:
+        """One predicate for both halves of the reuse decision.
+
+        ``_prepare_page`` asks it whether a stored vector may be reused instead
+        of calling the embedder; ``_reindex_chunks`` asks it whether the row's
+        vector columns still match the record about to be written. They must
+        never disagree: ``Chunk.hash`` covers the embedded *text* only, so a
+        stored vector of the wrong dimension has a matching hash yet must still
+        be replaced.
+        """
+        return stored_hash == target_hash and stored_dim == target_dim
+
+    @staticmethod
+    def _reused_record(chunk, scale: float, quantized) -> Record:
+        """Rebuild a record around a stored vector, refreshing page facets."""
+        return Record(
+            id=chunk.id,
+            file=chunk.file,
+            heading=chunk.heading,
+            chunk=chunk.chunk,
+            hash=chunk.hash,
+            dim=len(quantized),
+            scale=scale,
+            q=list(quantized),
+            type=chunk.type,
+            tags=list(chunk.tags),
+            kind=chunk.kind,
+            ordinal=chunk.ordinal,
+            v=SCHEMA_VERSION,
+        )
+
+    def _stored_vectors(self, domain: str, slug: str) -> dict:
+        """Slot to ``(hash, scale, quantized vector)`` for one page's chunks."""
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT c.section_id, c.heading, c.quantization_scale, "
+                    "c.quantized_embedding FROM iwiki.chunks c "
+                    "JOIN iwiki.pages p ON p.iwiki_id = c.iwiki_id "
+                    "AND p.page_id = c.page_id "
+                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                    "AND d.domain_id = p.domain_id "
+                    "WHERE c.iwiki_id = %s AND d.slug = %s AND p.slug = %s",
+                    (self.iwiki_id, domain, slug),
+                )
+                rows = cursor.fetchall()
+        return {
+            self._row_slot(section_id, heading): (
+                json.loads(section_id)["hash"],
+                float(scale),
+                [int(value) for value in quantized],
+            )
+            for section_id, heading, scale, quantized in rows
+        }
+
+    def _prepare_page(
+        self, domain: str, slug: str, markdown: str, *, reuse: bool = False
+    ):
         domain = _validate_identifier(domain, "domain")
         slug = _validate_identifier(slug, "page slug")
         if not isinstance(markdown, str):
@@ -640,12 +736,36 @@ class PostgresStore:
         if blocking:
             raise ValueError("section structure invalid")
         file = f"{slug}.md"
-        chunks, records = indexer.prepare_page_records(
-            self.cfg,
+        chunks = indexer.chunk_markdown(
             file,
             markdown,
-            embedder=self._embedder,
+            self.cfg.chunk_size,
+            self.cfg.chunk_overlap,
+            self.cfg.summary_max,
         )
+        stored = self._stored_vectors(domain, slug) if reuse else {}
+        records: list[Record] = [None] * len(chunks)
+        pending = []
+        for position, chunk in enumerate(chunks):
+            previous = stored.get(self._chunk_slot(chunk))
+            if previous is not None and self._vector_is_current(
+                previous[0], len(previous[2]), chunk.hash, self.cfg.dimensions
+            ):
+                records[position] = self._reused_record(
+                    chunk, previous[1], previous[2]
+                )
+            else:
+                pending.append((position, chunk))
+        if pending:
+            vectors = self._embedder(
+                self.cfg, [chunk.text for _position, chunk in pending]
+            )
+            if len(vectors) != len(pending):
+                raise ValueError("embedding response count mismatch")
+            if any(len(vector) != self.cfg.dimensions for vector in vectors):
+                raise ValueError("embedding dimension mismatch")
+            for (position, chunk), vector in zip(pending, vectors):
+                records[position] = make_record(chunk, vector)
         targets = parse_link_targets(markdown, domain)
         return domain, slug, markdown, chunks, records, targets
 
@@ -664,6 +784,116 @@ class PostgresStore:
             separators=(",", ":"),
         )
 
+    def _insert_chunk(
+        self, cursor, page_id: int, storage_ordinal: int, chunk, record: Record
+    ) -> None:
+        cursor.execute(
+            "INSERT INTO iwiki.chunks ("
+            "iwiki_id, page_id, section_id, heading, content, ordinal, "
+            "quantization_scale, quantized_embedding, embedding"
+            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                self.iwiki_id,
+                page_id,
+                self._record_metadata(record),
+                chunk.heading,
+                chunk.text,
+                storage_ordinal,
+                record.scale,
+                record.q,
+                np.asarray(dequantize(record.scale, record.q), dtype=np.float32),
+            ),
+        )
+
+    def _reindex_chunks(self, cursor, page_id: int, chunks, records) -> None:
+        """Diff the page's chunk rows against the new chunks; see the slot note."""
+        cursor.execute(
+            "SELECT chunk_id, section_id, heading, ordinal, "
+            "coalesce(array_length(quantized_embedding, 1), 0) "
+            "FROM iwiki.chunks WHERE iwiki_id = %s AND page_id = %s "
+            "ORDER BY chunk_id",
+            (self.iwiki_id, page_id),
+        )
+        existing: dict[tuple, tuple] = {}
+        stale: list[int] = []
+        highest = -1
+        for chunk_id, section_id, heading, ordinal, dim in cursor.fetchall():
+            highest = max(highest, ordinal)
+            slot = self._row_slot(section_id, heading)
+            if slot in existing:
+                # A slot is unique per page; a duplicate can only be legacy
+                # residue, so drop it rather than leave an unreachable row.
+                stale.append(chunk_id)
+            else:
+                existing[slot] = (
+                    chunk_id,
+                    json.loads(section_id)["hash"],
+                    ordinal,
+                    section_id,
+                    dim,
+                )
+        kept, fresh = [], []
+        for storage_ordinal, (chunk, record) in enumerate(zip(chunks, records)):
+            previous = existing.pop(self._chunk_slot(chunk), None)
+            if previous is None:
+                fresh.append((storage_ordinal, chunk, record))
+            else:
+                kept.append((previous, storage_ordinal, chunk, record))
+        stale.extend(previous[0] for previous in existing.values())
+        if stale:
+            cursor.execute(
+                "DELETE FROM iwiki.chunks WHERE iwiki_id = %s AND page_id = %s "
+                "AND chunk_id = ANY(%s)",
+                (self.iwiki_id, page_id, stale),
+            )
+        # (iwiki_id, page_id, ordinal) is UNIQUE and not deferrable, so park the
+        # retained rows above every final ordinal before renumbering them.
+        renumber = any(
+            previous[2] != storage_ordinal
+            for previous, storage_ordinal, _chunk, _record in kept
+        )
+        if renumber:
+            cursor.execute(
+                "UPDATE iwiki.chunks SET ordinal = ordinal + %s "
+                "WHERE iwiki_id = %s AND page_id = %s",
+                (highest + len(chunks) + 1, self.iwiki_id, page_id),
+            )
+        for previous, storage_ordinal, chunk, record in kept:
+            chunk_id, previous_hash, _ordinal, previous_metadata, previous_dim = (
+                previous
+            )
+            metadata = self._record_metadata(record)
+            if not self._vector_is_current(
+                previous_hash, previous_dim, record.hash, record.dim
+            ):
+                cursor.execute(
+                    "UPDATE iwiki.chunks SET section_id = %s, heading = %s, "
+                    "content = %s, ordinal = %s, quantization_scale = %s, "
+                    "quantized_embedding = %s, embedding = %s "
+                    "WHERE iwiki_id = %s AND chunk_id = %s",
+                    (
+                        metadata,
+                        chunk.heading,
+                        chunk.text,
+                        storage_ordinal,
+                        record.scale,
+                        record.q,
+                        np.asarray(
+                            dequantize(record.scale, record.q), dtype=np.float32
+                        ),
+                        self.iwiki_id,
+                        chunk_id,
+                    ),
+                )
+            elif renumber or previous_metadata != metadata:
+                cursor.execute(
+                    "UPDATE iwiki.chunks SET section_id = %s, ordinal = %s "
+                    "WHERE iwiki_id = %s AND chunk_id = %s",
+                    (metadata, storage_ordinal, self.iwiki_id, chunk_id),
+                )
+        for storage_ordinal, chunk, record in fresh:
+            self._insert_chunk(cursor, page_id, storage_ordinal, chunk, record)
+
     def _replace_derived(
         self,
         cursor,
@@ -671,33 +901,22 @@ class PostgresStore:
         chunks,
         records: list[Record],
         targets,
+        *,
+        reuse: bool = False,
     ) -> None:
-        cursor.execute(
-            "DELETE FROM iwiki.chunks WHERE iwiki_id = %s AND page_id = %s",
-            (self.iwiki_id, page_id),
-        )
+        if reuse:
+            self._reindex_chunks(cursor, page_id, chunks, records)
+        else:
+            cursor.execute(
+                "DELETE FROM iwiki.chunks WHERE iwiki_id = %s AND page_id = %s",
+                (self.iwiki_id, page_id),
+            )
+            for storage_ordinal, (chunk, record) in enumerate(zip(chunks, records)):
+                self._insert_chunk(cursor, page_id, storage_ordinal, chunk, record)
         cursor.execute(
             "DELETE FROM iwiki.links WHERE iwiki_id = %s AND source_page_id = %s",
             (self.iwiki_id, page_id),
         )
-        for storage_ordinal, (chunk, record) in enumerate(zip(chunks, records)):
-            cursor.execute(
-                "INSERT INTO iwiki.chunks ("
-                "iwiki_id, page_id, section_id, heading, content, ordinal, "
-                "quantization_scale, quantized_embedding, embedding"
-                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    self.iwiki_id,
-                    page_id,
-                    self._record_metadata(record),
-                    chunk.heading,
-                    chunk.text,
-                    storage_ordinal,
-                    record.scale,
-                    record.q,
-                    np.asarray(dequantize(record.scale, record.q), dtype=np.float32),
-                ),
-            )
         for target in targets:
             target_row = None
             if (
@@ -815,7 +1034,7 @@ class PostgresStore:
         if expected_revision is None:
             return expected_revision_required()
         domain, slug, markdown, chunks, records, targets = self._prepare_page(
-            domain, slug, markdown
+            domain, slug, markdown, reuse=True
         )
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -839,7 +1058,9 @@ class PostgresStore:
                     )
                     current = cursor.fetchone()
                     return revision_conflict(current[0] if current else None)
-                self._replace_derived(cursor, row[0], chunks, records, targets)
+                self._replace_derived(
+                    cursor, row[0], chunks, records, targets, reuse=True
+                )
                 self._bump_markdown_generation(cursor, domain)
         return {
             "page": f"{domain}/{slug}.md",

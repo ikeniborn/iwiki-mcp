@@ -21,6 +21,15 @@ def revision_conflict(current_revision: int | None) -> dict:
     }
 
 
+def section_conflict(current_section_hash: str | None) -> dict:
+    """Stable response when a section-level CAS pre-check loses a race."""
+    return {
+        "error": "section_conflict",
+        "current_section_hash": current_section_hash,
+        "hint": "re-read the section with wiki_read_page and retry",
+    }
+
+
 @dataclass(frozen=True)
 class GitBinding:
     """Resolved local Git wiki binding."""

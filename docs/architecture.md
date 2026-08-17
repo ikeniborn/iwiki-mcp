@@ -339,6 +339,9 @@ mindmap
     Write:::write
       wiki_write_page
       wiki_update_page
+      wiki_insert_section
+      wiki_delete_section
+      wiki_move_section
       wiki_delete_page
       wiki_index
       wiki_create_domain
@@ -489,6 +492,19 @@ in-place (`section.replace_section`, which rejects an ambiguous/missing heading)
 does a whole-file ingest-log upsert (`upsert_ingest_log` keeps one record per page),
 and rolls back by restoring the original bytes. `wiki_delete_page` removes the file,
 appends a `delete` log op, reindexes, and rolls back by rewriting the file.
+
+`wiki_insert_section`, `wiki_delete_section`, and `wiki_move_section` extend this
+family with section-granular structural edits — add, remove, or reorder a single `##`
+section without touching the rest of the page — sharing `engine/section.py`'s
+`list_sections` parser and the same fail-soft/transactional shape and PostgreSQL
+`expected_revision` requirement as `wiki_update_page`. `wiki_read_page` accepts an
+optional `heading` to return just that section (plus its `section_hash`) instead of
+the whole page; `wiki_update_page`, `wiki_delete_section`, and `wiki_move_section`
+accept a matching optional `expected_section_hash` as a pre-check layered in front of
+`expected_revision`, rejecting a stale hash with `section_conflict`. Page reindexing
+after any of these ops reuses unchanged sections' stored embeddings by chunk-hash diff
+(`indexer.index_domain` for Git; `PostgresStore._vector_is_current` for PostgreSQL)
+instead of re-embedding the whole page on every edit.
 
 ### Cross-domain rewrite coordinator
 

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Отчёт о внедрении: section-granular-page-updates</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg);
+  transition:background .3s, color .3s;
+}
+.theme-btn{ position:sticky; top:.5rem; float:right; cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--surface); }
+h1{ font-size:1.6rem; margin-top:0; }
+h2{ font-size:1.25rem; margin-top:2.2rem; border-bottom:2px solid var(--border); padding-bottom:.3rem; }
+h3{ font-size:1.05rem; color:var(--accent-2); }
+.lead{ font-size:1.08rem; }
+.sub{ color:var(--muted); font-size:.95rem; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0;
+  box-shadow:0 1px 8px var(--shadow); }
+.note.warn{ border-left-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+.note.danger{ border-left-color:var(--danger); background:color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+details{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:.7rem 1rem; margin:.7rem 0; box-shadow:0 1px 8px var(--shadow); }
+details summary{ cursor:pointer; font-weight:600; color:var(--accent); }
+details[open] summary{ margin-bottom:.55rem; }
+ul.tight li{ margin:.28rem 0; }
+.badge{ display:inline-block; font-size:.72rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); }
+.badge.ok{ color:var(--ok-2); border-color:var(--ok); }
+.badge.warn{ color:var(--warn-2); border-color:var(--warn); }
+.badge.danger{ color:var(--danger-2); border-color:var(--danger); }
+.badge.info{ color:var(--accent-2); border-color:var(--accent); }
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface);
+  margin:1rem 0; font-size:.9rem; border:1px solid var(--border); border-radius:10px;
+  overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.5rem .75rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); position:sticky; top:0; }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table tbody tr:hover{ background:color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.rpt-table td code{ white-space:nowrap; }
+.rpt-c4 .boundary{ border:1.6px dashed var(--accent); border-radius:12px;
+  padding:1.8rem 1rem 1rem; margin:.7rem 0; position:relative;
+  display:flex; flex-wrap:wrap; gap:.6rem;
+  background:color-mix(in srgb, var(--accent) 5%, transparent); }
+.rpt-c4 .boundary::before{ content:attr(data-label); position:absolute; top:-.7rem; left:.9rem;
+  background:var(--bg); padding:0 .45rem; font-size:.8rem; color:var(--accent); font-weight:600; }
+.rpt-c4 .comp{ background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  padding:.55rem .85rem; min-width:8rem; font-size:.85rem; box-shadow:0 1px 6px var(--shadow);
+  border-left:4px solid var(--accent); }
+.rpt-c4 .comp b{ color:var(--accent); }
+.rpt-c4 .comp .sub{ font-size:.75rem; }
+.rpt-flow{ display:flex; align-items:center; gap:0; margin:1rem 0; flex-wrap:wrap; }
+.rpt-flow .node{ background:var(--surface); color:var(--fg);
+  border:1px solid var(--border); border-radius:8px; padding:.6rem 1rem; font-size:.88rem; }
+.rpt-flow .node.decision{ border-color:var(--warn); }
+.rpt-flow .node.ok{ border-color:var(--ok); }
+.rpt-flow .node.danger{ border-color:var(--danger); }
+.rpt-flow .arrow{ flex:0 0 2.2rem; height:2px; background:var(--line); position:relative; }
+.rpt-flow .arrow::after{ content:""; position:absolute; right:0; top:-4px;
+  border:5px solid transparent; border-left-color:var(--line); }
+code{ background:color-mix(in srgb, var(--accent) 8%, var(--surface)); padding:.1rem .35rem; border-radius:4px; font-size:.9em; }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Переключить тему">🌙 / ☀️</label>
+
+<main class="report">
+
+<h1>Отчёт о внедрении: section-granular-page-updates</h1>
+<p class="sub">
+Ветка <code>dev-section-granular-page-updates</code> · база diff
+<code>a52dd33</code> (merge-base с origin/master) · голова <code>57bc9b8</code> ·
+25 файлов, +4019/−85
+</p>
+
+<h2>1. Резюме внедрения</h2>
+<p class="lead">
+Секционные операции над страницами wiki-MCP-сервера: чтение/вставка/удаление/перемещение
+одного <code>##</code>-раздела вместо перезаписи всей страницы, плюс переиспользование
+эмбеддингов неизменённых секций и optimistic CAS на уровне раздела — только для
+Postgres-бэкенда, Git-бэкенд намеренно не тронут.
+</p>
+<table class="rpt-table">
+<thead><tr><th>Документ цепочки</th><th>Путь</th></tr></thead>
+<tbody>
+<tr><td>Intent</td><td><code>docs/superpowers/intents/2026-08-17-section-granular-page-updates-intent.md</code></td></tr>
+<tr><td>Spec</td><td><code>docs/superpowers/specs/2026-08-17-section-granular-page-updates-design.md</code></td></tr>
+<tr><td>Plan</td><td><code>docs/superpowers/plans/2026-08-17-section-granular-page-updates.md</code></td></tr>
+</tbody>
+</table>
+
+<h2>2. Выполненные изменения</h2>
+<table class="rpt-table">
+<thead><tr><th>Файл</th><th>Тип</th><th>Что изменилось</th></tr></thead>
+<tbody>
+<tr><td><code>src/iwiki_mcp/engine/section.py</code></td><td>modified</td><td>Общий парсер <code>list_sections</code>/<code>_locate</code>; новые <code>insert_section</code>/<code>delete_section</code>/<code>move_section</code>; guard зарезервированных разделов на <code>move</code>.</td></tr>
+<tr><td><code>src/iwiki_mcp/server.py</code></td><td>modified</td><td>Параметр <code>heading</code> у <code>wiki_read_page</code>; 3 новых tool; CAS-проверка <code>expected_section_hash</code>; валидация <code>_BLOCKING</code> на delete/move.</td></tr>
+<tr><td><code>src/iwiki_mcp/postgres/store.py</code></td><td>modified</td><td>Переиспользование чанков через <code>_vector_is_current</code>; shift-then-renumber для <code>UNIQUE(iwiki_id,page_id,ordinal)</code>.</td></tr>
+<tr><td><code>src/iwiki_mcp/storage.py</code></td><td>modified</td><td>Новый хелпер ошибки <code>section_conflict()</code>.</td></tr>
+<tr><td><code>src/iwiki_mcp/indexer.py</code></td><td>modified (−21)</td><td>Удалена осиротевшая <code>prepare_page_records</code>.</td></tr>
+<tr><td><code>src/iwiki_mcp/http.py</code></td><td>modified</td><td>3 новых tool добавлены в allow-list авторизации <code>_WRITE_DOMAIN_TOOLS</code>.</td></tr>
+<tr><td>тесты (5 файлов git-пути)</td><td>modified</td><td>Юнит/интеграционное покрытие всех изменений выше.</td></tr>
+<tr><td>тесты (4 файла postgres, 1 новый)</td><td>modified/new</td><td>Postgres-режим, включая прогон на реальном pgvector-контейнере.</td></tr>
+<tr><td><code>resources.py</code>, <code>README.md</code>, <code>docs/README.ru.md</code>, <code>docs/architecture.md</code></td><td>modified</td><td>Документация синхронизирована с новым API.</td></tr>
+<tr><td><code>pyproject.toml</code>, <code>uv.lock</code></td><td>modified</td><td>Версия <code>0.7.134 → 0.7.143</code>.</td></tr>
+<tr><td>intent/spec/plan (chain)</td><td>new</td><td>Артефакты IDD→SDD цепочки.</td></tr>
+</tbody>
+</table>
+
+<h2>3. Результаты</h2>
+
+<h3>Задачи плана (9/9 DONE)</h3>
+<table class="rpt-table">
+<thead><tr><th>#</th><th>Задача</th><th>Статус</th><th>Раунды фикса</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Общий парсер <code>list_sections</code>/<code>_locate</code></td><td><span class="badge ok">DONE</span></td><td>1 (семантика поля <code>body_start</code>)</td></tr>
+<tr><td>2</td><td><code>insert_section</code>/<code>delete_section</code>/<code>move_section</code></td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+<tr><td>3</td><td>Секционное чтение <code>wiki_read_page(heading=)</code></td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+<tr><td>4</td><td><code>wiki_insert_section</code></td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+<tr><td>5</td><td><code>wiki_delete_section</code></td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+<tr><td>6</td><td><code>wiki_move_section</code></td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+<tr><td>7</td><td>Переиспользование чанков в Postgres</td><td><span class="badge ok">DONE</span></td><td>1 (desync решения о переиспользовании при несовпадении размерности — реальный дефект, найден и исправлен, проверено на живом pgvector)</td></tr>
+<tr><td>8</td><td>CAS <code>expected_section_hash</code></td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+<tr><td>9</td><td>Тесты конкурентности + docs upkeep</td><td><span class="badge ok">DONE</span></td><td>0</td></tr>
+</tbody>
+</table>
+
+<h3>Desired Outcomes интента (3 полных / 1 частично)</h3>
+<table class="rpt-table">
+<thead><tr><th>Outcome</th><th>Статус</th></tr></thead>
+<tbody>
+<tr><td>Правка раздела в Postgres не трогает чанки других разделов</td><td><span class="badge ok">DONE</span></td></tr>
+<tr><td><code>wiki_read_page</code> возвращает один раздел</td><td><span class="badge ok">DONE</span></td></tr>
+<tr><td>Insert/delete/move без полной перезаписи страницы</td><td><span class="badge ok">DONE</span></td></tr>
+<tr><td>Конкурентные правки разных разделов — обе успешны; правка одного раздела — конфликт</td><td><span class="badge warn">PARTIAL</span></td></tr>
+</tbody>
+</table>
+<div class="note warn">
+<b>Честно о частичном outcome:</b> доказано только на Git-бэкенде. На Postgres не достижимо
+полностью — <code>expected_revision</code> (тот же интент требует его обязательным) —
+page-scoped, а не section-scoped, поэтому два агента, читающие одну ревизию и правящие
+разные разделы, всё равно гонятся на page-level CAS. Это внутреннее противоречие
+собственных ограничений интента, а не дефект реализации — вскрыто финальным ревью,
+не скрыто.
+</div>
+
+<h3>Финальный whole-branch review и fix-волна</h3>
+<p>
+Ревью (Opus, весь диапазон 18 коммитов) нашло <b>1 Critical</b> + <b>5 Important</b> +
+4 продвинутых Minor. Единая fix-волна (3 коммита) закрыла все 8 находок; scoped re-review
+подтвердил: все ADDRESSED, новых Critical/Important не привнесено.
+</p>
+<details>
+<summary>Список находок (клик, чтобы развернуть)</summary>
+<ul class="tight">
+<li><span class="badge danger">Critical</span> <code>test_tool_matrix.py</code> падал в дефолтном сьюте — реестр <code>TOOLS</code> не расширен на 3 новых tool.</li>
+<li><span class="badge warn">Important</span> <code>http.py</code>: 3 новых tool отсутствовали в allow-list авторизации hosted HTTP-транспорта.</li>
+<li><span class="badge warn">Important</span> Мёртвый параметр <code>source</code> у <code>wiki_delete_section</code> (наследие из плана) — удалён.</li>
+<li><span class="badge warn">Important</span> Тонкое покрытие Postgres-режима для delete/move/CAS — расширено.</li>
+<li><span class="badge warn">Important</span> Устаревшая документация (<code>_REMEDIATION_NEXT_STEPS</code>, <code>architecture.md</code>) — обновлена.</li>
+<li><span class="badge info">Minor→fixed</span> Нет юнит-теста на <code>_vector_is_current</code>; асимметрия reserved-guard между <code>delete_section</code>/<code>move_section</code>; отсутствие <code>_BLOCKING</code>-проверки на delete/move; <code>uv.lock</code> отставал на версию.</li>
+</ul>
+</details>
+<div class="note">
+Два Minor-пункта оставлены как есть (не регрессия, не блокируют merge, вынесены на
+поверхность человеку явно): одностороннее ограничение <code>move_section</code>
+относительно <code>## Overview</code>; недостижимая через интерфейс tool-ов ветка
+<code>_BLOCKING</code> для delete/move на устаревших страницах с <code>###</code>.
+</div>
+
+<h2>4. Влияние на систему</h2>
+<table class="rpt-table">
+<thead><tr><th>Компонент</th><th>Изменение поведения</th><th>Риск/follow-up</th></tr></thead>
+<tbody>
+<tr><td><code>wiki_read_page</code></td><td>+опциональный <code>heading</code> — обратная совместимость сохранена</td><td>—</td></tr>
+<tr><td><code>wiki_update_page</code> / новые 3 tool</td><td>+опциональный <code>expected_section_hash</code> CAS поверх обязательного <code>expected_revision</code></td><td>Postgres: не решает гонку между разными разделами (см. Outcome 4)</td></tr>
+<tr><td>Postgres storage</td><td>Переиспользование эмбеддингов неизменённых чанков вместо полного переэмбеддинга страницы</td><td>Прозрачно для вызывающего кода</td></tr>
+<tr><td>Git-бэкенд</td><td>Не тронут (steering-ограничение интента)</td><td>—</td></tr>
+<tr><td>Схема хранения</td><td>Без изменений — markdown остаётся источником истины, новых таблиц нет</td><td>—</td></tr>
+</tbody>
+</table>
+
+<h2>5. Схемы</h2>
+
+<h3>Компоненты</h3>
+<figure class="rpt-c4">
+  <div class="boundary" data-label="iwiki-mcp · MCP сервер">
+    <div class="comp"><b>engine/section.py</b><br><span class="sub">list_sections, insert/delete/move_section</span></div>
+    <div class="comp"><b>server.py</b><br><span class="sub">wiki_read_page, wiki_*_section tools</span></div>
+    <div class="comp"><b>storage.py</b><br><span class="sub">section_conflict()</span></div>
+    <div class="boundary" data-label="Postgres-only путь">
+      <div class="comp"><b>postgres/store.py</b><br><span class="sub">_vector_is_current, chunk reuse</span></div>
+    </div>
+    <div class="boundary" data-label="Git-путь · не тронут">
+      <div class="comp"><b>indexer.py</b><br><span class="sub">index_domain (без изменений)</span></div>
+    </div>
+  </div>
+</figure>
+
+<h3>Поток CAS-проверки раздела</h3>
+<figure class="rpt-flow">
+  <div class="node">wiki_read_page(heading=X)</div>
+  <div class="arrow"></div>
+  <div class="node">section_hash</div>
+  <div class="arrow"></div>
+  <div class="node decision">wiki_update_page(expected_section_hash)</div>
+  <div class="arrow"></div>
+  <div class="node ok">хэш совпал → продолжить</div>
+  <div class="arrow"></div>
+  <div class="node decision">expected_revision (page-level CAS)</div>
+  <div class="arrow"></div>
+  <div class="node ok">commit</div>
+</figure>
+<p class="sub">Ветка отказа: несовпадение <code>section_hash</code> → <code>section_conflict</code> до обращения к page-level CAS.</p>
+
+</main>
+</body>
+</html>

@@ -1,5 +1,6 @@
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -456,3 +457,352 @@ def test_write_page_surfaces_safe_push_failure_metadata(tmp_path, monkeypatch):
             "type not given and IWIKI_CHAT_MODEL unset; defaulted to concept"
         ),
     }
+
+
+def test_read_page_with_heading_returns_only_that_section(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    assert out["heading"] == "Flow"
+    assert out["body"].strip() == "flow body"
+    assert "section_hash" in out
+    assert "markdown" not in out
+
+
+def test_read_page_with_missing_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_read_page("backend", "concept/auth", heading="Nope")
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_read_page_without_heading_is_unchanged(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_read_page("backend", "concept/auth")
+    assert set(out) == {"domain", "slug", "markdown"}
+
+
+def test_insert_section_adds_new_section_after_target(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "new body", after_heading="Flow"
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## New\nnew body" in read["markdown"]
+    assert read["markdown"].index("## Flow") < read["markdown"].index("## New")
+
+
+def test_insert_section_missing_page_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_insert_section("backend", "nope", "New", "body")
+    assert "not found" in out["error"]
+
+
+def test_insert_section_rejects_invalid_body_structure(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "### too deep\nx"
+    )
+    assert "error" in out
+
+
+def test_insert_section_missing_anchor_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "body", after_heading="NoSuchSection"
+    )
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_insert_section_rejects_both_after_and_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "body",
+        after_heading="Flow", before_heading="Overview",
+    )
+    assert "error" in out
+
+
+def test_insert_section_rejects_anchor_collision(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_insert_section("backend", "concept/auth", "Flow", "body")
+    assert "error" in out
+    assert "collides" in out["error"]
+
+
+def test_delete_section_removes_target_section(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Flow")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+    assert "## Notes" in read["markdown"]
+
+
+def test_delete_section_rejects_last_section(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Overview")
+    assert "error" in out
+
+
+def test_delete_section_missing_page_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_delete_section("backend", "concept/missing", "Flow")
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_delete_section_missing_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Nope")
+    assert "error" in out
+
+
+def test_move_section_reorders_target(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Notes", before_heading="Overview")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_move_section_rejects_self_reference(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Flow", after_heading="Flow")
+    assert "error" in out
+
+
+def test_move_section_missing_page_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_move_section("backend", "concept/missing", "Flow", after_heading="Overview")
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_move_section_missing_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Nope", after_heading="Overview")
+    assert "error" in out
+
+
+def test_move_section_rejects_both_after_and_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section(
+        "backend", "concept/auth", "Notes", after_heading="Overview", before_heading="Flow",
+    )
+    assert "error" in out
+
+
+def test_delete_section_hash_mismatch_returns_conflict(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_delete_section(
+        "backend", "concept/auth", "Flow", expected_section_hash="0000000000000000",
+    )
+    assert out["error"] == "section_conflict"
+    assert "current_section_hash" in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" in read["markdown"]
+
+
+def test_delete_section_hash_match_succeeds(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    current = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    out = server.wiki_delete_section(
+        "backend", "concept/auth", "Flow", expected_section_hash=current["section_hash"],
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+
+
+def test_delete_section_hash_omitted_behaves_as_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Flow")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+
+
+def test_move_section_hash_mismatch_returns_conflict(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section(
+        "backend", "concept/auth", "Notes", before_heading="Overview",
+        expected_section_hash="0000000000000000",
+    )
+    assert out["error"] == "section_conflict"
+    assert "current_section_hash" in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Overview") < read["markdown"].index("## Notes")
+
+
+def test_move_section_hash_match_succeeds(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    current = server.wiki_read_page("backend", "concept/auth", heading="Notes")
+    out = server.wiki_move_section(
+        "backend", "concept/auth", "Notes", before_heading="Overview",
+        expected_section_hash=current["section_hash"],
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_move_section_hash_omitted_behaves_as_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Notes", before_heading="Overview")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_concurrent_updates_to_different_sections_both_succeed(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    overview = server.wiki_read_page("backend", "concept/auth", heading="Overview")
+    flow = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(
+            server.wiki_update_page, "backend", "concept/auth", "Overview", "new sum",
+            expected_section_hash=overview["section_hash"],
+        )
+        f2 = pool.submit(
+            server.wiki_update_page, "backend", "concept/auth", "Flow", "new flow",
+            expected_section_hash=flow["section_hash"],
+        )
+        r1, r2 = f1.result(), f2.result()
+
+    assert "error" not in r1
+    assert "error" not in r2
+    final = server.wiki_read_page("backend", "concept/auth")
+    assert "new sum" in final["markdown"]
+    assert "new flow" in final["markdown"]
+
+
+def test_concurrent_updates_to_same_section_second_conflicts(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    flow = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "first write",
+        expected_section_hash=flow["section_hash"],
+    )
+    out = server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "second write",
+        expected_section_hash=flow["section_hash"],  # stale, already applied above
+    )
+    assert out["error"] == "section_conflict"

@@ -35,6 +35,12 @@ AUTHORING_RULES: str = """\
   section (or its `new_heading` rename), and `wiki_delete_page` only when a source was
   removed. Run `wiki_lint` after changes; use `wiki_remediation_plan` to inspect grouped
   repair actions.
+- `wiki_read_page(..., heading=...)` returns only that one `##` section (with its
+  `section_hash`) instead of the whole page. `wiki_insert_section`, `wiki_delete_section`,
+  and `wiki_move_section` add, remove, or reorder one `##` section without rewriting the
+  rest of the page. `wiki_update_page`, `wiki_delete_section`, and `wiki_move_section` all
+  accept `expected_section_hash` for optimistic concurrency: a stale hash is rejected with
+  `section_conflict` instead of silently overwriting a concurrent edit.
 - PostgreSQL reads include a numeric `revision`. Pass it as `expected_revision` to
   PostgreSQL update/delete calls; omission or a stale value leaves the page unchanged.
   Git mode keeps its existing mutation contract and does not require a revision.

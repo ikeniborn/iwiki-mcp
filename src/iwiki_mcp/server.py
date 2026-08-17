@@ -72,11 +72,14 @@ from .engine.related import related
 # closure gets loaded lazily from disk — after an on-disk package upgrade that
 # mixes new source with stale cached modules in a long-lived stdio process.
 from .engine import search  # noqa: F401
-from .engine.section import SectionError, replace_section
+from .engine.section import (
+    SectionError, delete_section, insert_section, list_sections, move_section,
+    replace_section, _locate,
+)
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
-from .storage import expected_revision_required
+from .storage import expected_revision_required, section_conflict
 
 
 LOGGER = logging.getLogger(__name__)
@@ -217,13 +220,19 @@ SOURCE_CONTENT_MAX_BYTES = 200_000
 _REMEDIATION_NEXT_STEPS = [
     "Regenerate stale wiki markdown from source semantics.",
     "Use wiki_update_page for compatible section-body edits.",
-    "Use wiki_delete_page then wiki_write_page when the article structure must change.",
+    "Use wiki_insert_section, wiki_delete_section, or wiki_move_section for "
+    "section-level structural changes.",
+    "Use wiki_delete_page then wiki_write_page when structural changes go "
+    "beyond section-level (e.g. type migration).",
     "Use wiki_delete_page for missing_source delete candidates.",
     "Run wiki_lint and report planned, updated, deleted, failed, and remaining_lint.",
 ]
 
 _UPDATE_REMEDIATION_TOOLS = [
     "wiki_update_page",
+    "wiki_insert_section",
+    "wiki_delete_section",
+    "wiki_move_section",
     "wiki_delete_page",
     "wiki_write_page",
     "wiki_lint",
@@ -1276,7 +1285,7 @@ def wiki_list_pages(domain: str) -> dict:
 
 
 @_safe
-def wiki_read_page(domain: str, slug: str) -> dict:
+def wiki_read_page(domain: str, slug: str, heading: str | None = None) -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
         valid_domain = _validate_domain(domain)
@@ -1292,18 +1301,55 @@ def wiki_read_page(domain: str, slug: str) -> dict:
                 "error": f"page '{valid_domain}/{slug}' not found",
                 "hint": "list pages with wiki_list_pages",
             }
-        return page
+        if heading is None:
+            return page
+        _, body = _fm.split(page["markdown"], strict_code=True)
+        return _read_section(domain, slug, body, heading)
     path = _page_path(bind.base, domain, slug)
     if not os.path.isfile(path):
         return {
             "error": f"page '{domain}/{slug}' not found",
             "hint": "list pages with wiki_list_pages",
         }
+    markdown = open(path, encoding="utf-8").read()
+    if heading is None:
+        return {"domain": domain, "slug": slug, "markdown": markdown}
+    _, body = _fm.split(markdown, strict_code=True)
+    return _read_section(domain, slug, body, heading)
+
+
+def _read_section(domain: str, slug: str, body: str, heading: str) -> dict:
+    try:
+        sections = list_sections(body)
+        idx = _locate(sections, heading)
+    except SectionError as exc:
+        return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
+    section = sections[idx]
+    section_hash = sha256(section.body.strip("\n").encode("utf-8")).hexdigest()[:16]
     return {
         "domain": domain,
         "slug": slug,
-        "markdown": open(path, encoding="utf-8").read(),
+        "heading": section.heading,
+        "body": section.body.strip("\n"),
+        "section_hash": section_hash,
     }
+
+
+def _check_section_hash(body: str, heading: str, expected: str | None) -> dict | None:
+    """Return a section_conflict dict if `expected` doesn't match, else None.
+
+    Raises SectionError (propagated like other section lookups) if the
+    heading is missing/ambiguous; callers catch that alongside their
+    existing replace/delete/move SectionError handling.
+    """
+    if expected is None:
+        return None
+    sections = list_sections(body)
+    idx = _locate(sections, heading)
+    current_hash = sha256(sections[idx].body.strip("\n").encode("utf-8")).hexdigest()[:16]
+    if current_hash != expected:
+        return section_conflict(current_hash)
+    return None
 
 
 @_safe
@@ -2021,6 +2067,7 @@ def wiki_update_page(
     description: str | None = None, status: str | None = None,
     new_heading: str | None = None,
     expected_revision: int | None = None,
+    expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -2048,6 +2095,9 @@ def wiki_update_page(
                 "hint": "fix nested code frontmatter before updating",
             }
         try:
+            conflict = _check_section_hash(original_body, heading, expected_section_hash)
+            if conflict is not None:
+                return conflict
             updated_body = replace_section(
                 original_body,
                 heading,
@@ -2134,6 +2184,9 @@ def wiki_update_page(
         }
     new_body = to_markdown_links(new_body)
     try:
+        conflict = _check_section_hash(original_body, heading, expected_section_hash)
+        if conflict is not None:
+            return conflict
         new_body = replace_section(
             original_body, heading, new_body, new_heading=new_heading
         )
@@ -2207,6 +2260,454 @@ def wiki_update_page(
         **_write_sync_result(commit, fresh.get("warning")),
     }
     return result
+
+
+@_safe
+def wiki_insert_section(
+    domain: str, slug: str, heading: str, body: str,
+    after_heading: str | None = None, before_heading: str | None = None,
+    source: str | None = None, description: str | None = None,
+    status: str | None = None, expected_revision: int | None = None,
+) -> dict:
+    bind = _resolved_binding()
+    valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        if expected_revision is None:
+            return expected_revision_required()
+        _slug_parts(slug)
+        store = _postgres_store_for_binding(bind)
+        page = store.read_page(valid_domain, slug)
+        if page is None:
+            return {
+                "error": f"page '{valid_domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages",
+            }
+        try:
+            meta, original_body = _fm.split(
+                page["markdown"], strict_code=True
+            )
+        except _fm.FrontmatterError as exc:
+            return {
+                "error": str(exc),
+                "hint": "fix nested code frontmatter before updating",
+            }
+        try:
+            updated_body = insert_section(
+                original_body,
+                heading,
+                to_markdown_links(body),
+                after=after_heading,
+                before=before_heading,
+            )
+        except SectionError as exc:
+            return {
+                "error": str(exc),
+                "hint": "check the heading with wiki_read_page",
+            }
+        blocking = [
+            finding
+            for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "body must use only ## headings; no ###+, no pre-## text",
+            }
+        if description is not None:
+            meta["description"] = description
+        if status is not None:
+            meta["status"] = _fm.normalize_status(status)
+        if source is not None:
+            meta["resource"] = source
+        if meta:
+            meta["timestamp"] = _dt.date.today().isoformat()
+            updated_markdown = _fm.render(meta) + updated_body
+        else:
+            updated_markdown = updated_body
+        result = store.update_page(
+            valid_domain,
+            slug,
+            updated_markdown,
+            expected_revision,
+        )
+        if "error" not in result:
+            result["heading"] = heading.lstrip("#").strip()
+        return result
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
+    if not dom_path.is_dir():
+        return {
+            "error": f"domain '{valid_domain}' not found",
+            "hint": "create it with wiki_create_domain",
+        }
+    base.migrate_store_location(bind.base, valid_domain)
+    # See wiki_write_page: ignore gate on the raw source first, then normalize.
+    if source:
+        spec = ignore.load_project_ignore(bind.project_dir)
+        if ignore.is_ignored(spec, source, bind.project_dir):
+            return {
+                "error": "source matches .iwikiignore",
+                "hint": f"'{source}' is excluded by .iwikiignore; "
+                        "remove the pattern to ingest, or omit source",
+            }
+    if source is not None:
+        try:
+            source = _normalize_source(bind.project_dir, source)
+        except ValueError as exc:
+            return {"error": str(exc),
+                    "hint": "pass a source path inside the bound project"}
+    path = _page_path(bind.base, valid_domain, slug)
+    if not os.path.isfile(path):
+        return {
+            "error": f"page '{valid_domain}/{slug}' not found",
+            "hint": "list pages with wiki_list_pages",
+        }
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    original_full = open(path, encoding="utf-8").read()
+    try:
+        meta, original_body = _fm.split(original_full, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before updating",
+        }
+    body = to_markdown_links(body)
+    try:
+        new_body = insert_section(
+            original_body, heading, body, after=after_heading, before=before_heading
+        )
+    except SectionError as e:
+        return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "body must use only ## headings; no ###+, no pre-## text",
+        }
+    cfg = Config.load()
+    if meta:
+        if description is not None:
+            meta["description"] = description
+        if status is not None:
+            meta["status"] = _fm.normalize_status(status)
+        meta["timestamp"] = _dt.date.today().isoformat()
+        new_md = _fm.render(meta) + new_body
+    else:
+        new_md = new_body
+    log_file = base.log_path(bind.base, valid_domain)
+    log_before = None
+    if source and os.path.exists(log_file):
+        with open(log_file, "rb") as fh:
+            log_before = fh.read()
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+        if source:
+            indexer.upsert_ingest_log(
+                bind.base, valid_domain, source, page_file, indexer.src_hash(source)
+            )
+        stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    except Exception:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(original_full)
+        if source:            # mirrors the upsert gate above
+            _restore_log(log_file, log_before)
+        raise
+    page_rel = f"{valid_domain}/{page_file}"
+    commit = sync.commit_and_push(bind.base, f"iwiki: insert section into {page_rel}",
+                                  pathspec=valid_domain,
+                                  _after_commit=_after_commit_graph(
+                                      graph_mutation, refresh_files=(page_file,)
+                                  ))
+    result = {
+        "page": page_rel,
+        "heading": heading.lstrip("#").strip(),
+        "indexed_chunks": stats["indexed_chunks"],
+        "reused": stats["reused"],
+        "embedded": stats["embedded"],
+        "bytes": stats["bytes"],
+        "over_cap": stats["over_cap"],
+        **_write_sync_result(commit, fresh.get("warning")),
+    }
+    return result
+
+
+@_safe
+def wiki_delete_section(
+    domain: str, slug: str, heading: str,
+    expected_revision: int | None = None,
+    expected_section_hash: str | None = None,
+) -> dict:
+    bind = _resolved_binding()
+    valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        if expected_revision is None:
+            return expected_revision_required()
+        _slug_parts(slug)
+        store = _postgres_store_for_binding(bind)
+        page = store.read_page(valid_domain, slug)
+        if page is None:
+            return {
+                "error": f"page '{valid_domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages",
+            }
+        try:
+            meta, original_body = _fm.split(page["markdown"], strict_code=True)
+        except _fm.FrontmatterError as exc:
+            return {
+                "error": str(exc),
+                "hint": "fix nested code frontmatter before updating",
+            }
+        try:
+            conflict = _check_section_hash(original_body, heading, expected_section_hash)
+            if conflict is not None:
+                return conflict
+            updated_body = delete_section(original_body, heading)
+        except SectionError as exc:
+            return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
+        blocking = [
+            finding
+            for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+            }
+        if meta:
+            meta["timestamp"] = _dt.date.today().isoformat()
+            updated_markdown = _fm.render(meta) + updated_body
+        else:
+            updated_markdown = updated_body
+        result = store.update_page(
+            valid_domain, slug, updated_markdown, expected_revision
+        )
+        if "error" not in result:
+            result["heading"] = heading.lstrip("#").strip()
+        return result
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
+    if not dom_path.is_dir():
+        return {
+            "error": f"domain '{valid_domain}' not found",
+            "hint": "create it with wiki_create_domain",
+        }
+    base.migrate_store_location(bind.base, valid_domain)
+    path = _page_path(bind.base, valid_domain, slug)
+    if not os.path.isfile(path):
+        return {
+            "error": f"page '{valid_domain}/{slug}' not found",
+            "hint": "list pages with wiki_list_pages",
+        }
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    original_full = open(path, encoding="utf-8").read()
+    try:
+        meta, original_body = _fm.split(original_full, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before updating",
+        }
+    try:
+        conflict = _check_section_hash(original_body, heading, expected_section_hash)
+        if conflict is not None:
+            return conflict
+        new_body = delete_section(original_body, heading)
+    except SectionError as e:
+        return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+        }
+    cfg = Config.load()
+    if meta:
+        meta["timestamp"] = _dt.date.today().isoformat()
+        new_md = _fm.render(meta) + new_body
+    else:
+        new_md = new_body
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+        stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    except Exception:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(original_full)
+        raise
+    page_rel = f"{valid_domain}/{page_file}"
+    commit = sync.commit_and_push(
+        bind.base, f"iwiki: delete section from {page_rel}", pathspec=valid_domain,
+        _after_commit=_after_commit_graph(graph_mutation, refresh_files=(page_file,)),
+    )
+    return {
+        "page": page_rel,
+        "heading": heading.lstrip("#").strip(),
+        "indexed_chunks": stats["indexed_chunks"],
+        "reused": stats["reused"],
+        "embedded": stats["embedded"],
+        "bytes": stats["bytes"],
+        "over_cap": stats["over_cap"],
+        **_write_sync_result(commit, fresh.get("warning")),
+    }
+
+
+@_safe
+def wiki_move_section(
+    domain: str, slug: str, heading: str,
+    after_heading: str | None = None, before_heading: str | None = None,
+    expected_revision: int | None = None,
+    expected_section_hash: str | None = None,
+) -> dict:
+    bind = _resolved_binding()
+    valid_domain = _validate_domain(domain)
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+        if scope_error:
+            return scope_error
+        if expected_revision is None:
+            return expected_revision_required()
+        _slug_parts(slug)
+        store = _postgres_store_for_binding(bind)
+        page = store.read_page(valid_domain, slug)
+        if page is None:
+            return {
+                "error": f"page '{valid_domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages",
+            }
+        try:
+            meta, original_body = _fm.split(page["markdown"], strict_code=True)
+        except _fm.FrontmatterError as exc:
+            return {
+                "error": str(exc),
+                "hint": "fix nested code frontmatter before updating",
+            }
+        try:
+            conflict = _check_section_hash(original_body, heading, expected_section_hash)
+            if conflict is not None:
+                return conflict
+            updated_body = move_section(
+                original_body, heading, after=after_heading, before=before_heading
+            )
+        except SectionError as exc:
+            return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
+        blocking = [
+            finding
+            for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+            }
+        if meta:
+            meta["timestamp"] = _dt.date.today().isoformat()
+            updated_markdown = _fm.render(meta) + updated_body
+        else:
+            updated_markdown = updated_body
+        result = store.update_page(
+            valid_domain, slug, updated_markdown, expected_revision
+        )
+        if "error" not in result:
+            result["heading"] = heading.lstrip("#").strip()
+        return result
+    dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
+    fresh = sync.ensure_fresh(bind.base)
+    if fresh.get("state") == "diverged":
+        return dict(_DIVERGED)
+    if not dom_path.is_dir():
+        return {
+            "error": f"domain '{valid_domain}' not found",
+            "hint": "create it with wiki_create_domain",
+        }
+    base.migrate_store_location(bind.base, valid_domain)
+    path = _page_path(bind.base, valid_domain, slug)
+    if not os.path.isfile(path):
+        return {
+            "error": f"page '{valid_domain}/{slug}' not found",
+            "hint": "list pages with wiki_list_pages",
+        }
+    page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    original_full = open(path, encoding="utf-8").read()
+    try:
+        meta, original_body = _fm.split(original_full, strict_code=True)
+    except _fm.FrontmatterError as exc:
+        return {
+            "error": str(exc),
+            "hint": "fix nested code frontmatter before updating",
+        }
+    try:
+        conflict = _check_section_hash(original_body, heading, expected_section_hash)
+        if conflict is not None:
+            return conflict
+        new_body = move_section(
+            original_body, heading, after=after_heading, before=before_heading
+        )
+    except SectionError as e:
+        return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
+    if blocking:
+        return {
+            "error": "section structure invalid",
+            "findings": blocking,
+            "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
+        }
+    cfg = Config.load()
+    if meta:
+        meta["timestamp"] = _dt.date.today().isoformat()
+        new_md = _fm.render(meta) + new_body
+    else:
+        new_md = new_body
+    graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+        stats = indexer.index_domain(cfg, bind.base, valid_domain)
+    except Exception:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(original_full)
+        raise
+    page_rel = f"{valid_domain}/{page_file}"
+    commit = sync.commit_and_push(
+        bind.base, f"iwiki: move section in {page_rel}", pathspec=valid_domain,
+        _after_commit=_after_commit_graph(graph_mutation, refresh_files=(page_file,)),
+    )
+    return {
+        "page": page_rel,
+        "heading": heading.lstrip("#").strip(),
+        "indexed_chunks": stats["indexed_chunks"],
+        "reused": stats["reused"],
+        "embedded": stats["embedded"],
+        "bytes": stats["bytes"],
+        "over_cap": stats["over_cap"],
+        **_write_sync_result(commit, fresh.get("warning")),
+    }
 
 
 @_safe
@@ -3133,6 +3634,9 @@ wiki_sync = _postgres_unsupported_guard(wiki_sync)
 # Every overlapping mutation recovers journals before any other side effect.
 wiki_write_page = _mutation_guard(wiki_write_page)
 wiki_update_page = _mutation_guard(wiki_update_page)
+wiki_insert_section = _mutation_guard(wiki_insert_section)
+wiki_delete_section = _mutation_guard(wiki_delete_section)
+wiki_move_section = _mutation_guard(wiki_move_section)
 wiki_delete_page = _mutation_guard(wiki_delete_page)
 wiki_index = _mutation_guard(wiki_index)
 wiki_create_domain = _mutation_guard(wiki_create_domain)
@@ -3159,6 +3663,9 @@ mcp.tool()(wiki_search)
 mcp.tool()(wiki_related)
 mcp.tool()(wiki_write_page)
 mcp.tool()(wiki_update_page)
+mcp.tool()(wiki_insert_section)
+mcp.tool()(wiki_delete_section)
+mcp.tool()(wiki_move_section)
 mcp.tool()(wiki_delete_page)
 mcp.tool()(wiki_index)
 mcp.tool()(wiki_create_domain)
