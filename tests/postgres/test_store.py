@@ -463,7 +463,12 @@ def test_update_page_reuses_unchanged_chunk_embeddings(store_factory):
     assert [row[1] for row in before] == ["", "Alpha", "Beta"]
 
     embed_calls = _counting_embedder(store)
-    updated = _two_section_markdown(beta="beta body changed")
+    # The fixture embedder buckets on substrings of the whole chunk text, and
+    # the ``## Beta`` heading is part of that text, so the replacement body must
+    # carry the "alpha" keyword to land in a *different* bucket. Without that,
+    # a stale vector and a correctly rewritten one would be the same value and
+    # the assertion below could not tell them apart.
+    updated = _two_section_markdown(beta="alpha rewritten body")
     assert store.update_page(
         "docs", "concept/two", updated, expected_revision=1
     ) == {
@@ -474,16 +479,52 @@ def test_update_page_reuses_unchanged_chunk_embeddings(store_factory):
     after = _chunk_rows(store, "concept/two")
 
     # Only the changed section is re-embedded.
-    assert not any("alpha body" in text for text in embed_calls)
-    assert not any("two summary" in text for text in embed_calls)
-    assert any("beta body changed" in text for text in embed_calls)
+    assert "## Alpha\nalpha body" not in embed_calls
+    assert "two summary" not in embed_calls
+    assert embed_calls == ["## Beta\nalpha rewritten body"]
     # The untouched rows keep their identity and their stored vector.
     assert [row[1] for row in after] == ["", "Alpha", "Beta"]
     assert before[0] == after[0]
     assert before[1] == after[1]
-    # The changed section is rewritten in its own row, keeping its identity.
+    # The changed section is rewritten in its own row, keeping its identity,
+    # and its stored vector really is replaced.
     assert after[2][0] == before[2][0]
-    assert after[2][3] == "## Beta\nbeta body changed"
+    assert after[2][3] == "## Beta\nalpha rewritten body"
+    assert before[2][6] == [0.0, 1.0, 0.0]
+    assert after[2][6] == [1.0, 0.0, 0.0]
+    assert after[2][5] != before[2][5]
+
+
+def test_update_page_rewrites_a_stored_vector_of_the_wrong_dimension(store_factory):
+    store = store_factory()
+    markdown = _two_section_markdown()
+    store.write_page("docs", "concept/two", markdown)
+    with store._connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE iwiki.chunks c SET quantized_embedding = "
+                "ARRAY[1, 2]::smallint[] FROM iwiki.pages p "
+                "WHERE p.iwiki_id = c.iwiki_id AND p.page_id = c.page_id "
+                "AND p.slug = %s AND c.heading = %s",
+                ("concept/two", "Beta"),
+            )
+    before = {row[1]: row for row in _chunk_rows(store, "concept/two")}
+    assert before["Beta"][5] == [1, 2]
+
+    # The text is unchanged, so the hash still matches: only the dimension tells
+    # the store that the stored vector is unusable. Both halves of the reuse
+    # decision must agree, or the fresh embedding is computed and discarded.
+    embed_calls = _counting_embedder(store)
+    assert store.update_page(
+        "docs", "concept/two", markdown, expected_revision=1
+    )["indexed_chunks"] == 3
+    after = {row[1]: row for row in _chunk_rows(store, "concept/two")}
+
+    assert embed_calls == ["## Beta\nbeta body"]
+    assert after["Beta"][5] == [0, 127, 0]
+    assert after["Beta"][6] == [0.0, 1.0, 0.0]
+    assert after["Beta"][0] == before["Beta"][0]
+    assert after["Alpha"] == before["Alpha"]
 
 
 def test_update_page_reuses_embeddings_when_sections_shift(store_factory):

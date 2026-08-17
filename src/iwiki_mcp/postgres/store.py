@@ -660,6 +660,21 @@ class PostgresStore:
         return (metadata.get("kind", "section"), heading, metadata["chunk"])
 
     @staticmethod
+    def _vector_is_current(
+        stored_hash: str, stored_dim: int, target_hash: str, target_dim: int
+    ) -> bool:
+        """One predicate for both halves of the reuse decision.
+
+        ``_prepare_page`` asks it whether a stored vector may be reused instead
+        of calling the embedder; ``_reindex_chunks`` asks it whether the row's
+        vector columns still match the record about to be written. They must
+        never disagree: ``Chunk.hash`` covers the embedded *text* only, so a
+        stored vector of the wrong dimension has a matching hash yet must still
+        be replaced.
+        """
+        return stored_hash == target_hash and stored_dim == target_dim
+
+    @staticmethod
     def _reused_record(chunk, scale: float, quantized) -> Record:
         """Rebuild a record around a stored vector, refreshing page facets."""
         return Record(
@@ -733,10 +748,8 @@ class PostgresStore:
         pending = []
         for position, chunk in enumerate(chunks):
             previous = stored.get(self._chunk_slot(chunk))
-            if (
-                previous is not None
-                and previous[0] == chunk.hash
-                and len(previous[2]) == self.cfg.dimensions
+            if previous is not None and self._vector_is_current(
+                previous[0], len(previous[2]), chunk.hash, self.cfg.dimensions
             ):
                 records[position] = self._reused_record(
                     chunk, previous[1], previous[2]
@@ -795,14 +808,16 @@ class PostgresStore:
     def _reindex_chunks(self, cursor, page_id: int, chunks, records) -> None:
         """Diff the page's chunk rows against the new chunks; see the slot note."""
         cursor.execute(
-            "SELECT chunk_id, section_id, heading, ordinal FROM iwiki.chunks "
-            "WHERE iwiki_id = %s AND page_id = %s ORDER BY chunk_id",
+            "SELECT chunk_id, section_id, heading, ordinal, "
+            "coalesce(array_length(quantized_embedding, 1), 0) "
+            "FROM iwiki.chunks WHERE iwiki_id = %s AND page_id = %s "
+            "ORDER BY chunk_id",
             (self.iwiki_id, page_id),
         )
         existing: dict[tuple, tuple] = {}
         stale: list[int] = []
         highest = -1
-        for chunk_id, section_id, heading, ordinal in cursor.fetchall():
+        for chunk_id, section_id, heading, ordinal, dim in cursor.fetchall():
             highest = max(highest, ordinal)
             slot = self._row_slot(section_id, heading)
             if slot in existing:
@@ -811,7 +826,11 @@ class PostgresStore:
                 stale.append(chunk_id)
             else:
                 existing[slot] = (
-                    chunk_id, json.loads(section_id)["hash"], ordinal, section_id,
+                    chunk_id,
+                    json.loads(section_id)["hash"],
+                    ordinal,
+                    section_id,
+                    dim,
                 )
         kept, fresh = [], []
         for storage_ordinal, (chunk, record) in enumerate(zip(chunks, records)):
@@ -840,9 +859,13 @@ class PostgresStore:
                 (highest + len(chunks) + 1, self.iwiki_id, page_id),
             )
         for previous, storage_ordinal, chunk, record in kept:
-            chunk_id, previous_hash, _ordinal, previous_metadata = previous
+            chunk_id, previous_hash, _ordinal, previous_metadata, previous_dim = (
+                previous
+            )
             metadata = self._record_metadata(record)
-            if previous_hash != record.hash:
+            if not self._vector_is_current(
+                previous_hash, previous_dim, record.hash, record.dim
+            ):
                 cursor.execute(
                     "UPDATE iwiki.chunks SET section_id = %s, heading = %s, "
                     "content = %s, ordinal = %s, quantization_scale = %s, "
