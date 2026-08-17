@@ -1122,6 +1122,25 @@ def test_explicit_index_uses_one_deadline_and_discards_staging(
     ))
 
 
+def test_explicit_index_deadline_is_independent_of_bounded_rebuild_deadline(
+    seed_runtime, monkeypatch
+):
+    runtime = seed_runtime.with_config(
+        max_rebuild_seconds=1, max_full_rebuild_seconds=5
+    )
+    real_parse = runtime.runtime._indexer._parse
+
+    def slow_parse(discovered, config):
+        time.sleep(1.5)
+        return real_parse(discovered, config)
+
+    monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
+
+    result = runtime.index(force=True)
+
+    assert result.get("state") == "ready"
+
+
 def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
     seed_runtime, monkeypatch
 ):

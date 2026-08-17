@@ -1035,7 +1035,11 @@ class CodeGraphRuntime:
         if unavailable is not None:
             return unavailable
         assert self._indexer is not None and self.config is not None
-        deadline = time.monotonic() + self.config.max_rebuild_seconds
+        full_rebuild_seconds = (
+            self.config.max_full_rebuild_seconds
+            or self.config.max_rebuild_seconds
+        )
+        deadline = time.monotonic() + full_rebuild_seconds
         return self._index_with_deadline(
             force=force,
             languages=languages,

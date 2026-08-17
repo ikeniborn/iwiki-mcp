@@ -378,11 +378,17 @@ enabled = true
 languages = ["python"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
+max_full_rebuild_seconds = 10
 max_file_bytes = 1000000
 max_total_files = 20000
 include_tests = true
 exclude = []
 ```
+
+`max_rebuild_seconds` bounds the query-time auto-rebuild only. `max_full_rebuild_seconds`
+bounds an explicit `wiki_code_index` full build and defaults to `max_rebuild_seconds` when
+unset; set it higher on large repositories so a full build is not cut short by the tighter
+query-time budget.
 
 The supported environment overrides are `IWIKI_CODE_GRAPH_ENABLED`,
 `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES`, and
@@ -458,10 +464,13 @@ a machine that holds the repository. One primary domain maps to exactly one repo
 Remote publication is a four-call lifecycle over the existing bearer-token
 authorization: `wiki_code_publish_begin`, repeated `wiki_code_publish_batch`,
 then `wiki_code_publish_finalize` or `wiki_code_publish_abort`. None of them accepts a
-tenant or domain field; the server derives `iwiki_id` and the bound primary from the
-token, which must hold write access to that primary. A session belongs to the identity
-that created it: another token with write access to the same domain cannot append to,
-abort, or finalize it, and a replacement process must start a new session.
+tenant or domain field; the client binds each remote session to the local project's
+`primary` (from `.iwiki.toml`) with `wiki_bind` right after `session.initialize()`, and
+the server derives `iwiki_id` and the bound primary from that session, so the token must
+hold write access to the project's primary domain — `wiki_bind` narrows an already
+granted scope and cannot widen it. A session belongs to the identity that created it:
+another token with write access to the same domain cannot append to, abort, or finalize
+it, and a replacement process must start a new session.
 
 Batches carry rows only — never a database file, source text, an absolute checkout
 path, credentials, or publisher-generated wiki links. The target recomputes the payload

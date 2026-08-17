@@ -102,31 +102,39 @@ def _write_config(project: Path, base: Path, **overrides) -> None:
         "languages": ["python"],
         "auto_rebuild": "off",
         "max_rebuild_seconds": 2,
+        "max_full_rebuild_seconds": None,
         "max_file_bytes": 1_000_000,
         "max_total_files": 100,
         "include_tests": True,
         **overrides,
     }
     languages = ", ".join(json.dumps(item) for item in values["languages"])
+    lines = [
+        f"base = {json.dumps(str(base))}",
+        'read = ["project"]',
+        'write = ["project"]',
+        'primary = "project"',
+        "",
+        "[code_graph]",
+        f"enabled = {str(values['enabled']).lower()}",
+        f"languages = [{languages}]",
+        f"auto_rebuild = {json.dumps(values['auto_rebuild'])}",
+        f"max_rebuild_seconds = {values['max_rebuild_seconds']}",
+    ]
+    if values["max_full_rebuild_seconds"] is not None:
+        lines.append(
+            f"max_full_rebuild_seconds = {values['max_full_rebuild_seconds']}"
+        )
+    lines.extend(
+        (
+            f"max_file_bytes = {values['max_file_bytes']}",
+            f"max_total_files = {values['max_total_files']}",
+            f"include_tests = {str(values['include_tests']).lower()}",
+            "",
+        )
+    )
     project.joinpath(".iwiki.toml").write_text(
-        "\n".join(
-            (
-                f"base = {json.dumps(str(base))}",
-                'read = ["project"]',
-                'write = ["project"]',
-                'primary = "project"',
-                "",
-                "[code_graph]",
-                f"enabled = {str(values['enabled']).lower()}",
-                f"languages = [{languages}]",
-                f"auto_rebuild = {json.dumps(values['auto_rebuild'])}",
-                f"max_rebuild_seconds = {values['max_rebuild_seconds']}",
-                f"max_file_bytes = {values['max_file_bytes']}",
-                f"max_total_files = {values['max_total_files']}",
-                f"include_tests = {str(values['include_tests']).lower()}",
-                "",
-            )
-        ),
+        "\n".join(lines),
         encoding="utf-8",
     )
 

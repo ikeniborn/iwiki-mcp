@@ -24,6 +24,7 @@ _FIELDS = {
     "languages",
     "auto_rebuild",
     "max_rebuild_seconds",
+    "max_full_rebuild_seconds",
     "max_file_bytes",
     "max_total_files",
     "include_tests",
@@ -61,6 +62,12 @@ def _positive_int(value: Any, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise CodeGraphConfigError(f"code_graph.{field} must be a positive integer")
     return value
+
+
+def _optional_positive_int(value: Any, field: str) -> int | None:
+    if value is None:
+        return None
+    return _positive_int(value, field)
 
 
 def _non_negative_int(value: Any, field: str) -> int:
@@ -106,6 +113,7 @@ class CodeGraphConfig:
     languages: tuple[str, ...] = ("python",)
     auto_rebuild: str = "bounded"
     max_rebuild_seconds: int = 10
+    max_full_rebuild_seconds: int | None = None
     max_file_bytes: int = 1_000_000
     max_total_files: int = 20_000
     include_tests: bool = True
@@ -128,6 +136,13 @@ class CodeGraphConfig:
             self,
             "max_rebuild_seconds",
             _positive_int(self.max_rebuild_seconds, "max_rebuild_seconds"),
+        )
+        object.__setattr__(
+            self,
+            "max_full_rebuild_seconds",
+            _optional_positive_int(
+                self.max_full_rebuild_seconds, "max_full_rebuild_seconds"
+            ),
         )
         object.__setattr__(
             self, "max_file_bytes", _positive_int(self.max_file_bytes, "max_file_bytes")

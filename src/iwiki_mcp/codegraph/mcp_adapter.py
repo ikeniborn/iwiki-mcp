@@ -43,6 +43,14 @@ class CodeGraphAdapterError(CodeGraphError):
     code = "invalid_config"
 
 
+class _RemoteBindError(Exception):
+    """Carries a typed bind failure through to the caller, unmasked."""
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        super().__init__(payload.get("error", "remote_mcp_failed"))
+        self.payload = payload
+
+
 @asynccontextmanager
 async def _official_session(url: str, headers: Mapping[str, str]):
     from mcp import ClientSession
@@ -79,6 +87,7 @@ class RemoteMcpTransport:
         *,
         environ: Mapping[str, str] | None = None,
         session_factory: Callable[[str, Mapping[str, str]], Any] | None = None,
+        primary: str | None = None,
     ) -> None:
         values = os.environ if environ is None else environ
         url = values.get(ENDPOINT_ENV) or ""
@@ -89,6 +98,7 @@ class RemoteMcpTransport:
             )
         self._url = url
         self._token = token
+        self._primary = primary
         self._session_factory = session_factory or _official_session
 
     def __repr__(self) -> str:
@@ -100,6 +110,8 @@ class RemoteMcpTransport:
         """Invoke one remote tool, mapping every failure to a safe code."""
         try:
             return anyio.run(self._invoke, tool_name, dict(arguments))
+        except _RemoteBindError as exc:
+            return dict(exc.payload)
         except Exception:
             return dict(_REMOTE_FAILED)
 
@@ -109,6 +121,13 @@ class RemoteMcpTransport:
         headers = {"Authorization": f"Bearer {self._token}"}
         async with self._session_factory(self._url, headers) as session:
             await session.initialize()
+            if self._primary:
+                bind_result = await session.call_tool(
+                    "wiki_bind", arguments={"primary": self._primary}
+                )
+                bind_payload = _decoded(bind_result)
+                if "error" in bind_payload:
+                    raise _RemoteBindError(bind_payload)
             result = await session.call_tool(tool_name, arguments=arguments)
         return _decoded(result)
 
