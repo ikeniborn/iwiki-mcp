@@ -121,7 +121,7 @@ def test_heading_rename_rewrites_relative_and_cross_domain_anchors(
     assert result["rewritten_links"] == 5
     assert len(result["transaction_id"]) == 32
     target = (wiki / "target" / "concept" / "x.md").read_text()
-    assert "## New Heading\nNew body." in target
+    assert "## New Heading\n\nNew body." in target
     assert "[Self](#new-heading)" in target
     relative = (wiki / "target" / "relative.md").read_text()
     assert "concept/x.md#new-heading" in relative
@@ -232,7 +232,7 @@ def test_same_normalized_anchor_renames_heading_without_referrer_changes(
     assert result["rewritten_pages"] == []
     assert result["rewritten_links"] == 0
     assert result["affected_domains"] == ["target"]
-    assert "## Old Heading!\nNew body." in (
+    assert "## Old Heading!\n\nNew body." in (
         wiki / "target" / "concept" / "x.md"
     ).read_text()
     assert "#Old-Heading" in (wiki / "target" / "relative.md").read_text()
