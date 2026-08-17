@@ -187,8 +187,11 @@ def test_wrong_dimension_and_invalid_markdown_do_not_mutate(store_factory):
     wrong_dimension = store.with_embedder(
         lambda _cfg, texts: [[1.0, 0.0] for _text in texts]
     )
+    # The body must differ: an update that reuses every stored vector never
+    # reaches the embedder (see the incremental chunk reuse note in the store).
+    changed = _markdown("Alpha", "alpha summary", "Details", "alpha body changed")
     with pytest.raises(ValueError, match="embedding dimension mismatch"):
-        wrong_dimension.update_page("docs", "concept/alpha", original, 1)
+        wrong_dimension.update_page("docs", "concept/alpha", changed, 1)
 
     with pytest.raises(ValueError, match="section structure invalid"):
         store.update_page("docs", "concept/alpha", "text before a section", 1)
@@ -395,3 +398,143 @@ def test_git_and_postgres_fixture_have_same_order_and_graph_neighbors(
     assert postgres.graph_neighbors(
         ["docs"], "docs/concept/seed.md", depth=1
     ) == git_neighbors
+
+
+def _two_section_markdown(alpha="alpha body", beta="beta body", extra=""):
+    return (
+        "---\n"
+        "type: concept\n"
+        "title: Two\n"
+        "description: two summary\n"
+        "tags: [fixture]\n"
+        "status: stable\n"
+        "---\n"
+        "# Two\n\n"
+        f"{extra}"
+        f"## Alpha\n{alpha}\n\n"
+        f"## Beta\n{beta}\n"
+    )
+
+
+def _chunk_rows(store, slug):
+    with store._connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT c.chunk_id, c.heading, c.ordinal, c.content, "
+                "c.quantization_scale, c.quantized_embedding, c.embedding "
+                "FROM iwiki.chunks c JOIN iwiki.pages p "
+                "ON p.iwiki_id = c.iwiki_id AND p.page_id = c.page_id "
+                "WHERE p.slug = %s ORDER BY c.ordinal",
+                (slug,),
+            )
+            return [
+                (
+                    chunk_id,
+                    heading,
+                    ordinal,
+                    content,
+                    scale,
+                    list(quantized),
+                    embedding.to_list(),
+                )
+                for chunk_id, heading, ordinal, content, scale, quantized, embedding
+                in cursor.fetchall()
+            ]
+
+
+def _counting_embedder(store):
+    calls = []
+    original = store._embedder
+
+    def counting(cfg, texts):
+        calls.extend(texts)
+        return original(cfg, texts)
+
+    store._embedder = counting
+    return calls
+
+
+def test_update_page_reuses_unchanged_chunk_embeddings(store_factory):
+    store = store_factory()
+    markdown = _two_section_markdown()
+
+    store.write_page("docs", "concept/two", markdown)
+    before = _chunk_rows(store, "concept/two")
+    assert [row[1] for row in before] == ["", "Alpha", "Beta"]
+
+    embed_calls = _counting_embedder(store)
+    updated = _two_section_markdown(beta="beta body changed")
+    assert store.update_page(
+        "docs", "concept/two", updated, expected_revision=1
+    ) == {
+        "page": "docs/concept/two.md",
+        "revision": 2,
+        "indexed_chunks": 3,
+    }
+    after = _chunk_rows(store, "concept/two")
+
+    # Only the changed section is re-embedded.
+    assert not any("alpha body" in text for text in embed_calls)
+    assert not any("two summary" in text for text in embed_calls)
+    assert any("beta body changed" in text for text in embed_calls)
+    # The untouched rows keep their identity and their stored vector.
+    assert [row[1] for row in after] == ["", "Alpha", "Beta"]
+    assert before[0] == after[0]
+    assert before[1] == after[1]
+    # The changed section is rewritten in its own row, keeping its identity.
+    assert after[2][0] == before[2][0]
+    assert after[2][3] == "## Beta\nbeta body changed"
+
+
+def test_update_page_reuses_embeddings_when_sections_shift(store_factory):
+    store = store_factory()
+    store.write_page("docs", "concept/two", _two_section_markdown())
+    before = {row[1]: row for row in _chunk_rows(store, "concept/two")}
+
+    embed_calls = _counting_embedder(store)
+    shifted = _two_section_markdown(extra="## Intro\nintro body\n\n")
+    assert store.update_page(
+        "docs", "concept/two", shifted, expected_revision=1
+    )["indexed_chunks"] == 4
+    after = _chunk_rows(store, "concept/two")
+
+    assert [row[1] for row in after] == ["", "Intro", "Alpha", "Beta"]
+    assert [row[2] for row in after] == [0, 1, 2, 3]
+    # Only the inserted section is embedded; the shifted rows keep their ids.
+    assert [text for text in embed_calls if "intro body" in text]
+    assert not any("alpha body" in text for text in embed_calls)
+    assert not any("beta body" in text for text in embed_calls)
+    moved = {row[1]: row for row in after}
+    for heading in ("", "Alpha", "Beta"):
+        assert moved[heading][0] == before[heading][0]
+        assert moved[heading][6] == before[heading][6]
+
+
+def test_update_page_drops_rows_for_removed_sections(store_factory):
+    store = store_factory()
+    store.write_page("docs", "concept/two", _two_section_markdown())
+    before = {row[1]: row for row in _chunk_rows(store, "concept/two")}
+
+    embed_calls = _counting_embedder(store)
+    trimmed = (
+        "---\n"
+        "type: concept\n"
+        "title: Two\n"
+        "description: two summary\n"
+        "tags: [fixture]\n"
+        "status: stable\n"
+        "---\n"
+        "# Two\n\n"
+        "## Beta\nbeta body\n"
+    )
+    assert store.update_page(
+        "docs", "concept/two", trimmed, expected_revision=1
+    )["indexed_chunks"] == 2
+    after = _chunk_rows(store, "concept/two")
+
+    assert [row[1] for row in after] == ["", "Beta"]
+    assert [row[2] for row in after] == [0, 1]
+    assert embed_calls == []
+    moved = {row[1]: row for row in after}
+    assert moved["Beta"][0] == before["Beta"][0]
+    assert moved[""][0] == before[""][0]
