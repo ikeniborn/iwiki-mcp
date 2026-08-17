@@ -755,11 +755,14 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | Tool | What it does |
 |---|---|
 | `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch, while provider `top_n` is limited to requested final `k`; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. |
-| `wiki_read_page` | Read one Markdown page by domain and slug. |
+| `wiki_read_page` | Read one Markdown page by domain and slug. With `heading`, return only that one `##` section (including its `section_hash`) instead of the whole page. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain; its `{"vector": [], "graph": []}` shape and domain-local fallback stay unchanged. |
 | `wiki_write_page` | Validate and write a new page, index the domain, commit and push. |
-| `wiki_update_page` | Replace one existing `##` body. With `new_heading`, rename that heading and atomically rewrite exact visible incoming links when their domains are writable. |
+| `wiki_update_page` | Replace one existing `##` body. With `new_heading`, rename that heading and atomically rewrite exact visible incoming links when their domains are writable. Accepts `expected_section_hash` for optimistic concurrency. |
+| `wiki_insert_section` | Insert one new `##` section (positioned with `after_heading` / `before_heading`) without rewriting the rest of the page. |
+| `wiki_delete_section` | Delete one existing `##` section without rewriting the rest of the page. Accepts `expected_section_hash`. |
+| `wiki_move_section` | Reorder one existing `##` section (positioned with `after_heading` / `before_heading`) without rewriting its body. Accepts `expected_section_hash`. |
 | `wiki_delete_page` | Delete one page by domain and slug: remove the file, append a `delete` log op, reindex the domain, commit and push. Rolls back on failure. |
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
@@ -773,7 +776,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_export_okf` | Run the deterministic in-place OKF conformance sweep and regenerate root `index.md` / `log.md`. |
 | `wiki_sync` | Run `git pull --rebase` and `git push` in the base. |
 
-`wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None, new_heading=None)` — it replaces only the named `##` section and leaves the rest of the page intact. `new_heading` is optional: without it this is the ordinary single-domain update; with it, the server rewrites exact incoming relative links in the page domain and exact `iwiki://` links from visible read domains. `wiki_apply_okf` applies the same transaction only when a type change moves a page.
+`wiki_write_page` refuses to overwrite an existing page in v1. To update a single section of an existing page, use `wiki_update_page(domain, slug, heading, new_body, source=None, new_heading=None)` — it replaces only the named `##` section and leaves the rest of the page intact. `new_heading` is optional: without it this is the ordinary single-domain update; with it, the server rewrites exact incoming relative links in the page domain and exact `iwiki://` links from visible read domains. `wiki_apply_okf` applies the same transaction only when a type change moves a page. `wiki_insert_section` and `wiki_delete_section` add or remove one `##` section, and `wiki_move_section` reorders one, all without rewriting the rest of the page. `wiki_update_page`, `wiki_delete_section`, and `wiki_move_section` accept `expected_section_hash` (from a prior `wiki_read_page(..., heading=...)`) for optimistic concurrency: a stale hash is rejected with `section_conflict` instead of silently overwriting a concurrent edit.
 
 The cross-domain operation starts only when every discovered visible referrer is in `write`; a visible read-only referrer blocks before any Markdown changes. Hidden domains are not inspected or reported, and are never rewritten. Results include `transaction_id`, `rewritten_pages`, `affected_domains`, and `rewritten_links` in addition to normal write fields.
 

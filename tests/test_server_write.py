@@ -1,5 +1,6 @@
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -758,3 +759,50 @@ def test_move_section_hash_omitted_behaves_as_before(tmp_path, monkeypatch):
     assert "error" not in out
     read = server.wiki_read_page("backend", "concept/auth")
     assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_concurrent_updates_to_different_sections_both_succeed(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    overview = server.wiki_read_page("backend", "concept/auth", heading="Overview")
+    flow = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(
+            server.wiki_update_page, "backend", "concept/auth", "Overview", "new sum",
+            expected_section_hash=overview["section_hash"],
+        )
+        f2 = pool.submit(
+            server.wiki_update_page, "backend", "concept/auth", "Flow", "new flow",
+            expected_section_hash=flow["section_hash"],
+        )
+        r1, r2 = f1.result(), f2.result()
+
+    assert "error" not in r1
+    assert "error" not in r2
+    final = server.wiki_read_page("backend", "concept/auth")
+    assert "new sum" in final["markdown"]
+    assert "new flow" in final["markdown"]
+
+
+def test_concurrent_updates_to_same_section_second_conflicts(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    flow = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "first write",
+        expected_section_hash=flow["section_hash"],
+    )
+    out = server.wiki_update_page(
+        "backend", "concept/auth", "Flow", "second write",
+        expected_section_hash=flow["section_hash"],  # stale, already applied above
+    )
+    assert out["error"] == "section_conflict"
