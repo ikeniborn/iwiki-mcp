@@ -508,7 +508,7 @@ def test_insert_section_adds_new_section_after_target(tmp_path, monkeypatch):
     )
     assert "error" not in out
     read = server.wiki_read_page("backend", "concept/auth")
-    assert "## New\nnew body" in read["markdown"]
+    assert "## New\n\nnew body" in read["markdown"]
     assert read["markdown"].index("## Flow") < read["markdown"].index("## New")
 
 

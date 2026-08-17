@@ -62,7 +62,7 @@ def test_insert_section_adds_new_section_from_postgres(postgres_section_ops):
 
     assert "error" not in out
     read = store.read_page("docs", "concept/auth")
-    assert "## New\nnew body" in read["markdown"]
+    assert "## New\n\nnew body" in read["markdown"]
     assert read["markdown"].index("## Flow") < read["markdown"].index("## New")
 
 

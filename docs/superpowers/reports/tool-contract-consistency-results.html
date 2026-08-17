@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>tool-contract-consistency — результат внедрения</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg);
+  transition:background .3s, color .3s;
+}
+.theme-btn{
+  position:sticky; top:.5rem; float:right;
+  cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px;
+  background:var(--surface);
+}
+h1{ color:var(--accent-2); margin-bottom:.2rem; }
+h2{ color:var(--accent); border-bottom:1px solid var(--border); padding-bottom:.3rem; margin-top:2.2rem; }
+.lead{ font-size:1.08rem; }
+.sub{ color:var(--muted); font-size:.95rem; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0;
+  box-shadow:0 1px 8px var(--shadow); }
+.note.wontfix{ border-left-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+details{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:.7rem 1rem; margin:.7rem 0; box-shadow:0 1px 8px var(--shadow); }
+details summary{ cursor:pointer; font-weight:600; color:var(--accent); }
+details[open] summary{ margin-bottom:.55rem; }
+ul.tight li{ margin:.28rem 0; }
+.badge{ display:inline-block; font-size:.72rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); }
+.badge.ok{ color:var(--ok-2); border-color:var(--ok); }
+.badge.warn{ color:var(--warn-2); border-color:var(--warn); }
+.badge.danger{ color:var(--danger-2); border-color:var(--danger); }
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface);
+  margin:1rem 0; font-size:.92rem; border:1px solid var(--border); border-radius:10px;
+  overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.5rem .75rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); position:sticky; top:0; }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table tbody tr:hover{ background:color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.rpt-table td code{ white-space:nowrap; }
+code{ background:color-mix(in srgb, var(--accent) 10%, var(--surface)); padding:.05rem .3rem; border-radius:4px; }
+a{ color:var(--accent); }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Toggle dark/light">🌙 / ☀️</label>
+
+<main class="report">
+
+<h1>tool-contract-consistency</h1>
+<p class="sub">workflow: chain (execute) · ветка <code>dev-tool-contract-consistency</code> · база <code>origin/master</code> · дата 2026-08-17</p>
+
+<h2>1. Резюме внедрения</h2>
+<p class="lead">Пять расхождений схема/поведение и код/код в <code>iwiki-mcp</code>, обнаруженных внешним аудитом клиента, устранены (B1, B2, B4, B5); B3 закрыт как wontfix из-за конфликта с существующим инвариантом.</p>
+<table class="rpt-table">
+<thead><tr><th>Артефакт</th><th>Путь</th><th>Статус</th></tr></thead>
+<tbody>
+<tr><td>Intent</td><td><code>docs/superpowers/intents/2026-08-17-tool-contract-consistency-intent.md</code></td><td><span class="badge ok">approved · check-chain OK</span></td></tr>
+<tr><td>Spec</td><td>n/a</td><td><span class="badge">execute route</span></td></tr>
+<tr><td>Plan</td><td>n/a</td><td><span class="badge">execute route</span></td></tr>
+<tr><td>Result reconciliation</td><td>против intent (execute)</td><td><span class="badge ok">OK</span></td></tr>
+</tbody>
+</table>
+
+<h2>2. Выполненные изменения</h2>
+<table class="rpt-table">
+<thead><tr><th>Файл</th><th>Тип</th><th>± строк</th><th>Что сделано</th></tr></thead>
+<tbody>
+<tr><td><code>docs/superpowers/intents/2026-08-17-tool-contract-consistency-intent.md</code></td><td>добавлен</td><td>+119</td><td>Intent-документ B1-B5, включая решение wontfix по B3</td></tr>
+<tr><td><code>src/iwiki_mcp/server.py</code></td><td>изменён</td><td>+22 / −5</td><td>B1 — <code>_ExpectedRevision</code> (Annotated + pydantic Field) с описанием backend-зависимости, применён к 5 write-инструментам</td></tr>
+<tr><td><code>src/iwiki_mcp/http.py</code></td><td>изменён</td><td>+41 / −1</td><td>B2 — JSON-RPC ответ <code>access_denied</code> (код -32001) для одиночного denied tools/call вместо HTTP 403</td></tr>
+<tr><td><code>src/iwiki_mcp/engine/related.py</code></td><td>изменён</td><td>+8 / −4</td><td>B4 — дедуп соседей <code>wiki_related</code> по <code>id</code>, оставляя лучший score</td></tr>
+<tr><td><code>src/iwiki_mcp/engine/section.py</code></td><td>изменён</td><td>+2 / −2</td><td>B5 — пустая строка между <code>## Heading</code> и телом в <code>replace_section</code>/<code>insert_section</code></td></tr>
+<tr><td><code>tests/test_section.py</code></td><td>изменён</td><td>+7 / −7</td><td>Ассерты приведены к новому формату B5</td></tr>
+<tr><td><code>tests/test_server_write.py</code></td><td>изменён</td><td>+1 / −1</td><td>Ассерт формата B5 (git-режим)</td></tr>
+<tr><td><code>tests/postgres/test_section_ops.py</code></td><td>изменён</td><td>+1 / −1</td><td>Ассерт формата B5 (postgres-режим)</td></tr>
+<tr><td><code>tests/test_cross_domain_update.py</code></td><td>изменён</td><td>+2 / −2</td><td>Ассерты формата B5, пропущенные в первом коммите, дочинены во втором</td></tr>
+</tbody>
+</table>
+
+<h2>3. Результаты</h2>
+<p class="lead">Сверка diff против <code>Desired Outcomes</code> intent-документа (execute-маршрут сверяет по intent, не по плану).</p>
+<table class="rpt-table">
+<thead><tr><th>Desired Outcome</th><th>Статус</th><th>Свидетельство в diff</th></tr></thead>
+<tbody>
+<tr><td>B1 — описание <code>expected_revision</code> в схеме документирует backend-зависимость на всех 5 write-инструментах</td><td><span class="badge ok">DONE</span></td><td><code>server.py</code>: <code>_ExpectedRevision</code> применён к <code>wiki_update_page</code>, <code>wiki_insert_section</code>, <code>wiki_delete_section</code>, <code>wiki_move_section</code>, <code>wiki_delete_page</code>; вручную проверено через <code>server.mcp._tool_manager.list_tools()</code></td></tr>
+<tr><td>B2 — denied grant/create_domain вызов возвращает один JSON-RPC <code>access_denied</code>, не HTTP 403</td><td><span class="badge ok">DONE</span></td><td><code>http.py</code>: <code>_send_tool_access_denied</code> + обёртка вокруг <code>_authorize_tool</code>; вручную проверено полным ASGI-вызовом middleware — статус 200, тело <code>{"jsonrpc":"2.0","id":7,"error":{"code":-32001,...}}</code></td></tr>
+<tr><td>B3 — wontfix, зафиксировано в тексте intent</td><td><span class="badge warn">WONTFIX</span></td><td>Objective/Desired Outcomes/Autonomy Zones/Stop Rules intent-документа явно переписаны на статус wontfix с обоснованием; кода не менялось</td></tr>
+<tr><td>B4 — <code>wiki_related.vector</code> не содержит дублей <code>id</code></td><td><span class="badge ok">DONE</span></td><td><code>engine/related.py</code>: <code>_vector_neighbours</code> дедупит по <code>id</code>, keep best score; вручную проверено на 3 суб-чанках одной секции — в выдаче ровно 1 запись с лучшим score</td></tr>
+<tr><td>B5 — секционные мутации пишут <code>## Heading\n\nbody</code></td><td><span class="badge ok">DONE</span></td><td><code>engine/section.py</code>: <code>replace_section</code> и <code>insert_section</code> вставляют пустую строку; вручную проверено на обеих функциях</td></tr>
+</tbody>
+</table>
+<p class="sub">Покрытие Desired Outcomes: 4 DONE + 1 WONTFIX (задокументирован) из 5. Лишних (EXCESS) изменений не найдено — все затронутые файлы прослеживаются к B1/B2/B4/B5.</p>
+
+<div class="note wontfix">
+<b>B3 — почему wontfix.</b> Для корректного (canonical-формат) seed на отсутствующем снапшоте <code>wiki_code_context</code> уже возвращает <code>missing_snapshot</code> — подтверждено на уровне reader тестом <code>tests/postgres/test_code_graph_reader.py::test_missing_snapshot_answers_every_read_without_graph_rows</code>. <code>invalid_config</code> возникает только для структурно некорректного seed, а тест <code>tests/codegraph/test_server_tools.py::test_context_validation_precedes_binding</code> жёстко требует, чтобы вся структурная валидация (включая формат seed) отрабатывала <b>до</b> <code>resolve_binding</code> — то есть до того, как вообще можно узнать readiness. Требования несовместимы как заявлены; решение задокументировано в intent, реализация отклонена.
+</div>
+
+<h2>4. Влияние на систему</h2>
+<table class="rpt-table">
+<thead><tr><th>Компонент</th><th>Поведенческое изменение</th><th>Риски / follow-up</th></tr></thead>
+<tbody>
+<tr><td><code>server.py</code> — публичная MCP-схема</td><td>5 write-инструментов теперь публикуют текстовое описание <code>expected_revision</code> в схеме; сигнатуры и рантайм-поведение не изменились</td><td>Нет — чисто описательное изменение, git-режим не требует поле как и раньше</td></tr>
+<tr><td><code>http.py</code> — hosted transport</td><td>Одиночный denied <code>tools/call</code> на grant/<code>wiki_create_domain</code> инструменты теперь HTTP 200 + JSON-RPC error вместо HTTP 403; batch/непарсимые запросы — без изменений; <code>_authorize_tool</code> и его исключение <code>AccessError</code> не тронуты, юнит-тесты на неё зелёные</td><td>Клиенты, ожидающие HTTP 403 на denied grant-вызовы, должны переключиться на разбор JSON-RPC error — задокументировано как контрактное изменение intent'ом</td></tr>
+<tr><td><code>engine/related.py</code> — <code>wiki_related</code></td><td>Список <code>vector</code> больше не может содержать несколько записей одной секции; форма ответа <code>{vector, graph}</code> не изменилась</td><td>Нет — дедуп только убирает точные дубли по <code>id</code>, оставляя лучший score</td></tr>
+<tr><td><code>engine/section.py</code> — секционные мутации</td><td>Все страницы, записанные <code>wiki_update_page</code>/<code>wiki_insert_section</code> после этого изменения, получают пустую строку под заголовком; старые страницы не переписываются автоматически</td><td>Косметическое расхождение для существующих страниц, записанных до фикса, пока их не тронет следующая мутация</td></tr>
+<tr><td><code>wiki_code_context</code></td><td>Без изменений (B3 wontfix)</td><td>Задокументированный открытый follow-up: <code>invalid_config</code> на malformed seed при отсутствующем снапшоте остаётся</td></tr>
+</tbody>
+</table>
+
+<details>
+<summary>Верификация (клик, чтобы раскрыть)</summary>
+<ul class="tight">
+<li>Полный тестовый набор: <b>2155 passed, 27 skipped, 0 failed</b> (<code>uv run pytest -q -m "not postgres_integration"</code>, 46 мин)</li>
+<li><code>flake8 src tests</code> — чисто</li>
+<li>Ручная репродукция всех 4 реализованных багов (B1, B2, B4, B5) с новым наблюдаемым результатом — детали в разделе 3</li>
+<li>3 ложных failure в первом полном прогоне (2 — незамеченные ассерты B5, 1 — CPU contention от двух параллельных pytest-процессов) устранены; финальный прогон чистый</li>
+</ul>
+</details>
+
+</main>
+</body>
+</html>
