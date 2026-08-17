@@ -568,3 +568,46 @@ def test_insert_section_rejects_anchor_collision(tmp_path, monkeypatch):
     out = server.wiki_insert_section("backend", "concept/auth", "Flow", "body")
     assert "error" in out
     assert "collides" in out["error"]
+
+
+def test_delete_section_removes_target_section(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Flow")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+    assert "## Notes" in read["markdown"]
+
+
+def test_delete_section_rejects_last_section(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Overview")
+    assert "error" in out
+
+
+def test_delete_section_missing_page_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_delete_section("backend", "concept/missing", "Flow")
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_delete_section_missing_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_delete_section("backend", "concept/auth", "Nope")
+    assert "error" in out
