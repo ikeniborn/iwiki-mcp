@@ -274,6 +274,18 @@ def test_postgres_supported_handlers_use_store_without_local_access(postgres_ser
     assert server.wiki_lint("docs")["reports"]["docs"]["broken"] == []
 
 
+def test_postgres_read_page_with_heading_returns_section(postgres_server):
+    out = server.wiki_read_page("docs", "concept/page", heading="Body")
+
+    assert out["heading"] == "Body"
+    assert out["body"] == "text"
+    assert "section_hash" in out
+    assert "markdown" not in out
+
+    missing = server.wiki_read_page("docs", "concept/page", heading="Nope")
+    assert "not found" in missing["error"]
+
+
 def test_postgres_revision_is_required_but_git_schema_remains_optional(postgres_server):
     assert server.wiki_update_page(
         "docs", "concept/page", "Body", "new text"

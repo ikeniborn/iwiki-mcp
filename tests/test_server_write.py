@@ -456,3 +456,40 @@ def test_write_page_surfaces_safe_push_failure_metadata(tmp_path, monkeypatch):
             "type not given and IWIKI_CHAT_MODEL unset; defaulted to concept"
         ),
     }
+
+
+def test_read_page_with_heading_returns_only_that_section(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_read_page("backend", "concept/auth", heading="Flow")
+    assert out["heading"] == "Flow"
+    assert out["body"].strip() == "flow body"
+    assert "section_hash" in out
+    assert "markdown" not in out
+
+
+def test_read_page_with_missing_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_read_page("backend", "concept/auth", heading="Nope")
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_read_page_without_heading_is_unchanged(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_read_page("backend", "concept/auth")
+    assert set(out) == {"domain", "slug", "markdown"}

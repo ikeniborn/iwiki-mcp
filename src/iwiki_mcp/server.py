@@ -72,7 +72,7 @@ from .engine.related import related
 # closure gets loaded lazily from disk — after an on-disk package upgrade that
 # mixes new source with stale cached modules in a long-lived stdio process.
 from .engine import search  # noqa: F401
-from .engine.section import SectionError, replace_section
+from .engine.section import SectionError, list_sections, replace_section, _locate
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
@@ -1276,7 +1276,7 @@ def wiki_list_pages(domain: str) -> dict:
 
 
 @_safe
-def wiki_read_page(domain: str, slug: str) -> dict:
+def wiki_read_page(domain: str, slug: str, heading: str | None = None) -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
         valid_domain = _validate_domain(domain)
@@ -1292,17 +1292,37 @@ def wiki_read_page(domain: str, slug: str) -> dict:
                 "error": f"page '{valid_domain}/{slug}' not found",
                 "hint": "list pages with wiki_list_pages",
             }
-        return page
+        if heading is None:
+            return page
+        _, body = _fm.split(page["markdown"], strict_code=True)
+        return _read_section(domain, slug, body, heading)
     path = _page_path(bind.base, domain, slug)
     if not os.path.isfile(path):
         return {
             "error": f"page '{domain}/{slug}' not found",
             "hint": "list pages with wiki_list_pages",
         }
+    markdown = open(path, encoding="utf-8").read()
+    if heading is None:
+        return {"domain": domain, "slug": slug, "markdown": markdown}
+    _, body = _fm.split(markdown, strict_code=True)
+    return _read_section(domain, slug, body, heading)
+
+
+def _read_section(domain: str, slug: str, body: str, heading: str) -> dict:
+    try:
+        sections = list_sections(body)
+        idx = _locate(sections, heading)
+    except SectionError as exc:
+        return {"error": str(exc), "hint": "check the heading with wiki_read_page"}
+    section = sections[idx]
+    section_hash = sha256(section.body.strip("\n").encode("utf-8")).hexdigest()[:16]
     return {
         "domain": domain,
         "slug": slug,
-        "markdown": open(path, encoding="utf-8").read(),
+        "heading": section.heading,
+        "body": section.body.strip("\n"),
+        "section_hash": section_hash,
     }
 
 
