@@ -1,3 +1,23 @@
+---
+review:
+  plan_hash: 9708618055e4b173
+  last_run: 2026-08-17
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    dependencies:
+      status: passed
+    verifiability:
+      status: passed
+    consistency:
+      status: passed
+  findings: []
+chain:
+  intent: docs/superpowers/intents/2026-08-17-section-granular-page-updates-intent.md
+  spec: docs/superpowers/specs/2026-08-17-section-granular-page-updates-design.md
+---
 # section-granular-page-updates Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -19,7 +39,6 @@
 - New section operations reuse `validate_page`'s existing `_BLOCKING` findings (`deep_heading`, `pre_h2_text`) — no new validator rules (spec §4).
 - Fail-soft style: every new tool is wrapped by `@_safe`; errors are `{"error", "hint"}` dicts, never raised past the tool boundary (spec §4).
 
----
 
 ### Task 1: `engine/section.py` — shared `list_sections` + `_locate`, refactor `replace_section`
 
@@ -183,7 +202,6 @@ git add src/iwiki_mcp/engine/section.py tests/test_section.py
 git commit -m "refactor(section): extract list_sections/_locate, reuse in replace_section"
 ```
 
----
 
 ### Task 2: `engine/section.py` — `insert_section`, `delete_section`, `move_section`
 
@@ -407,7 +425,6 @@ git add src/iwiki_mcp/engine/section.py tests/test_section.py
 git commit -m "feat(section): add insert_section, delete_section, move_section"
 ```
 
----
 
 ### Task 3: `wiki_read_page` — section-scoped read (B)
 
@@ -570,7 +587,6 @@ git add src/iwiki_mcp/server.py tests/test_server_write.py
 git commit -m "feat(server): add section-scoped wiki_read_page(heading=...)"
 ```
 
----
 
 ### Task 4: `wiki_insert_section` tool (both backends)
 
@@ -826,7 +842,6 @@ git add src/iwiki_mcp/server.py tests/test_server_write.py
 git commit -m "feat(server): add wiki_insert_section tool"
 ```
 
----
 
 ### Task 5: `wiki_delete_section` tool (both backends)
 
@@ -995,7 +1010,6 @@ git add src/iwiki_mcp/server.py tests/test_server_write.py
 git commit -m "feat(server): add wiki_delete_section tool"
 ```
 
----
 
 ### Task 6: `wiki_move_section` tool (both backends)
 
@@ -1171,7 +1185,6 @@ git add src/iwiki_mcp/server.py tests/test_server_write.py
 git commit -m "feat(server): add wiki_move_section tool"
 ```
 
----
 
 ### Task 7: Incremental chunk reuse in `_replace_derived` (A)
 
@@ -1375,7 +1388,6 @@ git add src/iwiki_mcp/postgres/store.py src/iwiki_mcp/engine/store.py tests/post
 git commit -m "perf(postgres): reuse unchanged chunk embeddings in _replace_derived"
 ```
 
----
 
 ### Task 8: Section-level CAS — `expected_section_hash` (D)
 
@@ -1517,7 +1529,6 @@ git add src/iwiki_mcp/storage.py src/iwiki_mcp/server.py tests/test_server_updat
 git commit -m "feat(server): add expected_section_hash CAS pre-check"
 ```
 
----
 
 ### Task 9: Concurrent-edit integration test (Desired Outcome 4) + docs upkeep
 
@@ -1642,7 +1653,6 @@ git add tests/test_server_write.py src/iwiki_mcp/resources.py README.md docs/REA
 git commit -m "test(server): verify concurrent section edits; docs(resources): document section tools"
 ```
 
----
 
 ## Final Verification
 
