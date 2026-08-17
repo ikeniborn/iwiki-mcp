@@ -245,6 +245,9 @@ def test_remediation_plan_returns_stale_update_candidate(tmp_path, monkeypatch):
     assert cand["current_headings"] == ["Overview", "Flow"]
     assert cand["recommended_tools"] == [
         "wiki_update_page",
+        "wiki_insert_section",
+        "wiki_delete_section",
+        "wiki_move_section",
         "wiki_delete_page",
         "wiki_write_page",
         "wiki_lint",

@@ -29,6 +29,9 @@ TOOLS = {
     "wiki_write_page": "supported",
     "wiki_update_page": "supported",
     "wiki_delete_page": "supported",
+    "wiki_insert_section": "supported",
+    "wiki_delete_section": "supported",
+    "wiki_move_section": "supported",
     "wiki_index": "supported",
     "wiki_create_domain": "unsupported",
     "wiki_list_domain_grants": "unsupported",
@@ -153,7 +156,7 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 29
+    assert len(TOOLS) == 32
     assert registered == set(TOOLS)
 
 
@@ -297,9 +300,29 @@ def test_postgres_revision_is_required_but_git_schema_remains_optional(postgres_
         "error": "expected_revision_required",
         "hint": "read the page and retry with its revision",
     }
+    assert server.wiki_insert_section(
+        "docs", "concept/page", "New", "body"
+    ) == {
+        "error": "expected_revision_required",
+        "hint": "read the page and retry with its revision",
+    }
+    assert server.wiki_delete_section("docs", "concept/page", "Body") == {
+        "error": "expected_revision_required",
+        "hint": "read the page and retry with its revision",
+    }
+    assert server.wiki_move_section("docs", "concept/page", "Body") == {
+        "error": "expected_revision_required",
+        "hint": "read the page and retry with its revision",
+    }
 
     tools = {tool.name: tool for tool in server.mcp._tool_manager.list_tools()}
-    for name in ("wiki_update_page", "wiki_delete_page"):
+    for name in (
+        "wiki_update_page",
+        "wiki_delete_page",
+        "wiki_insert_section",
+        "wiki_delete_section",
+        "wiki_move_section",
+    ):
         schema = tools[name].parameters
         assert "expected_revision" in schema["properties"]
         assert "expected_revision" not in schema.get("required", [])

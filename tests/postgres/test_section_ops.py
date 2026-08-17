@@ -96,3 +96,59 @@ def test_insert_section_rejects_anchor_collision_from_postgres(postgres_section_
 
     assert "error" in out
     assert "collides" in out["error"]
+
+
+def test_delete_section_removes_target_section_from_postgres(postgres_section_ops):
+    server, store = postgres_section_ops
+    revision = store.read_page("docs", "concept/auth")["revision"]
+
+    out = server.wiki_delete_section(
+        "docs", "concept/auth", "Flow", expected_revision=revision
+    )
+
+    assert "error" not in out
+    read = store.read_page("docs", "concept/auth")
+    assert "## Flow" not in read["markdown"]
+
+
+def test_move_section_reorders_target_from_postgres(postgres_section_ops):
+    server, store = postgres_section_ops
+    store.write_page(
+        "docs",
+        "concept/moveme",
+        "---\n"
+        "type: concept\n"
+        "title: Move\n"
+        "description: move flow\n"
+        "tags: [fixture]\n"
+        "status: stable\n"
+        "---\n"
+        "## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    revision = store.read_page("docs", "concept/moveme")["revision"]
+
+    out = server.wiki_move_section(
+        "docs", "concept/moveme", "Notes", before_heading="Overview",
+        expected_revision=revision,
+    )
+
+    assert "error" not in out
+    read = store.read_page("docs", "concept/moveme")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_update_page_section_hash_mismatch_returns_conflict_from_postgres(
+    postgres_section_ops,
+):
+    server, store = postgres_section_ops
+    revision = store.read_page("docs", "concept/auth")["revision"]
+
+    out = server.wiki_update_page(
+        "docs", "concept/auth", "Flow", "new body",
+        expected_revision=revision, expected_section_hash="0000000000000000",
+    )
+
+    assert out["error"] == "section_conflict"
+    assert "current_section_hash" in out
+    read = store.read_page("docs", "concept/auth")
+    assert "flow body" in read["markdown"]

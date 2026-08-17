@@ -151,8 +151,8 @@ def test_delete_section_rejects_last_remaining_section():
 
 
 def test_move_section_after_target():
-    out = move_section(PAGE, "Overview", after="Notes")
-    assert out.index("## Flow") < out.index("## Notes") < out.index("## Overview")
+    out = move_section(PAGE, "Flow", after="Notes")
+    assert out.index("## Overview") < out.index("## Notes") < out.index("## Flow")
 
 
 def test_move_section_before_target():
@@ -166,7 +166,18 @@ def test_move_section_rejects_self_reference():
 
 
 def test_move_section_no_op_next_to_itself_still_succeeds():
-    # Overview is already immediately before Flow — moving it "before Flow"
+    # Flow is already immediately before Notes — moving it "before Notes"
     # is a valid no-op reorder, not an error.
-    out = move_section(PAGE, "Overview", before="Flow")
+    out = move_section(PAGE, "Flow", before="Notes")
     assert out.index("## Overview") < out.index("## Flow") < out.index("## Notes")
+
+
+def test_move_section_rejects_reserved_heading():
+    reserved = PAGE + "## Outgoing links\n- x\n"
+    with pytest.raises(SectionError, match="reserved"):
+        move_section(reserved, "Outgoing links", before="Overview")
+
+
+def test_move_section_rejects_moving_overview():
+    with pytest.raises(SectionError, match="reserved"):
+        move_section(PAGE, "Overview", after="Notes")
