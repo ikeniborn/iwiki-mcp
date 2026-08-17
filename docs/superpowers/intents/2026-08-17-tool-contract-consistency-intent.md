@@ -1,3 +1,15 @@
+---
+review:
+  intent_hash: 7422baf3c4c19cf2
+  last_run: 2026-08-17
+  phases:
+    structure: passed
+    completeness: passed
+    clarity: passed
+    consistency: passed
+    alignment: passed
+  findings: []
+---
 # Intent: tool-contract-consistency
 
 **Date:** 2026-08-17
