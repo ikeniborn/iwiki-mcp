@@ -882,7 +882,7 @@ _code_publisher_factories = {
         binding, secrets.token_hex(16)
     ),
     "mcp": lambda binding, config: _codegraph_mcp_adapter.McpSnapshotPublisher(
-        _codegraph_mcp_adapter.RemoteMcpTransport()
+        _codegraph_mcp_adapter.RemoteMcpTransport(primary=binding.primary)
     ),
 }
 

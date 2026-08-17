@@ -76,10 +76,11 @@ _CONFIGURED = {
 }
 
 
-def _transport(session, environ=None):
+def _transport(session, environ=None, primary=None):
     return RemoteMcpTransport(
         environ=_CONFIGURED if environ is None else environ,
         session_factory=lambda url, headers: _FakeConnection(session),
+        primary=primary,
     )
 
 
@@ -289,3 +290,39 @@ def test_malformed_remote_payloads_are_rejected(header):
     publisher = McpSnapshotPublisher(_transport(_Malformed()))
 
     assert publisher.begin(header)["error"] == "remote_mcp_failed"
+
+
+def test_configured_primary_binds_before_the_first_tool_call(fake_session, header):
+    publisher = McpSnapshotPublisher(_transport(fake_session, primary="iwiki-mcp"))
+
+    publisher.begin(header)
+
+    name, arguments = fake_session.calls[0]
+    assert name == "wiki_bind"
+    assert arguments == {"primary": "iwiki-mcp"}
+    assert fake_session.calls[1][0] == "wiki_code_publish_begin"
+
+
+def test_no_primary_configured_skips_bind(fake_session, header):
+    publisher = McpSnapshotPublisher(_transport(fake_session, primary=None))
+
+    publisher.begin(header)
+
+    assert [name for name, _ in fake_session.calls] == ["wiki_code_publish_begin"]
+
+
+def test_bind_scope_mismatch_is_reported_instead_of_generic_failure(
+    fake_session, header
+):
+    fake_session._replies["wiki_bind"] = {
+        "error": "scope_mismatch",
+        "hint": "token is not granted this domain",
+    }
+    publisher = McpSnapshotPublisher(
+        _transport(fake_session, primary="other-domain")
+    )
+
+    result = publisher.begin(header)
+
+    assert result["error"] == "scope_mismatch"
+    assert fake_session.calls == [("wiki_bind", {"primary": "other-domain"})]

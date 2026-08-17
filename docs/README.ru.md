@@ -378,11 +378,17 @@ enabled = true
 languages = ["python"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
+max_full_rebuild_seconds = 10
 max_file_bytes = 1000000
 max_total_files = 20000
 include_tests = true
 exclude = []
 ```
+
+`max_rebuild_seconds` ограничивает только bounded rebuild во время запроса.
+`max_full_rebuild_seconds` ограничивает явный full build через `wiki_code_index` и по
+умолчанию берёт значение `max_rebuild_seconds`, если не задан; на больших репозиториях
+выставляйте его выше, чтобы full build не обрезался узким query-time бюджетом.
 
 Поддерживаемые environment overrides: `IWIKI_CODE_GRAPH_ENABLED`,
 `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES` и
@@ -461,10 +467,13 @@ staging_cleanup_limit = 100
 авторизации по bearer-токену: `wiki_code_publish_begin`, повторяемый
 `wiki_code_publish_batch`, затем `wiki_code_publish_finalize` или
 `wiki_code_publish_abort`. Ни один из них не принимает поле арендатора или домена;
-сервер выводит `iwiki_id` и связанный primary из токена, который обязан иметь право
-записи в этот primary. Сессия принадлежит создавшей её личности: другой токен с правом
-записи в тот же домен не может дополнить, прервать или завершить её, а процесс-замена
-обязан открыть новую сессию.
+клиент привязывает каждую удалённую сессию к `primary` локального проекта (из
+`.iwiki.toml`) вызовом `wiki_bind` сразу после `session.initialize()`, и сервер выводит
+`iwiki_id` и связанный primary из этой сессии — поэтому токен обязан иметь право записи
+в primary-домен проекта; `wiki_bind` только сужает уже выданный scope и не может его
+расширить. Сессия принадлежит создавшей её личности: другой токен с правом записи в тот
+же домен не может дополнить, прервать или завершить её, а процесс-замена обязан открыть
+новую сессию.
 
 Батчи несут только строки — никогда файл базы, текст исходников, абсолютный путь
 checkout, учётные данные или сформированные издателем wiki-ссылки. Цель пересчитывает
