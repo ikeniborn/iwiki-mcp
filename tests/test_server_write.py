@@ -493,3 +493,78 @@ def test_read_page_without_heading_is_unchanged(tmp_path, monkeypatch):
     )
     out = server.wiki_read_page("backend", "concept/auth")
     assert set(out) == {"domain", "slug", "markdown"}
+
+
+def test_insert_section_adds_new_section_after_target(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "new body", after_heading="Flow"
+    )
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert "## New\nnew body" in read["markdown"]
+    assert read["markdown"].index("## Flow") < read["markdown"].index("## New")
+
+
+def test_insert_section_missing_page_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_insert_section("backend", "nope", "New", "body")
+    assert "not found" in out["error"]
+
+
+def test_insert_section_rejects_invalid_body_structure(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "### too deep\nx"
+    )
+    assert "error" in out
+
+
+def test_insert_section_missing_anchor_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "body", after_heading="NoSuchSection"
+    )
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_insert_section_rejects_both_after_and_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_insert_section(
+        "backend", "concept/auth", "New", "body",
+        after_heading="Flow", before_heading="Overview",
+    )
+    assert "error" in out
+
+
+def test_insert_section_rejects_anchor_collision(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_insert_section("backend", "concept/auth", "Flow", "body")
+    assert "error" in out
+    assert "collides" in out["error"]

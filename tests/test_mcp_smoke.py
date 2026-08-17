@@ -16,6 +16,7 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 EXPECTED_TOOLS = {
     "wiki_status", "wiki_list_domains", "wiki_list_pages", "wiki_read_page",
     "wiki_search", "wiki_related", "wiki_write_page", "wiki_update_page",
+    "wiki_insert_section",
     "wiki_delete_page", "wiki_index", "wiki_create_domain", "wiki_bind",
     "wiki_list_domain_grants", "wiki_set_domain_grant",
     "wiki_revoke_domain_grant",
