@@ -611,3 +611,58 @@ def test_delete_section_missing_heading_returns_error(tmp_path, monkeypatch):
     )
     out = server.wiki_delete_section("backend", "concept/auth", "Nope")
     assert "error" in out
+
+
+def test_move_section_reorders_target(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Notes", before_heading="Overview")
+    assert "error" not in out
+    read = server.wiki_read_page("backend", "concept/auth")
+    assert read["markdown"].index("## Notes") < read["markdown"].index("## Overview")
+
+
+def test_move_section_rejects_self_reference(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Flow", after_heading="Flow")
+    assert "error" in out
+
+
+def test_move_section_missing_page_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    out = server.wiki_move_section("backend", "concept/missing", "Flow", after_heading="Overview")
+    assert "error" in out
+    assert "not found" in out["error"]
+
+
+def test_move_section_missing_heading_returns_error(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n",
+    )
+    out = server.wiki_move_section("backend", "concept/auth", "Nope", after_heading="Overview")
+    assert "error" in out
+
+
+def test_move_section_rejects_both_after_and_before(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend", "concept/auth",
+        "---\ntype: concept\ntitle: Auth\ndescription: d\ntags: [x]\nstatus: stable\n"
+        "---\n## Overview\nsum\n## Flow\nflow body\n## Notes\nkeep\n",
+    )
+    out = server.wiki_move_section(
+        "backend", "concept/auth", "Notes", after_heading="Overview", before_heading="Flow",
+    )
+    assert "error" in out
