@@ -22,10 +22,10 @@ class Section:
     """One `##` section: heading text plus its body span in the source."""
 
     heading: str
-    body: str
+    body: str           # body content (starts after the newline following heading)
     start: int          # offset of the "## " line
-    body_start: int      # offset right after the heading line (+ its newline)
-    body_end: int         # offset of the next "##" heading, or EOF
+    body_start: int     # offset of newline after heading (splice point for replace_section)
+    body_end: int       # offset of the next "##" heading, or EOF
 
 
 def list_sections(content: str) -> list[Section]:
@@ -33,8 +33,9 @@ def list_sections(content: str) -> list[Section]:
     heads = list(_H2.finditer(content))
     sections = []
     for i, m in enumerate(heads):
-        body_start = m.end()  # Position of newline after heading
-        # Skip newline if present to get body content start
+        # body_start points to the newline after the heading (where replace_section splices).
+        # body content starts one position later (after the newline).
+        body_start = m.end()
         body_content_start = (
             m.end() + 1
             if m.end() < len(content) and content[m.end()] == "\n"
