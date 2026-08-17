@@ -104,7 +104,7 @@ def replace_section(
     shift = len(replacement_heading) - (heading_end - heading_start)
     body_start = sections[idx].body_start + shift
     body_end = sections[idx].body_end + shift
-    return renamed[:body_start] + "\n" + new_body.strip("\n") + "\n\n" + renamed[body_end:]
+    return renamed[:body_start] + "\n\n" + new_body.strip("\n") + "\n\n" + renamed[body_end:]
 
 
 def _anchor_collision(content: str, exclude_start: int, anchor: str) -> bool:
@@ -145,7 +145,7 @@ def insert_section(
     if _anchor_collision(content, -1, anchor):
         raise SectionError(f"section heading '{target}' collides with another anchor")
     point = _anchor_point(content, after=after, before=before)
-    block = f"## {target}\n{body.strip(chr(10))}\n\n"
+    block = f"## {target}\n\n{body.strip(chr(10))}\n\n"
     prefix = content[:point]
     if prefix and not prefix.endswith("\n\n"):
         prefix = prefix.rstrip("\n") + "\n\n"

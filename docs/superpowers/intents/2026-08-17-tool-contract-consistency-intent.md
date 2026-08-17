@@ -1,6 +1,6 @@
 ---
 review:
-  intent_hash: 7422baf3c4c19cf2
+  intent_hash: 91a75be426033452
   last_run: 2026-08-17
   phases:
     structure: passed
@@ -26,14 +26,27 @@ section; (B5) section mutations write the body with no blank line under the `##`
 Now — because these mismatches break schema-driven client call generation and mislead
 failure diagnosis.
 
+**B3 status: wontfix.** Implementation found that for a well-formed (canonical-format)
+seed against a missing snapshot, `wiki_code_context` already reports `missing_snapshot`
+correctly (verified at the reader level by
+`tests/postgres/test_code_graph_reader.py::test_missing_snapshot_answers_every_read_without_graph_rows`).
+`invalid_config` only occurs for a structurally malformed seed (wrong format), and
+`tests/codegraph/test_server_tools.py::test_context_validation_precedes_binding` hard-requires
+that ALL structural validation (including seed format) runs before `resolve_binding` — before
+readiness can even be checked, since readiness requires a resolved binding. Reordering to
+check readiness first would resolve the binding on structurally invalid input, breaking this
+existing, deliberately-tested invariant. The two requirements are incompatible as stated;
+B3 is not implemented, kept as documented follow-up.
+
 ## Desired Outcomes
 - B1: the schema description of `expected_revision` on all five write tools
   (`wiki_update_page`, `wiki_insert_section`, `wiki_delete_section`, `wiki_move_section`,
   `wiki_delete_page`) states it is required on PostgreSQL storage and unused on Git storage.
 - B2: a grant tool call without authorization returns one JSON-RPC error with
   `code: access_denied`, not an HTTP 403 at the transport layer.
-- B3: `wiki_code_context` against a missing snapshot reports `missing_snapshot`, matching
-  `wiki_code_search` and `wiki_code_status`.
+- B3: WONTFIX — already true for well-formed seeds (verified at the reader level); not
+  achievable for malformed seeds without breaking the existing
+  validate-before-binding invariant (see Objective).
 - B4: `wiki_related`'s `vector` list never contains two entries with the same `id`.
 - B5: `wiki_insert_section`, `wiki_update_page` (via `replace_section`), and
   `wiki_move_section` write `## Heading\n\nbody` (blank line under the heading).
@@ -85,7 +98,8 @@ failure diagnosis.
   B4 (dedupe by id).
 - Guarded (log + confidence threshold): B3 (reordering the readiness check in
   `wiki_code_context`) — verify all existing codegraph tests (`test_graph_runtime.py` and
-  related) stay green before commit.
+  related) stay green before commit. Result: conflict found against
+  `test_context_validation_precedes_binding`; resolved as wontfix (see Objective).
 - Proposal-first (needs approval): B2 — changes the transport layer
   (`http.py:_send_error`) and the access-denial response format visible to external
   clients; show the exact diff and the new JSON-RPC error shape for approval before
@@ -101,5 +115,5 @@ failure diagnosis.
   paths — out of scope.
 - Escalate if: `pytest` shows a regression outside the five affected modules after any fix.
 - Done when: `uv run pytest -q` reports 2029+/2029 passed (0 failed), `flake8` is clean,
-  and for each of B1-B5 the original bug scenario is reproduced manually with a new
-  observed result (not just a green test).
+  and for each of B1, B2, B4, B5 the original bug scenario is reproduced manually with a
+  new observed result (not just a green test); B3 is closed as wontfix per the Objective.

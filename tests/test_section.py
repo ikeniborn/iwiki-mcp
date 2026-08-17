@@ -24,7 +24,7 @@ def test_list_sections_empty_content_returns_empty_list():
 
 def test_replace_section_swaps_only_target_body():
     out = replace_section(PAGE, "Flow", "new body")
-    assert "## Flow\nnew body" in out
+    assert "## Flow\n\nnew body" in out
     assert "old body here" not in out
     assert "## Overview\nsummary" in out
     assert "## Notes\nkeep" in out
@@ -32,18 +32,18 @@ def test_replace_section_swaps_only_target_body():
 
 def test_replace_section_last_section():
     out = replace_section(PAGE, "Notes", "fresh notes")
-    assert "## Notes\nfresh notes" in out
+    assert "## Notes\n\nfresh notes" in out
     assert "keep" not in out
 
 
 def test_replace_section_strips_leading_hashes_in_heading():
     out = replace_section(PAGE, "## Flow", "b2")
-    assert "## Flow\nb2" in out
+    assert "## Flow\n\nb2" in out
 
 
 def test_replace_section_overview_is_editable():
     out = replace_section(PAGE, "Overview", "new summary")
-    assert "## Overview\nnew summary" in out
+    assert "## Overview\n\nnew summary" in out
 
 
 def test_replace_section_missing_heading_raises():
@@ -69,7 +69,7 @@ def test_replace_section_rejects_h2_in_body():
 
 def test_replace_section_renames_heading_and_replaces_body():
     out = replace_section(PAGE, "Flow", "new", new_heading="New Flow")
-    assert "## New Flow\nnew" in out
+    assert "## New Flow\n\nnew" in out
     assert "## Flow" not in out
 
 
@@ -93,7 +93,7 @@ def test_replace_section_rejects_anchor_collision_with_any_heading_level():
 def test_insert_section_after_existing_heading():
     out = insert_section(PAGE, "New", "new body", after="Flow")
     assert out.index("## Flow") < out.index("## New") < out.index("## Notes")
-    assert "## New\nnew body" in out
+    assert "## New\n\nnew body" in out
 
 
 def test_insert_section_before_existing_heading():
@@ -103,7 +103,7 @@ def test_insert_section_before_existing_heading():
 
 def test_insert_section_defaults_to_append_at_end():
     out = insert_section(PAGE, "New", "new body")
-    assert out.rstrip().endswith("## New\nnew body")
+    assert out.rstrip().endswith("## New\n\nnew body")
 
 
 def test_insert_section_rejects_both_after_and_before():

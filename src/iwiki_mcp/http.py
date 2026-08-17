@@ -168,6 +168,37 @@ async def _send_error(send, error: AccessError) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+def _request_id(payload: Any) -> Any:
+    return payload.get("id") if isinstance(payload, dict) else None
+
+
+async def _send_tool_access_denied(send, request_id: Any) -> None:
+    """JSON-RPC error for a `tools/call` denied at the authorization gate
+    (`_authorize_tool`), matching the `access_denied` code/hint the tool
+    handlers themselves return via `@_safe` for the same condition."""
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": -32001,
+                "message": "access_denied",
+                "data": {
+                    "hint": "the authenticated context does not allow this operation"
+                },
+            },
+        }
+    ).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"application/json")],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
 async def _send_service_unavailable(send) -> None:
     body = b'{"error":"service unavailable"}'
     await send(
@@ -419,7 +450,16 @@ class AuthenticatedMCPMiddleware:
                 state.set_effective(current, effective_context)
                 try:
                     messages = await _request_messages(receive)
-                    _authorize_tool(effective_context, _request_json(messages))
+                    request_json = _request_json(messages)
+                    try:
+                        _authorize_tool(effective_context, request_json)
+                    except AccessError:
+                        if not isinstance(request_json, dict):
+                            raise
+                        await _send_tool_access_denied(
+                            send, _request_id(request_json)
+                        )
+                        return
                     iterator = iter(messages)
 
                     async def replay_receive():

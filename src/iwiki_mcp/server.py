@@ -20,11 +20,12 @@ from threading import RLock
 import time
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Literal
+from typing import Annotated, Literal
 
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
+from pydantic import Field
 
 from . import admin as _admin  # noqa: F401
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
@@ -1486,6 +1487,20 @@ def wiki_related(domain: str, section_id: str) -> dict:
 
 _BLOCKING = {"deep_heading", "pre_h2_text"}
 
+# Required on PostgreSQL storage (optimistic locking via `wiki_read_page`'s
+# `revision`); unused and always omitted on Git storage.
+_ExpectedRevision = Annotated[
+    int | None,
+    Field(
+        description=(
+            "Required on PostgreSQL storage: pass the page's current `revision` "
+            "from `wiki_read_page`, or the call is rejected with "
+            "`expected_revision_required`. Omit on Git storage, which has no "
+            "revision counter."
+        )
+    ),
+]
+
 
 def _rollback_last_log(
     b: str, domain: str, op: str, page: str, source: str, src_hash: str | None
@@ -2066,7 +2081,7 @@ def wiki_update_page(
     domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
     description: str | None = None, status: str | None = None,
     new_heading: str | None = None,
-    expected_revision: int | None = None,
+    expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
@@ -2267,7 +2282,7 @@ def wiki_insert_section(
     domain: str, slug: str, heading: str, body: str,
     after_heading: str | None = None, before_heading: str | None = None,
     source: str | None = None, description: str | None = None,
-    status: str | None = None, expected_revision: int | None = None,
+    status: str | None = None, expected_revision: _ExpectedRevision = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -2446,7 +2461,7 @@ def wiki_insert_section(
 @_safe
 def wiki_delete_section(
     domain: str, slug: str, heading: str,
-    expected_revision: int | None = None,
+    expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
@@ -2578,7 +2593,7 @@ def wiki_delete_section(
 def wiki_move_section(
     domain: str, slug: str, heading: str,
     after_heading: str | None = None, before_heading: str | None = None,
-    expected_revision: int | None = None,
+    expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
@@ -2712,7 +2727,7 @@ def wiki_move_section(
 
 @_safe
 def wiki_delete_page(
-    domain: str, slug: str, expected_revision: int | None = None
+    domain: str, slug: str, expected_revision: _ExpectedRevision = None
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)

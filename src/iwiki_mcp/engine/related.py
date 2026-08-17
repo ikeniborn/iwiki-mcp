@@ -7,13 +7,17 @@ from .links import parse_links
 
 def _vector_neighbours(target: Record, recs: list[Record], top_k: int) -> list[dict]:
     tv = dequantize(target.scale, target.q)
-    out = []
+    # Multiple sub-chunks of one section share the same `id` (`file#heading`);
+    # keep only the best-scoring sub-chunk per section, not every window.
+    best: dict[str, dict] = {}
     for r in recs:
         if r.id == target.id:
             continue
-        out.append({"id": r.id, "file": r.file, "heading": r.heading,
-                    "score": round(cosine(tv, dequantize(r.scale, r.q)), 4)})
-    out.sort(key=lambda d: d["score"], reverse=True)
+        score = round(cosine(tv, dequantize(r.scale, r.q)), 4)
+        existing = best.get(r.id)
+        if existing is None or score > existing["score"]:
+            best[r.id] = {"id": r.id, "file": r.file, "heading": r.heading, "score": score}
+    out = sorted(best.values(), key=lambda d: d["score"], reverse=True)
     return out[:top_k]
 
 
