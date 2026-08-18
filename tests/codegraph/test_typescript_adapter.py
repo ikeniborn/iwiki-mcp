@@ -124,3 +124,35 @@ def test_resolve_references_produces_declares_and_import_relations():
     result = adapter.resolve_references(parsed, index)
 
     assert any(rel.relation_type == "IMPORTS" for rel in result.relations)
+
+
+def test_class_extends_produces_inherits_reference():
+    source = (
+        b"class Base {}\n"
+        b"class Derived extends Base {}\n"
+    )
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.ts/Base"
+
+
+def test_interface_extends_and_class_implements_produce_inherits_references():
+    source = (
+        b"interface Base { }\n"
+        b"interface Derived extends Base { }\n"
+        b"class Impl implements Derived { }\n"
+    )
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits_targets = {
+        r.target_reference for r in parsed.references
+        if r.relation_type == "INHERITS"
+    }
+    assert "a.ts/Base" in inherits_targets
+    assert "a.ts/Derived" in inherits_targets

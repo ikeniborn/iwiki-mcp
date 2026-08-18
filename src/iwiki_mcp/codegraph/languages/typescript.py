@@ -24,7 +24,6 @@ from ..resolver import declaration_relations, resolve_references, sort_relations
 _PARSERS: dict[str, Any] = {}
 
 _KIND_BY_NODE = {
-    "interface_declaration": "interface",
     "type_alias_declaration": "type_alias",
     "enum_declaration": "enum",
 }
@@ -50,6 +49,42 @@ def _visibility(name: str) -> str:
     return "private" if name.startswith("_") or name.startswith("#") else "public"
 
 
+def _heritage_references(source: bytes, node, *, owner_symbol_id: str, file_record):
+    references = []
+    heritage = next(
+        (child for child in node.children if child.type == "class_heritage"), None
+    )
+    clauses = []
+    if heritage is not None:
+        clauses.extend(heritage.children)
+    extends_type = next(
+        (child for child in node.children if child.type == "extends_type_clause"),
+        None,
+    )
+    if extends_type is not None:
+        clauses.append(extends_type)
+    for clause in clauses:
+        if clause.type not in ("extends_clause", "implements_clause", "extends_type_clause"):
+            continue
+        for target in clause.children:
+            if target.type not in ("identifier", "type_identifier", "nested_type_identifier"):
+                continue
+            name = _text(source, target)
+            references.append(ReferenceRecord(
+                source_symbol_id=owner_symbol_id,
+                source_file_id=file_record.file_id,
+                source_module_id=file_record.module_id,
+                relation_type="INHERITS",
+                target_reference=f"{file_record.path}/{name}",
+                source_line=clause.start_point[0] + 1,
+                source_byte=clause.start_byte,
+                source_end_line=clause.end_point[0] + 1,
+                source_end_byte=clause.end_byte,
+                resolution_scope="file",
+            ))
+    return tuple(references)
+
+
 def _extract_symbols(
     source: bytes,
     root,
@@ -58,8 +93,10 @@ def _extract_symbols(
     prefix: str,
     repository_id: str,
     relative_path: str,
+    file_record: FileRecord,
 ):
     symbols: list[SymbolRecord] = []
+    references: list[ReferenceRecord] = []
 
     def make_symbol(
         node, kind, name_node, *, owner_qualified=None,
@@ -118,12 +155,25 @@ def _extract_symbols(
                 if name_node is None:
                     walk(child, owner_qualified)
                     continue
-                qualified, _stable_id = make_symbol(
+                qualified, stable_id = make_symbol(
                     child, "class", name_node, owner_qualified=owner_qualified,
                 )
+                references.extend(_heritage_references(
+                    source, child, owner_symbol_id=stable_id, file_record=file_record,
+                ))
                 body = child.child_by_field_name("body")
                 if body is not None:
                     walk(body, qualified)
+            elif ctype == "interface_declaration":
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    qualified, stable_id = make_symbol(
+                        child, "interface", name_node, owner_qualified=owner_qualified,
+                    )
+                    references.extend(_heritage_references(
+                        source, child, owner_symbol_id=stable_id, file_record=file_record,
+                    ))
+                walk(child, owner_qualified)
             elif ctype == "method_definition":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None and owner_qualified is not None:
@@ -177,7 +227,7 @@ def _extract_symbols(
                 walk(child, owner_qualified)
 
     walk(root)
-    return tuple(symbols)
+    return tuple(symbols), tuple(references)
 
 
 def _extract_references(source: bytes, root, *, file_record: FileRecord):
@@ -316,12 +366,16 @@ class TypeScriptAdapter:
                 token_key(module_local_name) if module_local_name else None
             ),
         )
-        symbols = _extract_symbols(
+        symbols, heritage_references = _extract_symbols(
             source, root,
             language=self.language, prefix=self.prefix,
             repository_id=self.repository_id, relative_path=relative_path,
+            file_record=file,
         )
-        references = _extract_references(source, root, file_record=file)
+        references = (
+            *_extract_references(source, root, file_record=file),
+            *heritage_references,
+        )
         return _TypeScriptParsedFile(
             file=file, symbols=symbols, references=references, warnings=(),
         )
