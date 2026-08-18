@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import json
 import os
@@ -108,8 +109,15 @@ class RemoteMcpTransport:
         self, tool_name: str, arguments: Mapping[str, object]
     ) -> dict[str, object]:
         """Invoke one remote tool, mapping every failure to a safe code."""
+        # FastMCP runs sync tool functions inline on its own running event
+        # loop thread, so anyio.run() here would raise "already running" -
+        # run the coroutine on a fresh worker thread instead, which has no
+        # event loop of its own regardless of the caller's context.
         try:
-            return anyio.run(self._invoke, tool_name, dict(arguments))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(
+                    anyio.run, self._invoke, tool_name, dict(arguments)
+                ).result()
         except _RemoteBindError as exc:
             return dict(exc.payload)
         except Exception:
