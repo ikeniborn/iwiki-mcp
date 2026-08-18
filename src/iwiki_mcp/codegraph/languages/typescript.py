@@ -9,6 +9,7 @@ from typing import Any
 from ..models import (
     FileRecord,
     ParsedFile,
+    ReferenceRecord,
     ResolutionResult,
     SymbolRecord,
     compact_casefold,
@@ -179,6 +180,30 @@ def _extract_symbols(
     return tuple(symbols)
 
 
+def _extract_references(source: bytes, root, *, file_record: FileRecord):
+    references: list[ReferenceRecord] = []
+    for child in root.children:
+        if child.type != "import_statement":
+            continue
+        source_node = child.child_by_field_name("source")
+        if source_node is None:
+            continue
+        specifier = _text(source, source_node).strip("\"'")
+        references.append(ReferenceRecord(
+            source_symbol_id=None,
+            source_file_id=file_record.file_id,
+            source_module_id=file_record.module_id,
+            relation_type="IMPORTS",
+            target_reference=specifier,
+            source_line=child.start_point[0] + 1,
+            source_byte=child.start_byte,
+            source_end_line=child.end_point[0] + 1,
+            source_end_byte=child.end_byte,
+            resolution_hint="unresolved",
+        ))
+    return tuple(references)
+
+
 def _relative_path(path: str) -> str:
     """Keep only a safe POSIX source-relative spelling, never an absolute path."""
     if not isinstance(path, str) or not path or "\\" in path:
@@ -296,8 +321,9 @@ class TypeScriptAdapter:
             language=self.language, prefix=self.prefix,
             repository_id=self.repository_id, relative_path=relative_path,
         )
+        references = _extract_references(source, root, file_record=file)
         return _TypeScriptParsedFile(
-            file=file, symbols=symbols, references=(), warnings=(),
+            file=file, symbols=symbols, references=references, warnings=(),
         )
 
     def resolve_references(self, parsed, project_index) -> ResolutionResult:

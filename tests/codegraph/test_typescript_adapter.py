@@ -98,3 +98,29 @@ def test_arrow_function_const_extracted():
     by_name = {symbol.qualified_name: symbol for symbol in parsed.symbols}
     assert "a.ts/add" in by_name
     assert by_name["a.ts/add"].kind == "function"
+
+
+def test_import_statement_produces_reference():
+    source = b"import { foo } from \"./foo\";\nexport function use() { return foo; }\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    assert len(parsed.references) == 1
+    reference = parsed.references[0]
+    assert reference.relation_type == "IMPORTS"
+    assert reference.target_reference == "./foo"
+    assert reference.source_file_id == parsed.file.file_id
+
+
+def test_resolve_references_produces_declares_and_import_relations():
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    source = b"import { foo } from \"./foo\";\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+    parsed = adapter.parse_file(source, "a.ts")
+    index = SymbolIndex.from_parsed_files((parsed,))
+
+    result = adapter.resolve_references(parsed, index)
+
+    assert any(rel.relation_type == "IMPORTS" for rel in result.relations)
