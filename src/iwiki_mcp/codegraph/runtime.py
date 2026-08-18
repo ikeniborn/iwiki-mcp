@@ -1176,11 +1176,15 @@ class CodeGraphRuntime:
     ) -> dict[str, object]:
         """Search only one revision proven ready under the shared reader lock."""
         try:
+            configured_languages = (
+                self.config.languages if self.config is not None else ("python",)
+            )
             request = validate_search_request(
                 query,
                 kinds=kinds,
                 path=path,
                 languages=languages,
+                configured_languages=configured_languages,
                 limit=limit,
             )
         except CodeGraphQueryError:

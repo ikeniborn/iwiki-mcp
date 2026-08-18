@@ -570,7 +570,7 @@ def test_rank_predicates_and_filters_are_inside_each_union_branch():
 
     branches, outer = sql.split("/* iwiki-after-branches */", 1)
     assert branches.count("f.repository_id = ?") == 3
-    assert branches.count("f.language = ?") == 3
+    assert branches.count("f.language IN (?)") == 3
     assert branches.count("substr(f.path, 1, length(?)) = ?") == 3
     assert branches.count("name_tokens_casefold") >= 3
     assert "repository_id" not in outer
@@ -578,6 +578,37 @@ def test_rank_predicates_and_filters_are_inside_each_union_branch():
     assert "kind IN" not in outer
     assert "path" not in outer
     assert "name_tokens_casefold" not in outer
+
+
+def test_default_languages_is_configured_languages_not_all_known():
+    request = validate_search_request(
+        "foo", configured_languages=("python",),
+    )
+    assert request.languages == ("python",)
+
+
+def test_explicit_languages_filter_validated_against_known_languages():
+    request = validate_search_request(
+        "foo", languages=["typescript"], configured_languages=("python", "typescript"),
+    )
+    assert request.languages == ("typescript",)
+
+
+def test_unregistered_language_rejected():
+    with pytest.raises(CodeGraphQueryError, match="unsupported language"):
+        validate_search_request("foo", languages=["ruby"])
+
+
+def test_multi_language_query_filters_both_languages_in_sql():
+    request = validate_search_request(
+        "foo", languages=["python", "typescript"],
+        configured_languages=("python", "typescript"),
+    )
+    sql, params = query_module._canonical_rank_query(
+        "domain", request, "qualified_exact", ()
+    )
+    assert "f.language IN (?, ?)" in sql
+    assert "python" in params and "typescript" in params
 
 
 def _query_plan(connection, request, name):

@@ -227,7 +227,7 @@ class McpCodeGraphReader:
                 "query": request.query,
                 "kinds": list(request.kinds),
                 "path": request.path,
-                "languages": [request.language],
+                "languages": list(request.languages),
                 "limit": request.limit,
             },
         )

@@ -957,8 +957,8 @@ def _entity_specs(
         specs.append({
             "select": _FILE_ENTITY_SELECT,
             "from": "files AS f",
-            "common": "f.repository_id = %s AND f.language = %s",
-            "common_parameters": [repository_id, request.language],
+            "common": "f.repository_id = %s AND f.language = ANY(%s)",
+            "common_parameters": [repository_id, list(request.languages)],
             "qualified": "f.path",
             "local": "f.file_local_name",
             "tokens": "f.file_name_tokens_casefold",
@@ -973,10 +973,10 @@ def _entity_specs(
             "select": _MODULE_ENTITY_SELECT,
             "from": "files AS f",
             "common": (
-                "f.repository_id = %s AND f.language = %s "
+                "f.repository_id = %s AND f.language = ANY(%s) "
                 "AND f.module_id IS NOT NULL"
             ),
-            "common_parameters": [repository_id, request.language],
+            "common_parameters": [repository_id, list(request.languages)],
             "qualified": "f.module_qualified_name",
             "local": "f.module_local_name",
             "tokens": "f.module_name_tokens_casefold",
@@ -991,10 +991,12 @@ def _entity_specs(
             "select": _SYMBOL_ENTITY_SELECT,
             "from": "symbols AS s JOIN files AS f ON f.file_id = s.file_id",
             "common": (
-                "f.repository_id = %s AND f.language = %s "
+                "f.repository_id = %s AND f.language = ANY(%s) "
                 "AND s.kind = ANY(%s)"
             ),
-            "common_parameters": [repository_id, request.language, symbol_kinds],
+            "common_parameters": [
+                repository_id, list(request.languages), symbol_kinds,
+            ],
             "qualified": "s.qualified_name",
             "local": "s.local_name",
             "tokens": "s.name_tokens_casefold",
@@ -1094,9 +1096,11 @@ def _alias_rank_query(
 {_MODULE_ENTITY_SELECT}
 FROM relations AS r JOIN files AS f ON f.module_id = r.target_module_id
 WHERE {alias_common}
-  AND f.repository_id = %s AND f.language = %s {path_sql}
+  AND f.repository_id = %s AND f.language = ANY(%s) {path_sql}
   AND {predicate} {excluded_sql}""")
-        parameters.extend([repository_id, request.language, *path_parameters])
+        parameters.extend([
+            repository_id, list(request.languages), *path_parameters,
+        ])
         parameters.extend(predicate_parameters)
         parameters.extend(excluded_parameters)
     if symbol_kinds:
@@ -1109,12 +1113,12 @@ WHERE {alias_common}
 FROM relations AS r JOIN symbols AS s ON s.symbol_id = r.target_symbol_id
 JOIN files AS f ON f.file_id = s.file_id
 WHERE {alias_common}
-  AND f.repository_id = %s AND f.language = %s
+  AND f.repository_id = %s AND f.language = ANY(%s)
   AND s.kind = ANY(%s) {path_sql}
   AND {predicate} {excluded_sql}""")
         parameters.extend([
             repository_id,
-            request.language,
+            list(request.languages),
             symbol_kinds,
             *path_parameters,
         ])
