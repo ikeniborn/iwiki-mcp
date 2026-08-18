@@ -16,7 +16,12 @@ from filelock import Timeout
 from iwiki_mcp.base import Binding
 
 from . import models as codegraph_models
-from .config import CodeGraphConfig, CodeGraphConfigError, load_code_graph_config
+from .config import (
+    KNOWN_LANGUAGES,
+    CodeGraphConfig,
+    CodeGraphConfigError,
+    load_code_graph_config,
+)
 from .context import (
     CodeGraphContext,
     CodeGraphContextError,
@@ -721,7 +726,7 @@ class CodeGraphRuntime:
             parser_fingerprint=str(repository["parser_fingerprint"]),
             normalizer_version=str(repository["normalizer_version"]),
             unicode_data_version=str(repository["unicode_data_version"]),
-            languages=("python",),
+            languages=tuple(sorted({row["language"] for row in rows["files"]})),
             expected_counts={kind: len(rows[kind]) for kind in rows},
             graph_payload_revision=graph_payload_revision(rows),
         )
@@ -1028,7 +1033,8 @@ class CodeGraphRuntime:
         languages: list[str] | None = None,
     ) -> dict[str, object]:
         if languages is not None and (
-            not languages or any(language != "python" for language in languages)
+            not languages
+            or any(language not in KNOWN_LANGUAGES for language in languages)
         ):
             return _invalid_config()
         unavailable = self._unavailable()

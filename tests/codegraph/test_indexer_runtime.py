@@ -1027,11 +1027,17 @@ def test_index_lock_timeout_returns_stable_busy_contract(seed_runtime):
 
 
 def test_unsupported_index_language_returns_invalid_config(seed_runtime):
-    assert seed_runtime.index(languages=["typescript"]) == {
+    assert seed_runtime.index(languages=["ruby"]) == {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+
+
+def test_index_accepts_typescript_language_argument(seed_runtime):
+    for languages in (["typescript"], ["python", "typescript"]):
+        result = seed_runtime.index(languages=languages)
+        assert result.get("code") != "invalid_config"
 
 
 def test_index_validation_precedes_missing_primary_and_storage(

@@ -1,7 +1,7 @@
 """FastMCP Unit B code-graph tool integration."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 import sqlite3
 
@@ -719,3 +719,42 @@ def test_export_snapshot_reproduces_the_ready_payload_revision(ready_runtime):
     }
     assert header.graph_payload_revision == graph_payload_revision(rows)
     assert header.graph_payload_revision.startswith("sha256:")
+
+
+def test_export_snapshot_header_languages_reflects_stored_files_not_a_literal(
+    ready_runtime,
+):
+    with closing(sqlite3.connect(ready_runtime.paths.database)) as connection:
+        columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(files)")
+        ]
+        source = dict(
+            zip(
+                columns,
+                connection.execute(
+                    "SELECT * FROM files ORDER BY file_id LIMIT 1"
+                ).fetchone(),
+            )
+        )
+        source.update(
+            file_id="typescript-fixture-file",
+            path="src/pkg/fixture.ts",
+            path_casefold="src/pkg/fixture.ts",
+            file_local_name="fixture.ts",
+            file_name_tokens_casefold="fixture ts",
+            language="typescript",
+            module_id=None,
+            module_qualified_name=None,
+            module_local_name=None,
+            module_name_tokens_casefold=None,
+        )
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO files ({', '.join(columns)}) VALUES ({placeholders})",
+            tuple(source[column] for column in columns),
+        )
+        connection.commit()
+
+    header, _rows = ready_runtime.runtime.export_snapshot()
+
+    assert header.languages == ("python", "typescript")
