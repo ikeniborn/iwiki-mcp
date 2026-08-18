@@ -229,6 +229,46 @@ def _extract_symbols(
     return tuple(symbols), tuple(references)
 
 
+def _import_bindings(source: bytes, clause) -> tuple[tuple[str, str], ...]:
+    """Return (binding_name, binding_kind) pairs one import clause binds.
+
+    ``import_clause`` children (no field names in the grammar) are one of:
+    a bare ``identifier`` (default import), a ``named_imports`` block of
+    ``import_specifier`` nodes (each with a ``name`` field and an optional
+    ``alias`` field), a ``namespace_import`` (``* as name``), or a default
+    identifier followed by a ``named_imports`` block (combined form). A
+    side-effect-only import (``import "./m"``) has no clause at all.
+    """
+    if clause is None:
+        return ()
+    bindings: list[tuple[str, str]] = []
+    for item in clause.children:
+        if item.type == "identifier":
+            bindings.append((_text(source, item), "implicit_binding"))
+        elif item.type == "named_imports":
+            for specifier in item.children:
+                if specifier.type != "import_specifier":
+                    continue
+                alias_node = specifier.child_by_field_name("alias")
+                if alias_node is not None:
+                    bindings.append((_text(source, alias_node), "explicit_alias"))
+                    continue
+                name_node = specifier.child_by_field_name("name")
+                if name_node is not None:
+                    bindings.append((_text(source, name_node), "implicit_binding"))
+        elif item.type == "namespace_import":
+            name_node = next(
+                (grandchild for grandchild in item.children
+                 if grandchild.type == "identifier"),
+                None,
+            )
+            if name_node is not None:
+                # "* as ns" always renames the whole module namespace, the
+                # same semantics as Python's "import x as y".
+                bindings.append((_text(source, name_node), "explicit_alias"))
+    return tuple(bindings)
+
+
 def _extract_references(source: bytes, root, *, file_record: FileRecord):
     references: list[ReferenceRecord] = []
     for child in root.children:
@@ -238,18 +278,27 @@ def _extract_references(source: bytes, root, *, file_record: FileRecord):
         if source_node is None:
             continue
         specifier = _text(source, source_node).strip("\"'")
-        references.append(ReferenceRecord(
-            source_symbol_id=None,
-            source_file_id=file_record.file_id,
-            source_module_id=file_record.module_id,
-            relation_type="IMPORTS",
-            target_reference=specifier,
-            source_line=child.start_point[0] + 1,
-            source_byte=child.start_byte,
-            source_end_line=child.end_point[0] + 1,
-            source_end_byte=child.end_byte,
-            resolution_hint="unresolved",
-        ))
+        clause = next(
+            (grandchild for grandchild in child.children
+             if grandchild.type == "import_clause"),
+            None,
+        )
+        for binding_name, binding_kind in _import_bindings(source, clause):
+            references.append(ReferenceRecord(
+                source_symbol_id=None,
+                source_file_id=file_record.file_id,
+                source_module_id=file_record.module_id,
+                relation_type="IMPORTS",
+                target_reference=specifier,
+                source_line=child.start_point[0] + 1,
+                source_byte=child.start_byte,
+                source_end_line=child.end_point[0] + 1,
+                source_end_byte=child.end_byte,
+                binding_name=binding_name,
+                binding_kind=binding_kind,
+                binding_name_tokens_casefold=token_key(binding_name),
+                resolution_hint="unresolved",
+            ))
     return tuple(references)
 
 

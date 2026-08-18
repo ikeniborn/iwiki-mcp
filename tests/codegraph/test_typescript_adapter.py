@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from iwiki_mcp.codegraph.languages.typescript import TypeScriptAdapter
-from iwiki_mcp.codegraph.models import file_id
+from iwiki_mcp.codegraph.models import file_id, token_key
 
 
 def test_adapter_identity():
@@ -111,6 +111,71 @@ def test_import_statement_produces_reference():
     assert reference.relation_type == "IMPORTS"
     assert reference.target_reference == "./foo"
     assert reference.source_file_id == parsed.file.file_id
+    assert reference.binding_name == "foo"
+    assert reference.binding_kind == "implicit_binding"
+    assert reference.binding_name_tokens_casefold == token_key("foo")
+
+
+def test_named_import_with_alias_produces_explicit_alias_binding():
+    source = b"import { foo, bar as baz } from \"./m\";\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    imports = [r for r in parsed.references if r.relation_type == "IMPORTS"]
+    bindings = {(r.binding_name, r.binding_kind) for r in imports}
+    assert bindings == {
+        ("foo", "implicit_binding"),
+        ("baz", "explicit_alias"),
+    }
+    assert all(r.target_reference == "./m" for r in imports)
+
+
+def test_default_import_produces_implicit_binding():
+    source = b"import Default from \"./m\";\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    imports = [r for r in parsed.references if r.relation_type == "IMPORTS"]
+    assert len(imports) == 1
+    assert imports[0].binding_name == "Default"
+    assert imports[0].binding_kind == "implicit_binding"
+
+
+def test_namespace_import_produces_explicit_alias_binding():
+    source = b"import * as ns from \"./m\";\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    imports = [r for r in parsed.references if r.relation_type == "IMPORTS"]
+    assert len(imports) == 1
+    assert imports[0].binding_name == "ns"
+    assert imports[0].binding_kind == "explicit_alias"
+
+
+def test_combined_default_and_named_import_produces_two_bindings():
+    source = b"import Default, { foo } from \"./m\";\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    imports = [r for r in parsed.references if r.relation_type == "IMPORTS"]
+    bindings = {(r.binding_name, r.binding_kind) for r in imports}
+    assert bindings == {
+        ("Default", "implicit_binding"),
+        ("foo", "implicit_binding"),
+    }
+
+
+def test_side_effect_only_import_produces_no_references():
+    source = b"import \"./m\";\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    assert parsed.references == ()
 
 
 def test_resolve_references_produces_declares_and_import_relations():
