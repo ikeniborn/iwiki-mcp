@@ -9,6 +9,7 @@ import pytest
 
 from iwiki_mcp import server
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.models import CodeGraphError
 from iwiki_mcp.codegraph.query import CodeGraphQueryError
 
@@ -157,6 +158,27 @@ def test_index_handler_validates_languages_before_binding(monkeypatch):
     }
 
 
+def test_index_handler_accepts_every_known_language(seed_binding, monkeypatch):
+    # Regression for C2: wiki_code_index's languages gate used to reject
+    # every language except the literal "python" -- a fifth python-only
+    # gate the plan's inventory (config.py, runtime.snapshot,
+    # runtime.index, sqlite_adapter.begin) missed. It must now accept
+    # every iwiki_mcp.codegraph.config.KNOWN_LANGUAGES member.
+    calls = []
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(
+        server, "_code_runtime", lambda current: _FakeRuntime(current, calls)
+    )
+
+    assert server.wiki_code_index(languages=["typescript"])["languages"] == [
+        "typescript"
+    ]
+    assert server.wiki_code_index(languages=["python", "typescript"])[
+        "languages"
+    ] == ["python", "typescript"]
+    assert "error" not in server.wiki_code_index(languages=["typescript"])
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -179,6 +201,83 @@ def test_search_validation_precedes_binding_for_all_text_bounds(
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+
+
+def test_search_handler_accepts_explicit_typescript_filter(
+    seed_binding, monkeypatch
+):
+    # Regression for C3 (item 1): the binding-free pre-validation gate used
+    # to default configured_languages to ("python",), so an explicit
+    # languages=["typescript"] filter raised "unsupported language" before
+    # the request ever reached the project's real code_graph.languages
+    # config -- even for a project that configures typescript. It must
+    # reach the runtime instead.
+    calls = []
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(
+        server, "_code_runtime", lambda current: _FakeRuntime(current, calls)
+    )
+
+    result = server.wiki_code_search("run", languages=["typescript"])
+
+    assert "error" not in result
+    assert result["languages"] == ["typescript"]
+    assert calls == [f"search:{seed_binding.primary}"]
+
+
+def test_search_handler_threads_configured_languages_to_postgres_path(
+    monkeypatch,
+):
+    # Regression for C3 (item 2): the PostgreSQL hosted-read call site
+    # never passed configured_languages, so it always validated against
+    # the ("python",) module default regardless of the project's real
+    # code_graph.languages config -- silently dropping TypeScript results
+    # for a project configured with languages = ["python", "typescript"]
+    # even when the caller applied no explicit languages filter.
+    postgres_binding = server.base.PostgresBinding(
+        host="localhost",
+        port=5432,
+        database="iwiki_test",
+        user="tester",
+        sslmode="disable",
+        iwiki_id="iwiki-test",
+        read=("project",),
+        write=("project",),
+        primary="project",
+        project_dir="/tmp/does-not-matter",
+        embed_model="test-embed",
+        embed_dimensions=2,
+        rerank_model="test-rerank",
+        password="secret",
+    )
+    monkeypatch.setattr(
+        server, "_resolved_binding", lambda: postgres_binding
+    )
+    monkeypatch.setattr(
+        server._codegraph_config,
+        "load_code_graph_config",
+        lambda project_dir: CodeGraphConfig(languages=("python", "typescript")),
+    )
+    captured = []
+
+    class _FakeReader:
+        def search(self, request):
+            captured.append(request)
+            return {"results": []}
+
+    monkeypatch.setattr(server, "_postgres_code_reader", lambda bind: _FakeReader())
+
+    result = server.wiki_code_search("run")
+
+    assert "error" not in result
+    assert len(captured) == 1
+    assert set(captured[0].languages) == {"python", "typescript"}
+
+    captured.clear()
+    result = server.wiki_code_search("run", languages=["typescript"])
+
+    assert "error" not in result
+    assert captured[0].languages == ("typescript",)
 
 
 @pytest.mark.parametrize(

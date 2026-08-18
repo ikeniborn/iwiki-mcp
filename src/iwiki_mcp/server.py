@@ -148,6 +148,22 @@ def _code_graph_adapter_factories(repository_id, config=None):
     }
 
 
+def _code_graph_configured_languages(binding) -> tuple[str, ...]:
+    """Resolve the project's configured code-graph languages for validation.
+
+    Mirrors the fallback `CodeGraphRuntime.search` itself applies (see
+    `runtime.py`: `self.config.languages if self.config is not None else
+    ("python",)`) so a request-validation call site that runs before (or
+    instead of) a runtime is constructed still validates a `languages`
+    filter against the project's real `code_graph.languages` config, not
+    the `("python",)` module default.
+    """
+    try:
+        return _codegraph_config.load_code_graph_config(binding.project_dir).languages
+    except _codegraph_config.CodeGraphConfigError:
+        return ("python",)
+
+
 def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
     try:
@@ -1089,7 +1105,11 @@ def wiki_code_index(
     languages: list[str] | None = None,
 ) -> dict:
     if languages is not None and (
-        not languages or any(language != "python" for language in languages)
+        not languages
+        or any(
+            language not in _codegraph_config.KNOWN_LANGUAGES
+            for language in languages
+        )
     ):
         return _invalid_code_config()
     bind = _resolved_binding()
@@ -1121,11 +1141,21 @@ def wiki_code_search(
     languages: list[str] | None = None,
     limit: int = 20,
 ) -> dict:
+    # Binding-free fail-fast gate: catches malformed query/kinds/limit/path
+    # input before any binding resolution (tested by
+    # test_search_validation_precedes_binding_for_all_text_bounds). It
+    # can't know the project's real configured languages yet -- passing
+    # KNOWN_LANGUAGES here (rather than the module default ("python",))
+    # keeps this gate from wrongly rejecting a "typescript" filter before
+    # the project's actual code_graph.languages config gets a say; the
+    # real per-project check still happens below (postgres path) or inside
+    # CodeGraphRuntime.search (git/sqlite path, already wired in runtime.py).
     _codegraph_runtime.validate_search_request(
         query,
         kinds=kinds,
         path=path,
         languages=languages,
+        configured_languages=tuple(sorted(_codegraph_config.KNOWN_LANGUAGES)),
         limit=limit,
     )
     bind = _resolved_binding()
@@ -1138,6 +1168,7 @@ def wiki_code_search(
                 kinds=kinds,
                 path=path,
                 languages=languages,
+                configured_languages=_code_graph_configured_languages(bind),
                 limit=limit,
             )
         )
