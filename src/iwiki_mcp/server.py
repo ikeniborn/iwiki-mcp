@@ -102,7 +102,7 @@ _TYPESCRIPT_PARSER_VERSION = (
 )
 
 
-def _code_graph_adapter_factories(repository_id):
+def _code_graph_adapter_factories(repository_id, config=None):
     def create_python_adapter(source_paths):
         return _codegraph_python.PythonAdapter(
             repository_id,
@@ -115,6 +115,9 @@ def _code_graph_adapter_factories(repository_id):
             repository_id,
             source_paths,
             parser_version=_TYPESCRIPT_PARSER_VERSION,
+            type_boost_enabled=bool(
+                config is not None and config.typescript_type_boost
+            ),
         )
 
     return {
@@ -147,9 +150,13 @@ def _code_graph_adapter_factories(repository_id):
 
 def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
+    try:
+        code_config = _codegraph_config.load_code_graph_config(binding.project_dir)
+    except _codegraph_config.CodeGraphConfigError:
+        code_config = None
     runtime = _codegraph_runtime.CodeGraphRuntime(
         binding,
-        adapter_factories=_code_graph_adapter_factories(binding.primary),
+        adapter_factories=_code_graph_adapter_factories(binding.primary, code_config),
     )
     if runtime._indexer is not None:
         runtime._indexer.wiki_selector_resolver = (

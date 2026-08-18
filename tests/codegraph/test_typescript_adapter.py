@@ -221,3 +221,51 @@ def test_interface_extends_and_class_implements_produce_inherits_references():
     }
     assert "a.Base" in inherits_targets
     assert "a.Derived" in inherits_targets
+
+
+def test_type_boost_disabled_by_default_no_subprocess_call(monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.languages.typescript._run_tsc_boost",
+        lambda *a, **k: called.append(1) or None,
+    )
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+    parsed = adapter.parse_file(b"const x = 1;\n", "a.ts")
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    adapter.resolve_references(parsed, SymbolIndex.from_parsed_files((parsed,)))
+
+    assert called == []
+
+
+def test_type_boost_failure_degrades_silently_and_warns(monkeypatch):
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.languages.typescript._run_tsc_boost",
+        lambda *a, **k: None,  # None == "boost unavailable" per its own contract
+    )
+    adapter = TypeScriptAdapter(
+        "domain", ("a.ts",), parser_version="test", type_boost_enabled=True,
+    )
+    parsed = adapter.parse_file(b"const x = 1;\n", "a.ts")
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    result = adapter.resolve_references(parsed, SymbolIndex.from_parsed_files((parsed,)))
+
+    assert result is not None  # did not raise
+    assert result.warnings == ("typescript_boost_unavailable",)
+
+
+def test_type_boost_success_emits_no_warning(monkeypatch):
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.languages.typescript._run_tsc_boost",
+        lambda *a, **k: {},  # any non-None return == boost succeeded
+    )
+    adapter = TypeScriptAdapter(
+        "domain", ("a.ts",), parser_version="test", type_boost_enabled=True,
+    )
+    parsed = adapter.parse_file(b"const x = 1;\n", "a.ts")
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    result = adapter.resolve_references(parsed, SymbolIndex.from_parsed_files((parsed,)))
+
+    assert result.warnings == ()

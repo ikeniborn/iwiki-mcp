@@ -82,6 +82,7 @@ KNOWN_WARNING_CODES = frozenset({
     "parse_error",
     "secret_excluded",
     "symlink_excluded",
+    "typescript_boost_unavailable",
 })
 _FILE_EXCLUSION_CODES = frozenset({
     "entry_excluded",

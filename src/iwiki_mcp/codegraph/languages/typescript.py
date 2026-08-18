@@ -350,6 +350,37 @@ def _get_parser(grammar: str) -> Any:
     return parser
 
 
+def _run_tsc_boost(source: bytes, path: str, *, timeout_seconds: float = 5.0):
+    """Best-effort type info from the project's own `typescript` package.
+
+    Returns None on any failure (missing node, missing typescript package,
+    timeout, non-zero exit, malformed output) — callers must treat None as
+    "no boost available" and continue with the Tree-sitter-only result.
+    """
+    import json
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["node", "-e", _TSC_BOOST_SCRIPT, path],
+            input=source,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=True,
+        )
+        return json.loads(completed.stdout.decode("utf-8"))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+_TSC_BOOST_SCRIPT = """
+// Minimal TS Compiler API probe: emit {} until a real type-resolution
+// payload is implemented in a follow-up task; this establishes the
+// subprocess boundary and its failure contract only.
+process.stdout.write("{}");
+"""
+
+
 @dataclass(frozen=True)
 class _TypeScriptParsedFile(ParsedFile):
     pass
@@ -366,11 +397,13 @@ class TypeScriptAdapter:
         source_paths: tuple[str, ...],
         *,
         parser_version: str = "tree-sitter-typescript",
+        type_boost_enabled: bool = False,
     ) -> None:
         if not isinstance(repository_id, str) or not repository_id:
             raise ValueError("invalid repository id")
         self.repository_id = repository_id
         self.parser_version = parser_version
+        self.type_boost_enabled = type_boost_enabled
 
     def parse_file(self, source: bytes, path: str) -> ParsedFile:
         if not isinstance(source, bytes):
@@ -440,6 +473,18 @@ class TypeScriptAdapter:
         )
 
     def resolve_references(self, parsed, project_index) -> ResolutionResult:
+        warnings: tuple[str, ...] = ()
+        if self.type_boost_enabled:
+            boost_result = _run_tsc_boost(
+                parsed.file.content_hash.encode(), parsed.file.path,
+            )
+            if boost_result is None:
+                warnings = ("typescript_boost_unavailable",)
+            # boost_result payload wiring into relation confidence/resolution_state
+            # is out of scope for this plan (spec: best-effort, opt-in; the
+            # Tree-sitter baseline already satisfies the intent's Trust priority
+            # on its own) — this call proves the non-blocking subprocess contract
+            # end-to-end and surfaces its own availability, nothing more.
         declares = declaration_relations(
             self.language, self.prefix, self.repository_id, parsed,
         )
@@ -448,5 +493,5 @@ class TypeScriptAdapter:
             parsed.references, project_index,
         )
         return ResolutionResult(
-            relations=sort_relations((*declares, *resolved)), warnings=(),
+            relations=sort_relations((*declares, *resolved)), warnings=warnings,
         )
