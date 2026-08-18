@@ -51,8 +51,8 @@ def test_function_declaration_extracted():
     parsed = adapter.parse_file(source, "a.ts")
 
     by_name = {symbol.qualified_name: symbol for symbol in parsed.symbols}
-    assert "a.ts/greet" in by_name
-    symbol = by_name["a.ts/greet"]
+    assert "a.greet" in by_name
+    symbol = by_name["a.greet"]
     assert symbol.kind == "function"
     assert symbol.local_name == "greet"
     assert symbol.visibility == "public"
@@ -69,8 +69,8 @@ def test_class_with_method_extracted():
     parsed = adapter.parse_file(source, "a.ts")
 
     kinds = {symbol.qualified_name: symbol.kind for symbol in parsed.symbols}
-    assert kinds["a.ts/Animal"] == "class"
-    assert kinds["a.ts/Animal.speak"] == "method"
+    assert kinds["a.Animal"] == "class"
+    assert kinds["a.Animal.speak"] == "method"
 
 
 def test_interface_type_alias_enum_extracted():
@@ -84,9 +84,9 @@ def test_interface_type_alias_enum_extracted():
     parsed = adapter.parse_file(source, "a.ts")
 
     kinds = {symbol.qualified_name: symbol.kind for symbol in parsed.symbols}
-    assert kinds["a.ts/Named"] == "interface"
-    assert kinds["a.ts/Alias"] == "type_alias"
-    assert kinds["a.ts/Color"] == "enum"
+    assert kinds["a.Named"] == "interface"
+    assert kinds["a.Alias"] == "type_alias"
+    assert kinds["a.Color"] == "enum"
 
 
 def test_arrow_function_const_extracted():
@@ -96,8 +96,8 @@ def test_arrow_function_const_extracted():
     parsed = adapter.parse_file(source, "a.ts")
 
     by_name = {symbol.qualified_name: symbol for symbol in parsed.symbols}
-    assert "a.ts/add" in by_name
-    assert by_name["a.ts/add"].kind == "function"
+    assert "a.add" in by_name
+    assert by_name["a.add"].kind == "function"
 
 
 def test_import_statement_produces_reference():
@@ -202,7 +202,7 @@ def test_class_extends_produces_inherits_reference():
 
     inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
     assert len(inherits) == 1
-    assert inherits[0].target_reference == "a.ts/Base"
+    assert inherits[0].target_reference == "a.Base"
 
 
 def test_interface_extends_and_class_implements_produce_inherits_references():
@@ -219,5 +219,5 @@ def test_interface_extends_and_class_implements_produce_inherits_references():
         r.target_reference for r in parsed.references
         if r.relation_type == "INHERITS"
     }
-    assert "a.ts/Base" in inherits_targets
-    assert "a.ts/Derived" in inherits_targets
+    assert "a.Base" in inherits_targets
+    assert "a.Derived" in inherits_targets

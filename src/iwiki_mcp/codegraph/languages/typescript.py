@@ -49,7 +49,10 @@ def _visibility(name: str) -> str:
     return "private" if name.startswith("_") or name.startswith("#") else "public"
 
 
-def _heritage_references(source: bytes, node, *, owner_symbol_id: str, file_record):
+def _heritage_references(
+    source: bytes, node, *, owner_symbol_id: str, file_record,
+    module_dotted_name: str,
+):
     references = []
     heritage = next(
         (child for child in node.children if child.type == "class_heritage"), None
@@ -74,7 +77,7 @@ def _heritage_references(source: bytes, node, *, owner_symbol_id: str, file_reco
                 source_symbol_id=owner_symbol_id,
                 source_file_id=file_record.file_id,
                 relation_type="INHERITS",
-                target_reference=f"{file_record.path}/{name}",
+                target_reference=f"{module_dotted_name}.{name}",
                 source_line=clause.start_point[0] + 1,
                 source_byte=clause.start_byte,
                 source_end_line=clause.end_point[0] + 1,
@@ -93,6 +96,7 @@ def _extract_symbols(
     repository_id: str,
     relative_path: str,
     file_record: FileRecord,
+    module_dotted_name: str,
 ):
     symbols: list[SymbolRecord] = []
     references: list[ReferenceRecord] = []
@@ -104,7 +108,7 @@ def _extract_symbols(
         local_name = _text(source, name_node)
         qualified = (
             f"{owner_qualified}.{local_name}" if owner_qualified
-            else f"{relative_path}/{local_name}"
+            else f"{module_dotted_name}.{local_name}"
         )
         record_kind = kind
         signature = None
@@ -125,7 +129,7 @@ def _extract_symbols(
             kind=record_kind,
             qualified_name=qualified,
             local_name=local_name,
-            name_tokens_casefold=token_key(local_name),
+            name_tokens_casefold=token_key(qualified, local_name),
             start_line=node.start_point[0] + 1,
             end_line=node.end_point[0] + 1,
             start_byte=node.start_byte,
@@ -159,6 +163,7 @@ def _extract_symbols(
                 )
                 references.extend(_heritage_references(
                     source, child, owner_symbol_id=stable_id, file_record=file_record,
+                    module_dotted_name=module_dotted_name,
                 ))
                 body = child.child_by_field_name("body")
                 if body is not None:
@@ -171,6 +176,7 @@ def _extract_symbols(
                     )
                     references.extend(_heritage_references(
                         source, child, owner_symbol_id=stable_id, file_record=file_record,
+                        module_dotted_name=module_dotted_name,
                     ))
                 walk(child, owner_qualified)
             elif ctype == "method_definition":
@@ -382,10 +388,10 @@ class TypeScriptAdapter:
             child.type in ("import_statement", "export_statement")
             for child in root.children
         )
-        module_qualified_name = (
-            ".".join(PurePosixPath(relative_path).with_suffix("").parts)
-            if is_module else None
+        module_dotted_name = ".".join(
+            PurePosixPath(relative_path).with_suffix("").parts
         )
+        module_qualified_name = module_dotted_name if is_module else None
         module_local_name = PurePosixPath(relative_path).stem if is_module else None
         stable_module_id = (
             module_id(
@@ -423,7 +429,7 @@ class TypeScriptAdapter:
             source, root,
             language=self.language, prefix=self.prefix,
             repository_id=self.repository_id, relative_path=relative_path,
-            file_record=file,
+            file_record=file, module_dotted_name=module_dotted_name,
         )
         references = (
             *_extract_references(source, root, file_record=file),
