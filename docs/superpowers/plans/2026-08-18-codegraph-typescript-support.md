@@ -1,3 +1,53 @@
+---
+review:
+  plan_hash: b46d58f258713a2b
+  last_run: 2026-08-18
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    dependencies:
+      status: passed
+    verifiability:
+      status: passed
+    consistency:
+      status: passed
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: WARNING
+      section: "Task 10"
+      section_hash: 2f756eb372993646
+      fragment: "test_single_language_filter_excludes_the_other_language"
+      text: "Spec §5 requires a test proving languages=['typescript'] excludes Python entities and vice versa; Task 9's test only asserted the generated SQL text, no task exercised it against a real DB."
+      fix: "Added test_single_language_filter_excludes_the_other_language to Task 10."
+      verdict: fixed
+      verdict_at: 2026-08-18
+    - id: F-002
+      phase: coverage
+      severity: WARNING
+      section: "Task 10"
+      section_hash: 2f756eb372993646
+      fragment: "test_typescript_files_respect_exclude_patterns"
+      text: "Spec §5 requires confirming .ts/.tsx discovery still respects `exclude`; no task exercised this."
+      fix: "Added test_typescript_files_respect_exclude_patterns and a vendor/ fixture file to Task 10."
+      verdict: fixed
+      verdict_at: 2026-08-18
+    - id: F-003
+      phase: verifiability
+      severity: WARNING
+      section: "Task 11"
+      section_hash: a733f1eb913dc35b
+      fragment: "Step 5: Wire the config flag through the composition root"
+      text: "Task 11's composition-root wiring step (Step 5) had no run/verify step before Step 6's commit."
+      fix: "Inserted a Step 6 test run before the commit step (renumbered to Step 7)."
+      verdict: fixed
+      verdict_at: 2026-08-18
+chain:
+  intent: docs/superpowers/intents/2026-08-18-codegraph-typescript-support-intent.md
+  spec: docs/superpowers/specs/2026-08-18-codegraph-typescript-support-design.md
+---
 # codegraph-typescript-support Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -1541,6 +1591,15 @@ tests/fixtures/codegraph/mixed_python_typescript/
   __init__.py
   client.ts
   base.ts
+  vendor/
+    ignored.ts
+```
+
+`vendor/ignored.ts` (used only by
+`test_typescript_files_respect_exclude_patterns`, which configures
+`exclude=["vendor/"]`):
+```typescript
+export class ShouldNeverBeIndexed {}
 ```
 
 `service.py`:
@@ -1611,6 +1670,33 @@ def test_python_only_repo_search_unaffected(tmp_path, monkeypatch):
     # and confirm search results are identical to this suite's existing
     # python-only search assertions (byte-for-byte same entity_ids).
     ...
+
+
+def test_single_language_filter_excludes_the_other_language(tmp_path, monkeypatch):
+    # Build the mixed_python_typescript fixture as in
+    # test_mixed_repo_builds_one_snapshot_with_both_languages, then run two
+    # searches against the same ready snapshot: languages=["typescript"] must
+    # return zero Python entity_ids (assert none of the result entity_ids match
+    # a known Python symbol_id from this fixture, e.g. the "process" function's
+    # symbol_id computed via `symbol_id("python", "py", ...)`), and
+    # languages=["python"] must symmetrically return zero TypeScript entity_ids
+    # (none matching a "ts:" -prefixed symbol_id). This is the runtime
+    # counterpart to Task 9's `_canonical_rank_query` SQL-string assertion —
+    # it proves the `IN (...)` filter actually excludes rows, not just that the
+    # SQL text contains the right tokens.
+    ...
+
+
+def test_typescript_files_respect_exclude_patterns(tmp_path, monkeypatch):
+    # Add one more .ts file under a "vendor/" subdirectory of the
+    # mixed_python_typescript fixture (create it in Step 1 below), configure
+    # `exclude=["vendor/"]`, build, and assert no file/symbol from that path is
+    # present in the built snapshot — discover_sources()/exclude handling in
+    # discovery.py is already language-neutral and already covered by the
+    # existing Python exclude tests, so this is a thin confirmation that the
+    # same code path behaves identically for a .ts source, not new discovery
+    # logic to write.
+    ...
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail (or pass, revealing gaps)**
@@ -1621,7 +1707,7 @@ uv run pytest tests/codegraph/test_mixed_language_indexing.py -v
 
 Expected: FAIL initially only if the indexer-construction helper pattern needs
 adjustment for two languages; if the two-language indexer builds correctly first try,
-this step still confirms it — either way, do not proceed to Step 4 until all three
+this step still confirms it — either way, do not proceed to Step 4 until all five
 tests pass for a real reason, not a stub.
 
 - [ ] **Step 4: Fill in the test bodies for real, run, verify pass**
@@ -1630,7 +1716,7 @@ tests pass for a real reason, not a stub.
 uv run pytest tests/codegraph/test_mixed_language_indexing.py -v
 ```
 
-Expected: PASS, 3/3.
+Expected: PASS, 5/5.
 
 - [ ] **Step 5: Rerun the full suite and the code-graph benchmark**
 
@@ -1849,7 +1935,18 @@ thread it in as a parameter to `_code_graph_adapter_factories(repository_id, con
 and update its one call site) and pass
 `type_boost_enabled=config.typescript_type_boost`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Run the tests to verify the wiring did not break anything**
+
+```bash
+uv run pytest tests/test_server_code_graph.py tests/codegraph -v
+uv run pytest -q
+```
+
+Expected: PASS. The composition-root wiring itself has no dedicated new test (it is a
+one-line constructor-argument plumb-through) — the existing Task 6 factory test and the
+full suite are what confirm it did not break `create_typescript_adapter`'s call shape.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/iwiki_mcp/codegraph/languages/typescript.py src/iwiki_mcp/codegraph/indexer.py src/iwiki_mcp/server.py tests/codegraph/test_typescript_adapter.py
