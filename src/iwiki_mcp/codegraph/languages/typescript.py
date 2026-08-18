@@ -73,7 +73,6 @@ def _heritage_references(source: bytes, node, *, owner_symbol_id: str, file_reco
             references.append(ReferenceRecord(
                 source_symbol_id=owner_symbol_id,
                 source_file_id=file_record.file_id,
-                source_module_id=file_record.module_id,
                 relation_type="INHERITS",
                 target_reference=f"{file_record.path}/{name}",
                 source_line=clause.start_point[0] + 1,
