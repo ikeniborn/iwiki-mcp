@@ -49,11 +49,38 @@ def _visibility(name: str) -> str:
     return "private" if name.startswith("_") or name.startswith("#") else "public"
 
 
-def _heritage_references(
-    source: bytes, node, *, owner_symbol_id: str, file_record,
-    module_dotted_name: str, owner_qualified: str | None = None,
+@dataclass(frozen=True)
+class _PendingHeritage:
+    """A class/interface heritage clause target awaiting scope resolution.
+
+    TypeScript name resolution is lexical: the target of `extends`/
+    `implements` may be declared in the declaring class/interface's own
+    enclosing scope, or in any scope outward from there, down to the
+    module -- it is not necessarily a sibling in the *same* scope as the
+    declaring class. Building the final `target_reference` therefore needs
+    the full (deduplicated) symbol set for the file, which isn't known
+    until `walk()` finishes. This record carries just enough to resolve it
+    in that later pass: `owner_qualified` is the qualified name of the
+    scope the declaring class/interface itself sits in (the innermost
+    scope to probe first), and `name` is the heritage target's bare
+    identifier. See `_resolve_heritage_references`.
+    """
+
+    owner_symbol_id: str
+    source_file_id: str
+    owner_qualified: str | None
+    name: str
+    source_line: int
+    source_byte: int
+    source_end_line: int
+    source_end_byte: int
+
+
+def _pending_heritage_references(
+    source: bytes, node, *, owner_symbol_id: str, source_file_id: str,
+    owner_qualified: str | None = None,
 ):
-    references = []
+    pending = []
     heritage = next(
         (child for child in node.children if child.type == "class_heritage"), None
     )
@@ -73,21 +100,75 @@ def _heritage_references(
             if target.type not in ("identifier", "type_identifier", "nested_type_identifier"):
                 continue
             name = _text(source, target)
-            target_reference = (
-                f"{owner_qualified}.{name}" if owner_qualified
-                else f"{module_dotted_name}.{name}"
-            )
-            references.append(ReferenceRecord(
-                source_symbol_id=owner_symbol_id,
-                source_file_id=file_record.file_id,
-                relation_type="INHERITS",
-                target_reference=target_reference,
+            pending.append(_PendingHeritage(
+                owner_symbol_id=owner_symbol_id,
+                source_file_id=source_file_id,
+                owner_qualified=owner_qualified,
+                name=name,
                 source_line=clause.start_point[0] + 1,
                 source_byte=clause.start_byte,
                 source_end_line=clause.end_point[0] + 1,
                 source_end_byte=clause.end_byte,
-                resolution_scope="file",
             ))
+    return tuple(pending)
+
+
+def _heritage_scope_candidates(
+    owner_qualified: str | None, module_dotted_name: str,
+) -> tuple[str, ...]:
+    """Ordered scope-qualified-name prefixes to probe, innermost first.
+
+    Always ends at `module_dotted_name`, the outermost (module) scope --
+    the same fallback target `_pending_heritage_references` used to build
+    unconditionally before this fix.
+    """
+    if not owner_qualified:
+        return (module_dotted_name,)
+    candidates = [owner_qualified]
+    scope = owner_qualified
+    while scope != module_dotted_name and "." in scope:
+        scope = scope.rsplit(".", 1)[0]
+        candidates.append(scope)
+    if candidates[-1] != module_dotted_name:
+        candidates.append(module_dotted_name)
+    return tuple(candidates)
+
+
+def _resolve_heritage_references(
+    pending: tuple[_PendingHeritage, ...],
+    qualified_names: set[str],
+    module_dotted_name: str,
+) -> tuple[ReferenceRecord, ...]:
+    """Resolve each pending heritage target to the innermost matching scope.
+
+    Tries `owner_qualified` (the declaring class/interface's own enclosing
+    scope) first, then walks outward one `.`-separated scope level at a
+    time down to `module_dotted_name`, using the first candidate that
+    matches an actually-collected symbol's `qualified_name`. If none
+    match, falls back to the module-scoped candidate (last in the probe
+    order) -- an unresolved-but-present reference, same as before this fix,
+    for heritage targets that are genuinely external/cross-file.
+    """
+    references = []
+    for item in pending:
+        candidates = _heritage_scope_candidates(item.owner_qualified, module_dotted_name)
+        target_reference = f"{candidates[-1]}.{item.name}"
+        for scope in candidates:
+            candidate = f"{scope}.{item.name}"
+            if candidate in qualified_names:
+                target_reference = candidate
+                break
+        references.append(ReferenceRecord(
+            source_symbol_id=item.owner_symbol_id,
+            source_file_id=item.source_file_id,
+            relation_type="INHERITS",
+            target_reference=target_reference,
+            source_line=item.source_line,
+            source_byte=item.source_byte,
+            source_end_line=item.source_end_line,
+            source_end_byte=item.source_end_byte,
+            resolution_scope="file",
+        ))
     return tuple(references)
 
 
@@ -103,7 +184,7 @@ def _extract_symbols(
     module_dotted_name: str,
 ):
     symbols: list[SymbolRecord] = []
-    references: list[ReferenceRecord] = []
+    pending_heritage: list[_PendingHeritage] = []
 
     def make_symbol(
         node, kind, name_node, *, owner_qualified=None,
@@ -189,9 +270,9 @@ def _extract_symbols(
                 qualified, stable_id = make_symbol(
                     child, "class", name_node, owner_qualified=owner_qualified,
                 )
-                references.extend(_heritage_references(
-                    source, child, owner_symbol_id=stable_id, file_record=file_record,
-                    module_dotted_name=module_dotted_name, owner_qualified=owner_qualified,
+                pending_heritage.extend(_pending_heritage_references(
+                    source, child, owner_symbol_id=stable_id,
+                    source_file_id=file_record.file_id, owner_qualified=owner_qualified,
                 ))
                 body = child.child_by_field_name("body")
                 if body is not None:
@@ -203,9 +284,9 @@ def _extract_symbols(
                     qualified, stable_id = make_symbol(
                         child, "interface", name_node, owner_qualified=owner_qualified,
                     )
-                    references.extend(_heritage_references(
-                        source, child, owner_symbol_id=stable_id, file_record=file_record,
-                        module_dotted_name=module_dotted_name, owner_qualified=owner_qualified,
+                    pending_heritage.extend(_pending_heritage_references(
+                        source, child, owner_symbol_id=stable_id,
+                        source_file_id=file_record.file_id, owner_qualified=owner_qualified,
                     ))
                 walk(child, qualified)
             elif ctype == "method_definition":
@@ -273,7 +354,7 @@ def _extract_symbols(
                 walk(child, owner_qualified)
 
     walk(root)
-    return tuple(symbols), tuple(references)
+    return tuple(symbols), tuple(pending_heritage)
 
 
 def _import_bindings(source: bytes, clause) -> tuple[tuple[str, str], ...]:
@@ -508,7 +589,7 @@ class TypeScriptAdapter:
                 if module_qualified_name else None
             ),
         )
-        symbols, heritage_references = _extract_symbols(
+        symbols, pending_heritage = _extract_symbols(
             source, root,
             language=self.language, prefix=self.prefix,
             repository_id=self.repository_id, relative_path=relative_path,
@@ -537,6 +618,16 @@ class TypeScriptAdapter:
         warnings = tuple(sorted((
             *("duplicate_symbol_identity" for _item in duplicate_symbol_ids),
         )))
+        # Heritage targets resolve against the final, post-dedup symbol set
+        # (see `_resolve_heritage_references`): TypeScript name resolution
+        # is lexical, so a class's `extends`/`implements` target may live in
+        # any enclosing scope outward from where the class itself is
+        # declared, not just the class's own immediate scope.
+        heritage_references = _resolve_heritage_references(
+            pending_heritage,
+            {symbol.qualified_name for symbol in symbols},
+            module_dotted_name,
+        )
         references = (
             *_extract_references(source, root, file_record=file),
             *heritage_references,

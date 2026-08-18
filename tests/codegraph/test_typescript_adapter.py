@@ -276,6 +276,146 @@ def test_namespace_scoped_interface_extends_builds_the_namespaced_target_referen
     assert inherits[0].target_reference == "a.A.C"
 
 
+def _resolved_inherits_target(parsed):
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    index = SymbolIndex.from_parsed_files((parsed,))
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+    result = adapter.resolve_references(parsed, index)
+    inherits_relations = [
+        relation for relation in result.relations
+        if relation.relation_type == "INHERITS"
+    ]
+    assert len(inherits_relations) == 1
+    return inherits_relations[0]
+
+
+def test_namespace_nested_extends_still_resolves_the_outer_module_base():
+    # Regression (fix wave 3): the fix wave 2 fix for the namespace-sibling
+    # case (test_namespace_scoped_extends_resolves_to_the_namespaced_target
+    # above) made _heritage_references use the innermost owner_qualified
+    # unconditionally, with no check that a symbol actually exists there.
+    # TypeScript name resolution is lexical -- a class declared inside a
+    # namespace routinely extends a base declared at module scope. This
+    # must still resolve to the OUTER "a.Base", not the never-declared
+    # "a.A.Base".
+    source = b"class Base {}\nnamespace A { class D extends Base {} }\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.Base"
+
+    base_symbol = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.Base"
+    )
+    relation = _resolved_inherits_target(parsed)
+    assert relation.resolution_state == "resolved"
+    assert relation.target_symbol_id == base_symbol.symbol_id
+
+
+def test_function_nested_extends_still_resolves_the_outer_module_base():
+    # Same class of regression as above, for a class nested inside a
+    # function body instead of a namespace.
+    source = b"class Base {}\nfunction f() { class D extends Base {} }\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.Base"
+
+    base_symbol = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.Base"
+    )
+    relation = _resolved_inherits_target(parsed)
+    assert relation.resolution_state == "resolved"
+    assert relation.target_symbol_id == base_symbol.symbol_id
+
+
+def test_method_nested_extends_still_resolves_the_outer_module_base():
+    # Same class of regression, two scope levels deep: a class nested
+    # inside a method body of another class extends a module-level base.
+    source = (
+        b"class Base {}\n"
+        b"class Outer { m() { class D extends Base {} } }\n"
+    )
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.Base"
+
+    base_symbol = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.Base"
+    )
+    relation = _resolved_inherits_target(parsed)
+    assert relation.resolution_state == "resolved"
+    assert relation.target_symbol_id == base_symbol.symbol_id
+
+
+def test_namespace_scoped_extends_resolution_state_is_resolved():
+    # No-regression check for the fix wave 2 namespace-sibling case: it
+    # must still resolve to the INNER "a.A.C" (not the fix wave 3 outward
+    # fallback), through the real resolve_references/SymbolIndex path.
+    source = b"namespace A { class C {} class B extends C {} }\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    c_symbol = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.A.C"
+    )
+    relation = _resolved_inherits_target(parsed)
+    assert relation.resolution_state == "resolved"
+    assert relation.target_symbol_id == c_symbol.symbol_id
+
+
+def test_namespace_scoped_extends_shadows_the_outer_module_base():
+    # Shadowing: a namespace-local Base must win over the module-level
+    # Base of the same name -- the fix wave 3 outward-walk fallback must
+    # not skip past a match that DOES exist at the innermost scope.
+    source = (
+        b"class Base {}\n"
+        b"namespace A { class Base {} class D extends Base {} }\n"
+    )
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.A.Base"
+
+    inner_base = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.A.Base"
+    )
+    relation = _resolved_inherits_target(parsed)
+    assert relation.resolution_state == "resolved"
+    assert relation.target_symbol_id == inner_base.symbol_id
+
+
+def test_module_level_extends_still_resolves_as_before():
+    # No-regression check for the always-worked plain module-level case,
+    # through the real resolve_references/SymbolIndex path.
+    source = b"class Base {}\nclass D extends Base {}\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    base_symbol = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.Base"
+    )
+    relation = _resolved_inherits_target(parsed)
+    assert relation.resolution_state == "resolved"
+    assert relation.target_symbol_id == base_symbol.symbol_id
+
+
 def test_type_boost_disabled_by_default_no_subprocess_call(monkeypatch):
     called = []
     monkeypatch.setattr(
