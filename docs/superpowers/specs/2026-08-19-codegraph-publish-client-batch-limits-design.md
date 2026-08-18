@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 5e6a497855146097
+  spec_hash: ada0c39e019f81a8
   last_run: 2026-08-19
   phases:
     structure:
@@ -89,21 +89,25 @@ Two independent slices:
    This is the ONLY behavioral branch point — everything else in the batching/publish
    flow (`iter_snapshot_batches`, `canonical_batch`, hashing) is untouched.
 
-Diagnostic detail (independent of the above, applies to both remaining checks):
-`_CODE_INVALID_BATCH` (`server.py`) and `_INVALID_BATCH` (`postgres/codegraph.py`) each
-gain `"limit": <int>, "received": <int>` in the returned dict specifically for the
-`len(rows) > max_batch_rows` rejection branch (the one this whole intent is about); the
-`byte_count > max_batch_bytes` branch gains the equivalent `"limit"`/`"received"` pair.
-Other `invalid_batch` triggers (malformed `kind`, negative `ordinal`, hash mismatch)
-keep their current shape — they are not size-mismatch diagnostics and adding
-limit/received to them would be misleading.
+Diagnostic detail (independent of the above): the ONLY size-based `invalid_batch` checks
+in the whole publish path are both in `server.py::_HostedPublication.publish_from_mapping`
+— `len(rows) > self._settings.max_batch_rows` and `batch.byte_count >
+self._settings.max_batch_bytes` (confirmed: `postgres/codegraph.py`'s own `_INVALID_BATCH`
+triggers, in `publish_batch`/`_materialize`/`_validate_references`, are kind/ordinal
+validity, batch-count/row-count mismatch, and referential integrity — none of them are
+size checks, so none of them need this diagnostic). Both `server.py` branches gain
+`"limit": <int>, "received": <int>` in the returned `_CODE_INVALID_BATCH` dict. Every
+other `invalid_batch` trigger anywhere in the codebase (malformed `kind`, negative
+`ordinal`, hash mismatch, row-count mismatch, referential integrity) keeps its current
+shape — they are not size-mismatch diagnostics and adding limit/received to them would
+be misleading.
 
 ## 2. Components touched
 
 | File | Change |
 |---|---|
 | `codegraph/publication.py` | `PublicationSession`: add `max_batch_rows`, `max_batch_bytes` (both `int \| None = None`) |
-| `postgres/codegraph.py` | No change to `begin()`/`PublicationSession` construction. `_INVALID_BATCH`-adjacent len-check in `publish_batch`/`_materialize`: add `limit`/`received` (this is the direct-postgres-store's own diagnostic, independent of the `server.py` wrapper's). |
+| `postgres/codegraph.py` | No change. Confirmed it has no size-based `invalid_batch` check of its own (only kind/ordinal validity, row-count/ordinal-contiguity, and referential integrity). |
 | `server.py` | `_HostedPublication.begin_from_mapping`: include `max_batch_rows`/`max_batch_bytes` from `self._settings` in the returned mapping. `_HostedPublication.publish_from_mapping`: `_CODE_INVALID_BATCH` len/byte-count branches gain `limit`/`received`. `_publish_local_snapshot`: select batch-sizing source per §3. |
 | `codegraph/mcp_adapter.py` | `McpSnapshotPublisher.begin()`: parse `max_batch_rows`/`max_batch_bytes` (optional keys) from the decoded remote response into the returned `PublicationSession`. |
 | `codegraph/sqlite_adapter.py` | `SqliteSnapshotPublisher.begin()`: no change to logic — its returned `PublicationSession` simply omits the two new fields (defaults apply). |
@@ -170,9 +174,11 @@ server" — this is what makes the change backward compatible with no version ne
   `None` (regression guard — this is the "sqlite path untouched" Health Metric made
   concrete).
 - **Unit — diagnostic fields:** both `_CODE_INVALID_BATCH` triggers (rows, bytes) in
-  `server.py` and both in `postgres/codegraph.py` include correct `limit`/`received`
-  values for a constructed over-limit batch; other `invalid_batch` triggers (bad `kind`,
-  negative `ordinal`, hash mismatch) do NOT gain these fields (scope guard).
+  `server.py::_HostedPublication.publish_from_mapping` include correct `limit`/`received`
+  values for a constructed over-limit batch; every other `invalid_batch` trigger in the
+  codebase (bad `kind`, negative `ordinal`, hash mismatch, row-count mismatch,
+  referential integrity, all in `postgres/codegraph.py`) does NOT gain these fields
+  (scope guard).
 - **Integration — end-to-end via `_HostedPublication`/`PostgresCodeGraphStore` directly**
   (no live network, mirrors this plan's own diagnostic session against `aioperator`):
   build a `CodeGraphIndexer` snapshot with a symbol/relation count exceeding a
