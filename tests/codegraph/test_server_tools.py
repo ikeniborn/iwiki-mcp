@@ -987,6 +987,28 @@ def test_publish_from_mapping_reports_byte_limit_on_rejection():
     assert result["received"] > 10
 
 
+def test_publish_from_mapping_hash_mismatch_carries_no_size_diagnostics():
+    # Scope guard: the limit/received diagnostic fields introduced for the
+    # row- and byte-limit rejections above must stay confined to those two
+    # size checks. A hash-mismatch rejection is not a size violation and
+    # must return the bare _CODE_INVALID_BATCH dict with no extra keys.
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    store = _FakeHostedStore(_session())
+    settings = HostedCodeGraphConfig(max_batch_rows=1000, max_batch_bytes=1_000_000)
+    publication = _HostedPublication(store, settings)
+
+    result = publication.publish_from_mapping(
+        "s1", "files", 0, [{"file_id": "f0"}], "sha256:" + "0" * 64
+    )
+
+    assert result == {
+        "error": "invalid_batch",
+        "hint": "send batches that match the declared header",
+    }
+
+
 def test_publish_local_snapshot_uses_session_limits_over_config(monkeypatch):
     from iwiki_mcp import server as server_module
 
