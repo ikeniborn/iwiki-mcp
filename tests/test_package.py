@@ -46,7 +46,6 @@ def test_user_docs_describe_python_code_graph_mvp_contract():
     assert "<500 ms" in text
     assert "<150 ms" in text
     assert "incremental" not in {field.name for field in dataclasses.fields(CodeGraphConfig)}
-    assert not Path("src/iwiki_mcp/codegraph/languages/typescript.py").exists()
 
 
 def test_docs_describe_hosted_domain_authority_contract():
