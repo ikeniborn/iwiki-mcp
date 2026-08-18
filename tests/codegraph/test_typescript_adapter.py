@@ -223,6 +223,59 @@ def test_interface_extends_and_class_implements_produce_inherits_references():
     assert "a.Derived" in inherits_targets
 
 
+def test_namespace_scoped_extends_resolves_to_the_namespaced_target():
+    # Regression: the first fix wave correctly scoped named-declaration
+    # qualified_names under their enclosing namespace (a.A.C, a.A.B instead
+    # of the pre-fix-wave a.C, a.B), but _heritage_references still built
+    # target_reference from module_dotted_name alone -- so `B extends C`
+    # inside `namespace A { ... }` produced target_reference "a.C", which
+    # never matches the real symbol's qualified_name "a.A.C" and resolves
+    # to unresolved. It must instead use the same owner_qualified scope
+    # the class/interface's own symbol was given.
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    source = b"namespace A { class C {} class B extends C {} }\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.A.C"
+
+    index = SymbolIndex.from_parsed_files((parsed,))
+    result = adapter.resolve_references(parsed, index)
+    c_symbol = next(
+        symbol for symbol in parsed.symbols if symbol.qualified_name == "a.A.C"
+    )
+    inherits_relations = [
+        relation for relation in result.relations
+        if relation.relation_type == "INHERITS"
+    ]
+    assert len(inherits_relations) == 1
+    assert inherits_relations[0].target_symbol_id == c_symbol.symbol_id
+    assert inherits_relations[0].resolution_state == "resolved"
+
+
+def test_namespace_scoped_interface_extends_builds_the_namespaced_target_reference():
+    # resolver.py's _symbol_candidates restricts INHERITS resolution to
+    # symbols of kind "class" (a pre-existing, unrelated design decision --
+    # see test_interface_extends_and_class_implements_produce_inherits_references
+    # above, which likewise only asserts target_reference for the interface
+    # case, not resolution), so an interface-extends-interface INHERITS
+    # relation never resolves regardless of this fix. This test only proves
+    # _heritage_references itself builds the correctly namespaced
+    # target_reference for the interface_declaration call site.
+    source = b"namespace A { interface C {} interface B extends C {} }\n"
+    adapter = TypeScriptAdapter("domain", ("a.ts",), parser_version="test")
+
+    parsed = adapter.parse_file(source, "a.ts")
+
+    inherits = [r for r in parsed.references if r.relation_type == "INHERITS"]
+    assert len(inherits) == 1
+    assert inherits[0].target_reference == "a.A.C"
+
+
 def test_type_boost_disabled_by_default_no_subprocess_call(monkeypatch):
     called = []
     monkeypatch.setattr(

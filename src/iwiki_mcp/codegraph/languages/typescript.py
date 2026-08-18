@@ -51,7 +51,7 @@ def _visibility(name: str) -> str:
 
 def _heritage_references(
     source: bytes, node, *, owner_symbol_id: str, file_record,
-    module_dotted_name: str,
+    module_dotted_name: str, owner_qualified: str | None = None,
 ):
     references = []
     heritage = next(
@@ -73,11 +73,15 @@ def _heritage_references(
             if target.type not in ("identifier", "type_identifier", "nested_type_identifier"):
                 continue
             name = _text(source, target)
+            target_reference = (
+                f"{owner_qualified}.{name}" if owner_qualified
+                else f"{module_dotted_name}.{name}"
+            )
             references.append(ReferenceRecord(
                 source_symbol_id=owner_symbol_id,
                 source_file_id=file_record.file_id,
                 relation_type="INHERITS",
-                target_reference=f"{module_dotted_name}.{name}",
+                target_reference=target_reference,
                 source_line=clause.start_point[0] + 1,
                 source_byte=clause.start_byte,
                 source_end_line=clause.end_point[0] + 1,
@@ -187,7 +191,7 @@ def _extract_symbols(
                 )
                 references.extend(_heritage_references(
                     source, child, owner_symbol_id=stable_id, file_record=file_record,
-                    module_dotted_name=module_dotted_name,
+                    module_dotted_name=module_dotted_name, owner_qualified=owner_qualified,
                 ))
                 body = child.child_by_field_name("body")
                 if body is not None:
@@ -201,7 +205,7 @@ def _extract_symbols(
                     )
                     references.extend(_heritage_references(
                         source, child, owner_symbol_id=stable_id, file_record=file_record,
-                        module_dotted_name=module_dotted_name,
+                        module_dotted_name=module_dotted_name, owner_qualified=owner_qualified,
                     ))
                 walk(child, qualified)
             elif ctype == "method_definition":
@@ -510,12 +514,36 @@ class TypeScriptAdapter:
             repository_id=self.repository_id, relative_path=relative_path,
             file_record=file, module_dotted_name=module_dotted_name,
         )
+        # Safety net for genuine `symbol_id` collisions that scoping alone
+        # cannot prevent: declarations inside anonymous/block scopes (arrow
+        # callback bodies, if/else branches, try/catch blocks, IIFEs) get no
+        # named scope segment of their own, so same-named siblings there
+        # still flatten to the same qualified_name. This does not attempt to
+        # invent a semantically correct qualified_name for those cases -- it
+        # only guarantees the build never crashes on the PRIMARY KEY
+        # constraint, keeping the last-by-position declaration and surfacing
+        # a warning so the degradation is visible. Mirrors python.py's
+        # equivalent dedup in `parse_file`.
+        symbols_by_id: dict[str, SymbolRecord] = {}
+        duplicate_symbol_ids: set[str] = set()
+        for symbol in symbols:
+            previous = symbols_by_id.get(symbol.symbol_id)
+            if previous is not None:
+                duplicate_symbol_ids.add(symbol.symbol_id)
+            if previous is None or symbol.start_byte >= previous.start_byte:
+                symbols_by_id[symbol.symbol_id] = symbol
+        symbols = list(symbols_by_id.values())
+        symbols.sort(key=lambda item: (item.start_byte or -1, item.qualified_name))
+        warnings = tuple(sorted((
+            *("duplicate_symbol_identity" for _item in duplicate_symbol_ids),
+        )))
         references = (
             *_extract_references(source, root, file_record=file),
             *heritage_references,
         )
         return _TypeScriptParsedFile(
-            file=file, symbols=symbols, references=references, warnings=(),
+            file=file, symbols=tuple(symbols), references=references,
+            warnings=warnings,
         )
 
     def _probe_boost_once(self, parsed) -> tuple[str, ...]:

@@ -241,6 +241,39 @@ def test_typescript_nested_local_declarations_do_not_collide(tmp_path):
     assert len(symbol_ids) == len(set(symbol_ids))
 
 
+def test_typescript_anonymous_scope_collisions_deduplicate_with_warning(tmp_path):
+    # Regression for the residual C1 gap: the first fix wave threaded scope
+    # through NAMED declaration parents (functions, methods, classes,
+    # namespaces), but declarations inside an ANONYMOUS or block scope --
+    # callback bodies passed to another call, or if/else branches -- get no
+    # named scope segment of their own, so same-named siblings there still
+    # collide on qualified_name/symbol_id. This is a safety-net dedup, not a
+    # scoping fix: it must not crash the build, must keep exactly one
+    # symbol per colliding id, and must surface duplicate_symbol_identity.
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "callback.ts").write_text(
+        "describe('a', () => { function setup(){} });\n"
+        "describe('b', () => { function setup(){} });\n",
+        encoding="utf-8",
+    )
+    (project_dir / "block.ts").write_text(
+        "if (x) { function f(){} } else { function f(){} }\n",
+        encoding="utf-8",
+    )
+    indexer = _build_indexer(
+        tmp_path / "cache", project_dir, languages=("typescript",),
+    )
+
+    built = indexer.build(force=True)
+
+    assert built["state"] == "ready"
+    assert "duplicate_symbol_identity" in built["warnings"]
+    rows = indexer.build_rows()
+    symbol_ids = [row["symbol_id"] for row in rows.tables["symbols"]]
+    assert len(symbol_ids) == len(set(symbol_ids))
+
+
 def test_typescript_files_respect_exclude_patterns(tmp_path):
     project_dir = FIXTURES / "mixed_python_typescript"
     indexer = _build_indexer(
