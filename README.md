@@ -356,9 +356,9 @@ creation, physical wiki deletion, and automatic embedding-model/dimension migrat
 ## Python code graph MVP
 
 The optional code graph is a separate, local SQLite cache for the project bound to
-the primary wiki domain. It indexes Python source only and does not change
-`wiki_search` or the Markdown/vector wiki indexes. The cache paths are derived from
-the wiki base and primary domain:
+the primary wiki domain. It indexes Python and/or TypeScript/TSX source, depending on
+the configured `languages`, and does not change `wiki_search` or the Markdown/vector
+wiki indexes. The cache paths are derived from the wiki base and primary domain:
 
 ```text
 <IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3
@@ -406,7 +406,7 @@ documented under distributed publication below:
 | Tool | Contract |
 | --- | --- |
 | `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics. |
-| `wiki_code_index` | Requests a full Python rebuild; `force` may rebuild an otherwise current cache. |
+| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
 
@@ -416,9 +416,11 @@ are 50 nodes, 20 files, and 200,000 source bytes. `include_source` is `false` by
 default. Source discovery rejects unsafe paths and symlink escapes; query and context
 calls fail safely if the local cache cannot be used.
 
-Incremental indexing is not part of the Python MVP.
-TypeScript is not part of the Python MVP.
-Each needs a separate specification and delivery.
+Incremental indexing is not part of the Python MVP; it needs a separate specification
+and delivery. TypeScript support is Tree-sitter-only static extraction (declarations,
+imports, class/interface heritage); it does not extract interface members, and
+`typescript_type_boost`'s Compiler API subprocess is opt-in, best-effort, and does not
+yet wire real type information into resolution.
 
 ### Distributed code graph publication
 

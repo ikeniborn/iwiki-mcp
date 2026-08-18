@@ -23,7 +23,7 @@ def test_package_metadata_rejects_mcp_v2():
 
 
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.148"
+    assert iwiki_mcp.__version__ == "0.7.149"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
@@ -39,7 +39,7 @@ def test_user_docs_describe_python_code_graph_mvp_contract():
         )
     )
     assert "Incremental indexing is not part of the Python MVP" in text
-    assert "TypeScript is not part of the Python MVP" in text
+    assert "TypeScript support is Tree-sitter-only static extraction" in text
     assert "deterministic full rebuild" in text
     assert "schema-v1" in text
     assert "uv run python -m eval.code_graph" in text

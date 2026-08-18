@@ -356,9 +356,9 @@ extension, физическое удаление wiki и автоматичес�
 ## Python code graph MVP
 
 Опциональный code graph — отдельный локальный SQLite-кэш проекта, привязанного к
-primary wiki-домену. Он индексирует только Python-исходники и не меняет
-`wiki_search` или Markdown/vector индексы wiki. Пути кэша выводятся из wiki-base и
-primary domain:
+primary wiki-домену. Он индексирует Python и/или TypeScript/TSX-исходники, в
+зависимости от настроенных `languages`, и не меняет `wiki_search` или Markdown/vector
+индексы wiki. Пути кэша выводятся из wiki-base и primary domain:
 
 ```text
 <IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3
@@ -407,7 +407,7 @@ schema-v1 несовместим и заменяется детерминиро�
 | Инструмент | Контракт |
 | --- | --- |
 | `wiki_code_status` | Возвращает настройку, состояние, freshness и diagnostics локального кэша. |
-| `wiki_code_index` | Запрашивает полный Python rebuild; `force` может перестроить уже current кэш. |
+| `wiki_code_index` | Запрашивает полный rebuild для настроенных `languages`; `force` может перестроить уже current кэш. |
 | `wiki_code_search` | Ищет typed file, module и symbol entities с optional kind, path, language и limit filters. |
 | `wiki_code_context` | Расширяет точные typed entity-ID `seeds` через bounded relations; source по умолчанию выключен. |
 
@@ -417,9 +417,11 @@ code graph. Default: direction `both`, depth `1`, максимум 50 nodes, 20 
 отклоняет unsafe paths и symlink escapes; query и context безопасно завершаются,
 если локальный кэш нельзя использовать.
 
-Incremental indexing is not part of the Python MVP.
-TypeScript is not part of the Python MVP.
-Для каждого нужна отдельная specification и delivery.
+Incremental indexing не входит в Python MVP; для него нужна отдельная specification и
+delivery. Поддержка TypeScript — это статическое извлечение только через Tree-sitter
+(декларации, импорты, class/interface heritage); члены interface не извлекаются, а
+подпроцесс TypeScript Compiler API из `typescript_type_boost` — opt-in,
+best-effort и пока не подключает реальную типовую информацию к резолвингу.
 
 ### Распределённая публикация code graph
 
