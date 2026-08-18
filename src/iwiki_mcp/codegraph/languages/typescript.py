@@ -382,11 +382,15 @@ class TypeScriptAdapter:
             child.type in ("import_statement", "export_statement")
             for child in root.children
         )
+        module_qualified_name = (
+            ".".join(PurePosixPath(relative_path).with_suffix("").parts)
+            if is_module else None
+        )
         module_local_name = PurePosixPath(relative_path).stem if is_module else None
         stable_module_id = (
             module_id(
                 self.language, self.prefix, self.repository_id,
-                relative_path, relative_path,
+                relative_path, module_qualified_name,
             )
             if is_module else None
         )
@@ -408,10 +412,11 @@ class TypeScriptAdapter:
             end_byte=len(source),
             module_key=relative_path,
             module_id=stable_module_id,
-            module_qualified_name=relative_path if is_module else None,
+            module_qualified_name=module_qualified_name,
             module_local_name=module_local_name,
             module_name_tokens_casefold=(
-                token_key(module_local_name) if module_local_name else None
+                token_key(module_qualified_name, module_local_name)
+                if module_qualified_name else None
             ),
         )
         symbols, heritage_references = _extract_symbols(
