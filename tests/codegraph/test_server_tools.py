@@ -906,3 +906,86 @@ def test_begin_from_mapping_reports_hosted_batch_limits():
     assert result["max_batch_rows"] == 1000
     assert result["max_batch_bytes"] == 1_000_000
     assert result["session_id"] == "s1"
+
+
+def _session(max_batch_rows=None, max_batch_bytes=None):
+    from iwiki_mcp.codegraph.publication import PublicationSession
+
+    return PublicationSession(
+        session_id="s",
+        lease_expires_at="2026-08-19T00:00:00Z",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+        max_batch_rows=max_batch_rows,
+        max_batch_bytes=max_batch_bytes,
+    )
+
+
+@pytest.mark.parametrize(
+    "reported_rows,reported_bytes,expected_rows,expected_bytes",
+    [
+        (1000, 1_000_000, 1000, 1_000_000),   # valid server value used
+        (None, None, 5000, 5_000_000),        # absent -> config fallback
+        (0, 1_000_000, 5000, 1_000_000),      # zero rejected -> config fallback
+        (-1, 1_000_000, 5000, 1_000_000),     # negative rejected -> config fallback
+        (5001, 1_000_000, 5000, 1_000_000),   # over hard ceiling -> config fallback
+        (1000, 0, 1000, 5_000_000),           # zero bytes rejected -> config fallback
+        (1000, 5_000_001, 1000, 5_000_000),   # over hard ceiling -> config fallback
+        (True, 1_000_000, 5000, 1_000_000),   # bool-is-int trap rejected
+    ],
+)
+def test_effective_batch_bounds_validates_server_value(
+    reported_rows, reported_bytes, expected_rows, expected_bytes
+):
+    from iwiki_mcp.server import _effective_batch_bounds
+
+    session = _session(reported_rows, reported_bytes)
+    config = CodeGraphConfig(max_batch_rows=5000, max_batch_bytes=5_000_000)
+
+    rows_limit, bytes_limit = _effective_batch_bounds(session, config)
+
+    assert rows_limit == expected_rows
+    assert bytes_limit == expected_bytes
+
+
+def test_publish_local_snapshot_uses_session_limits_over_config(monkeypatch):
+    from iwiki_mcp import server as server_module
+
+    captured = {}
+    real_iter = server_module._codegraph_publication.iter_snapshot_batches
+
+    def spying_iter(rows, *, max_rows, max_bytes):
+        captured["max_rows"] = max_rows
+        captured["max_bytes"] = max_bytes
+        return real_iter(rows, max_rows=max_rows, max_bytes=max_bytes)
+
+    monkeypatch.setattr(
+        server_module._codegraph_publication, "iter_snapshot_batches", spying_iter
+    )
+
+    class _StubPublisher:
+        def begin(self, header):
+            return _session(max_batch_rows=1000, max_batch_bytes=1_000_000)
+
+        def publish_batch(self, session, batch):
+            return {"accepted": True}
+
+        def finalize(self, session):
+            return {"state": "ready"}
+
+        def abort(self, session):
+            return {"state": "aborted"}
+
+    class _StubRuntime:
+        def export_snapshot(self):
+            return _exported_snapshot()
+
+    monkeypatch.setattr(
+        server_module, "_code_publisher", lambda *a, **k: _StubPublisher()
+    )
+    config = CodeGraphConfig(max_batch_rows=5000, max_batch_bytes=5_000_000)
+
+    server_module._publish_local_snapshot(_StubRuntime(), object(), config)
+
+    assert captured["max_rows"] == 1000
+    assert captured["max_bytes"] == 1_000_000

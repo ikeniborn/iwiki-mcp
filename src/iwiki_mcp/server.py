@@ -1048,6 +1048,26 @@ _CODE_INVALID_HEADER = {
 }
 
 
+def _effective_batch_bounds(session, config) -> tuple[int, int]:
+    """Prefer the hosted server's reported batch bounds, validated against
+    this codebase's own hard ceiling; fall back to local config otherwise."""
+    rows_limit = session.max_batch_rows
+    if (
+        not isinstance(rows_limit, int)
+        or isinstance(rows_limit, bool)
+        or not 1 <= rows_limit <= 5000
+    ):
+        rows_limit = config.max_batch_rows
+    bytes_limit = session.max_batch_bytes
+    if (
+        not isinstance(bytes_limit, int)
+        or isinstance(bytes_limit, bool)
+        or not 1 <= bytes_limit <= 5_000_000
+    ):
+        bytes_limit = config.max_batch_bytes
+    return rows_limit, bytes_limit
+
+
 def _publish_local_snapshot(runtime, binding, config) -> dict:
     """Send the freshly indexed local snapshot to the selected publisher."""
     publisher = _code_publisher(binding, config.publish_mode, config)
@@ -1060,10 +1080,11 @@ def _publish_local_snapshot(runtime, binding, config) -> dict:
     session = publisher.begin(header)
     if isinstance(session, dict):
         return session
+    max_rows, max_bytes = _effective_batch_bounds(session, config)
     for batch in _codegraph_publication.iter_snapshot_batches(
         rows,
-        max_rows=config.max_batch_rows,
-        max_bytes=config.max_batch_bytes,
+        max_rows=max_rows,
+        max_bytes=max_bytes,
     ):
         accepted = publisher.publish_batch(session, batch)
         if "error" in accepted:
