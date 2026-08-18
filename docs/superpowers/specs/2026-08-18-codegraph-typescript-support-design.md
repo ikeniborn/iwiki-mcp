@@ -1,4 +1,27 @@
 ---
+review:
+  spec_hash: 48375472246e15ea
+  last_run: 2026-08-18
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: "2.6 `query.py` changes"
+      section_hash: c825a422c1a7b495
+      fragment: "the project's configured code_graph.languages (plumbed through from the runtime call site, not the global KNOWN_LANGUAGES registry"
+      text: "Default languages source was stated ambiguously — both 'all of KNOWN_LANGUAGES' and 'configured code_graph.languages' were named as the default."
+      fix: "Resolved: default is config.languages (the project's actually-enabled subset), not the global registry."
+      verdict: fixed
+      verdict_at: 2026-08-18
 chain:
   intent: docs/superpowers/intents/2026-08-18-codegraph-typescript-support-intent.md
 ---
@@ -129,9 +152,10 @@ non-zero exit degrades silently to the Tree-sitter-only result for that file
 
 - `ValidatedSearchRequest.language: str` → `languages: tuple[str, ...]`.
 - `validate_search_request(..., languages: list[str] | None = None)`:
-  `None` → all of `KNOWN_LANGUAGES` (or, more precisely, the caller's
-  configured `code_graph.languages` — plumbed through from the runtime call
-  site, not hardcoded); explicit list validated against `KNOWN_LANGUAGES`,
+  `None` → the project's configured `code_graph.languages` (plumbed through
+  from the runtime call site, not the global `KNOWN_LANGUAGES` registry — a
+  python-only project must not silently search a typescript column it never
+  indexed); explicit list validated against `KNOWN_LANGUAGES`,
   same `CodeGraphQueryError("unsupported language")` on a miss.
 - `_canonical_rank_query`/`_alias_rank_query`: every `f.language = ?` /
   `AND f.language = ?` predicate becomes
