@@ -1007,6 +1007,8 @@ class _HostedPublication:
             "lease_expires_at": session.lease_expires_at,
             "base_snapshot_revision": session.base_snapshot_revision,
             "base_markdown_token": session.base_markdown_token,
+            "max_batch_rows": self._settings.max_batch_rows,
+            "max_batch_bytes": self._settings.max_batch_bytes,
         }
 
     def publish_from_mapping(

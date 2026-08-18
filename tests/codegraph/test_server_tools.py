@@ -857,3 +857,52 @@ def test_export_snapshot_header_languages_reflects_stored_files_not_a_literal(
     header, _rows = ready_runtime.runtime.export_snapshot()
 
     assert header.languages == ("python", "typescript")
+
+
+class _FakeHostedStore:
+    """Records begin() calls; never touches a real database."""
+
+    def __init__(self, session):
+        self.domain = "docs"
+        self._session = session
+        self.begin_calls = []
+
+    def begin(self, header):
+        self.begin_calls.append(header)
+        return self._session
+
+
+def test_begin_from_mapping_reports_hosted_batch_limits():
+    from iwiki_mcp.codegraph.publication import PublicationSession
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    session = PublicationSession(
+        session_id="s1",
+        lease_expires_at="2026-08-19T00:00:00Z",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+    )
+    store = _FakeHostedStore(session)
+    settings = HostedCodeGraphConfig(max_batch_rows=1000, max_batch_bytes=1_000_000)
+    publication = _HostedPublication(store, settings)
+    header = {
+        "protocol_version": 1,
+        "schema_version": 2,
+        "repository_id": "docs",
+        "source_fingerprint": "source",
+        "parser_fingerprint": "parser",
+        "normalizer_version": "normalizer-1",
+        "unicode_data_version": "15.1",
+        "languages": ["python"],
+        "expected_counts": {
+            "repositories": 1, "files": 0, "symbols": 0, "relations": 0
+        },
+        "graph_payload_revision": "sha256:" + "a" * 64,
+    }
+
+    result = publication.begin_from_mapping(header)
+
+    assert result["max_batch_rows"] == 1000
+    assert result["max_batch_bytes"] == 1_000_000
+    assert result["session_id"] == "s1"
