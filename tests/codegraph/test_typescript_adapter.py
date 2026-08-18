@@ -255,6 +255,34 @@ def test_type_boost_failure_degrades_silently_and_warns(monkeypatch):
     assert result.warnings == ("typescript_boost_unavailable",)
 
 
+def test_type_boost_probes_at_most_once_per_adapter_instance(monkeypatch):
+    # Regression for I2: resolve_references used to call _run_tsc_boost
+    # fresh for every file, meaning one `node` subprocess spawn per file on
+    # a large TS repo (N OSErrors with no node, or up to N * timeout with a
+    # slow one). It must probe at most once per adapter instance (i.e. once
+    # per build) and reuse that result for subsequent files.
+    calls = []
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.languages.typescript._run_tsc_boost",
+        lambda *a, **k: calls.append(1) or None,
+    )
+    adapter = TypeScriptAdapter(
+        "domain", ("a.ts", "b.ts"), parser_version="test", type_boost_enabled=True,
+    )
+    from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+    parsed_a = adapter.parse_file(b"const x = 1;\n", "a.ts")
+    parsed_b = adapter.parse_file(b"const y = 2;\n", "b.ts")
+    index = SymbolIndex.from_parsed_files((parsed_a, parsed_b))
+
+    first = adapter.resolve_references(parsed_a, index)
+    second = adapter.resolve_references(parsed_b, index)
+
+    assert len(calls) == 1
+    assert first.warnings == ("typescript_boost_unavailable",)
+    assert second.warnings == ("typescript_boost_unavailable",)
+
+
 def test_type_boost_success_emits_no_warning(monkeypatch):
     monkeypatch.setattr(
         "iwiki_mcp.codegraph.languages.typescript._run_tsc_boost",

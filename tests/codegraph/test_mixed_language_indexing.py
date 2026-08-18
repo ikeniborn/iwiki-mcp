@@ -209,6 +209,38 @@ def test_typescript_multi_dot_basename_module_name_strips_from_first_dot(tmp_pat
     assert file_row["module_qualified_name"] == "component"
 
 
+def test_typescript_nested_local_declarations_do_not_collide(tmp_path):
+    # Regression for C1: two functions each declaring a local arrow function
+    # of the same name must not flatten to the same module-scoped
+    # qualified_name -- that collision breaks symbol_id's PRIMARY KEY
+    # constraint and fails the whole snapshot build, not just this file.
+    # A unit-level assertion on parsed.symbols alone would not catch this:
+    # the failure only manifests as a real SQLite PRIMARY KEY violation
+    # during persistence, so this exercises the real build_rows()/build()
+    # path exactly like the other tests in this module.
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "a.ts").write_text(
+        "function f() { const h = () => 1; }\n"
+        "function g() { const h = () => 2; }\n",
+        encoding="utf-8",
+    )
+    indexer = _build_indexer(
+        tmp_path / "cache", project_dir, languages=("typescript",),
+    )
+
+    built = indexer.build(force=True)
+
+    assert built["state"] == "ready"
+    rows = indexer.build_rows()
+    qualified_names = {
+        row["qualified_name"] for row in rows.tables["symbols"]
+    }
+    assert {"a.f", "a.f.h", "a.g", "a.g.h"} <= qualified_names
+    symbol_ids = [row["symbol_id"] for row in rows.tables["symbols"]]
+    assert len(symbol_ids) == len(set(symbol_ids))
+
+
 def test_typescript_files_respect_exclude_patterns(tmp_path):
     project_dir = FIXTURES / "mixed_python_typescript"
     indexer = _build_indexer(

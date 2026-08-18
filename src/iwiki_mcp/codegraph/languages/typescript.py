@@ -144,15 +144,39 @@ def _extract_symbols(
         ))
         return qualified, stable_id
 
+    def _namespace_qualified(child, owner_qualified):
+        """Scope a `namespace X { ... }` / `declare module "x" { ... }` body.
+
+        Neither construct emits its own SymbolRecord (extraction is scoped to
+        the plan's declaration kinds only), but nested declarations must
+        still be narrowed under the namespace/module's own name -- otherwise
+        two same-named declarations in different namespaces/ambient modules
+        flatten to the same qualified_name and collide, the same root cause
+        as C1's per-function collision.
+        """
+        name_node = child.child_by_field_name("name")
+        if name_node is None:
+            return owner_qualified
+        local_name = _text(source, name_node).strip("\"'")
+        if not local_name:
+            return owner_qualified
+        return (
+            f"{owner_qualified}.{local_name}" if owner_qualified
+            else f"{module_dotted_name}.{local_name}"
+        )
+
     def walk(node, owner_qualified=None):
         for child in node.children:
             ctype = child.type
             if ctype in _KIND_BY_NODE:
                 name_node = child.child_by_field_name("name")
+                qualified = owner_qualified
                 if name_node is not None:
-                    make_symbol(child, _KIND_BY_NODE[ctype], name_node,
-                                owner_qualified=owner_qualified)
-                walk(child, owner_qualified)
+                    qualified, _ = make_symbol(
+                        child, _KIND_BY_NODE[ctype], name_node,
+                        owner_qualified=owner_qualified,
+                    )
+                walk(child, qualified)
             elif ctype == "class_declaration":
                 name_node = child.child_by_field_name("name")
                 if name_node is None:
@@ -170,6 +194,7 @@ def _extract_symbols(
                     walk(body, qualified)
             elif ctype == "interface_declaration":
                 name_node = child.child_by_field_name("name")
+                qualified = owner_qualified
                 if name_node is not None:
                     qualified, stable_id = make_symbol(
                         child, "interface", name_node, owner_qualified=owner_qualified,
@@ -178,11 +203,12 @@ def _extract_symbols(
                         source, child, owner_symbol_id=stable_id, file_record=file_record,
                         module_dotted_name=module_dotted_name,
                     ))
-                walk(child, owner_qualified)
+                walk(child, qualified)
             elif ctype == "method_definition":
                 name_node = child.child_by_field_name("name")
+                qualified = owner_qualified
                 if name_node is not None and owner_qualified is not None:
-                    make_symbol(
+                    qualified, _ = make_symbol(
                         child, "method", name_node,
                         owner_qualified=owner_qualified,
                         params_node=child.child_by_field_name("parameters"),
@@ -192,11 +218,12 @@ def _extract_symbols(
                             for grandchild in child.children
                         ),
                     )
-                walk(child, owner_qualified)
+                walk(child, qualified)
             elif ctype == "function_declaration":
                 name_node = child.child_by_field_name("name")
+                qualified = owner_qualified
                 if name_node is not None:
-                    make_symbol(
+                    qualified, _ = make_symbol(
                         child, "function", name_node,
                         owner_qualified=owner_qualified,
                         params_node=child.child_by_field_name("parameters"),
@@ -205,7 +232,7 @@ def _extract_symbols(
                             grandchild.type == "async" for grandchild in child.children
                         ),
                     )
-                walk(child, owner_qualified)
+                walk(child, qualified)
             elif ctype in ("lexical_declaration", "variable_declaration"):
                 for declarator in child.children:
                     if declarator.type != "variable_declarator":
@@ -217,7 +244,7 @@ def _extract_symbols(
                         and value.type in ("arrow_function", "function_expression")
                         and name_node is not None
                     ):
-                        make_symbol(
+                        qualified, _ = make_symbol(
                             declarator, "function", name_node,
                             owner_qualified=owner_qualified,
                             params_node=value.child_by_field_name("parameters"),
@@ -227,7 +254,17 @@ def _extract_symbols(
                                 for grandchild in value.children
                             ),
                         )
-                walk(child, owner_qualified)
+                        walk(value, qualified)
+                    else:
+                        walk(declarator, owner_qualified)
+            elif ctype == "internal_module":
+                # `namespace X { ... }` / `declare namespace X.Y { ... }`.
+                walk(child, _namespace_qualified(child, owner_qualified))
+            elif ctype == "module" and child.child_by_field_name("body") is not None:
+                # Ambient `declare module "specifier" { ... }`; the plain
+                # `module` node type only carries a body in this ambient
+                # shape, so this can't misfire on an unrelated grammar node.
+                walk(child, _namespace_qualified(child, owner_qualified))
             else:
                 walk(child, owner_qualified)
 
@@ -404,6 +441,15 @@ class TypeScriptAdapter:
         self.repository_id = repository_id
         self.parser_version = parser_version
         self.type_boost_enabled = type_boost_enabled
+        # `_run_tsc_boost` spawns a `node` subprocess; probing it fresh for
+        # every file would mean one subprocess spawn per file (N `OSError`s
+        # with no `node`, or up to N * timeout with a slow one), which can
+        # blow past a build's max_rebuild_seconds budget on a large repo.
+        # The boost's own payload is still a stub ({}), so a single
+        # probe-once-per-adapter-instance (i.e. once per build) result is
+        # sufficient: bound the spawn cost to O(1) per build, not O(files).
+        self._boost_probed = False
+        self._boost_warnings: tuple[str, ...] = ()
 
     def parse_file(self, source: bytes, path: str) -> ParsedFile:
         if not isinstance(source, bytes):
@@ -472,19 +518,30 @@ class TypeScriptAdapter:
             file=file, symbols=symbols, references=references, warnings=(),
         )
 
-    def resolve_references(self, parsed, project_index) -> ResolutionResult:
-        warnings: tuple[str, ...] = ()
-        if self.type_boost_enabled:
+    def _probe_boost_once(self, parsed) -> tuple[str, ...]:
+        """Run `_run_tsc_boost` at most once per adapter instance (per build).
+
+        boost_result payload wiring into relation confidence/resolution_state
+        is out of scope for this plan (spec: best-effort, opt-in; the
+        Tree-sitter baseline already satisfies the intent's Trust priority
+        on its own) — this proves the non-blocking subprocess contract
+        end-to-end and surfaces its own availability, nothing more.
+        """
+        if not self._boost_probed:
             boost_result = _run_tsc_boost(
                 parsed.file.content_hash.encode(), parsed.file.path,
             )
-            if boost_result is None:
-                warnings = ("typescript_boost_unavailable",)
-            # boost_result payload wiring into relation confidence/resolution_state
-            # is out of scope for this plan (spec: best-effort, opt-in; the
-            # Tree-sitter baseline already satisfies the intent's Trust priority
-            # on its own) — this call proves the non-blocking subprocess contract
-            # end-to-end and surfaces its own availability, nothing more.
+            self._boost_warnings = (
+                () if boost_result is not None
+                else ("typescript_boost_unavailable",)
+            )
+            self._boost_probed = True
+        return self._boost_warnings
+
+    def resolve_references(self, parsed, project_index) -> ResolutionResult:
+        warnings: tuple[str, ...] = ()
+        if self.type_boost_enabled:
+            warnings = self._probe_boost_once(parsed)
         declares = declaration_relations(
             self.language, self.prefix, self.repository_id, parsed,
         )
