@@ -369,13 +369,13 @@ the wiki base and primary domain:
 ```
 
 Configure it in the bound project's `.iwiki.toml`. All values are optional; these
-are the defaults. `languages` accepts only `python`. `exclude` entries must be safe
-relative paths.
+are the defaults. `languages` accepts `python` and/or `typescript`. `exclude` entries
+must be safe relative paths.
 
 ```toml
 [code_graph]
 enabled = true
-languages = ["python"]
+languages = ["python", "typescript"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
 max_full_rebuild_seconds = 10
@@ -388,7 +388,9 @@ exclude = []
 `max_rebuild_seconds` bounds the query-time auto-rebuild only. `max_full_rebuild_seconds`
 bounds an explicit `wiki_code_index` full build and defaults to `max_rebuild_seconds` when
 unset; set it higher on large repositories so a full build is not cut short by the tighter
-query-time budget.
+query-time budget. `typescript_type_boost` (default `false`) opts into an isolated,
+best-effort TypeScript Compiler API subprocess for type resolution; its absence or failure
+never blocks indexing — the Tree-sitter baseline always runs.
 
 The supported environment overrides are `IWIKI_CODE_GRAPH_ENABLED`,
 `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES`, and

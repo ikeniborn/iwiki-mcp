@@ -369,13 +369,13 @@ primary domain:
 ```
 
 Настройте его в `.iwiki.toml` привязанного проекта. Все значения необязательны;
-ниже приведены defaults. `languages` принимает только `python`; значения `exclude`
-должны быть безопасными относительными путями.
+ниже приведены defaults. `languages` принимает `python` и/или `typescript`; значения
+`exclude` должны быть безопасными относительными путями.
 
 ```toml
 [code_graph]
 enabled = true
-languages = ["python"]
+languages = ["python", "typescript"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
 max_full_rebuild_seconds = 10
@@ -389,6 +389,9 @@ exclude = []
 `max_full_rebuild_seconds` ограничивает явный full build через `wiki_code_index` и по
 умолчанию берёт значение `max_rebuild_seconds`, если не задан; на больших репозиториях
 выставляйте его выше, чтобы full build не обрезался узким query-time бюджетом.
+`typescript_type_boost` (по умолчанию `false`) включает изолированный,
+best-effort-подпроцесс TypeScript Compiler API для резолвинга типов; его отсутствие
+или сбой никогда не блокирует индексацию — Tree-sitter baseline всегда выполняется.
 
 Поддерживаемые environment overrides: `IWIKI_CODE_GRAPH_ENABLED`,
 `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES` и
