@@ -1014,21 +1014,28 @@ class _HostedPublication:
     def publish_from_mapping(
         self, session_id, kind, ordinal, rows, payload_hash
     ) -> dict:
-        if (
-            not isinstance(rows, list)
-            or len(rows) > self._settings.max_batch_rows
-            or any(not isinstance(row, dict) for row in rows)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows
         ):
             return dict(_CODE_INVALID_BATCH)
+        if len(rows) > self._settings.max_batch_rows:
+            return {
+                **_CODE_INVALID_BATCH,
+                "limit": self._settings.max_batch_rows,
+                "received": len(rows),
+            }
         try:
             batch = _codegraph_publication.canonical_batch(kind, ordinal, rows)
         except (TypeError, ValueError):
             return dict(_CODE_INVALID_BATCH)
-        if (
-            batch.payload_hash != payload_hash
-            or batch.byte_count > self._settings.max_batch_bytes
-        ):
+        if batch.payload_hash != payload_hash:
             return dict(_CODE_INVALID_BATCH)
+        if batch.byte_count > self._settings.max_batch_bytes:
+            return {
+                **_CODE_INVALID_BATCH,
+                "limit": self._settings.max_batch_bytes,
+                "received": batch.byte_count,
+            }
         return self._store.publish_batch(_session_reference(session_id), batch)
 
     def finalize_from_mapping(self, session_id) -> dict:

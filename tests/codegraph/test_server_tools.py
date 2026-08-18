@@ -948,6 +948,45 @@ def test_effective_batch_bounds_validates_server_value(
     assert bytes_limit == expected_bytes
 
 
+def test_publish_from_mapping_reports_row_limit_on_rejection():
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    store = _FakeHostedStore(_session())
+    settings = HostedCodeGraphConfig(max_batch_rows=10, max_batch_bytes=1_000_000)
+    publication = _HostedPublication(store, settings)
+    rows = [{"file_id": f"f{i}"} for i in range(11)]
+
+    result = publication.publish_from_mapping("s1", "files", 0, rows, "sha256:x")
+
+    assert result == {
+        "error": "invalid_batch",
+        "hint": "send batches that match the declared header",
+        "limit": 10,
+        "received": 11,
+    }
+
+
+def test_publish_from_mapping_reports_byte_limit_on_rejection():
+    from iwiki_mcp.codegraph.publication import canonical_batch
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    store = _FakeHostedStore(_session())
+    settings = HostedCodeGraphConfig(max_batch_rows=1000, max_batch_bytes=10)
+    publication = _HostedPublication(store, settings)
+    rows = [{"file_id": "f0", "note": "x" * 50}]
+    # Use the real payload hash so the hash check passes and the byte-limit
+    # branch (not the hash-mismatch branch) is what rejects this batch.
+    payload_hash = canonical_batch("files", 0, rows).payload_hash
+
+    result = publication.publish_from_mapping("s1", "files", 0, rows, payload_hash)
+
+    assert result["error"] == "invalid_batch"
+    assert result["limit"] == 10
+    assert result["received"] > 10
+
+
 def test_publish_local_snapshot_uses_session_limits_over_config(monkeypatch):
     from iwiki_mcp import server as server_module
 
