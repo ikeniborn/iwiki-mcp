@@ -311,6 +311,18 @@ def test_no_primary_configured_skips_bind(fake_session, header):
     assert [name for name, _ in fake_session.calls] == ["wiki_code_publish_begin"]
 
 
+async def test_call_succeeds_from_inside_a_running_event_loop(fake_session, header):
+    # wiki_code_index is a sync tool function that FastMCP runs inline on its
+    # own running event loop thread (mcp/server/fastmcp calls it directly,
+    # not via a thread pool). transport.call() must not assume it is being
+    # invoked from a thread with no event loop of its own.
+    publisher = McpSnapshotPublisher(_transport(fake_session))
+
+    session = publisher.begin(header)
+
+    assert session.session_id == "remote-session"
+
+
 def test_bind_scope_mismatch_is_reported_instead_of_generic_failure(
     fake_session, header
 ):
