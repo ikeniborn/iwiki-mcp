@@ -239,7 +239,10 @@ def test_schema_v2_identity_normalization_and_typed_records():
         SymbolRecord: {
             "symbol_id": str,
             "file_id": str,
-            "kind": Literal["class", "function", "async_function", "method"],
+            "kind": Literal[
+                "class", "function", "async_function", "method",
+                "interface", "type_alias", "enum",
+            ],
             "qualified_name": str,
             "local_name": str,
             "name_tokens_casefold": str,
@@ -282,7 +285,8 @@ def test_schema_v2_identity_normalization_and_typed_records():
             "module_id": str | None,
             "symbol_id": str | None,
             "kind": Literal[
-                "file", "module", "class", "function", "async_function", "method"
+                "file", "module", "class", "function", "async_function", "method",
+                "interface", "type_alias", "enum",
             ],
             "qualified_name": str,
             "local_name": str,

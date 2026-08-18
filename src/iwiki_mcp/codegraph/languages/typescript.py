@@ -10,15 +10,173 @@ from ..models import (
     FileRecord,
     ParsedFile,
     ResolutionResult,
+    SymbolRecord,
     compact_casefold,
     file_id,
     module_id,
+    symbol_id,
     token_key,
 )
 from ..resolver import declaration_relations, resolve_references, sort_relations
 
 
 _PARSERS: dict[str, Any] = {}
+
+_KIND_BY_NODE = {
+    "interface_declaration": "interface",
+    "type_alias_declaration": "type_alias",
+    "enum_declaration": "enum",
+}
+
+
+def _text(source: bytes, node) -> str:
+    return source[node.start_byte:node.end_byte].decode("utf-8", "replace")
+
+
+def _param_signature(source: bytes, params_node) -> str:
+    if params_node is None:
+        return "()"
+    return _text(source, params_node)
+
+
+def _return_type_signature(source: bytes, return_type_node) -> str:
+    if return_type_node is None:
+        return ""
+    return "->" + _text(source, return_type_node).lstrip(":").strip()
+
+
+def _visibility(name: str) -> str:
+    return "private" if name.startswith("_") or name.startswith("#") else "public"
+
+
+def _extract_symbols(
+    source: bytes,
+    root,
+    *,
+    language: str,
+    prefix: str,
+    repository_id: str,
+    relative_path: str,
+):
+    symbols: list[SymbolRecord] = []
+
+    def make_symbol(
+        node, kind, name_node, *, owner_qualified=None,
+        params_node=None, return_type_node=None, is_async=False,
+    ):
+        local_name = _text(source, name_node)
+        qualified = (
+            f"{owner_qualified}.{local_name}" if owner_qualified
+            else f"{relative_path}/{local_name}"
+        )
+        record_kind = kind
+        signature = None
+        if kind in ("function", "method"):
+            record_kind = "async_function" if is_async and kind == "function" else kind
+            signature = (
+                f"{record_kind}|{'async' if is_async else ''}"
+                f"{_param_signature(source, params_node)}"
+                f"{_return_type_signature(source, return_type_node)}"
+            )
+        stable_id = symbol_id(
+            language, prefix, repository_id, relative_path,
+            qualified, signature or "",
+        )
+        symbols.append(SymbolRecord(
+            symbol_id=stable_id,
+            file_id=file_id(language, prefix, repository_id, relative_path),
+            kind=record_kind,
+            qualified_name=qualified,
+            local_name=local_name,
+            name_tokens_casefold=token_key(local_name),
+            start_line=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
+            start_byte=node.start_byte,
+            end_byte=node.end_byte,
+            signature=signature,
+            signature_casefold=compact_casefold(signature),
+            visibility=_visibility(local_name),
+            content_hash=hashlib.sha256(
+                source[node.start_byte:node.end_byte]
+            ).hexdigest(),
+            metadata_json="{}",
+        ))
+        return qualified, stable_id
+
+    def walk(node, owner_qualified=None):
+        for child in node.children:
+            ctype = child.type
+            if ctype in _KIND_BY_NODE:
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    make_symbol(child, _KIND_BY_NODE[ctype], name_node,
+                                owner_qualified=owner_qualified)
+                walk(child, owner_qualified)
+            elif ctype == "class_declaration":
+                name_node = child.child_by_field_name("name")
+                if name_node is None:
+                    walk(child, owner_qualified)
+                    continue
+                qualified, _stable_id = make_symbol(
+                    child, "class", name_node, owner_qualified=owner_qualified,
+                )
+                body = child.child_by_field_name("body")
+                if body is not None:
+                    walk(body, qualified)
+            elif ctype == "method_definition":
+                name_node = child.child_by_field_name("name")
+                if name_node is not None and owner_qualified is not None:
+                    make_symbol(
+                        child, "method", name_node,
+                        owner_qualified=owner_qualified,
+                        params_node=child.child_by_field_name("parameters"),
+                        return_type_node=child.child_by_field_name("return_type"),
+                        is_async=any(
+                            grandchild.type == "async"
+                            for grandchild in child.children
+                        ),
+                    )
+                walk(child, owner_qualified)
+            elif ctype == "function_declaration":
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    make_symbol(
+                        child, "function", name_node,
+                        owner_qualified=owner_qualified,
+                        params_node=child.child_by_field_name("parameters"),
+                        return_type_node=child.child_by_field_name("return_type"),
+                        is_async=any(
+                            grandchild.type == "async" for grandchild in child.children
+                        ),
+                    )
+                walk(child, owner_qualified)
+            elif ctype in ("lexical_declaration", "variable_declaration"):
+                for declarator in child.children:
+                    if declarator.type != "variable_declarator":
+                        continue
+                    value = declarator.child_by_field_name("value")
+                    name_node = declarator.child_by_field_name("name")
+                    if (
+                        value is not None
+                        and value.type in ("arrow_function", "function_expression")
+                        and name_node is not None
+                    ):
+                        make_symbol(
+                            declarator, "function", name_node,
+                            owner_qualified=owner_qualified,
+                            params_node=value.child_by_field_name("parameters"),
+                            return_type_node=value.child_by_field_name("return_type"),
+                            is_async=any(
+                                grandchild.type == "async"
+                                for grandchild in value.children
+                            ),
+                        )
+                walk(child, owner_qualified)
+            else:
+                walk(child, owner_qualified)
+
+    walk(root)
+    return tuple(symbols)
 
 
 def _relative_path(path: str) -> str:
@@ -133,8 +291,13 @@ class TypeScriptAdapter:
                 token_key(module_local_name) if module_local_name else None
             ),
         )
+        symbols = _extract_symbols(
+            source, root,
+            language=self.language, prefix=self.prefix,
+            repository_id=self.repository_id, relative_path=relative_path,
+        )
         return _TypeScriptParsedFile(
-            file=file, symbols=(), references=(), warnings=(),
+            file=file, symbols=symbols, references=(), warnings=(),
         )
 
     def resolve_references(self, parsed, project_index) -> ResolutionResult:

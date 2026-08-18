@@ -30,10 +30,13 @@ _MATCH_BY_RANK = {rank: name for name, rank in MATCH_RANK.items()}
 KNOWN_ENTITY_KINDS = frozenset({
     "async_function",
     "class",
+    "enum",
     "file",
     "function",
+    "interface",
     "method",
     "module",
+    "type_alias",
 })
 # Compatibility name for internal callers written before schema v2.
 KNOWN_SYMBOL_KINDS = KNOWN_ENTITY_KINDS
