@@ -181,6 +181,34 @@ def test_single_language_filter_excludes_the_other_language(tmp_path):
     assert python_symbol_id in python_only_ids
 
 
+def test_typescript_multi_dot_basename_module_name_strips_from_first_dot(tmp_path):
+    # "component.spec.ts" is a pervasive real-world TS/Jest/Angular naming
+    # convention with more than one dot in its basename. store.py's shared
+    # validator re-derives a module's expected local name via a single
+    # rsplit(".", 1), so the local/qualified name must strip everything
+    # from the FIRST dot onward ("component"), not just the last suffix
+    # ("component.spec") -- the latter still contains a literal "." and
+    # would fail validation on a real build.
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "component.spec.ts").write_text(
+        "export class Widget {}\n", encoding="utf-8",
+    )
+    indexer = _build_indexer(
+        tmp_path / "cache", project_dir, languages=("typescript",),
+    )
+
+    built = indexer.build(force=True)
+
+    assert built["state"] == "ready"
+    file_row = next(
+        row for row in indexer.build_rows().tables["files"]
+        if row["path"] == "component.spec.ts"
+    )
+    assert file_row["module_local_name"] == "component"
+    assert file_row["module_qualified_name"] == "component"
+
+
 def test_typescript_files_respect_exclude_patterns(tmp_path):
     project_dir = FIXTURES / "mixed_python_typescript"
     indexer = _build_indexer(

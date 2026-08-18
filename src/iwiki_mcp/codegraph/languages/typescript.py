@@ -388,11 +388,11 @@ class TypeScriptAdapter:
             child.type in ("import_statement", "export_statement")
             for child in root.children
         )
-        module_dotted_name = ".".join(
-            PurePosixPath(relative_path).with_suffix("").parts
-        )
+        posix_path = PurePosixPath(relative_path)
+        local_stem = posix_path.name.split(".", 1)[0]
+        module_dotted_name = ".".join((*posix_path.parent.parts, local_stem))
         module_qualified_name = module_dotted_name if is_module else None
-        module_local_name = PurePosixPath(relative_path).stem if is_module else None
+        module_local_name = local_stem if is_module else None
         stable_module_id = (
             module_id(
                 self.language, self.prefix, self.repository_id,
