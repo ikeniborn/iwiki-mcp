@@ -30,10 +30,13 @@ _MATCH_BY_RANK = {rank: name for name, rank in MATCH_RANK.items()}
 KNOWN_ENTITY_KINDS = frozenset({
     "async_function",
     "class",
+    "enum",
     "file",
     "function",
+    "interface",
     "method",
     "module",
+    "type_alias",
 })
 # Compatibility name for internal callers written before schema v2.
 KNOWN_SYMBOL_KINDS = KNOWN_ENTITY_KINDS
@@ -59,7 +62,7 @@ class ValidatedSearchRequest:
     query: str
     kinds: tuple[str, ...]
     path: str | None
-    language: str
+    languages: tuple[str, ...]
     limit: int
     tokens: tuple[str, ...]
 
@@ -105,9 +108,15 @@ def validate_search_request(
     kinds: list[str] | None = None,
     path: str | None = None,
     languages: list[str] | None = None,
+    configured_languages: tuple[str, ...] = ("python",),
     limit: int = 20,
 ) -> ValidatedSearchRequest:
     """Validate public inputs without touching binding, status, or SQLite."""
+    # Deferred import: .config sits above .query in the import graph
+    # (config -> publication -> reader -> query), so importing it at module
+    # load time would create a circular import.
+    from .config import KNOWN_LANGUAGES
+
     if not isinstance(query, str) or not any(not char.isspace() for char in query):
         raise CodeGraphQueryError("query must be nonblank")
     if "\0" in query:
@@ -134,12 +143,19 @@ def validate_search_request(
         raise CodeGraphQueryError("unknown code kind")
     else:
         normalized_kinds = tuple(sorted(set(kinds)))
-    if languages is not None and (
+    if languages is None:
+        normalized_languages = tuple(configured_languages)
+    elif (
         not isinstance(languages, list)
         or not languages
-        or any(language != "python" for language in languages)
+        or any(
+            language not in KNOWN_LANGUAGES or language not in configured_languages
+            for language in languages
+        )
     ):
         raise CodeGraphQueryError("unsupported language")
+    else:
+        normalized_languages = tuple(sorted(set(languages)))
     if type(limit) is not int or not 1 <= limit <= 100:
         raise CodeGraphQueryError("limit must be between 1 and 100")
     if path is not None:
@@ -153,7 +169,7 @@ def validate_search_request(
         query=query,
         kinds=normalized_kinds,
         path=path,
-        language="python",
+        languages=normalized_languages,
         limit=limit,
         tokens=query_tokens,
     )
@@ -324,8 +340,11 @@ def _canonical_rank_query(
                 "f.end_line, f.start_byte, f.end_byte"
             ),
             "from": "files AS f",
-            "common": "f.repository_id = ? AND f.language = ?",
-            "common_parameters": [domain, request.language],
+            "common": (
+                "f.repository_id = ? AND f.language IN "
+                f"({', '.join('?' for _ in request.languages)})"
+            ),
+            "common_parameters": [domain, *request.languages],
             "qualified": "f.path",
             "local": "f.file_local_name",
             "tokens": "f.file_name_tokens_casefold",
@@ -349,10 +368,11 @@ def _canonical_rank_query(
             ),
             "from": "files AS f",
             "common": (
-                "f.repository_id = ? AND f.language = ? "
+                "f.repository_id = ? AND f.language IN "
+                f"({', '.join('?' for _ in request.languages)}) "
                 "AND f.module_id IS NOT NULL"
             ),
-            "common_parameters": [domain, request.language],
+            "common_parameters": [domain, *request.languages],
             "qualified": "f.module_qualified_name",
             "local": "f.module_local_name",
             "tokens": "f.module_name_tokens_casefold",
@@ -377,10 +397,11 @@ def _canonical_rank_query(
             ),
             "from": "symbols AS s JOIN files AS f ON f.file_id = s.file_id",
             "common": (
-                f"f.repository_id = ? AND f.language = ? "
+                "f.repository_id = ? AND f.language IN "
+                f"({', '.join('?' for _ in request.languages)}) "
                 f"AND s.kind IN ({placeholders})"
             ),
-            "common_parameters": [domain, request.language, *symbol_kinds],
+            "common_parameters": [domain, *request.languages, *symbol_kinds],
             "qualified": "s.qualified_name",
             "local": "s.local_name",
             "tokens": "s.name_tokens_casefold",
@@ -524,9 +545,10 @@ SELECT DISTINCT r.binding_name, r.binding_name_tokens_casefold,
 FROM relations AS r JOIN files AS f ON f.module_id = r.target_module_id
 WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
   AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
-  AND f.repository_id = ? AND f.language = ? {path_sql}
+  AND f.repository_id = ? AND f.language IN
+  ({', '.join('?' for _ in request.languages)}) {path_sql}
   AND {predicate} {excluded_sql}""")
-        parameters.extend([domain, request.language, *path_parameters])
+        parameters.extend([domain, *request.languages, *path_parameters])
         parameters.extend(predicate_parameters)
         parameters.extend(excluded_parameters)
     if symbol_kinds:
@@ -545,12 +567,13 @@ FROM relations AS r JOIN symbols AS s ON s.symbol_id = r.target_symbol_id
 JOIN files AS f ON f.file_id = s.file_id
 WHERE r.relation_type = 'IMPORTS' AND r.binding_kind = 'explicit_alias'
   AND r.resolution_state IN ('resolved', 'ambiguous', 'partially_resolved')
-  AND f.repository_id = ? AND f.language = ?
+  AND f.repository_id = ? AND f.language IN
+  ({', '.join('?' for _ in request.languages)})
   AND s.kind IN ({placeholders}) {path_sql}
   AND {predicate} {excluded_sql}""")
         parameters.extend([
             domain,
-            request.language,
+            *request.languages,
             *symbol_kinds,
             *path_parameters,
         ])

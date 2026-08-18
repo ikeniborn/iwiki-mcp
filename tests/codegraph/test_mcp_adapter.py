@@ -228,7 +228,8 @@ def test_reader_maps_public_requests_without_scope_fields(
     assert arguments == {
         "query": "needle",
         "kinds": [
-            "async_function", "class", "file", "function", "method", "module"
+            "async_function", "class", "enum", "file", "function",
+            "interface", "method", "module", "type_alias",
         ],
         "path": None,
         "languages": ["python"],

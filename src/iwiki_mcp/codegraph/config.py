@@ -19,6 +19,8 @@ class CodeGraphConfigError(RuntimeError):
     """Raised when code graph configuration is invalid."""
 
 
+KNOWN_LANGUAGES = frozenset({"python", "typescript"})
+
 _FIELDS = {
     "enabled",
     "languages",
@@ -37,6 +39,7 @@ _FIELDS = {
     "publication_session_ttl_seconds",
     "staging_retention_seconds",
     "staging_cleanup_limit",
+    "typescript_type_boost",
 }
 _FORBIDDEN_FIELDS = {
     "database",
@@ -90,8 +93,13 @@ def _languages(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or not value:
         raise CodeGraphConfigError("code_graph.languages must be a non-empty array")
     result = tuple(value)
-    if any(type(item) is not str or item != "python" for item in result):
-        raise CodeGraphConfigError("code_graph.languages supports only python")
+    if any(
+        type(item) is not str or item not in KNOWN_LANGUAGES
+        for item in result
+    ):
+        raise CodeGraphConfigError(
+            "code_graph.languages supports only python, typescript"
+        )
     return result
 
 
@@ -120,6 +128,7 @@ class CodeGraphConfig:
     exclude: tuple[str, ...] = ()
     publish_mode: PublishMode = "sqlite"
     read_mode: PublishMode = "sqlite"
+    typescript_type_boost: bool = False
     max_snapshot_age_seconds: int = 86400
     max_batch_rows: int = 1000
     max_batch_bytes: int = 1_000_000
@@ -154,6 +163,11 @@ class CodeGraphConfig:
         object.__setattr__(self, "exclude", _exclude(self.exclude))
         object.__setattr__(self, "publish_mode", _mode(self.publish_mode, "publish_mode"))
         object.__setattr__(self, "read_mode", _mode(self.read_mode, "read_mode"))
+        object.__setattr__(
+            self,
+            "typescript_type_boost",
+            _bool(self.typescript_type_boost, "typescript_type_boost"),
+        )
         object.__setattr__(
             self,
             "max_snapshot_age_seconds",

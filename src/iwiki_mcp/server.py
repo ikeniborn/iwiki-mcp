@@ -51,6 +51,7 @@ from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401
+from .codegraph.languages import typescript as _codegraph_typescript
 from .lock import mutation_lock
 from .engine import classify, rerank
 from .engine import frontmatter as _fm
@@ -96,14 +97,27 @@ def _distribution_version(name: str) -> str:
 _PYTHON_PARSER_VERSION = (
     "tree-sitter-python:" + _distribution_version("tree-sitter-python")
 )
+_TYPESCRIPT_PARSER_VERSION = (
+    "tree-sitter-typescript:" + _distribution_version("tree-sitter-typescript")
+)
 
 
-def _code_graph_adapter_factories(repository_id):
+def _code_graph_adapter_factories(repository_id, config=None):
     def create_python_adapter(source_paths):
         return _codegraph_python.PythonAdapter(
             repository_id,
             source_paths,
             parser_version=_PYTHON_PARSER_VERSION,
+        )
+
+    def create_typescript_adapter(source_paths):
+        return _codegraph_typescript.TypeScriptAdapter(
+            repository_id,
+            source_paths,
+            parser_version=_TYPESCRIPT_PARSER_VERSION,
+            type_boost_enabled=bool(
+                config is not None and config.typescript_type_boost
+            ),
         )
 
     return {
@@ -118,15 +132,47 @@ def _code_graph_adapter_factories(repository_id):
                 _PYTHON_PARSER_VERSION,
             )),
             adapter_version="python-adapter-v2",
-        )
+        ),
+        "typescript": _codegraph_indexer.AdapterFactory(
+            create=create_typescript_adapter,
+            extensions=(".ts", ".tsx"),
+            parser_version=_TYPESCRIPT_PARSER_VERSION,
+            grammar_version=";".join((
+                "tree-sitter:" + _distribution_version("tree-sitter"),
+                "tree-sitter-language-pack:"
+                + _distribution_version("tree-sitter-language-pack"),
+                _TYPESCRIPT_PARSER_VERSION,
+            )),
+            adapter_version="typescript-adapter-v1",
+        ),
     }
+
+
+def _code_graph_configured_languages(binding) -> tuple[str, ...]:
+    """Resolve the project's configured code-graph languages for validation.
+
+    Mirrors the fallback `CodeGraphRuntime.search` itself applies (see
+    `runtime.py`: `self.config.languages if self.config is not None else
+    ("python",)`) so a request-validation call site that runs before (or
+    instead of) a runtime is constructed still validates a `languages`
+    filter against the project's real `code_graph.languages` config, not
+    the `("python",)` module default.
+    """
+    try:
+        return _codegraph_config.load_code_graph_config(binding.project_dir).languages
+    except _codegraph_config.CodeGraphConfigError:
+        return ("python",)
 
 
 def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
+    try:
+        code_config = _codegraph_config.load_code_graph_config(binding.project_dir)
+    except _codegraph_config.CodeGraphConfigError:
+        code_config = None
     runtime = _codegraph_runtime.CodeGraphRuntime(
         binding,
-        adapter_factories=_code_graph_adapter_factories(binding.primary),
+        adapter_factories=_code_graph_adapter_factories(binding.primary, code_config),
     )
     if runtime._indexer is not None:
         runtime._indexer.wiki_selector_resolver = (
@@ -1059,7 +1105,11 @@ def wiki_code_index(
     languages: list[str] | None = None,
 ) -> dict:
     if languages is not None and (
-        not languages or any(language != "python" for language in languages)
+        not languages
+        or any(
+            language not in _codegraph_config.KNOWN_LANGUAGES
+            for language in languages
+        )
     ):
         return _invalid_code_config()
     bind = _resolved_binding()
@@ -1091,11 +1141,21 @@ def wiki_code_search(
     languages: list[str] | None = None,
     limit: int = 20,
 ) -> dict:
+    # Binding-free fail-fast gate: catches malformed query/kinds/limit/path
+    # input before any binding resolution (tested by
+    # test_search_validation_precedes_binding_for_all_text_bounds). It
+    # can't know the project's real configured languages yet -- passing
+    # KNOWN_LANGUAGES here (rather than the module default ("python",))
+    # keeps this gate from wrongly rejecting a "typescript" filter before
+    # the project's actual code_graph.languages config gets a say; the
+    # real per-project check still happens below (postgres path) or inside
+    # CodeGraphRuntime.search (git/sqlite path, already wired in runtime.py).
     _codegraph_runtime.validate_search_request(
         query,
         kinds=kinds,
         path=path,
         languages=languages,
+        configured_languages=tuple(sorted(_codegraph_config.KNOWN_LANGUAGES)),
         limit=limit,
     )
     bind = _resolved_binding()
@@ -1108,6 +1168,7 @@ def wiki_code_search(
                 kinds=kinds,
                 path=path,
                 languages=languages,
+                configured_languages=_code_graph_configured_languages(bind),
                 limit=limit,
             )
         )

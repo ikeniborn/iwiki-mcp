@@ -29,6 +29,7 @@ from iwiki_mcp.codegraph.store import (
     CodeGraphSchemaError,
     CodeGraphStore,
     CodeGraphStoreError,
+    _INSERTS,
     _snapshot_revision,
 )
 from iwiki_mcp.engine.graph_store import GraphStore
@@ -425,6 +426,51 @@ def test_schema_v2_rejects_invalid_relation_ranges(tmp_path, column, value):
             connection.execute(
                 f"UPDATE relations SET {column} = ? WHERE relation_id = ?",
                 (value, "relation-backend"),
+            )
+
+
+@pytest.mark.parametrize("kind", ["interface", "type_alias", "enum"])
+def test_symbols_kind_check_accepts_typescript_only_kinds(tmp_path, kind):
+    store = CodeGraphStore(tmp_path / "ts-kind.sqlite3")
+    repository_id = f"ts-{kind}"
+    snapshot = snapshot_with_symbol_file_and_wiki_links(repository_id=repository_id)
+    symbols = tuple({**row, "kind": kind} for row in snapshot["symbols"])
+
+    store.insert_snapshot({**snapshot, "symbols": symbols})
+
+    with closing(store.connect()) as connection:
+        stored = connection.execute(
+            "SELECT kind FROM symbols WHERE symbol_id = ?",
+            (f"symbol-{repository_id}",),
+        ).fetchone()
+    assert stored == (kind,)
+
+
+def test_symbols_kind_check_still_rejects_unknown_kind(tmp_path):
+    store = CodeGraphStore(tmp_path / "bogus-kind.sqlite3")
+    store.insert_snapshot(snapshot_with_symbol_file_and_wiki_links())
+
+    with closing(store.connect()) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                _INSERTS["symbols"],
+                {
+                    "symbol_id": "symbol-bogus-kind",
+                    "file_id": "file-backend",
+                    "kind": "bogus",
+                    "qualified_name": "pkg.module.bogus",
+                    "local_name": "bogus",
+                    "name_tokens_casefold": "\x1fbogus\x1f",
+                    "start_line": 5,
+                    "end_line": 6,
+                    "start_byte": 40,
+                    "end_byte": 60,
+                    "signature": None,
+                    "signature_casefold": None,
+                    "visibility": "public",
+                    "content_hash": "bogus-hash",
+                    "metadata_json": "{}",
+                },
             )
 
 

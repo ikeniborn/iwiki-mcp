@@ -180,7 +180,10 @@ class FileRecord:
 class SymbolRecord:
     symbol_id: str
     file_id: str
-    kind: Literal["class", "function", "async_function", "method"]
+    kind: Literal[
+        "class", "function", "async_function", "method",
+        "interface", "type_alias", "enum",
+    ]
     qualified_name: str
     local_name: str
     name_tokens_casefold: str
@@ -270,7 +273,8 @@ class SearchResult:
     module_id: str | None
     symbol_id: str | None
     kind: Literal[
-        "file", "module", "class", "function", "async_function", "method"
+        "file", "module", "class", "function", "async_function", "method",
+        "interface", "type_alias", "enum",
     ]
     qualified_name: str
     local_name: str
@@ -304,7 +308,8 @@ class ContextNode:
     module_id: str | None
     symbol_id: str | None
     kind: Literal[
-        "file", "module", "class", "function", "async_function", "method"
+        "file", "module", "class", "function", "async_function", "method",
+        "interface", "type_alias", "enum",
     ]
     qualified_name: str
     local_name: str

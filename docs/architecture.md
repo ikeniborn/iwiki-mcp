@@ -105,19 +105,20 @@ matrix and operator commands.
 
 ## Optional Python code graph
 
-The code graph is an independent local SQLite cache for Python source in the bound
-project. It is not part of the wiki Markdown/vector index and does not participate in
-`wiki_search`. `CodeGraphLocationResolver` derives its database, WAL, SHM, lock, and
-metadata paths beneath `<base>/.iwiki/` from the primary domain. The cache is
-rebuildable and never starts a build during server startup.
+The code graph is an independent local SQLite cache for Python and/or TypeScript/TSX
+source in the bound project. It is not part of the wiki Markdown/vector index and does
+not participate in `wiki_search`. `CodeGraphLocationResolver` derives its database,
+WAL, SHM, lock, and metadata paths beneath `<base>/.iwiki/` from the primary domain.
+The cache is rebuildable and never starts a build during server startup.
 
 `codegraph.config` loads the `[code_graph]` table from `.iwiki.toml`: `enabled`,
 `languages`, `auto_rebuild`, rebuild/file limits, `include_tests`, and safe relative
-`exclude` paths. Python is the only supported language. `wiki_code_index` requests a
-full build; when `auto_rebuild="bounded"`, a read request may use only its bounded
-rebuild budget. Schema-v1 stores are incompatible and replaced by a deterministic
-full rebuild. Missing, stale, busy, failed, or incompatible states remain fail-soft
-and cannot prevent wiki tools from serving Markdown/vector data.
+`exclude` paths. `languages` accepts `python` and/or `typescript`. `wiki_code_index`
+requests a full build for the configured languages; when `auto_rebuild="bounded"`, a
+read request may use only its bounded rebuild budget. Schema-v1 stores are incompatible
+and replaced by a deterministic full rebuild. Missing, stale, busy, failed, or
+incompatible states remain fail-soft and cannot prevent wiki tools from serving
+Markdown/vector data.
 
 The MCP boundary contains exactly `wiki_code_status`, `wiki_code_index`,
 `wiki_code_search`, and `wiki_code_context`. Search returns typed file/module/symbol
@@ -134,9 +135,10 @@ uv run python -m eval.code_graph --fixture-root tests/fixtures/codegraph --outpu
 It blocks release when any search warm maximum is not below `<500 ms`. The stricter
 `<150 ms` search comparison is reported as non-blocking post-v1 evidence.
 
-Incremental indexing is not part of the Python MVP.
-TypeScript is not part of the Python MVP.
-Both require separate specifications and deliveries.
+Incremental indexing is not part of the Python MVP; it requires a separate
+specification and delivery. TypeScript support is Tree-sitter-only static extraction
+(declarations, imports, class/interface heritage), not interface members, and does not
+yet wire real type information into resolution.
 
 ## Layered architecture
 

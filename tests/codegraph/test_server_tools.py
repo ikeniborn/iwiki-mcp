@@ -1,7 +1,7 @@
 """FastMCP Unit B code-graph tool integration."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 import sqlite3
 
@@ -9,6 +9,7 @@ import pytest
 
 from iwiki_mcp import server
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.models import CodeGraphError
 from iwiki_mcp.codegraph.query import CodeGraphQueryError
 
@@ -157,6 +158,27 @@ def test_index_handler_validates_languages_before_binding(monkeypatch):
     }
 
 
+def test_index_handler_accepts_every_known_language(seed_binding, monkeypatch):
+    # Regression for C2: wiki_code_index's languages gate used to reject
+    # every language except the literal "python" -- a fifth python-only
+    # gate the plan's inventory (config.py, runtime.snapshot,
+    # runtime.index, sqlite_adapter.begin) missed. It must now accept
+    # every iwiki_mcp.codegraph.config.KNOWN_LANGUAGES member.
+    calls = []
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(
+        server, "_code_runtime", lambda current: _FakeRuntime(current, calls)
+    )
+
+    assert server.wiki_code_index(languages=["typescript"])["languages"] == [
+        "typescript"
+    ]
+    assert server.wiki_code_index(languages=["python", "typescript"])[
+        "languages"
+    ] == ["python", "typescript"]
+    assert "error" not in server.wiki_code_index(languages=["typescript"])
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -179,6 +201,83 @@ def test_search_validation_precedes_binding_for_all_text_bounds(
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+
+
+def test_search_handler_accepts_explicit_typescript_filter(
+    seed_binding, monkeypatch
+):
+    # Regression for C3 (item 1): the binding-free pre-validation gate used
+    # to default configured_languages to ("python",), so an explicit
+    # languages=["typescript"] filter raised "unsupported language" before
+    # the request ever reached the project's real code_graph.languages
+    # config -- even for a project that configures typescript. It must
+    # reach the runtime instead.
+    calls = []
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    monkeypatch.setattr(
+        server, "_code_runtime", lambda current: _FakeRuntime(current, calls)
+    )
+
+    result = server.wiki_code_search("run", languages=["typescript"])
+
+    assert "error" not in result
+    assert result["languages"] == ["typescript"]
+    assert calls == [f"search:{seed_binding.primary}"]
+
+
+def test_search_handler_threads_configured_languages_to_postgres_path(
+    monkeypatch,
+):
+    # Regression for C3 (item 2): the PostgreSQL hosted-read call site
+    # never passed configured_languages, so it always validated against
+    # the ("python",) module default regardless of the project's real
+    # code_graph.languages config -- silently dropping TypeScript results
+    # for a project configured with languages = ["python", "typescript"]
+    # even when the caller applied no explicit languages filter.
+    postgres_binding = server.base.PostgresBinding(
+        host="localhost",
+        port=5432,
+        database="iwiki_test",
+        user="tester",
+        sslmode="disable",
+        iwiki_id="iwiki-test",
+        read=("project",),
+        write=("project",),
+        primary="project",
+        project_dir="/tmp/does-not-matter",
+        embed_model="test-embed",
+        embed_dimensions=2,
+        rerank_model="test-rerank",
+        password="secret",
+    )
+    monkeypatch.setattr(
+        server, "_resolved_binding", lambda: postgres_binding
+    )
+    monkeypatch.setattr(
+        server._codegraph_config,
+        "load_code_graph_config",
+        lambda project_dir: CodeGraphConfig(languages=("python", "typescript")),
+    )
+    captured = []
+
+    class _FakeReader:
+        def search(self, request):
+            captured.append(request)
+            return {"results": []}
+
+    monkeypatch.setattr(server, "_postgres_code_reader", lambda bind: _FakeReader())
+
+    result = server.wiki_code_search("run")
+
+    assert "error" not in result
+    assert len(captured) == 1
+    assert set(captured[0].languages) == {"python", "typescript"}
+
+    captured.clear()
+    result = server.wiki_code_search("run", languages=["typescript"])
+
+    assert "error" not in result
+    assert captured[0].languages == ("typescript",)
 
 
 @pytest.mark.parametrize(
@@ -506,6 +605,15 @@ def test_wiki_search_regression_keeps_existing_function():
     assert server.wiki_search.__name__ == "wiki_search"
 
 
+def test_adapter_factories_include_typescript():
+    factories = server._code_graph_adapter_factories("domain")
+
+    assert "typescript" in factories
+    assert factories["typescript"].extensions == (".ts", ".tsx")
+    adapter = factories["typescript"].create(("a.ts",))
+    assert adapter.language == "typescript"
+
+
 @pytest.mark.parametrize(
     ("handler", "args"),
     [
@@ -710,3 +818,42 @@ def test_export_snapshot_reproduces_the_ready_payload_revision(ready_runtime):
     }
     assert header.graph_payload_revision == graph_payload_revision(rows)
     assert header.graph_payload_revision.startswith("sha256:")
+
+
+def test_export_snapshot_header_languages_reflects_stored_files_not_a_literal(
+    ready_runtime,
+):
+    with closing(sqlite3.connect(ready_runtime.paths.database)) as connection:
+        columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(files)")
+        ]
+        source = dict(
+            zip(
+                columns,
+                connection.execute(
+                    "SELECT * FROM files ORDER BY file_id LIMIT 1"
+                ).fetchone(),
+            )
+        )
+        source.update(
+            file_id="typescript-fixture-file",
+            path="src/pkg/fixture.ts",
+            path_casefold="src/pkg/fixture.ts",
+            file_local_name="fixture.ts",
+            file_name_tokens_casefold="fixture ts",
+            language="typescript",
+            module_id=None,
+            module_qualified_name=None,
+            module_local_name=None,
+            module_name_tokens_casefold=None,
+        )
+        placeholders = ", ".join("?" for _ in columns)
+        connection.execute(
+            f"INSERT INTO files ({', '.join(columns)}) VALUES ({placeholders})",
+            tuple(source[column] for column in columns),
+        )
+        connection.commit()
+
+    header, _rows = ready_runtime.runtime.export_snapshot()
+
+    assert header.languages == ("python", "typescript")

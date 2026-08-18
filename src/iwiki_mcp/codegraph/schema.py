@@ -85,7 +85,10 @@ TABLE_DDL = {
             symbol_id TEXT PRIMARY KEY,
             file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
             kind TEXT NOT NULL
-                CHECK (kind IN ('class', 'function', 'async_function', 'method')),
+                CHECK (kind IN (
+                    'class', 'function', 'async_function', 'method',
+                    'interface', 'type_alias', 'enum'
+                )),
             qualified_name TEXT NOT NULL COLLATE BINARY,
             local_name TEXT NOT NULL COLLATE BINARY,
             name_tokens_casefold TEXT NOT NULL,

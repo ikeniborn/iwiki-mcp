@@ -289,12 +289,22 @@ def test_begin_wiki_lock_timeout_before_capture_is_sanitized_busy(
     ))
 
 
+def test_begin_accepts_mixed_language_header(sqlite_contract):
+    _runtime, built, _clock, publisher, _reader = sqlite_contract
+    mixed_header = replace(built.header, languages=("python", "typescript"))
+
+    session = publisher.begin(mixed_header)
+
+    assert hasattr(session, "session_id")
+    assert session.session_id
+
+
 @pytest.mark.parametrize(
     "changes",
     [
         {"protocol_version": 2},
         {"schema_version": 1},
-        {"languages": ("typescript",)},
+        {"languages": ("javascript",)},
     ],
 )
 def test_begin_maps_malformed_header_to_closed_publication_error(
