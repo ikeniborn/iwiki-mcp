@@ -15,7 +15,7 @@ import uuid
 from filelock import Timeout
 
 from .canonical import canonical_bytes_sha256, canonical_json_bytes, canonical_sha256
-from .config import CodeGraphConfig
+from .config import CodeGraphConfig, KNOWN_LANGUAGES
 from .context import (
     CodeGraphContext,
     ContextRequest,
@@ -447,7 +447,8 @@ class SqliteSnapshotPublisher:
         if (
             header.protocol_version != 1
             or header.schema_version != SCHEMA_VERSION
-            or tuple(header.languages) != ("python",)
+            or not header.languages
+            or not set(header.languages) <= KNOWN_LANGUAGES
         ):
             return {"error": "snapshot_incomplete"}
         selector_snapshot = None
