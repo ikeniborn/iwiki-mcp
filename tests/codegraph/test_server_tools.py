@@ -506,6 +506,15 @@ def test_wiki_search_regression_keeps_existing_function():
     assert server.wiki_search.__name__ == "wiki_search"
 
 
+def test_adapter_factories_include_typescript():
+    factories = server._code_graph_adapter_factories("domain")
+
+    assert "typescript" in factories
+    assert factories["typescript"].extensions == (".ts", ".tsx")
+    adapter = factories["typescript"].create(("a.ts",))
+    assert adapter.language == "typescript"
+
+
 @pytest.mark.parametrize(
     ("handler", "args"),
     [

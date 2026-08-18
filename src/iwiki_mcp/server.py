@@ -51,6 +51,7 @@ from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401
+from .codegraph.languages import typescript as _codegraph_typescript
 from .lock import mutation_lock
 from .engine import classify, rerank
 from .engine import frontmatter as _fm
@@ -96,6 +97,9 @@ def _distribution_version(name: str) -> str:
 _PYTHON_PARSER_VERSION = (
     "tree-sitter-python:" + _distribution_version("tree-sitter-python")
 )
+_TYPESCRIPT_PARSER_VERSION = (
+    "tree-sitter-typescript:" + _distribution_version("tree-sitter-typescript")
+)
 
 
 def _code_graph_adapter_factories(repository_id):
@@ -104,6 +108,13 @@ def _code_graph_adapter_factories(repository_id):
             repository_id,
             source_paths,
             parser_version=_PYTHON_PARSER_VERSION,
+        )
+
+    def create_typescript_adapter(source_paths):
+        return _codegraph_typescript.TypeScriptAdapter(
+            repository_id,
+            source_paths,
+            parser_version=_TYPESCRIPT_PARSER_VERSION,
         )
 
     return {
@@ -118,7 +129,19 @@ def _code_graph_adapter_factories(repository_id):
                 _PYTHON_PARSER_VERSION,
             )),
             adapter_version="python-adapter-v2",
-        )
+        ),
+        "typescript": _codegraph_indexer.AdapterFactory(
+            create=create_typescript_adapter,
+            extensions=(".ts", ".tsx"),
+            parser_version=_TYPESCRIPT_PARSER_VERSION,
+            grammar_version=";".join((
+                "tree-sitter:" + _distribution_version("tree-sitter"),
+                "tree-sitter-language-pack:"
+                + _distribution_version("tree-sitter-language-pack"),
+                _TYPESCRIPT_PARSER_VERSION,
+            )),
+            adapter_version="typescript-adapter-v1",
+        ),
     }
 
 
