@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Результаты: codegraph-publish-client-batch-limits</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg);
+  transition:background .3s, color .3s;
+}
+.theme-btn{
+  position:sticky; top:.5rem; float:right;
+  cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px;
+  background:var(--surface);
+}
+h1{ font-size:1.6rem; margin-bottom:.2rem; }
+h2{ font-size:1.25rem; margin-top:2.2rem; border-bottom:2px solid var(--border); padding-bottom:.3rem; }
+.lead{ font-size:1.08rem; }
+.sub{ color:var(--muted); font-size:.95rem; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0;
+  box-shadow:0 1px 8px var(--shadow); }
+details{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:.7rem 1rem; margin:.7rem 0; box-shadow:0 1px 8px var(--shadow); }
+details summary{ cursor:pointer; font-weight:600; color:var(--accent); }
+details[open] summary{ margin-bottom:.55rem; }
+ul.tight li{ margin:.28rem 0; }
+.badge{ display:inline-block; font-size:.72rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); }
+.badge.llm{ color:var(--warn-2); border-color:var(--warn); }
+.badge.det{ color:var(--ok-2);  border-color:var(--ok); }
+.badge.done{ color:var(--ok-2); border-color:var(--ok); }
+.badge.partial{ color:var(--warn-2); border-color:var(--warn); }
+.badge.missing{ color:var(--danger-2); border-color:var(--danger); }
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface);
+  margin:1rem 0; font-size:.9rem; border:1px solid var(--border); border-radius:10px;
+  overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.5rem .75rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); position:sticky; top:0; }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table tbody tr:hover{ background:color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.rpt-table td code{ white-space:nowrap; }
+code{ background:color-mix(in srgb, var(--accent) 10%, var(--surface)); padding:.05rem .3rem; border-radius:4px; font-size:.88em; }
+.rpt-flow{ display:flex; align-items:center; gap:0; margin:1.2rem 0; flex-wrap:wrap; }
+.rpt-flow .node{
+  background:var(--surface); color:var(--fg);
+  border:1px solid var(--border); border-radius:8px; padding:.6rem 1rem; font-size:.88rem;
+  box-shadow:0 1px 8px var(--shadow); max-width:14rem;
+}
+.rpt-flow .node b{ color:var(--accent); }
+.rpt-flow .arrow{ flex:0 0 2.2rem; height:2px; background:var(--line); position:relative; }
+.rpt-flow .arrow::after{
+  content:""; position:absolute; right:0; top:-4px;
+  border:5px solid transparent; border-left-color:var(--line);
+}
+.rpt-c4 .boundary{
+  border:1.6px dashed var(--accent); border-radius:12px;
+  padding:1.8rem 1rem 1rem; margin:.7rem 0; position:relative;
+  display:flex; flex-wrap:wrap; gap:.6rem;
+  background:color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.rpt-c4 .boundary::before{
+  content:attr(data-label); position:absolute; top:-.7rem; left:.9rem;
+  background:var(--bg); padding:0 .45rem; font-size:.8rem; color:var(--accent); font-weight:600;
+}
+.rpt-c4 .comp{
+  background:var(--surface); border:1px solid var(--border); border-radius:8px;
+  padding:.55rem .85rem; min-width:8rem; font-size:.84rem; box-shadow:0 1px 6px var(--shadow);
+  border-left:4px solid var(--accent);
+}
+.rpt-c4 .comp b{ color:var(--accent); }
+.rpt-c4 .comp .sub{ font-size:.78rem; }
+footer{ margin-top:3rem; color:var(--muted); font-size:.85rem; border-top:1px solid var(--border); padding-top:1rem; }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Переключить тему">🌙 / ☀️</label>
+<main class="report">
+
+<h1>Результаты внедрения: codegraph-publish-client-batch-limits</h1>
+<p class="lead">Клиент code-graph больше не задаёт лимиты батча для удалённой (hosted) публикации — сервер сообщает свои реальные лимиты, клиент их подчиняется (с защитным потолком), отказ по размеру батча теперь содержит точные цифры.</p>
+<p class="sub">Ветка <code>dev-codegraph-publish-client-batch-limits</code> · база диффа <code>af0ed06</code> → <code>HEAD</code> · intent: <code>docs/superpowers/intents/2026-08-19-codegraph-publish-client-batch-limits-intent.md</code> · spec: <code>docs/superpowers/specs/2026-08-19-codegraph-publish-client-batch-limits-design.md</code> · plan: <code>docs/superpowers/plans/2026-08-19-codegraph-publish-client-batch-limits.md</code></p>
+
+<div class="note"><b>Причина.</b> Реальный инцидент: публикация code-graph проекта <code>aioperator</code> детерминированно падала с <code>invalid_batch</code> — локальный <code>.iwiki.toml</code> задавал <code>max_batch_rows=5000</code>, а неконфигурированный hosted-сервер enforced дефолт 1000, без механизма обнаружения и без диагностики в ответе.</div>
+
+<h2>1. Выполненные изменения</h2>
+<table class="rpt-table">
+<thead><tr><th>Файл</th><th>Тип</th><th>± строк</th><th>Что изменилось</th></tr></thead>
+<tbody>
+<tr><td><code>src/iwiki_mcp/codegraph/publication.py</code></td><td>modified</td><td>+2</td><td><code>PublicationSession</code> получил опциональные поля <code>max_batch_rows</code>/<code>max_batch_bytes</code> (default <code>None</code>)</td></tr>
+<tr><td><code>src/iwiki_mcp/server.py</code></td><td>modified</td><td>+42/-10</td><td><code>_HostedPublication.begin_from_mapping</code> сообщает лимиты сервера; новая <code>_effective_batch_bounds</code> валидирует и выбирает границы; <code>_publish_local_snapshot</code> использует их только для <code>mcp</code>-цели; диагностика <code>limit</code>/<code>received</code> добавлена в оба size-триггера <code>invalid_batch</code></td></tr>
+<tr><td><code>src/iwiki_mcp/codegraph/mcp_adapter.py</code></td><td>modified</td><td>+2</td><td><code>McpSnapshotPublisher.begin()</code> парсит опциональные лимиты из ответа сервера</td></tr>
+<tr><td><code>tests/codegraph/test_publication.py</code></td><td>modified</td><td>+26</td><td>тесты дефолтов/значений новых полей <code>PublicationSession</code></td></tr>
+<tr><td><code>tests/codegraph/test_mcp_adapter.py</code></td><td>modified</td><td>+32</td><td>тесты парсинга лимитов клиентом</td></tr>
+<tr><td><code>tests/codegraph/test_server_tools.py</code></td><td>modified</td><td>+193</td><td>тесты <code>_effective_batch_bounds</code> (bool-trap, диапазоны, fallback), отчёт лимитов в <code>begin_from_mapping</code>, диагностика в <code>publish_from_mapping</code>, scope-guard тест (fix-round)</td></tr>
+<tr><td><code>tests/codegraph/test_publish_batch_limits_regression.py</code></td><td>added</td><td>+79</td><td>сквозной регрессионный тест точного сценария <code>aioperator</code> без живого PostgreSQL</td></tr>
+<tr><td><code>README.md</code></td><td>modified</td><td>+5/-1</td><td>абзац про автоматическое обнаружение hosted-лимитов</td></tr>
+<tr><td><code>docs/README.ru.md</code></td><td>modified</td><td>+5/-1</td><td>тот же абзац на русском</td></tr>
+<tr><td><code>pyproject.toml</code>, <code>src/iwiki_mcp/__init__.py</code>, <code>tests/test_package.py</code>, <code>uv.lock</code></td><td>modified</td><td>+1/-1 каждый</td><td>version bump 0.7.150 → 0.7.151</td></tr>
+<tr><td>intent / spec / plan docs</td><td>added</td><td>+1356</td><td>IDD-цепочка (не код, chain-артефакты)</td></tr>
+</tbody>
+</table>
+
+<h2>2. Результаты (сверка план ↔ diff)</h2>
+<table class="rpt-table">
+<thead><tr><th>Задача плана</th><th>Статус</th><th>Свидетельство в diff</th></tr></thead>
+<tbody>
+<tr><td>Task 1 — поля лимитов в <code>PublicationSession</code></td><td><span class="badge done">DONE</span></td><td><code>codegraph/publication.py</code> +2, <code>test_publication.py</code> +26</td></tr>
+<tr><td>Task 2 — <code>begin_from_mapping</code> сообщает лимиты</td><td><span class="badge done">DONE</span></td><td><code>server.py</code>: ключи <code>max_batch_rows</code>/<code>max_batch_bytes</code> из <code>self._settings</code> в ответе</td></tr>
+<tr><td>Task 3 — <code>McpSnapshotPublisher</code> парсит лимиты</td><td><span class="badge done">DONE</span></td><td><code>mcp_adapter.py</code> +2, <code>test_mcp_adapter.py</code> +32</td></tr>
+<tr><td>Task 4 — клиент подчиняется лимитам сервера (core fix)</td><td><span class="badge done">DONE</span></td><td><code>_effective_batch_bounds</code> + подключение в <code>_publish_local_snapshot</code>, target-aware (только <code>mcp</code>)</td></tr>
+<tr><td>Task 5 — диагностика <code>limit</code>/<code>received</code></td><td><span class="badge done">DONE</span></td><td>оба size-триггера <code>invalid_batch</code> в <code>server.py</code> обогащены; прочие триггеры не тронуты</td></tr>
+<tr><td>Task 6 — регрессионный тест + доки + version bump</td><td><span class="badge done">DONE</span></td><td><code>test_publish_batch_limits_regression.py</code>, README×2, version 0.7.151 в 4 файлах</td></tr>
+</tbody>
+</table>
+
+<p class="lead" style="margin-top:1.5rem">Покрытие Desired Outcomes (intent): 3/3</p>
+<ul class="tight">
+<li>✅ Клиент с завышенным локальным лимитом публикует успешно без ручной правки <code>.iwiki.toml</code> — обеспечено Task 2–4.</li>
+<li>✅ <code>publish_mode = "sqlite"</code> не затронут — подтверждено на двух независимых основаниях (factory возвращает <code>None</code> до вызова новой логики; <code>sqlite_adapter.py</code> вообще не в diff).</li>
+<li>✅ Отказ по превышению лимита называет точный лимит и полученное значение — Task 5 + scope-guard тест fix-раунда.</li>
+</ul>
+<p class="sub">Покрытие требований spec (§1–6): все 6 пунктов реализованы согласно таблице компонентов §2; вне рамок (§6) не тронуто — admin hard ceiling, 4 прочих shared-поля, version negotiation.</p>
+
+<h2>3. Ревью и найденные проблемы</h2>
+<table class="rpt-table">
+<thead><tr><th>Этап</th><th>Вердикт</th><th>Найдено / исправлено</th></tr></thead>
+<tbody>
+<tr><td>Task 1–5 (по задаче)</td><td>Approved, без замечаний</td><td>—</td></tr>
+<tr><td>Task 6 (по задаче)</td><td>Approved, без замечаний</td><td>Регрессионный тест независимо перепроверен ревьюером, wiki-обновление подтверждено вживую</td></tr>
+<tr><td>Финальное ревью всей ветки (opus)</td><td>Ready to merge — with fixes</td><td>0 Critical · 2 Important (исправлены) · 4 Minor (задокументированы, не блокирующие)</td></tr>
+<tr><td>Fix-раунд 1</td><td>Применён</td><td>scope-guard тест (диагностика не течёт на несвязанные <code>invalid_batch</code>) + keep-in-sync комментарий на дублированные потолки</td></tr>
+<tr><td><code>/check-chain result</code></td><td><span class="badge done">OK</span></td><td>0 CRITICAL, все 6 задач DONE</td></tr>
+</tbody>
+</table>
+<div class="note"><b>Отложено (Minor, не блокирует).</b> Неточность формулировки в тексте плана про порядок проверок; fallback-значение локального конфига не клэмпится к потолку сервера для старого сервера без нового поля; нет лог-строки при молчаливом fallback; README описывает только "вниз"-направление ограничения. Все — pre-existing поведение или doc-only, зафиксированы в SDD-ledger.</div>
+
+<h2>4. Влияние на систему</h2>
+<figure class="rpt-flow">
+  <div class="node"><b>Клиент</b><br>вызывает <code>wiki_code_publish_begin</code></div>
+  <div class="arrow"></div>
+  <div class="node"><b>Hosted-сервер</b><br><code>_HostedPublication.begin_from_mapping</code> добавляет <code>max_batch_rows</code>/<code>max_batch_bytes</code> из <code>HostedCodeGraphConfig</code></div>
+  <div class="arrow"></div>
+  <div class="node"><b>Клиент</b><br><code>McpSnapshotPublisher.begin()</code> парсит их в <code>PublicationSession</code></div>
+  <div class="arrow"></div>
+  <div class="node"><b>Клиент</b><br><code>_effective_batch_bounds</code> валидирует (bool-trap, диапазон 1–5000 / 1–5 000 000), иначе fallback на local config</div>
+  <div class="arrow"></div>
+  <div class="node"><b>Клиент</b><br><code>iter_snapshot_batches</code> режет батчи по выбранным границам</div>
+  <div class="arrow"></div>
+  <div class="node"><b>Hosted-сервер</b><br><code>publish_from_mapping</code> всё равно перепроверяет размер сам; при отказе — <code>limit</code>/<code>received</code></div>
+</figure>
+
+<table class="rpt-table">
+<thead><tr><th>Компонент</th><th>Поведенческое изменение</th><th>Риск / follow-up</th></tr></thead>
+<tbody>
+<tr><td><code>publish_mode = "mcp"</code> (hosted)</td><td>Размер батча теперь диктует сервер, а не локальный <code>.iwiki.toml</code></td><td>Проект больше не может <i>снизить</i> размер батча ниже лимита сервера как обходной манёвр (например, для слабого канала) — осознанное архитектурное решение из intent</td></tr>
+<tr><td><code>publish_mode = "sqlite"</code></td><td>Без изменений</td><td>Нет — untouched на двух независимых основаниях</td></tr>
+<tr><td>Обратная совместимость</td><td>Старый сервер без новых полей → клиент падает обратно на local config (как раньше)</td><td>Нет — <code>.get()</code>-парсинг, поля опциональны</td></tr>
+<tr><td>Безопасность / hard ceiling</td><td>Ни один клиентский или серверный ответ не может заставить сервер принять батч больше собственного <code>HostedCodeGraphConfig</code></td><td>Нет — подтверждено трассировкой в финальном ревью: нет кодового пути, где клиентское значение ослабляет серверную проверку</td></tr>
+</tbody>
+</table>
+
+<h2>5. Архитектура (C4, затронутые компоненты)</h2>
+<figure class="rpt-c4">
+  <div class="boundary" data-label="iwiki-mcp · клиентский процесс">
+    <div class="comp"><b>server.py</b><br><span class="sub">_publish_local_snapshot, _effective_batch_bounds</span></div>
+    <div class="comp"><b>mcp_adapter.py</b><br><span class="sub">McpSnapshotPublisher.begin()</span></div>
+    <div class="comp"><b>publication.py</b><br><span class="sub">PublicationSession(+2 поля)</span></div>
+  </div>
+  <div class="boundary" data-label="iwiki-mcp · hosted-сервер">
+    <div class="comp"><b>server.py</b><br><span class="sub">_HostedPublication.begin_from_mapping / publish_from_mapping</span></div>
+    <div class="comp"><b>postgres/config.py</b><br><span class="sub">HostedCodeGraphConfig (admin ceiling, не тронут)</span></div>
+    <div class="comp"><b>postgres/codegraph.py</b><br><span class="sub">PostgresCodeGraphStore (не тронут)</span></div>
+  </div>
+</figure>
+
+<footer>
+Сгенерировано по данным <code>git diff af0ed06..HEAD</code>, SDD-ledger <code>.superpowers/sdd/2026-08-19-codegraph-publish-client-batch-limits/progress.md</code> и отчёту финального ревью. Отчёт статичен, без внешних зависимостей.
+</footer>
+</main>
+</body>
+</html>
