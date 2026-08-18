@@ -38,6 +38,7 @@ def test_code_graph_config_defaults_and_mapping_values():
         exclude=(),
         publish_mode="sqlite",
         read_mode="sqlite",
+        typescript_type_boost=False,
         max_snapshot_age_seconds=86400,
         max_batch_rows=1000,
         max_batch_bytes=1_000_000,
@@ -106,7 +107,7 @@ def test_code_graph_config_has_no_secret_bearing_fields():
 @pytest.mark.parametrize(
     "mapping",
     [
-        {"languages": ["typescript"]},
+        {"languages": ["ruby"]},
         {"incremental": True},
         {"database": "custom.sqlite3"},
         {"project_id": "project"},
@@ -551,3 +552,23 @@ def test_tree_sitter_packages_are_available():
 
     assert tree_sitter is not None
     assert tree_sitter_language_pack is not None
+
+
+def test_languages_accepts_typescript():
+    config = CodeGraphConfig.from_mapping({"languages": ["python", "typescript"]})
+    assert config.languages == ("python", "typescript")
+
+
+def test_languages_rejects_unknown_language():
+    with pytest.raises(CodeGraphConfigError, match="languages"):
+        CodeGraphConfig.from_mapping({"languages": ["python", "ruby"]})
+
+
+def test_typescript_type_boost_defaults_false():
+    config = CodeGraphConfig.from_mapping({})
+    assert config.typescript_type_boost is False
+
+
+def test_typescript_type_boost_rejects_non_bool():
+    with pytest.raises(CodeGraphConfigError, match="typescript_type_boost"):
+        CodeGraphConfig.from_mapping({"typescript_type_boost": "yes"})
