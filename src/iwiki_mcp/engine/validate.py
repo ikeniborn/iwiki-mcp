@@ -15,7 +15,7 @@ LEAD_MAX = 250                  # section-lead advisory cap (validate-local)
 
 _DEEP = re.compile(r"^#{3,}\s", re.MULTILINE)   # ### or deeper
 _H1_LINE = re.compile(r"^#\s+\S")               # a single-# H1 line
-_H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)   # keep in sync with chunk._H2
+_H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)   # keep in sync with chunk._H2
 
 
 def _sections(content: str) -> list[tuple[str, str]]:
