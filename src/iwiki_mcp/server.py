@@ -1062,6 +1062,7 @@ def _effective_batch_bounds(session, config) -> tuple[int, int]:
     if (
         not isinstance(rows_limit, int)
         or isinstance(rows_limit, bool)
+        # keep in sync with HostedCodeGraphConfig.__post_init__ bounds (postgres/config.py)
         or not 1 <= rows_limit <= 5000
     ):
         rows_limit = config.max_batch_rows
@@ -1069,6 +1070,7 @@ def _effective_batch_bounds(session, config) -> tuple[int, int]:
     if (
         not isinstance(bytes_limit, int)
         or isinstance(bytes_limit, bool)
+        # keep in sync with HostedCodeGraphConfig.__post_init__ bounds (postgres/config.py)
         or not 1 <= bytes_limit <= 5_000_000
     ):
         bytes_limit = config.max_batch_bytes
