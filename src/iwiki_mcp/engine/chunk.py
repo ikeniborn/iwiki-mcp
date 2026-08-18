@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from . import frontmatter as _fm
 
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
-_H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
+_H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)
 
 
 @dataclass

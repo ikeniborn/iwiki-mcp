@@ -18,7 +18,7 @@ RESERVED_SECTIONS = ("outgoing links", "external links")
 
 OVERVIEW_HEADING = "overview"   # reserved summary section; consumed by chunk.py / okf.py
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
-_H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
+_H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)
 _FM = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 

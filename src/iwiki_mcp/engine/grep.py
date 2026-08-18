@@ -9,7 +9,7 @@ import re
 from .chunk import Chunk
 from .okf_artifacts import RESERVED_OKF
 
-_H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
+_H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)
 
 
 def _terms(query: str) -> list[str]:

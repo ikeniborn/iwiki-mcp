@@ -67,6 +67,13 @@ def test_replace_section_rejects_h2_in_body():
         replace_section(PAGE, "Flow", "## Injected\nx")
 
 
+def test_replace_section_repeated_calls_do_not_grow_blank_lines():
+    out = PAGE
+    for _ in range(4):
+        out = replace_section(out, "Flow", "new body")
+    assert "## Flow\n\nnew body\n\n## Notes" in out
+
+
 def test_replace_section_renames_heading_and_replaces_body():
     out = replace_section(PAGE, "Flow", "new", new_heading="New Flow")
     assert "## New Flow\n\nnew" in out

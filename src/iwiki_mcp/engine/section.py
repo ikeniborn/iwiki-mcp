@@ -10,7 +10,7 @@ from . import frontmatter as _fm
 from .links import slugify_heading
 
 # Keep in sync with chunk._H2 / validate._H2 / lint._H2.
-_H2 = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
+_H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)
 _HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.MULTILINE)
 
 
