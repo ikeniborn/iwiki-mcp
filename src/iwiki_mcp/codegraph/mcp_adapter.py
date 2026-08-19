@@ -27,15 +27,76 @@ TOKEN_ENV = "IWIKI_CODE_GRAPH_MCP_TOKEN"
 _CONNECT_TIMEOUT = 30
 _READ_TIMEOUT = 300
 
-_REMOTE_FAILED: dict[str, object] = {
-    "error": "remote_mcp_failed",
-    "hint": "retry the remote code graph call",
+# Closed, secret-free vocabulary describing *why* a remote call failed. The
+# error code stays `remote_mcp_failed` (R-028); `reason` and the optional HTTP
+# `status` only narrow it, and neither can carry a token, URL, or host detail.
+_HINTS: dict[str, str] = {
+    "http_status": "the remote wiki refused the code graph call; see status",
+    "timeout": "the remote code graph call timed out; retry it",
+    "connect": "the remote code graph endpoint was unreachable; check the URL",
+    "protocol": "the remote MCP session failed; retry the remote call",
+    "malformed_response": "the remote answered with a payload this client "
+    "cannot decode",
+    "unknown": "retry the remote code graph call",
 }
-_UNREADABLE: dict[str, object] = {
-    "state": "missing",
-    "fresh": False,
-    **_REMOTE_FAILED,
-}
+_UNREADABLE: dict[str, object] = {"state": "missing", "fresh": False}
+
+
+def _status_code(exc: BaseException) -> int | None:
+    """Return an HTTP status carried by the exception, when it holds one."""
+    for candidate in (getattr(getattr(exc, "response", None), "status_code", None),
+                      getattr(exc, "status_code", None)):
+        if isinstance(candidate, int) and 100 <= candidate < 600:
+            return candidate
+    return None
+
+
+def _related(exc: BaseException):
+    """Walk the exception, its group members, and its cause/context chain."""
+    seen: set[int] = set()
+    queue: list[BaseException | None] = [exc]
+    while queue:
+        current = queue.pop(0)
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        queue.extend(getattr(current, "exceptions", ()) or ())
+        queue.append(current.__cause__)
+        queue.append(current.__context__)
+
+
+def _remote_failed(exc: BaseException | None = None) -> dict[str, object]:
+    """Map one failure to `remote_mcp_failed` plus a safe reason and status."""
+    reason, status = "malformed_response", None
+    if exc is not None:
+        reason, status = "unknown", None
+        for current in _related(exc):
+            code = _status_code(current)
+            name = type(current).__name__
+            if code is not None:
+                reason, status = "http_status", code
+                break
+            if isinstance(current, TimeoutError) or "Timeout" in name:
+                reason = "timeout"
+                break
+            if isinstance(current, ConnectionError) or "Connect" in name:
+                reason = "connect"
+                break
+            if isinstance(current, ValueError):
+                reason = "malformed_response"
+                break
+            if "Mcp" in name or "Protocol" in name:
+                reason = "protocol"
+                break
+    payload: dict[str, object] = {
+        "error": "remote_mcp_failed",
+        "reason": reason,
+        "hint": _HINTS[reason],
+    }
+    if status is not None:
+        payload["status"] = status
+    return payload
 
 
 class CodeGraphAdapterError(CodeGraphError):
@@ -120,8 +181,8 @@ class RemoteMcpTransport:
                 ).result()
         except _RemoteBindError as exc:
             return dict(exc.payload)
-        except Exception:
-            return dict(_REMOTE_FAILED)
+        except Exception as exc:
+            return _remote_failed(exc)
 
     async def _invoke(
         self, tool_name: str, arguments: dict[str, object]
@@ -170,7 +231,7 @@ class McpSnapshotPublisher:
                 max_batch_bytes=result.get("max_batch_bytes"),
             )
         except KeyError:
-            return dict(_REMOTE_FAILED)
+            return _remote_failed()
 
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
@@ -219,7 +280,7 @@ class McpCodeGraphReader:
     def status(self) -> dict[str, object]:
         """Report remote readiness without requesting any graph rows."""
         result = self._transport.call("wiki_code_status", {})
-        return {**_UNREADABLE} if "error" in result else result
+        return {**_UNREADABLE, **result} if "error" in result else result
 
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
         """Search the remote snapshot under the shared validated bounds."""
@@ -234,7 +295,7 @@ class McpCodeGraphReader:
             },
         )
         if "error" in result:
-            return {**_UNREADABLE, "results": []}
+            return {**_UNREADABLE, **result, "results": []}
         return result
 
     def context(self, request: ContextRequest) -> dict[str, object]:
@@ -258,6 +319,7 @@ class McpCodeGraphReader:
         if "error" in result:
             return {
                 **_UNREADABLE,
+                **result,
                 "seeds": list(request.seeds),
                 "nodes": [],
                 "relations": [],
