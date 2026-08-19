@@ -286,10 +286,13 @@ def test_reader_maps_public_requests_without_scope_fields(
 
 
 @pytest.mark.parametrize(
-    "failure",
-    [RuntimeError("connection refused"), ValueError("bad frame")],
+    "failure,reason",
+    [
+        (RuntimeError("connection refused"), "unknown"),
+        (ValueError("bad frame"), "malformed_response"),
+    ],
 )
-def test_transport_failures_are_sanitized(header, batch, failure):
+def test_transport_failures_are_sanitized(header, batch, failure, reason):
     session = _FakeSession(failure=failure)
     transport = _transport(session)
     publisher = McpSnapshotPublisher(transport)
@@ -301,17 +304,87 @@ def test_transport_failures_are_sanitized(header, batch, failure):
         base_markdown_token=0,
     )
 
-    assert publisher.begin(header) == {
-        "error": "remote_mcp_failed",
-        "hint": "retry the remote code graph call",
-    }
+    begun = publisher.begin(header)
+    assert begun["error"] == "remote_mcp_failed"
+    assert begun["reason"] == reason
+    assert "status" not in begun
+    assert str(failure) not in json.dumps(begun)
     assert publisher.publish_batch(remote, batch)["error"] == "remote_mcp_failed"
     assert publisher.finalize(remote)["error"] == "remote_mcp_failed"
     search = reader.search(validate_search_request("needle"))
     assert search["error"] == "remote_mcp_failed"
+    assert search["reason"] == reason
     assert search["state"] == "missing"
     assert search["results"] == []
     assert _TOKEN not in json.dumps(search)
+
+
+class _Response:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _HttpStatusError(Exception):
+    def __init__(self, status_code):
+        super().__init__("https://wiki.example/mcp returned an error")
+        self.response = _Response(status_code)
+
+
+class _ConnectError(Exception):
+    pass
+
+
+class _McpError(Exception):
+    pass
+
+
+class _Group(Exception):
+    def __init__(self, exceptions):
+        super().__init__("transport")
+        self.exceptions = tuple(exceptions)
+
+
+@pytest.mark.parametrize(
+    "failure,reason,status",
+    [
+        (_HttpStatusError(401), "http_status", 401),
+        (_HttpStatusError(503), "http_status", 503),
+        (TimeoutError("read timed out"), "timeout", None),
+        (_ConnectError("name resolution failed"), "connect", None),
+        (ConnectionRefusedError("refused"), "connect", None),
+        (_McpError("bad session"), "protocol", None),
+    ],
+)
+def test_transport_failures_carry_a_safe_reason(header, failure, reason, status):
+    publisher = McpSnapshotPublisher(_transport(_FakeSession(failure=failure)))
+
+    result = publisher.begin(header)
+
+    assert result["error"] == "remote_mcp_failed"
+    assert result["reason"] == reason
+    assert result.get("status") == status
+    encoded = json.dumps(result)
+    assert _TOKEN not in encoded and _URL not in encoded
+
+
+def test_grouped_and_chained_failures_are_classified(header):
+    # Hand-rolled group instead of ExceptionGroup: the classifier duck-types
+    # `.exceptions`, and the builtin only exists on Python 3.11+.
+    grouped = _Group([_HttpStatusError(403)])
+    chained = RuntimeError("session closed")
+    chained.__cause__ = TimeoutError("read timed out")
+
+    assert McpSnapshotPublisher(
+        _transport(_FakeSession(failure=grouped))
+    ).begin(header) == {
+        "error": "remote_mcp_failed",
+        "reason": "http_status",
+        "status": 403,
+        "hint": "the remote wiki refused the code graph call; see status",
+    }
+    assert McpSnapshotPublisher(
+        _transport(_FakeSession(failure=chained))
+    ).begin(header)["reason"] == "timeout"
 
 
 def test_malformed_remote_payloads_are_rejected(header):
@@ -322,7 +395,20 @@ def test_malformed_remote_payloads_are_rejected(header):
 
     publisher = McpSnapshotPublisher(_transport(_Malformed()))
 
-    assert publisher.begin(header)["error"] == "remote_mcp_failed"
+    result = publisher.begin(header)
+    assert result["error"] == "remote_mcp_failed"
+    assert result["reason"] == "malformed_response"
+
+
+def test_incomplete_begin_reply_is_reported_as_malformed(header):
+    incomplete = _FakeSession(
+        replies={"wiki_code_publish_begin": {"session_id": "remote-session"}}
+    )
+    publisher = McpSnapshotPublisher(_transport(incomplete))
+
+    result = publisher.begin(header)
+
+    assert result["reason"] == "malformed_response"
 
 
 def test_configured_primary_binds_before_the_first_tool_call(fake_session, header):
