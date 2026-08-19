@@ -166,6 +166,8 @@ class McpSnapshotPublisher:
                     else str(result["base_snapshot_revision"])
                 ),
                 base_markdown_token=result["base_markdown_token"],
+                max_batch_rows=result.get("max_batch_rows"),
+                max_batch_bytes=result.get("max_batch_bytes"),
             )
         except KeyError:
             return dict(_REMOTE_FAILED)

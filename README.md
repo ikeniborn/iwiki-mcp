@@ -448,7 +448,11 @@ staging_cleanup_limit = 100
 A ready snapshot older than a positive `max_snapshot_age_seconds` returns
 `stale_snapshot` and no rows, while status keeps reporting age and timestamps. Value
 `0` disables age rejection entirely. The hosted server enforces its own validated
-ceilings for the numeric fields; a remote client cannot raise them.
+ceilings for the numeric fields; a remote client cannot raise them. For `max_batch_rows`
+and `max_batch_bytes` specifically, `publish_mode = "mcp"` discovers the server's actual
+limits from `wiki_code_publish_begin`'s response and sizes batches to them automatically
+— a local `.iwiki.toml` value larger than the server's own is never sent as-is, and a
+rejection states the exact limit and what was received instead of a bare `invalid_batch`.
 
 Secrets never enter `.iwiki.toml`. MCP mode reads `IWIKI_CODE_GRAPH_MCP_URL` and
 `IWIKI_CODE_GRAPH_MCP_TOKEN` from the runtime environment only, and both are absent

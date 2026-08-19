@@ -195,6 +195,8 @@ class PublicationSession:
     lease_expires_at: str
     base_snapshot_revision: str | None
     base_markdown_token: str | int
+    max_batch_rows: int | None = None
+    max_batch_bytes: int | None = None
 
 
 class SnapshotPublisher(Protocol):

@@ -857,3 +857,196 @@ def test_export_snapshot_header_languages_reflects_stored_files_not_a_literal(
     header, _rows = ready_runtime.runtime.export_snapshot()
 
     assert header.languages == ("python", "typescript")
+
+
+class _FakeHostedStore:
+    """Records begin() calls; never touches a real database."""
+
+    def __init__(self, session):
+        self.domain = "docs"
+        self._session = session
+        self.begin_calls = []
+
+    def begin(self, header):
+        self.begin_calls.append(header)
+        return self._session
+
+
+def test_begin_from_mapping_reports_hosted_batch_limits():
+    from iwiki_mcp.codegraph.publication import PublicationSession
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    session = PublicationSession(
+        session_id="s1",
+        lease_expires_at="2026-08-19T00:00:00Z",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+    )
+    store = _FakeHostedStore(session)
+    settings = HostedCodeGraphConfig(max_batch_rows=1000, max_batch_bytes=1_000_000)
+    publication = _HostedPublication(store, settings)
+    header = {
+        "protocol_version": 1,
+        "schema_version": 2,
+        "repository_id": "docs",
+        "source_fingerprint": "source",
+        "parser_fingerprint": "parser",
+        "normalizer_version": "normalizer-1",
+        "unicode_data_version": "15.1",
+        "languages": ["python"],
+        "expected_counts": {
+            "repositories": 1, "files": 0, "symbols": 0, "relations": 0
+        },
+        "graph_payload_revision": "sha256:" + "a" * 64,
+    }
+
+    result = publication.begin_from_mapping(header)
+
+    assert result["max_batch_rows"] == 1000
+    assert result["max_batch_bytes"] == 1_000_000
+    assert result["session_id"] == "s1"
+
+
+def _session(max_batch_rows=None, max_batch_bytes=None):
+    from iwiki_mcp.codegraph.publication import PublicationSession
+
+    return PublicationSession(
+        session_id="s",
+        lease_expires_at="2026-08-19T00:00:00Z",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+        max_batch_rows=max_batch_rows,
+        max_batch_bytes=max_batch_bytes,
+    )
+
+
+@pytest.mark.parametrize(
+    "reported_rows,reported_bytes,expected_rows,expected_bytes",
+    [
+        (1000, 1_000_000, 1000, 1_000_000),   # valid server value used
+        (None, None, 5000, 5_000_000),        # absent -> config fallback
+        (0, 1_000_000, 5000, 1_000_000),      # zero rejected -> config fallback
+        (-1, 1_000_000, 5000, 1_000_000),     # negative rejected -> config fallback
+        (5001, 1_000_000, 5000, 1_000_000),   # over hard ceiling -> config fallback
+        (1000, 0, 1000, 5_000_000),           # zero bytes rejected -> config fallback
+        (1000, 5_000_001, 1000, 5_000_000),   # over hard ceiling -> config fallback
+        (True, 1_000_000, 5000, 1_000_000),   # bool-is-int trap rejected
+    ],
+)
+def test_effective_batch_bounds_validates_server_value(
+    reported_rows, reported_bytes, expected_rows, expected_bytes
+):
+    from iwiki_mcp.server import _effective_batch_bounds
+
+    session = _session(reported_rows, reported_bytes)
+    config = CodeGraphConfig(max_batch_rows=5000, max_batch_bytes=5_000_000)
+
+    rows_limit, bytes_limit = _effective_batch_bounds(session, config)
+
+    assert rows_limit == expected_rows
+    assert bytes_limit == expected_bytes
+
+
+def test_publish_from_mapping_reports_row_limit_on_rejection():
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    store = _FakeHostedStore(_session())
+    settings = HostedCodeGraphConfig(max_batch_rows=10, max_batch_bytes=1_000_000)
+    publication = _HostedPublication(store, settings)
+    rows = [{"file_id": f"f{i}"} for i in range(11)]
+
+    result = publication.publish_from_mapping("s1", "files", 0, rows, "sha256:x")
+
+    assert result == {
+        "error": "invalid_batch",
+        "hint": "send batches that match the declared header",
+        "limit": 10,
+        "received": 11,
+    }
+
+
+def test_publish_from_mapping_reports_byte_limit_on_rejection():
+    from iwiki_mcp.codegraph.publication import canonical_batch
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    store = _FakeHostedStore(_session())
+    settings = HostedCodeGraphConfig(max_batch_rows=1000, max_batch_bytes=10)
+    publication = _HostedPublication(store, settings)
+    rows = [{"file_id": "f0", "note": "x" * 50}]
+    # Use the real payload hash so the hash check passes and the byte-limit
+    # branch (not the hash-mismatch branch) is what rejects this batch.
+    payload_hash = canonical_batch("files", 0, rows).payload_hash
+
+    result = publication.publish_from_mapping("s1", "files", 0, rows, payload_hash)
+
+    assert result["error"] == "invalid_batch"
+    assert result["limit"] == 10
+    assert result["received"] > 10
+
+
+def test_publish_from_mapping_hash_mismatch_carries_no_size_diagnostics():
+    # Scope guard: the limit/received diagnostic fields introduced for the
+    # row- and byte-limit rejections above must stay confined to those two
+    # size checks. A hash-mismatch rejection is not a size violation and
+    # must return the bare _CODE_INVALID_BATCH dict with no extra keys.
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.server import _HostedPublication
+
+    store = _FakeHostedStore(_session())
+    settings = HostedCodeGraphConfig(max_batch_rows=1000, max_batch_bytes=1_000_000)
+    publication = _HostedPublication(store, settings)
+
+    result = publication.publish_from_mapping(
+        "s1", "files", 0, [{"file_id": "f0"}], "sha256:" + "0" * 64
+    )
+
+    assert result == {
+        "error": "invalid_batch",
+        "hint": "send batches that match the declared header",
+    }
+
+
+def test_publish_local_snapshot_uses_session_limits_over_config(monkeypatch):
+    from iwiki_mcp import server as server_module
+
+    captured = {}
+    real_iter = server_module._codegraph_publication.iter_snapshot_batches
+
+    def spying_iter(rows, *, max_rows, max_bytes):
+        captured["max_rows"] = max_rows
+        captured["max_bytes"] = max_bytes
+        return real_iter(rows, max_rows=max_rows, max_bytes=max_bytes)
+
+    monkeypatch.setattr(
+        server_module._codegraph_publication, "iter_snapshot_batches", spying_iter
+    )
+
+    class _StubPublisher:
+        def begin(self, header):
+            return _session(max_batch_rows=1000, max_batch_bytes=1_000_000)
+
+        def publish_batch(self, session, batch):
+            return {"accepted": True}
+
+        def finalize(self, session):
+            return {"state": "ready"}
+
+        def abort(self, session):
+            return {"state": "aborted"}
+
+    class _StubRuntime:
+        def export_snapshot(self):
+            return _exported_snapshot()
+
+    monkeypatch.setattr(
+        server_module, "_code_publisher", lambda *a, **k: _StubPublisher()
+    )
+    config = CodeGraphConfig(max_batch_rows=5000, max_batch_bytes=5_000_000)
+
+    server_module._publish_local_snapshot(_StubRuntime(), object(), config)
+
+    assert captured["max_rows"] == 1000
+    assert captured["max_bytes"] == 1_000_000

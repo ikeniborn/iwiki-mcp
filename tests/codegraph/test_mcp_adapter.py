@@ -186,6 +186,38 @@ def test_mcp_begin_sends_only_the_shared_header(fake_session, header):
     assert fake_session.initialized == 1
 
 
+def test_mcp_begin_reports_absent_batch_limits_as_none(fake_session, header):
+    # fake_session's canned reply has no max_batch_rows/max_batch_bytes keys —
+    # this proves an older-server response doesn't break parsing.
+    publisher = McpSnapshotPublisher(_transport(fake_session))
+
+    session = publisher.begin(header)
+
+    assert session.max_batch_rows is None
+    assert session.max_batch_bytes is None
+
+
+def test_mcp_begin_parses_batch_limits_when_present(header):
+    session_with_limits = _FakeSession(
+        replies={
+            "wiki_code_publish_begin": {
+                "session_id": "remote-session",
+                "lease_expires_at": "2026-08-16T10:00:00+00:00",
+                "base_snapshot_revision": "sha256:base",
+                "base_markdown_token": 7,
+                "max_batch_rows": 1000,
+                "max_batch_bytes": 1_000_000,
+            },
+        }
+    )
+    publisher = McpSnapshotPublisher(_transport(session_with_limits))
+
+    session = publisher.begin(header)
+
+    assert session.max_batch_rows == 1000
+    assert session.max_batch_bytes == 1_000_000
+
+
 def test_mcp_batch_call_has_no_scope_override(fake_session, mcp_publisher, batch):
     mcp_publisher.publish_batch(mcp_publisher.session, batch)
 

@@ -484,3 +484,29 @@ def test_snapshot_header_defensively_freezes_languages_and_counts():
 def test_snapshot_header_rejects_invalid_expected_counts(counts):
     with pytest.raises(ValueError, match="expected_counts"):
         _snapshot_header(expected_counts=counts)
+
+
+def test_publication_session_batch_limits_default_to_none():
+    session = PublicationSession(
+        session_id="opaque",
+        lease_expires_at="2026-08-14T00:00:00Z",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+    )
+
+    assert session.max_batch_rows is None
+    assert session.max_batch_bytes is None
+
+
+def test_publication_session_batch_limits_can_be_set():
+    session = PublicationSession(
+        session_id="opaque",
+        lease_expires_at="2026-08-14T00:00:00Z",
+        base_snapshot_revision=None,
+        base_markdown_token=0,
+        max_batch_rows=250,
+        max_batch_bytes=500_000,
+    )
+
+    assert session.max_batch_rows == 250
+    assert session.max_batch_bytes == 500_000

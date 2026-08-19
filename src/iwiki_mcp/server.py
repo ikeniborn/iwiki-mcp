@@ -1007,26 +1007,35 @@ class _HostedPublication:
             "lease_expires_at": session.lease_expires_at,
             "base_snapshot_revision": session.base_snapshot_revision,
             "base_markdown_token": session.base_markdown_token,
+            "max_batch_rows": self._settings.max_batch_rows,
+            "max_batch_bytes": self._settings.max_batch_bytes,
         }
 
     def publish_from_mapping(
         self, session_id, kind, ordinal, rows, payload_hash
     ) -> dict:
-        if (
-            not isinstance(rows, list)
-            or len(rows) > self._settings.max_batch_rows
-            or any(not isinstance(row, dict) for row in rows)
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows
         ):
             return dict(_CODE_INVALID_BATCH)
+        if len(rows) > self._settings.max_batch_rows:
+            return {
+                **_CODE_INVALID_BATCH,
+                "limit": self._settings.max_batch_rows,
+                "received": len(rows),
+            }
         try:
             batch = _codegraph_publication.canonical_batch(kind, ordinal, rows)
         except (TypeError, ValueError):
             return dict(_CODE_INVALID_BATCH)
-        if (
-            batch.payload_hash != payload_hash
-            or batch.byte_count > self._settings.max_batch_bytes
-        ):
+        if batch.payload_hash != payload_hash:
             return dict(_CODE_INVALID_BATCH)
+        if batch.byte_count > self._settings.max_batch_bytes:
+            return {
+                **_CODE_INVALID_BATCH,
+                "limit": self._settings.max_batch_bytes,
+                "received": batch.byte_count,
+            }
         return self._store.publish_batch(_session_reference(session_id), batch)
 
     def finalize_from_mapping(self, session_id) -> dict:
@@ -1046,6 +1055,28 @@ _CODE_INVALID_HEADER = {
 }
 
 
+def _effective_batch_bounds(session, config) -> tuple[int, int]:
+    """Prefer the hosted server's reported batch bounds, validated against
+    this codebase's own hard ceiling; fall back to local config otherwise."""
+    rows_limit = session.max_batch_rows
+    if (
+        not isinstance(rows_limit, int)
+        or isinstance(rows_limit, bool)
+        # keep in sync with HostedCodeGraphConfig.__post_init__ bounds (postgres/config.py)
+        or not 1 <= rows_limit <= 5000
+    ):
+        rows_limit = config.max_batch_rows
+    bytes_limit = session.max_batch_bytes
+    if (
+        not isinstance(bytes_limit, int)
+        or isinstance(bytes_limit, bool)
+        # keep in sync with HostedCodeGraphConfig.__post_init__ bounds (postgres/config.py)
+        or not 1 <= bytes_limit <= 5_000_000
+    ):
+        bytes_limit = config.max_batch_bytes
+    return rows_limit, bytes_limit
+
+
 def _publish_local_snapshot(runtime, binding, config) -> dict:
     """Send the freshly indexed local snapshot to the selected publisher."""
     publisher = _code_publisher(binding, config.publish_mode, config)
@@ -1058,10 +1089,11 @@ def _publish_local_snapshot(runtime, binding, config) -> dict:
     session = publisher.begin(header)
     if isinstance(session, dict):
         return session
+    max_rows, max_bytes = _effective_batch_bounds(session, config)
     for batch in _codegraph_publication.iter_snapshot_batches(
         rows,
-        max_rows=config.max_batch_rows,
-        max_bytes=config.max_batch_bytes,
+        max_rows=max_rows,
+        max_bytes=max_bytes,
     ):
         accepted = publisher.publish_batch(session, batch)
         if "error" in accepted:
