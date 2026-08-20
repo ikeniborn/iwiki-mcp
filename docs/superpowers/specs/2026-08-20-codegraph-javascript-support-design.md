@@ -27,6 +27,12 @@ returns those symbols with correct ranges; `wiki_code_context` returns their
 `IMPORTS`/`CALLS`/`INHERITS` relations; and a byte-level comparison shows the Python and
 TypeScript records from the same run are unchanged against a pre-change baseline.
 
+**Outcome clarification (approved during design).** The cross-language outcome is
+satisfiable in one direction only. `typescript.py:428` sets `resolution_hint="unresolved"`
+on every TypeScript import and the intent forbids changing TypeScript behaviour, so
+**JS→TS** import edges resolve and **TS→JS** edges stay unresolved. Extending specifier
+resolution to TypeScript is out of scope for this work.
+
 ## 1. Current state
 
 `codegraph/languages/` holds two adapters. `python.py` extracts `IMPORTS`, `INHERITS`,
@@ -34,11 +40,12 @@ and `CALLS` references with alias tracking. `typescript.py` extracts declaration
 `IMPORTS` (always `resolution_hint="unresolved"`) and `INHERITS`; it emits no `CALLS`.
 `server.py::_code_graph_adapter_factories` maps a language name to an `AdapterFactory`
 carrying `extensions`, `parser_version`, `grammar_version`, and `adapter_version`.
-`indexer.py` routes each discovered file to the first adapter whose `extensions` match,
-then builds a single project-wide `SymbolIndex` across all languages
-(`indexer.py:854`) before calling every adapter's `resolve_references`.
+`indexer.py` routes each discovered file to the first adapter whose `extensions` match
+(`indexer.py:812-823`), then builds a single project-wide `SymbolIndex` across all
+languages (`indexer.py:854`) before calling every adapter's `resolve_references`.
 `config.py` gates the configured language list against
-`KNOWN_LANGUAGES = {"python", "typescript"}`.
+`KNOWN_LANGUAGES = {"python", "typescript"}`, which is the single source consumed by
+`query.py`, `runtime.py`, `sqlite_adapter.py`, and `server.py`.
 
 JavaScript is unsupported: `.js`/`.jsx`/`.mjs`/`.cjs` files are neither discovered nor
 parseable, and `code_graph.languages = ["javascript"]` is rejected by config validation.
@@ -50,22 +57,29 @@ parseable, and `code_graph.languages = ["javascript"]` is rejected by config val
 A new module `src/iwiki_mcp/codegraph/languages/_ecmascript.py` holds everything the two
 ECMAScript adapters share:
 
-- the Tree-sitter parser cache and grammar loading (`_PARSERS`, `get_parser`), including
-  the `tree_sitter_language_pack` → `tree_sitter_typescript` fallback chain that
+- the Tree-sitter parser cache and grammar loading (`get_parser`), including the
+  `tree_sitter_language_pack` → `tree_sitter_typescript` fallback chain
   `typescript.py` uses today;
 - source helpers `text`, `relative_path`, `param_signature`, `return_type_signature`,
   `visibility`;
-- heritage handling: the `PendingHeritage` record, `pending_heritage_references`,
+- heritage handling: `PendingHeritage`, `pending_heritage_references`,
   `heritage_scope_candidates`, `resolve_heritage_references`;
 - ESM import binding extraction (`import_bindings`) and ESM `IMPORTS` reference
   extraction;
 - the generic declaration walker `extract_symbols(source, root, *, profile, …)`;
-- symbol deduplication (`dedupe_symbols`) returning the deduped list plus the
+- symbol deduplication (`dedupe_symbols`), returning the deduped list plus the
   `duplicate_symbol_identity` warning.
+
+Shared helpers move with the leading underscore dropped (`_text` → `text`, …);
+`typescript.py` imports them by name and adds no aliases. `_run_tsc_boost`,
+`_TSC_BOOST_SCRIPT`, `_probe_boost_once`, and `_TypeScriptParsedFile` **stay defined in
+`typescript.py`** so `iwiki_mcp.codegraph.languages.typescript._run_tsc_boost` remains a
+valid monkeypatch target for the four existing boost tests.
 
 ### R2.2 — Language profile
 
-`extract_symbols` is parameterized by a frozen `LanguageProfile` dataclass:
+`extract_symbols` and the shared reference extractor are parameterized by a frozen
+`LanguageProfile` dataclass:
 
 | Field | Type | TypeScript | JavaScript |
 |---|---|---|---|
@@ -74,18 +88,29 @@ ECMAScript adapters share:
 | `kind_by_node` | `Mapping[str, str]` | `{type_alias_declaration: type_alias, enum_declaration: enum}` | `{}` |
 | `handles_interface` | `bool` | `True` | `False` |
 | `handles_namespace` | `bool` | `True` | `False` |
-| `declaration_hooks` | `tuple[Callable, ...]` | `()` | object-literal hook, prototype hook |
+| `object_literal_scope` | `bool` | `False` | `True` |
+| `emit_bindingless_imports` | `bool` | `False` | `True` |
+| `declaration_hooks` | `tuple[Callable, ...]` | `()` | `(prototype_method_hook,)` |
 
-A `declaration_hook` receives the walker's context (node, `owner_qualified`, the
-`make_symbol` callable, and the symbols collected so far) and may add symbols. Hooks run
-only for node types the base walker does not already claim, so a hook can never change
-which symbols the base walker itself emits.
+Every flag defaults to TypeScript's current behaviour, so a TypeScript profile drives the
+shared code down exactly the paths `typescript.py` takes today.
+
+**Hook contract.** A hook has the signature
+`hook(node, owner_qualified, make_symbol, symbols) -> bool`. It returns `True` when it
+claimed the node — the walker then does **not** recurse into that node — and `False`
+otherwise. `make_symbol` is the walker's closure
+`(node, kind, name_node, *, owner_qualified=None, params_node=None,
+return_type_node=None, is_async=False) -> (qualified_name, symbol_id)`. Hooks run only
+for node types the base walker does not claim in any branch; the object-literal case is
+**not** a hook (see R4.2) precisely because `variable_declarator` and `method_definition`
+are claimed by the base walker.
 
 ### R2.3 — Adapter modules
 
 `typescript.py` keeps the public name `TypeScriptAdapter` with its current `language`,
 `prefix`, `extensions`, constructor signature, tsc-boost probing, and warnings; its body
-delegates to `_ecmascript`. `javascript.py` adds `JavaScriptAdapter`.
+delegates to `_ecmascript` with the TypeScript profile. `javascript.py` adds
+`JavaScriptAdapter` with the JavaScript profile.
 
 ### R2.4 — Behavioural invariant for TypeScript
 
@@ -101,47 +126,77 @@ The refactor is output-preserving: for every TypeScript fixture, `parse_file` an
 `language = "javascript"`, `prefix = "js"`, `extensions = (".js", ".jsx", ".mjs", ".cjs")`.
 No file extension is claimed by two adapters; `.ts`/`.tsx` remain TypeScript's.
 
-### R3.2 — Grammar
+### R3.2 — Grammar and versions
 
-All four JavaScript extensions parse with the `tsx` grammar, which is a syntactic
-superset of JavaScript including JSX. No new runtime dependency is added;
-`parser_version` reuses the `tree-sitter-typescript:<version>` string, and
-`adapter_version` is `"javascript-adapter-v1"`.
+All four JavaScript extensions parse with the `tsx` grammar, a syntactic superset of
+JavaScript including JSX. No new runtime dependency is added. `parser_version` is the same
+`tree-sitter-typescript:<version>` string TypeScript uses — the grammar artifact is
+literally the same — so JavaScript `FileRecord.parser_version` reads
+`tree-sitter-typescript:<version>` by design; the language is distinguished by
+`language` / `prefix` / `adapter_version`, not by `parser_version`.
+`adapter_version = "javascript-adapter-v1"`.
 
 ### R3.3 — Module identity
 
-Every JavaScript file is a module: `module_qualified_name` is the dotted join of the
-POSIX parent parts and the file stem (`src/util.js` → `src.util`), `module_local_name` is
-the stem, and `module_id` is always populated. This differs deliberately from
-`typescript.py`, which requires a top-level `import`/`export`; without it a CommonJS file
-that only assigns `module.exports` could never be the resolved target of an import.
+Every JavaScript file is a module. `module_local_name` is `name.split(".", 1)[0]` —
+everything before the first dot of the basename, identical to `typescript.py:556`.
+`module_qualified_name` is the dotted join of the POSIX parent parts and that local name
+(`src/util.js` → `src.util`). `module_id`, `module_key`, and
+`module_name_tokens_casefold` (`token_key(module_qualified_name, module_local_name)`) are
+always populated, satisfying `schema.py:68-79`, which requires the four module columns to
+be non-null together.
+
+This diverges deliberately from `typescript.py`, which requires a top-level
+`import`/`export`: without it a CommonJS file that only assigns `module.exports` could
+never be the resolved target of an import.
 
 ## 4. Symbol extraction
 
 ### R4.1 — Base declarations
 
 From the shared walker, unchanged in meaning from TypeScript: `class`, `method`,
-`function` / `async_function` (function declarations, and `const`/`let`/`var`
-declarators initialized with an arrow function or function expression). Signatures use
-the parameter text; JavaScript has no return-type node, so the return-type part is always
-empty. Visibility is `private` for names starting with `_` or `#`, else `public`.
+`function` / `async_function` (function declarations, and `const`/`let`/`var` declarators
+initialized with an arrow function or function expression). Signatures use the parameter
+text; JavaScript has no return-type node, so the return-type segment is always empty.
+Visibility is `private` for names starting with `_` or `#`, else `public`.
+
+Declarations nested inside a named function or class body are qualified under that
+enclosing scope, exactly as TypeScript does. Anonymous scopes (IIFEs, callback bodies,
+`if`/`try` blocks) contribute no qualified-name segment, so same-named siblings there
+collide and are handled by R4.4. Unnamed declarations
+(`export default function () {}`, anonymous class expressions) emit no symbol.
 
 ### R4.2 — Object-literal methods
 
-For a variable declarator whose initializer is an `object` node, each property that is a
-shorthand method (`get() {}`), or a `pair` whose value is a function expression or arrow
-function, becomes a `method` symbol scoped under the declarator's qualified name
-(`src.api.get`). Keys are accepted only as `property_identifier` or a plain string
-literal; computed keys (`[k]: fn`) and spread properties are skipped.
+Driven by the profile flag `object_literal_scope`, **inside the base walker's
+`variable_declarator` branch** — not by a hook. When the declarator's initializer is an
+`object` node and the flag is set, the walker descends into that object with
+`owner_qualified = <declarator qualified name>` and does not otherwise recurse into it.
+Each shorthand method (`get() {}`) and each `pair` whose value is a function expression or
+arrow function becomes a `method` symbol (`src.api.get`). Keys are accepted only as
+`property_identifier` or a plain string literal; computed keys (`[k]: fn`) and spread
+properties are skipped. With the flag unset (TypeScript), the walker keeps its current
+`else: walk(declarator, owner_qualified)` recursion, so TypeScript output is unchanged.
 
 ### R4.3 — Prototype methods
 
-An assignment `C.prototype.m = function () {}` or `C.prototype.m = () => {}` becomes a
+A declaration hook on `expression_statement` nodes whose child is an
+`assignment_expression`: `C.prototype.m = function () {}` or `= () => {}` becomes a
 `method` symbol qualified under `C`'s qualified name — **only** when `C` resolves to a
-symbol already extracted from the same file (a `class` or `function`). Otherwise the
-assignment is skipped. `C.prototype = {…}` wholesale replacement is out of scope.
+symbol already extracted from the same file (a `class` or `function`). Otherwise the hook
+returns `False` and nothing is emitted. `C.prototype = {…}` wholesale replacement is out
+of scope.
 
-### R4.4 — Deduplication
+### R4.4 — Symbol field rules for R4.2 / R4.3
+
+Object-literal and prototype methods use `kind = "method"`; the node span is the `pair` /
+shorthand `method_definition` / whole `assignment_expression`; `params_node` is the
+function value's `parameters` node; `return_type_node` is `None`; `is_async` comes from
+the function value's `async` child; `visibility` follows R4.1's name rule. The resulting
+`signature` is `method|[async]<params>` with no return-type segment, and `content_hash`
+covers the node span.
+
+### R4.5 — Deduplication
 
 Colliding `symbol_id`s keep the last declaration by start byte and raise the
 `duplicate_symbol_identity` warning, matching `typescript.py`.
@@ -152,9 +207,14 @@ Colliding `symbol_id`s keep the last declaration by start byte and raise the
 
 `import` statements produce one `IMPORTS` reference per binding, reusing the shared
 binding extraction: default import and named import → `implicit_binding`; aliased named
-import and `* as ns` → `explicit_alias`. A side-effect-only `import "./m"` produces one
-reference with no binding. `export … from "./m"` re-exports are out of scope for this
-work.
+import and `* as ns` → `explicit_alias`.
+
+A side-effect-only `import "./m"` emits **one** `IMPORTS` reference with
+`binding_name = None` and `binding_kind = None`, gated by the profile flag
+`emit_bindingless_imports`. TypeScript keeps its current zero-reference behaviour, pinned
+by `tests/codegraph/test_typescript_adapter.py:172`.
+
+`export … from "./m"` re-export forwarding is out of scope.
 
 ### R5.2 — CommonJS requires
 
@@ -168,76 +228,132 @@ literal argument produces `IMPORTS` references:
   binding, produce no reference.
 
 `module.exports` / `exports.x` assignments produce no relation: the schema has no export
-relation type.
+relation type. R5.3 applies identically to a `require` specifier.
 
 ### R5.3 — Specifier resolution
 
-Reference extraction stores the raw specifier as `target_reference`. Resolution happens in
-`JavaScriptAdapter.resolve_references`, which has the project `SymbolIndex`:
+Reference extraction stores the raw specifier as `target_reference` with
+`resolution_hint = "unresolved"`. Resolution happens in
+`JavaScriptAdapter.resolve_references`, which has the project `SymbolIndex`. Because
+`ReferenceRecord` is frozen, references are rebuilt with `dataclasses.replace` into a new
+tuple; `ParsedFile` is never mutated.
 
-- A relative specifier (`./x`, `../y/z`) is normalized against the importing file's
-  parent directory into a POSIX path, then a dotted candidate. Candidates are probed in
-  order: the dotted path itself, then the dotted path plus `.index`. A candidate present
-  in `index.modules_by_qualified` becomes the reference's `target_reference` with
-  `resolution_hint` cleared, `resolution_scope = "project"` and
-  `target_kind_hint = "module"`, so the language-neutral resolver produces a typed module
-  edge — including to a TypeScript module, since the index spans all languages.
-- A specifier that escapes the repository root, a bare specifier (`react`), a
-  subpath-import (`#alias`), a URL, or a Node builtin (`node:fs`) keeps the raw
-  specifier, `resolution_hint = "unresolved"` — the same shape TypeScript emits today.
+For a **relative** specifier (`./x`, `../y/z`):
+
+1. Normalize it against the importing file's parent directory into a POSIX path. A path
+   that escapes the repository root is left unresolved.
+2. Strip a trailing `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, or `.tsx` suffix — ESM in `.mjs`
+   requires the extension in the specifier (`import x from "./util.js"`).
+3. Build the dotted candidate, then probe in order: the dotted path itself, then the
+   dotted path plus `.index`.
+4. A candidate present in `index.modules_by_qualified` becomes the reference's
+   `target_reference`, with `resolution_hint` cleared, `resolution_scope = "project"` and
+   `target_kind_hint = "module"`. `resolver.py:287-289` then yields a typed module edge,
+   including to a TypeScript module.
+5. When several files map to one dotted candidate (`util.js` and `util.ts`), the existing
+   resolver rule yields `resolution_state = "ambiguous"` with one relation row per
+   candidate. No disambiguation is added; R7.3's fixture uses distinct stems so its JS→TS
+   edge is `resolved`.
+6. When no candidate is present in the index, the reference keeps the **raw specifier**
+   with `resolution_hint = "unresolved"`. Prefix/partial module matching
+   (`_module_prefix_candidates`) is never used for JavaScript specifiers — a prefix match
+   is a guess.
+
+A bare specifier (`react`), a subpath import (`#alias`), a URL, and a Node builtin
+(`node:fs`) always keep the raw specifier and `resolution_hint = "unresolved"`.
+tsconfig/jsconfig path aliases are not read.
 
 ### R5.4 — Inheritance
 
 `class X extends Y` and `class X extends ns.Y` produce an `INHERITS` reference through the
-shared heritage machinery: the target resolves against the innermost matching enclosing
-scope in the file, falling back to the module scope. When `Y` is an import or require
-binding, the target is the imported module's dotted candidate plus the imported name, so
-the project resolver can bind it cross-file.
+shared heritage machinery, whose `resolution_scope` becomes a parameter defaulting to
+`"file"` — TypeScript keeps `"file"` and its output is unchanged.
+
+When the heritage target's head is an import or require binding in this file, JavaScript
+emits the expanded dotted target with `resolution_scope = "project"`, so
+`resolver._symbol_candidates` can bind it cross-file. Otherwise the target resolves
+against the innermost matching enclosing scope in the file with `resolution_scope = "file"`.
+A JS→TS `INHERITS` resolves only when the TypeScript target file is module-backed.
 
 ### R5.5 — Calls
 
 `call_expression` and `new_expression` produce `CALLS` references when the callee is:
 
-- an `identifier` — target is an import/require alias expansion when the name is bound by
-  an import in this file, else the innermost enclosing file scope match, else the raw name
-  with `resolution_hint = "unresolved"`;
+- an `identifier` — target is the import/require alias expansion when the name is bound by
+  an import in this file (`resolution_scope = "project"`), else the innermost enclosing
+  file-scope match (`resolution_scope = "file"`), else the raw name with
+  `resolution_hint = "unresolved"` and no scope;
 - a non-computed `member_expression` whose object chain is made of identifiers and
   `property_identifier`s (`a.b.c()`) — target is the dotted chain, alias-expanded at its
   head under the same rule.
 
-A computed callee (`obj[k]()`), a callee that is itself a call (`f()()`), a tagged
-template, and an optional call on a computed member are not extracted. `require(...)`
-calls already handled by R5.2 produce no `CALLS` reference.
+Not extracted: a computed callee (`obj[k]()`), a callee that is itself a call (`f()()`),
+tagged templates, `require(...)` calls already covered by R5.2, and — critically — any
+`call_expression` / `new_expression` carrying a `type_arguments` child. The `tsx` grammar
+parses the plain-JavaScript comparison chain `a < b > (c)` as a call with
+`type_arguments` and no error node; emitting a `CALLS` edge there would be a guess.
+
+JSX is not a call site: a component is an ordinary `function` / arrow-function symbol, and
+`<Foo />` produces no relation of any kind.
 
 ### R5.6 — Reference source attribution
 
 Each reference carries `source_symbol_id` = the innermost extracted symbol whose byte
-range contains the reference node, or `None` at module level; `source_file_id` and
-`source_module_id` are always set. This is what makes `wiki_code_context` able to answer
-"what does this function call".
+range contains the reference node, or `None` at module level, and `source_file_id` is
+always set.
+
+`source_module_id` is set **only when `source_symbol_id` is `None`**. `schema.py:138`
+enforces `CHECK (source_module_id IS NULL OR source_symbol_id IS NULL)` on `relations`,
+and `resolver.py:338-340` copies both fields verbatim, so setting both would abort the
+build at snapshot insert. This mirrors `python.py:919-921`. Heritage references keep the
+shared machinery's `source_module_id = None`, so TypeScript output is unchanged.
 
 ### R5.7 — Trust rule
 
 No relation is emitted on a guess. Dynamic `require`, computed member access, runtime
-prototype juggling beyond R4.3, re-export forwarding, and bundler/tsconfig path aliases
-stay either absent or explicitly `unresolved` with the raw text preserved.
+prototype juggling beyond R4.3, re-export forwarding, bundler/tsconfig path aliases, and
+`type_arguments`-bearing pseudo-calls stay either absent or explicitly `unresolved` with
+the raw text preserved.
 
-## 6. Configuration and server wiring
+## 6. Resolver, configuration, and server wiring
 
-### R6.1 — Known languages
+### R6.1 — Language-family candidate scoping
+
+`SymbolIndex` gains a `languages_by_file_id: Mapping[str, str]` map, populated from each
+`ParsedFile.file.language` in `from_parsed_files` (empty for `from_symbols`, which has no
+file records). `resolver.resolve_references` already receives the calling adapter's
+`language`; `_symbol_candidates`, the `exact_modules` lookup, and any module candidate
+lookup filter to languages in the same family:
+
+```
+python     → {python}
+typescript → {typescript, javascript}
+javascript → {javascript, typescript}
+```
+
+A language absent from the family map, or a candidate whose language is unknown (empty
+map, as in `from_symbols`), is not filtered — existing behaviour is preserved.
+
+Rationale: R3.3 injects a dotted module name for every JavaScript file. Without scoping,
+`src/utils.js` → `src.utils` collides with a Python `src.utils`, flipping a **Python**
+import from `resolved` to `ambiguous` and violating the intent's "Python and TypeScript
+graphs stay bit-for-bit identical" health metric.
+
+### R6.2 — Known languages
 
 `codegraph/config.py`: `KNOWN_LANGUAGES = frozenset({"python", "typescript", "javascript"})`
 and the validation message becomes
 `code_graph.languages supports only python, typescript, javascript`.
 
-### R6.2 — Adapter factory
+### R6.3 — Adapter factory
 
 `server.py::_code_graph_adapter_factories` registers a `"javascript"` factory with the
-extensions from R3.1, `parser_version`/`grammar_version` from R3.2, and
+extensions from R3.1, the versions from R3.2, and
 `adapter_version = "javascript-adapter-v1"`. `_code_graph_configured_languages`,
-`runtime.py`, and `query.py` need no change — they read the configured list.
+`runtime.py`, `query.py`, and `sqlite_adapter.py` need no change — they read
+`KNOWN_LANGUAGES` or the configured list.
 
-### R6.3 — Snapshot invalidation
+### R6.4 — Snapshot invalidation
 
 Adding a language to `code_graph.languages` changes the configured-language fingerprint,
 so an existing snapshot rebuilds; no schema migration and no publication-protocol change
@@ -245,28 +361,47 @@ is involved.
 
 ## 7. Testing
 
-### R7.1 — TypeScript regression baseline
+### R7.1 — TypeScript regression baselines (captured before the refactor)
 
-Before the refactor, a golden fixture set is captured from the current `typescript.py`:
-for each TypeScript/TSX fixture, the serialized `FileRecord`, `SymbolRecord`s,
-`ReferenceRecord`s, resolved `RelationRecord`s, and warnings. A test replays the fixtures
-through the refactored adapter and asserts equality against the stored golden data.
+Two committed baselines, both generated from `master` **before** any refactor commit and
+never regenerated in-test:
+
+- **Adapter-level:** `tests/codegraph/fixtures/typescript_golden.json` — for each
+  TypeScript/TSX fixture, the serialized `FileRecord`, `SymbolRecord`s,
+  `ReferenceRecord`s, resolved `RelationRecord`s, and warnings, as sorted dataclass dicts.
+  The fixture set must exercise every base-walker branch the refactor touches: an object
+  literal with shorthand and `pair`-valued methods at module level **and inside a class
+  method**, a `const` arrow function, a `var` function expression, a nested function
+  declaration, an interface/enum/type alias, a namespace, and a class with
+  `extends`/`implements`.
+- **Run-level:** a committed baseline over the existing mixed Python + TypeScript fixture
+  repository, asserting that a full index run after the change produces byte-identical
+  Python and TypeScript `FileRecord` / `SymbolRecord` / `RelationRecord` sets — the
+  intent's "Done when" comparison.
+
+Regenerating either baseline requires an explicit, reviewed commit.
 
 ### R7.2 — JavaScript adapter unit tests
 
-`tests/codegraph/test_javascript_adapter.py` covers: base declarations (R4.1), object
-literals (R4.2), prototype methods including the skipped unresolvable case (R4.3),
-duplicate identity warning (R4.4), ESM imports with every binding form (R5.1), CommonJS
-requires including the skipped dynamic form (R5.2), relative-specifier resolution
-including the `.index` candidate and the unresolved bare specifier (R5.3), inheritance
-across an import (R5.4), calls including the skipped computed forms (R5.5), source
-attribution (R5.6), and JSX parsing without error.
+`tests/codegraph/test_javascript_adapter.py` covers: base declarations and nested /
+anonymous scopes (R4.1), object literals including the computed-key skip (R4.2), prototype
+methods including the skipped unresolvable case (R4.3), symbol field rules (R4.4),
+duplicate identity warning (R4.5), ESM imports with every binding form including the
+binding-less side-effect import (R5.1), CommonJS requires including the skipped dynamic
+form (R5.2), specifier resolution — extension stripping, the `.index` candidate, the
+ambiguous case, the unresolved bare specifier, and no prefix matching (R5.3) — inheritance
+across an import (R5.4), calls including every skipped form and the `type_arguments` guard
+(R5.5), source attribution with `source_module_id` set only at module level (R5.6), and
+JSX parsing without error.
 
 ### R7.3 — Mixed-language indexing
 
 `tests/codegraph/test_mixed_language_indexing.py` gains JavaScript sources: one build over
 Python + TypeScript + JavaScript produces distinct `language` values, no `symbol_id` or
-`relation_id` collision, and a resolved JS→TS import edge.
+`relation_id` collision, and a resolved JS→TS import edge. It additionally asserts
+row-level equality of the Python and TypeScript relations between a build without
+JavaScript and a build with JavaScript, including a fixture where a Python module and a
+JavaScript module share a dotted name — the R6.1 guard.
 
 ### R7.4 — Config and server tests
 
@@ -274,21 +409,38 @@ Python + TypeScript + JavaScript produces distinct `language` values, no `symbol
 the updated message; `wiki_code_index` / `wiki_code_search` accept the `javascript`
 language filter.
 
-### R7.5 — Suite health
+### R7.5 — Extension routing and module identity
 
-`uv run pytest -q` passes and `uv run flake8 src tests` is clean.
+`.js`, `.jsx`, `.mjs`, and `.cjs` all route to `JavaScriptAdapter`;
+`adapter_version == "javascript-adapter-v1"`; a `.cjs` file containing only
+`module.exports = …` still yields a populated `module_id`, `module_qualified_name`, and
+`module_name_tokens_casefold` (R3.3).
+
+### R7.6 — Fingerprint
+
+Adding `"javascript"` to `code_graph.languages` changes the configured-language
+fingerprint and forces a rebuild (R6.4).
+
+### R7.7 — Suite health
+
+`uv run pytest -q` passes, `uv run flake8 src tests` is clean, and `pyproject.toml` gains
+no new runtime dependency.
 
 ## 8. Documentation and release
 
 `docs/architecture.md`, `README.md`, and `docs/README.ru.md` gain JavaScript in the
 code-graph language list with its extension set and its stated limits (no type inference,
-no bundler alias resolution). The bound wiki page covering code-graph languages is updated
-through the iwiki MCP tools. `pyproject.toml` gets a patch version bump.
+no bundler alias resolution, JS→TS edges only). The bound wiki page covering code-graph
+languages is updated through the iwiki MCP tools. `pyproject.toml` gets a patch version
+bump.
 
 ## 9. Out of scope
 
 - Type inference of any kind; no `node`, `tsc`, bundler, or `node_modules` involvement.
-- `export … from` re-export forwarding and `export` relation types.
+- `export … from` re-export forwarding and export relation types.
+- Specifier resolution for TypeScript imports, and therefore TS→JS edges.
 - tsconfig/jsconfig path aliases, `package.json` `imports`/`exports` maps.
 - Flow-annotated JavaScript, Vue/Svelte single-file components, `.d.ts` handling.
+- Minified bundles outside the default excluded directories: they are bounded only by
+  `max_file_bytes`; no `.min.js` filter is added.
 - Any behavioural change to the Python or TypeScript adapters.
