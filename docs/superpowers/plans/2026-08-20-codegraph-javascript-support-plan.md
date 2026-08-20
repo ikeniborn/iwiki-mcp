@@ -2,6 +2,10 @@
 chain:
   intent: docs/superpowers/intents/2026-08-20-codegraph-javascript-support-intent.md
   spec: docs/superpowers/specs/2026-08-20-codegraph-javascript-support-design.md
+result_check:
+  verdict: OK
+  plan_hash: c0ed918687cf0b0f
+  last_run: 2026-08-20
 review:
   plan_hash: c0ed918687cf0b0f
   last_run: 2026-08-20
