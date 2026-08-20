@@ -51,6 +51,17 @@ def test_context_validation_rejects_unbounded_or_untyped_input(seeds, changes):
         validate_context_request(seeds, **changes)
 
 
+def test_javascript_and_typescript_seeds_are_accepted():
+    digest = "a" * 64
+    request = validate_context_request([f"js:symbol:{digest}", f"ts:symbol:{digest}"])
+    assert len(request.seeds) == 2
+
+
+def test_unregistered_language_prefix_is_still_rejected():
+    with pytest.raises(CodeGraphContextError):
+        validate_context_request(["rb:symbol:" + "a" * 64])
+
+
 def test_context_validation_precedes_runtime_binding_and_io(seed_runtime, monkeypatch):
     def forbidden_guard():
         raise AssertionError("query guard must not run")
@@ -66,7 +77,7 @@ def test_context_validation_precedes_runtime_binding_and_io(seed_runtime, monkey
 @pytest.mark.parametrize(
     "seed",
     [
-        "ts:file:" + "a" * 64,
+        "rb:file:" + "a" * 64,
         "python:file:" + "a" * 64,
         "PY:file:" + "a" * 64,
         "py:alias:" + "a" * 64,

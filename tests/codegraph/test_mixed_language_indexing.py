@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from iwiki_mcp import server
+from iwiki_mcp.codegraph import context as context_module
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.indexer import CodeGraphIndexer
 from iwiki_mcp.codegraph.linking import WikiSelectorResolver
@@ -426,6 +427,37 @@ def test_search_reports_accurate_ranges_for_a_javascript_symbol(tmp_path):
     source = (FIXTURES / "mixed_python_typescript_javascript" / "widget.jsx").read_bytes()
     assert source[widget.start_byte:widget.end_byte].startswith(b"Widget")
     assert widget.start_line >= 1 and widget.end_line >= widget.start_line
+
+
+def _context_for(cache_base: Path, *, path_suffix: str) -> dict[str, object]:
+    """Run one CodeGraphContext.context() query the way the MCP tool does.
+
+    Seeds on the file's module id rather than a symbol id: DECLARES and
+    IMPORTS relations for top-level declarations are sourced from the
+    module (see resolver.py's `source_module_id` fallback when there is no
+    enclosing symbol), not from any single symbol, so only a module seed
+    reaches both edge kinds directly. depth=2 then lets the traversal step
+    from the module's DECLARES-linked symbols (app.js's `run` and `Panel`)
+    to their own CALLS and INHERITS relations.
+    """
+    project_dir = FIXTURES / "mixed_python_typescript_javascript"
+    indexer = _build_indexer(cache_base, project_dir, languages=_ALL_LANGUAGES)
+    built = indexer.build(force=True)
+    assert built["state"] == "ready"
+    module_id = next(
+        row["module_id"] for row in indexer.build_rows().tables["files"]
+        if row["path"].endswith(path_suffix)
+    )
+    request = context_module.validate_context_request([module_id], depth=2)
+    engine = context_module.CodeGraphContext(_DOMAIN, None, 1_000_000)
+    with indexer.store.read_lease() as connection:
+        return engine.context(connection, request)
+
+
+def test_context_for_a_javascript_symbol_returns_its_relations(tmp_path):
+    result = _context_for(tmp_path / "context", path_suffix="app.js")
+    kinds = {row["relation_type"] for row in result["relations"]}
+    assert {"DECLARES", "IMPORTS", "CALLS", "INHERITS"} <= kinds
 
 
 def test_typescript_files_respect_exclude_patterns(tmp_path):
