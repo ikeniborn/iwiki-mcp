@@ -92,3 +92,64 @@ def test_jsx_parses_without_error():
 def test_source_must_be_bytes():
     with pytest.raises(TypeError):
         _adapter().parse_file("export const a = 1;", "a.js")
+
+
+def test_object_literal_methods_are_scoped_under_the_declarator():
+    source = (
+        b"export const api = {\n"
+        b"  get(u) { return u; },\n"
+        b"  post: function (u) { return u; },\n"
+        b"  put: (u) => u,\n"
+        b"  'quoted': (u) => u,\n"
+        b"  [dynamic]: (u) => u,\n"
+        b"  ...spread,\n"
+        b"  plain: 1,\n"
+        b"};\n"
+    )
+    parsed = _adapter().parse_file(source, "src/api.js")
+    names = {symbol.qualified_name for symbol in parsed.symbols}
+    assert {
+        "src.api.api.get", "src.api.api.post", "src.api.api.put", "src.api.api.quoted",
+    } <= names
+    assert not any(name.endswith(".plain") for name in names)
+    assert not any("dynamic" in name or "spread" in name for name in names)
+
+
+def test_destructuring_declarator_with_object_initializer_is_skipped():
+    parsed = _adapter().parse_file(b"const { a } = { a() { return 1; } };\n", "src/d.js")
+    assert parsed.symbols == ()
+
+
+def test_prototype_method_attaches_to_a_known_local_symbol():
+    source = (
+        b"function Widget() {}\n"
+        b"Widget.prototype.render = function (x) { return x; };\n"
+        b"Unknown.prototype.hidden = function () {};\n"
+    )
+    parsed = _adapter().parse_file(source, "src/widget.js")
+    names = {symbol.qualified_name for symbol in parsed.symbols}
+    assert "src.widget.Widget.render" in names
+    assert not any("hidden" in name for name in names)
+
+
+def test_object_literal_method_signature_has_no_return_segment():
+    parsed = _adapter().parse_file(b"const api = { get(a, b) { return a; } };\n", "s.js")
+    symbol = next(item for item in parsed.symbols if item.local_name == "get")
+    assert symbol.kind == "method"
+    assert symbol.signature == "method|(a, b)"
+    assert symbol.visibility == "public"
+
+
+def test_async_object_literal_method_signature_marks_async():
+    parsed = _adapter().parse_file(b"const api = { async get(a) { return a; } };\n", "s.js")
+    symbol = next(item for item in parsed.symbols if item.local_name == "get")
+    assert symbol.signature == "method|async(a)"
+
+
+def test_duplicate_symbol_identity_warns():
+    source = (
+        b"if (x) { function dup() { return 1; } }\n"
+        b"else { function dup() { return 2; } }\n"
+    )
+    parsed = _adapter().parse_file(source, "src/dup.js")
+    assert "duplicate_symbol_identity" in parsed.warnings

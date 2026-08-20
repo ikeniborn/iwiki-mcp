@@ -24,6 +24,101 @@ from ..models import (
 from ..resolver import declaration_relations, resolve_references, sort_relations
 
 
+def member_chain(node):
+    """Dotted parts of a non-computed member chain, or None.
+
+    Returns None for anything whose target is not decidable statically:
+    a computed access (`a[k]`), a call in the chain (`f().b`), or any
+    non-identifier link. Callers must not guess past a None.
+    """
+    parts = []
+    current = node
+    while current.type == "member_expression":
+        prop = current.child_by_field_name("property")
+        if prop is None or prop.type != "property_identifier":
+            return None
+        parts.append(prop)
+        current = current.child_by_field_name("object")
+        if current is None:
+            return None
+    if current.type != "identifier":
+        return None
+    parts.append(current)
+    return tuple(
+        part.text.decode("utf-8", "replace") for part in reversed(parts)
+    )
+
+
+def object_pair_hook(node, owner_qualified, make_symbol, symbols):
+    """Claim `key: function () {}` / `key: () => {}` inside an object literal.
+
+    Shorthand methods are already claimed by the walker's
+    `method_definition` branch; only `pair` nodes need this. Computed keys
+    and spread properties are skipped -- their target is not statically
+    decidable.
+    """
+    if node.type != "pair" or owner_qualified is None:
+        return False
+    key = node.child_by_field_name("key")
+    value = node.child_by_field_name("value")
+    if key is None or value is None:
+        return False
+    if key.type not in ("property_identifier", "string"):
+        return False
+    if value.type not in ("function_expression", "arrow_function"):
+        return False
+    make_symbol(
+        node, "method", key,
+        owner_qualified=owner_qualified,
+        params_node=value.child_by_field_name("parameters"),
+        is_async=any(child.type == "async" for child in value.children),
+        local_name=key.text.decode("utf-8", "replace").strip("\"'"),
+    )
+    return True
+
+
+def prototype_method_hook(node, owner_qualified, make_symbol, symbols):
+    """Attach `C.prototype.m = function () {}` to an already-known `C`.
+
+    Deliberately narrow: the owner must resolve to a symbol already
+    extracted from this file, so a prototype patch on an imported or
+    runtime-built object is skipped instead of guessed at.
+    """
+    if node.type != "expression_statement":
+        return False
+    assignment = next(
+        (child for child in node.children if child.type == "assignment_expression"),
+        None,
+    )
+    if assignment is None:
+        return False
+    left = assignment.child_by_field_name("left")
+    value = assignment.child_by_field_name("right")
+    if left is None or value is None:
+        return False
+    if value.type not in ("function_expression", "arrow_function"):
+        return False
+    parts = member_chain(left)
+    if parts is None or len(parts) != 3 or parts[1] != "prototype":
+        return False
+    owner = next(
+        (
+            item for item in symbols
+            if item.local_name == parts[0] and item.kind in ("class", "function")
+        ),
+        None,
+    )
+    if owner is None:
+        return False
+    make_symbol(
+        node, "method", left.child_by_field_name("property"),
+        owner_qualified=owner.qualified_name,
+        params_node=value.child_by_field_name("parameters"),
+        is_async=any(child.type == "async" for child in value.children),
+    )
+    return True
+
+
 JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
     language="javascript",
     prefix="js",
@@ -31,7 +126,7 @@ JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
     handles_interface=False,
     handles_namespace=False,
     object_literal_scope=True,
-    declaration_hooks=(),          # Task 6 fills this in
+    declaration_hooks=(object_pair_hook, prototype_method_hook),
 )
 
 
