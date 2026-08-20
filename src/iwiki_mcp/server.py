@@ -52,7 +52,7 @@ from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401
 from .codegraph.languages import typescript as _codegraph_typescript
-from .codegraph.languages import javascript as _codegraph_javascript  # noqa: F401
+from .codegraph.languages import javascript as _codegraph_javascript
 from .lock import mutation_lock
 from .engine import classify, rerank
 from .engine import frontmatter as _fm
@@ -121,6 +121,13 @@ def _code_graph_adapter_factories(repository_id, config=None):
             ),
         )
 
+    def create_javascript_adapter(source_paths):
+        return _codegraph_javascript.JavaScriptAdapter(
+            repository_id,
+            source_paths,
+            parser_version=_TYPESCRIPT_PARSER_VERSION,
+        )
+
     return {
         "python": _codegraph_indexer.AdapterFactory(
             create=create_python_adapter,
@@ -145,6 +152,18 @@ def _code_graph_adapter_factories(repository_id, config=None):
                 _TYPESCRIPT_PARSER_VERSION,
             )),
             adapter_version="typescript-adapter-v1",
+        ),
+        "javascript": _codegraph_indexer.AdapterFactory(
+            create=create_javascript_adapter,
+            extensions=(".js", ".jsx", ".mjs", ".cjs"),
+            parser_version=_TYPESCRIPT_PARSER_VERSION,
+            grammar_version=";".join((
+                "tree-sitter:" + _distribution_version("tree-sitter"),
+                "tree-sitter-language-pack:"
+                + _distribution_version("tree-sitter-language-pack"),
+                _TYPESCRIPT_PARSER_VERSION,
+            )),
+            adapter_version="javascript-adapter-v1",
         ),
     }
 

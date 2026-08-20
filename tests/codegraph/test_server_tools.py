@@ -614,6 +614,16 @@ def test_adapter_factories_include_typescript():
     assert adapter.language == "typescript"
 
 
+def test_javascript_factory_is_registered():
+    factories = server._code_graph_adapter_factories("domain")
+    factory = factories["javascript"]
+    assert factory.extensions == (".js", ".jsx", ".mjs", ".cjs")
+    assert factory.adapter_version == "javascript-adapter-v1"
+    adapter = factory.create(())
+    assert adapter.language == "javascript"
+    assert adapter.parser_version.startswith("tree-sitter-typescript:")
+
+
 @pytest.mark.parametrize(
     ("handler", "args"),
     [

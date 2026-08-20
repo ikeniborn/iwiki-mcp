@@ -304,7 +304,7 @@ def test_begin_accepts_mixed_language_header(sqlite_contract):
     [
         {"protocol_version": 2},
         {"schema_version": 1},
-        {"languages": ("javascript",)},
+        {"languages": ("ruby",)},
     ],
 )
 def test_begin_maps_malformed_header_to_closed_publication_error(

@@ -3237,3 +3237,18 @@ def test_final_canonical_verify_failure_transitions_new_revision_to_failed(
     assert persisted["revision"] == status["revision"]
     assert "final verify fixture secret" not in str(rebuilt)
     assert "final verify fixture secret" not in str(status)
+
+
+def test_adding_javascript_changes_the_configured_language_fingerprint():
+    common = dict(
+        schema_version=2,
+        parser_version="p",
+        grammar_version="g",
+        adapter_version="a",
+        resolver_version="r",
+        normalizer_version="n",
+        unicode_data_version="u",
+    )
+    without = parser_fingerprint(languages=("python",), **common)
+    with_js = parser_fingerprint(languages=("python", "javascript"), **common)
+    assert without != with_js

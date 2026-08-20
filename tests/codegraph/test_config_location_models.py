@@ -568,6 +568,17 @@ def test_languages_rejects_unknown_language():
         CodeGraphConfig.from_mapping({"languages": ["python", "ruby"]})
 
 
+def test_languages_accepts_javascript():
+    config = CodeGraphConfig.from_mapping({"languages": ["python", "javascript"]})
+    assert config.languages == ("python", "javascript")
+
+
+def test_languages_rejects_unknown_language_message_lists_javascript():
+    with pytest.raises(CodeGraphConfigError) as excinfo:
+        CodeGraphConfig.from_mapping({"languages": ["ruby"]})
+    assert "python, typescript, javascript" in str(excinfo.value)
+
+
 def test_typescript_type_boost_defaults_false():
     config = CodeGraphConfig.from_mapping({})
     assert config.typescript_type_boost is False
