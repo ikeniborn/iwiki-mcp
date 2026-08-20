@@ -1,475 +1,41 @@
-"""Tree-sitter-only TypeScript/TSX declaration extraction."""
+"""Tree-sitter-only TypeScript/TSX declaration extraction.
+
+The Tree-sitter machinery this adapter runs on is shared with the
+JavaScript adapter and lives in `_ecmascript`; what stays here is what is
+TypeScript-specific: the grammar choice, the language profile, and the
+opt-in `tsc` type boost.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any
+from pathlib import PurePosixPath
 
+from . import _ecmascript
 from ..models import (
     FileRecord,
     ParsedFile,
-    ReferenceRecord,
     ResolutionResult,
-    SymbolRecord,
     compact_casefold,
     file_id,
     module_id,
-    symbol_id,
     token_key,
 )
 from ..resolver import declaration_relations, resolve_references, sort_relations
 
 
-_PARSERS: dict[str, Any] = {}
-
-_KIND_BY_NODE = {
-    "type_alias_declaration": "type_alias",
-    "enum_declaration": "enum",
-}
-
-
-def _text(source: bytes, node) -> str:
-    return source[node.start_byte:node.end_byte].decode("utf-8", "replace")
-
-
-def _param_signature(source: bytes, params_node) -> str:
-    if params_node is None:
-        return "()"
-    return _text(source, params_node)
-
-
-def _return_type_signature(source: bytes, return_type_node) -> str:
-    if return_type_node is None:
-        return ""
-    return "->" + _text(source, return_type_node).lstrip(":").strip()
-
-
-def _visibility(name: str) -> str:
-    return "private" if name.startswith("_") or name.startswith("#") else "public"
-
-
-@dataclass(frozen=True)
-class _PendingHeritage:
-    """A class/interface heritage clause target awaiting scope resolution.
-
-    TypeScript name resolution is lexical: the target of `extends`/
-    `implements` may be declared in the declaring class/interface's own
-    enclosing scope, or in any scope outward from there, down to the
-    module -- it is not necessarily a sibling in the *same* scope as the
-    declaring class. Building the final `target_reference` therefore needs
-    the full (deduplicated) symbol set for the file, which isn't known
-    until `walk()` finishes. This record carries just enough to resolve it
-    in that later pass: `owner_qualified` is the qualified name of the
-    scope the declaring class/interface itself sits in (the innermost
-    scope to probe first), and `name` is the heritage target's bare
-    identifier. See `_resolve_heritage_references`.
-    """
-
-    owner_symbol_id: str
-    source_file_id: str
-    owner_qualified: str | None
-    name: str
-    source_line: int
-    source_byte: int
-    source_end_line: int
-    source_end_byte: int
-
-
-def _pending_heritage_references(
-    source: bytes, node, *, owner_symbol_id: str, source_file_id: str,
-    owner_qualified: str | None = None,
-):
-    pending = []
-    heritage = next(
-        (child for child in node.children if child.type == "class_heritage"), None
-    )
-    clauses = []
-    if heritage is not None:
-        clauses.extend(heritage.children)
-    extends_type = next(
-        (child for child in node.children if child.type == "extends_type_clause"),
-        None,
-    )
-    if extends_type is not None:
-        clauses.append(extends_type)
-    for clause in clauses:
-        if clause.type not in ("extends_clause", "implements_clause", "extends_type_clause"):
-            continue
-        for target in clause.children:
-            if target.type not in ("identifier", "type_identifier", "nested_type_identifier"):
-                continue
-            name = _text(source, target)
-            pending.append(_PendingHeritage(
-                owner_symbol_id=owner_symbol_id,
-                source_file_id=source_file_id,
-                owner_qualified=owner_qualified,
-                name=name,
-                source_line=clause.start_point[0] + 1,
-                source_byte=clause.start_byte,
-                source_end_line=clause.end_point[0] + 1,
-                source_end_byte=clause.end_byte,
-            ))
-    return tuple(pending)
-
-
-def _heritage_scope_candidates(
-    owner_qualified: str | None, module_dotted_name: str,
-) -> tuple[str, ...]:
-    """Ordered scope-qualified-name prefixes to probe, innermost first.
-
-    Always ends at `module_dotted_name`, the outermost (module) scope --
-    the same fallback target `_pending_heritage_references` used to build
-    unconditionally before this fix.
-    """
-    if not owner_qualified:
-        return (module_dotted_name,)
-    candidates = [owner_qualified]
-    scope = owner_qualified
-    while scope != module_dotted_name and "." in scope:
-        scope = scope.rsplit(".", 1)[0]
-        candidates.append(scope)
-    if candidates[-1] != module_dotted_name:
-        candidates.append(module_dotted_name)
-    return tuple(candidates)
-
-
-def _resolve_heritage_references(
-    pending: tuple[_PendingHeritage, ...],
-    qualified_names: set[str],
-    module_dotted_name: str,
-) -> tuple[ReferenceRecord, ...]:
-    """Resolve each pending heritage target to the innermost matching scope.
-
-    Tries `owner_qualified` (the declaring class/interface's own enclosing
-    scope) first, then walks outward one `.`-separated scope level at a
-    time down to `module_dotted_name`, using the first candidate that
-    matches an actually-collected symbol's `qualified_name`. If none
-    match, falls back to the module-scoped candidate (last in the probe
-    order) -- an unresolved-but-present reference, same as before this fix,
-    for heritage targets that are genuinely external/cross-file.
-    """
-    references = []
-    for item in pending:
-        candidates = _heritage_scope_candidates(item.owner_qualified, module_dotted_name)
-        target_reference = f"{candidates[-1]}.{item.name}"
-        for scope in candidates:
-            candidate = f"{scope}.{item.name}"
-            if candidate in qualified_names:
-                target_reference = candidate
-                break
-        references.append(ReferenceRecord(
-            source_symbol_id=item.owner_symbol_id,
-            source_file_id=item.source_file_id,
-            relation_type="INHERITS",
-            target_reference=target_reference,
-            source_line=item.source_line,
-            source_byte=item.source_byte,
-            source_end_line=item.source_end_line,
-            source_end_byte=item.source_end_byte,
-            resolution_scope="file",
-        ))
-    return tuple(references)
-
-
-def _extract_symbols(
-    source: bytes,
-    root,
-    *,
-    language: str,
-    prefix: str,
-    repository_id: str,
-    relative_path: str,
-    file_record: FileRecord,
-    module_dotted_name: str,
-):
-    symbols: list[SymbolRecord] = []
-    pending_heritage: list[_PendingHeritage] = []
-
-    def make_symbol(
-        node, kind, name_node, *, owner_qualified=None,
-        params_node=None, return_type_node=None, is_async=False,
-    ):
-        local_name = _text(source, name_node)
-        qualified = (
-            f"{owner_qualified}.{local_name}" if owner_qualified
-            else f"{module_dotted_name}.{local_name}"
-        )
-        record_kind = kind
-        signature = None
-        if kind in ("function", "method"):
-            record_kind = "async_function" if is_async and kind == "function" else kind
-            signature = (
-                f"{record_kind}|{'async' if is_async else ''}"
-                f"{_param_signature(source, params_node)}"
-                f"{_return_type_signature(source, return_type_node)}"
-            )
-        stable_id = symbol_id(
-            language, prefix, repository_id, relative_path,
-            qualified, signature or "",
-        )
-        symbols.append(SymbolRecord(
-            symbol_id=stable_id,
-            file_id=file_id(language, prefix, repository_id, relative_path),
-            kind=record_kind,
-            qualified_name=qualified,
-            local_name=local_name,
-            name_tokens_casefold=token_key(qualified, local_name),
-            start_line=node.start_point[0] + 1,
-            end_line=node.end_point[0] + 1,
-            start_byte=node.start_byte,
-            end_byte=node.end_byte,
-            signature=signature,
-            signature_casefold=compact_casefold(signature),
-            visibility=_visibility(local_name),
-            content_hash=hashlib.sha256(
-                source[node.start_byte:node.end_byte]
-            ).hexdigest(),
-            metadata_json="{}",
-        ))
-        return qualified, stable_id
-
-    def _namespace_qualified(child, owner_qualified):
-        """Scope a `namespace X { ... }` / `declare module "x" { ... }` body.
-
-        Neither construct emits its own SymbolRecord (extraction is scoped to
-        the plan's declaration kinds only), but nested declarations must
-        still be narrowed under the namespace/module's own name -- otherwise
-        two same-named declarations in different namespaces/ambient modules
-        flatten to the same qualified_name and collide, the same root cause
-        as C1's per-function collision.
-        """
-        name_node = child.child_by_field_name("name")
-        if name_node is None:
-            return owner_qualified
-        local_name = _text(source, name_node).strip("\"'")
-        if not local_name:
-            return owner_qualified
-        return (
-            f"{owner_qualified}.{local_name}" if owner_qualified
-            else f"{module_dotted_name}.{local_name}"
-        )
-
-    def walk(node, owner_qualified=None):
-        for child in node.children:
-            ctype = child.type
-            if ctype in _KIND_BY_NODE:
-                name_node = child.child_by_field_name("name")
-                qualified = owner_qualified
-                if name_node is not None:
-                    qualified, _ = make_symbol(
-                        child, _KIND_BY_NODE[ctype], name_node,
-                        owner_qualified=owner_qualified,
-                    )
-                walk(child, qualified)
-            elif ctype == "class_declaration":
-                name_node = child.child_by_field_name("name")
-                if name_node is None:
-                    walk(child, owner_qualified)
-                    continue
-                qualified, stable_id = make_symbol(
-                    child, "class", name_node, owner_qualified=owner_qualified,
-                )
-                pending_heritage.extend(_pending_heritage_references(
-                    source, child, owner_symbol_id=stable_id,
-                    source_file_id=file_record.file_id, owner_qualified=owner_qualified,
-                ))
-                body = child.child_by_field_name("body")
-                if body is not None:
-                    walk(body, qualified)
-            elif ctype == "interface_declaration":
-                name_node = child.child_by_field_name("name")
-                qualified = owner_qualified
-                if name_node is not None:
-                    qualified, stable_id = make_symbol(
-                        child, "interface", name_node, owner_qualified=owner_qualified,
-                    )
-                    pending_heritage.extend(_pending_heritage_references(
-                        source, child, owner_symbol_id=stable_id,
-                        source_file_id=file_record.file_id, owner_qualified=owner_qualified,
-                    ))
-                walk(child, qualified)
-            elif ctype == "method_definition":
-                name_node = child.child_by_field_name("name")
-                qualified = owner_qualified
-                if name_node is not None and owner_qualified is not None:
-                    qualified, _ = make_symbol(
-                        child, "method", name_node,
-                        owner_qualified=owner_qualified,
-                        params_node=child.child_by_field_name("parameters"),
-                        return_type_node=child.child_by_field_name("return_type"),
-                        is_async=any(
-                            grandchild.type == "async"
-                            for grandchild in child.children
-                        ),
-                    )
-                walk(child, qualified)
-            elif ctype == "function_declaration":
-                name_node = child.child_by_field_name("name")
-                qualified = owner_qualified
-                if name_node is not None:
-                    qualified, _ = make_symbol(
-                        child, "function", name_node,
-                        owner_qualified=owner_qualified,
-                        params_node=child.child_by_field_name("parameters"),
-                        return_type_node=child.child_by_field_name("return_type"),
-                        is_async=any(
-                            grandchild.type == "async" for grandchild in child.children
-                        ),
-                    )
-                walk(child, qualified)
-            elif ctype in ("lexical_declaration", "variable_declaration"):
-                for declarator in child.children:
-                    if declarator.type != "variable_declarator":
-                        continue
-                    value = declarator.child_by_field_name("value")
-                    name_node = declarator.child_by_field_name("name")
-                    if (
-                        value is not None
-                        and value.type in ("arrow_function", "function_expression")
-                        and name_node is not None
-                    ):
-                        qualified, _ = make_symbol(
-                            declarator, "function", name_node,
-                            owner_qualified=owner_qualified,
-                            params_node=value.child_by_field_name("parameters"),
-                            return_type_node=value.child_by_field_name("return_type"),
-                            is_async=any(
-                                grandchild.type == "async"
-                                for grandchild in value.children
-                            ),
-                        )
-                        walk(value, qualified)
-                    else:
-                        walk(declarator, owner_qualified)
-            elif ctype == "internal_module":
-                # `namespace X { ... }` / `declare namespace X.Y { ... }`.
-                walk(child, _namespace_qualified(child, owner_qualified))
-            elif ctype == "module" and child.child_by_field_name("body") is not None:
-                # Ambient `declare module "specifier" { ... }`; the plain
-                # `module` node type only carries a body in this ambient
-                # shape, so this can't misfire on an unrelated grammar node.
-                walk(child, _namespace_qualified(child, owner_qualified))
-            else:
-                walk(child, owner_qualified)
-
-    walk(root)
-    return tuple(symbols), tuple(pending_heritage)
-
-
-def _import_bindings(source: bytes, clause) -> tuple[tuple[str, str], ...]:
-    """Return (binding_name, binding_kind) pairs one import clause binds.
-
-    ``import_clause`` children (no field names in the grammar) are one of:
-    a bare ``identifier`` (default import), a ``named_imports`` block of
-    ``import_specifier`` nodes (each with a ``name`` field and an optional
-    ``alias`` field), a ``namespace_import`` (``* as name``), or a default
-    identifier followed by a ``named_imports`` block (combined form). A
-    side-effect-only import (``import "./m"``) has no clause at all.
-    """
-    if clause is None:
-        return ()
-    bindings: list[tuple[str, str]] = []
-    for item in clause.children:
-        if item.type == "identifier":
-            bindings.append((_text(source, item), "implicit_binding"))
-        elif item.type == "named_imports":
-            for specifier in item.children:
-                if specifier.type != "import_specifier":
-                    continue
-                alias_node = specifier.child_by_field_name("alias")
-                if alias_node is not None:
-                    bindings.append((_text(source, alias_node), "explicit_alias"))
-                    continue
-                name_node = specifier.child_by_field_name("name")
-                if name_node is not None:
-                    bindings.append((_text(source, name_node), "implicit_binding"))
-        elif item.type == "namespace_import":
-            name_node = next(
-                (grandchild for grandchild in item.children
-                 if grandchild.type == "identifier"),
-                None,
-            )
-            if name_node is not None:
-                # "* as ns" always renames the whole module namespace, the
-                # same semantics as Python's "import x as y".
-                bindings.append((_text(source, name_node), "explicit_alias"))
-    return tuple(bindings)
-
-
-def _extract_references(source: bytes, root, *, file_record: FileRecord):
-    references: list[ReferenceRecord] = []
-    for child in root.children:
-        if child.type != "import_statement":
-            continue
-        source_node = child.child_by_field_name("source")
-        if source_node is None:
-            continue
-        specifier = _text(source, source_node).strip("\"'")
-        clause = next(
-            (grandchild for grandchild in child.children
-             if grandchild.type == "import_clause"),
-            None,
-        )
-        for binding_name, binding_kind in _import_bindings(source, clause):
-            references.append(ReferenceRecord(
-                source_symbol_id=None,
-                source_file_id=file_record.file_id,
-                source_module_id=file_record.module_id,
-                relation_type="IMPORTS",
-                target_reference=specifier,
-                source_line=child.start_point[0] + 1,
-                source_byte=child.start_byte,
-                source_end_line=child.end_point[0] + 1,
-                source_end_byte=child.end_byte,
-                binding_name=binding_name,
-                binding_kind=binding_kind,
-                binding_name_tokens_casefold=token_key(binding_name),
-                resolution_hint="unresolved",
-            ))
-    return tuple(references)
-
-
-def _relative_path(path: str) -> str:
-    """Keep only a safe POSIX source-relative spelling, never an absolute path."""
-    if not isinstance(path, str) or not path or "\\" in path:
-        raise ValueError("invalid source path")
-    windows_path = PureWindowsPath(path)
-    posix_path = PurePosixPath(path)
-    if (
-        windows_path.is_absolute()
-        or windows_path.drive
-        or posix_path.is_absolute()
-        or ".." in posix_path.parts
-    ):
-        raise ValueError("invalid source path")
-    return "/".join(part for part in posix_path.parts if part != ".")
+_TYPESCRIPT_PROFILE = _ecmascript.LanguageProfile(
+    language="typescript",
+    prefix="ts",
+    kind_by_node={
+        "type_alias_declaration": "type_alias",
+        "enum_declaration": "enum",
+    },
+)
 
 
 def _grammar_name(path: str) -> str:
     return "tsx" if path.casefold().endswith(".tsx") else "typescript"
-
-
-def _get_parser(grammar: str) -> Any:
-    parser = _PARSERS.get(grammar)
-    if parser is not None:
-        return parser
-    from tree_sitter import Language, Parser
-
-    try:
-        from tree_sitter_language_pack import get_parser
-        parser = get_parser(grammar)
-    except Exception:
-        import tree_sitter_typescript as ts_typescript
-
-        capsule = (
-            ts_typescript.language_tsx()
-            if grammar == "tsx"
-            else ts_typescript.language_typescript()
-        )
-        parser = Parser(Language(capsule))
-    _PARSERS[grammar] = parser
-    return parser
 
 
 def _run_tsc_boost(source: bytes, path: str, *, timeout_seconds: float = 5.0):
@@ -539,12 +105,12 @@ class TypeScriptAdapter:
     def parse_file(self, source: bytes, path: str) -> ParsedFile:
         if not isinstance(source, bytes):
             raise TypeError("source must be bytes")
-        relative_path = _relative_path(path)
+        relative_path = _ecmascript.relative_path(path)
         content_hash = hashlib.sha256(source).hexdigest()
         stable_file_id = file_id(
             self.language, self.prefix, self.repository_id, relative_path,
         )
-        parser = _get_parser(_grammar_name(relative_path))
+        parser = _ecmascript.get_parser(_grammar_name(relative_path))
         tree = parser.parse(source)
         root = tree.root_node
 
@@ -589,9 +155,9 @@ class TypeScriptAdapter:
                 if module_qualified_name else None
             ),
         )
-        symbols, pending_heritage = _extract_symbols(
+        symbols, pending_heritage = _ecmascript.extract_symbols(
             source, root,
-            language=self.language, prefix=self.prefix,
+            profile=_TYPESCRIPT_PROFILE,
             repository_id=self.repository_id, relative_path=relative_path,
             file_record=file, module_dotted_name=module_dotted_name,
         )
@@ -605,31 +171,19 @@ class TypeScriptAdapter:
         # constraint, keeping the last-by-position declaration and surfacing
         # a warning so the degradation is visible. Mirrors python.py's
         # equivalent dedup in `parse_file`.
-        symbols_by_id: dict[str, SymbolRecord] = {}
-        duplicate_symbol_ids: set[str] = set()
-        for symbol in symbols:
-            previous = symbols_by_id.get(symbol.symbol_id)
-            if previous is not None:
-                duplicate_symbol_ids.add(symbol.symbol_id)
-            if previous is None or symbol.start_byte >= previous.start_byte:
-                symbols_by_id[symbol.symbol_id] = symbol
-        symbols = list(symbols_by_id.values())
-        symbols.sort(key=lambda item: (item.start_byte or -1, item.qualified_name))
-        warnings = tuple(sorted((
-            *("duplicate_symbol_identity" for _item in duplicate_symbol_ids),
-        )))
+        symbols, warnings = _ecmascript.dedupe_symbols(symbols)
         # Heritage targets resolve against the final, post-dedup symbol set
-        # (see `_resolve_heritage_references`): TypeScript name resolution
-        # is lexical, so a class's `extends`/`implements` target may live in
-        # any enclosing scope outward from where the class itself is
-        # declared, not just the class's own immediate scope.
-        heritage_references = _resolve_heritage_references(
+        # (see `_ecmascript.resolve_heritage_references`): TypeScript name
+        # resolution is lexical, so a class's `extends`/`implements` target
+        # may live in any enclosing scope outward from where the class
+        # itself is declared, not just the class's own immediate scope.
+        heritage_references = _ecmascript.resolve_heritage_references(
             pending_heritage,
             {symbol.qualified_name for symbol in symbols},
             module_dotted_name,
         )
         references = (
-            *_extract_references(source, root, file_record=file),
+            *_ecmascript.esm_import_references(source, root, file_record=file),
             *heritage_references,
         )
         return _TypeScriptParsedFile(

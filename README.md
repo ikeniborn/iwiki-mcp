@@ -356,9 +356,10 @@ creation, physical wiki deletion, and automatic embedding-model/dimension migrat
 ## Python code graph MVP
 
 The optional code graph is a separate, local SQLite cache for the project bound to
-the primary wiki domain. It indexes Python and/or TypeScript/TSX source, depending on
-the configured `languages`, and does not change `wiki_search` or the Markdown/vector
-wiki indexes. The cache paths are derived from the wiki base and primary domain:
+the primary wiki domain. It indexes Python, TypeScript/TSX, and/or JavaScript source,
+depending on the configured `languages`, and does not change `wiki_search` or the
+Markdown/vector wiki indexes. The cache paths are derived from the wiki base and
+primary domain:
 
 ```text
 <IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3
@@ -369,13 +370,13 @@ wiki indexes. The cache paths are derived from the wiki base and primary domain:
 ```
 
 Configure it in the bound project's `.iwiki.toml`. All values are optional; these
-are the defaults. `languages` accepts `python` and/or `typescript`. `exclude` entries
-must be safe relative paths.
+are the defaults. `languages` accepts `python`, `typescript`, and/or `javascript`.
+`exclude` entries must be safe relative paths.
 
 ```toml
 [code_graph]
 enabled = true
-languages = ["python", "typescript"]
+languages = ["python", "typescript", "javascript"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
 max_full_rebuild_seconds = 10
@@ -421,6 +422,47 @@ and delivery. TypeScript support is Tree-sitter-only static extraction (declarat
 imports, class/interface heritage); it does not extract interface members, and
 `typescript_type_boost`'s Compiler API subprocess is opt-in, best-effort, and does not
 yet wire real type information into resolution.
+
+JavaScript support (extensions `.js`, `.jsx`, `.mjs`, `.cjs`) is Tree-sitter-only static
+extraction, parsed with the same `tsx` grammar as TypeScript/TSX — a syntactic superset
+of JavaScript including JSX, so no new parser dependency was added. Unlike TypeScript,
+every JavaScript file is unconditionally module-backed (no top-level import/export
+probe), because a CommonJS file that only assigns `module.exports` must still be a
+resolvable import target. Extracted declarations cover classes, methods, functions
+(including `async`), `const`/`let`/`var` arrow and function expressions, object-literal
+methods (shorthand and `key: function`/`key: arrow`), and ES5 prototype methods
+(`C.prototype.m = ...`, only when `C` is already a symbol declared in the same file).
+Relations are `DECLARES`, `IMPORTS` (both ESM `import` and CommonJS `require`,
+including destructured `require`), `CALLS`, and `INHERITS`. A relative specifier
+(`./util.js`) resolves to a project module with its extension stripped, with a
+`<dir>.index` fallback for directory imports — this is what makes a JavaScript file
+import a TypeScript module. `wiki_code_context` accepts `js:` and `ts:` entity-ID
+seeds, not only `py:`.
+
+JavaScript's design priority is trust over coverage: it never emits a speculative
+edge. JS-to-TS imports resolve, but TS-to-JS imports do not — TypeScript's own import
+resolution was not changed and stays unresolved there. There is no type inference, no
+execution of `node`/`tsc`/a bundler, and `node_modules` is not traversed. tsconfig/
+jsconfig path aliases and `package.json` `imports`/`exports` maps are not read, so a
+bare specifier stays unresolved. A dynamic `require(expr)`, a computed member access
+(`o[k]()`), a call of a call (`f()()`), and a tagged template produce no edge. A bare
+call inside a class method or an object-literal method does not bind to a sibling
+member, because JavaScript itself requires `this.`/the object name for that — only a
+function-like enclosing scope or the module scope is probed, and `this.m()` and
+`super.m()` are not extracted. A value imported as a default export
+(`import thing from './m'`) is never expanded into module members: `thing` is the
+default-exported value, whose shape is not statically known, so `thing.build()` is not
+treated as the module's named export `build` and stays unresolved. A namespace import
+(`import * as ns`) and a whole-module `const m = require('./m')` do expand, because
+both genuinely bind the module object. The same non-expandability reaches `extends`: a
+class extending a default-imported base (`import Base from './base'; class X extends
+Base {}`) produces no project-scoped, resolved INHERITS edge — the heritage target
+falls back to the module-qualified name in the importing file and stays unresolved,
+matching what the TypeScript adapter already does for every imported heritage target.
+A named import (`import { Base } from './base'`) still resolves INHERITS across files.
+One known limitation: a local binding or parameter that shadows an imported name still
+expands to the import when a call target is built, because the resolver does not track
+real lexical scope; fixing that is out of this MVP's scope.
 
 ### Distributed code graph publication
 

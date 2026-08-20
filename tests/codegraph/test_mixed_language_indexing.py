@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from iwiki_mcp import server
+from iwiki_mcp.codegraph import context as context_module
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.indexer import CodeGraphIndexer
 from iwiki_mcp.codegraph.linking import WikiSelectorResolver
@@ -272,6 +273,191 @@ def test_typescript_anonymous_scope_collisions_deduplicate_with_warning(tmp_path
     rows = indexer.build_rows()
     symbol_ids = [row["symbol_id"] for row in rows.tables["symbols"]]
     assert len(symbol_ids) == len(set(symbol_ids))
+
+
+_ALL_LANGUAGES = ("python", "typescript", "javascript")
+
+
+def _build_tables(cache_base: Path, *, languages: tuple[str, ...]):
+    project_dir = FIXTURES / "mixed_python_typescript_javascript"
+    indexer = _build_indexer(cache_base, project_dir, languages=languages)
+    return indexer.build_rows().tables
+
+
+def _rows_for_languages(tables, table, prefixes):
+    if table == "files":
+        return [row for row in tables[table] if row["language"] in prefixes]
+    key = "symbol_id" if table == "symbols" else "relation_id"
+    return [
+        row for row in tables[table]
+        if any(row[key].startswith(prefix + ":") for prefix in prefixes)
+    ]
+
+
+def _search(cache_base: Path, *, query: str, languages: list[str]):
+    project_dir = FIXTURES / "mixed_python_typescript_javascript"
+    indexer = _build_indexer(cache_base, project_dir, languages=_ALL_LANGUAGES)
+    built = indexer.build(force=True)
+    assert built["state"] == "ready"
+    request = validate_search_request(
+        query, languages=languages, configured_languages=_ALL_LANGUAGES, limit=100,
+    )
+    with indexer.store.read_lease() as connection:
+        return CodeGraphQuery(_DOMAIN).search(connection, request)
+
+
+def test_javascript_rows_carry_their_own_language(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    assert {row["language"] for row in tables["files"]} == {
+        "python", "typescript", "javascript",
+    }
+    extensions = {
+        row["path"].rsplit(".", 1)[-1]
+        for row in tables["files"] if row["language"] == "javascript"
+    }
+    assert extensions == {"js", "jsx", "cjs", "mjs"}
+
+
+def test_identifiers_do_not_collide_across_languages(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    for table, key in (("symbols", "symbol_id"), ("relations", "relation_id")):
+        identifiers = [row[key] for row in tables[table]]
+        assert len(identifiers) == len(set(identifiers))
+    # The fixture's intended collision must actually exist: shared/utils.py
+    # and shared/utils.js both derive the dotted qualified name
+    # "shared.utils.helper" -- if that collision ever stopped existing, this
+    # guard test would be protecting against nothing.
+    colliding_symbol_ids = {
+        row["symbol_id"] for row in tables["symbols"]
+        if row["qualified_name"] == "shared.utils.helper"
+    }
+    assert len(colliding_symbol_ids) == 2
+    prefixes = {symbol_id.split(":", 1)[0] for symbol_id in colliding_symbol_ids}
+    assert prefixes == {"py", "js"}
+
+
+def test_javascript_cross_file_calls_and_inherits_resolve_into_typescript(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    symbol_ids_by_qualified_name = {
+        row["qualified_name"]: row["symbol_id"] for row in tables["symbols"]
+    }
+    build_symbol_id = symbol_ids_by_qualified_name["shapes.build"]
+    shape_symbol_id = symbol_ids_by_qualified_name["shapes.Shape"]
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "CALLS"
+        and row["resolution_state"] == "resolved"
+        and row["target_symbol_id"] == build_symbol_id
+        for row in tables["relations"]
+    )
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "INHERITS"
+        and row["resolution_state"] == "resolved"
+        and row["target_symbol_id"] == shape_symbol_id
+        for row in tables["relations"]
+    )
+
+
+def test_javascript_import_resolves_into_typescript(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    shapes_module_id = next(
+        row["module_id"] for row in tables["files"] if row["path"].endswith("shapes.ts")
+    )
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "IMPORTS"
+        and row["resolution_state"] == "resolved"
+        and row["target_module_id"] == shapes_module_id
+        for row in tables["relations"]
+    )
+
+
+def test_mjs_extension_bearing_specifier_resolves(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    esm_file_id = next(
+        row["file_id"] for row in tables["files"] if row["path"].endswith("esm.mjs")
+    )
+    shapes_module_id = next(
+        row["module_id"] for row in tables["files"] if row["path"].endswith("shapes.ts")
+    )
+    assert any(
+        row["source_file_id"] == esm_file_id
+        and row["relation_type"] == "IMPORTS"
+        and row["resolution_state"] == "resolved"
+        and row["target_module_id"] == shapes_module_id
+        for row in tables["relations"]
+    )
+
+
+def test_python_and_typescript_rows_are_unchanged_by_adding_javascript(tmp_path):
+    without = _build_tables(tmp_path / "without", languages=("python", "typescript"))
+    with_js = _build_tables(tmp_path / "with", languages=_ALL_LANGUAGES)
+    assert _rows_for_languages(without, "files", {"python", "typescript"}) == \
+        _rows_for_languages(with_js, "files", {"python", "typescript"})
+    for table, prefixes in (("symbols", ("py", "ts")), ("relations", ("py", "ts"))):
+        assert _rows_for_languages(without, table, prefixes) == \
+            _rows_for_languages(with_js, table, prefixes)
+
+
+def test_search_filtered_to_javascript_returns_only_javascript_symbols(tmp_path):
+    # "helper" exists in BOTH shared/utils.py and shared/utils.js (the R6.1
+    # collision fixture), so filtering by language must actually narrow the
+    # result set rather than merely coexist with a JavaScript-unique term.
+    javascript_results = _search(
+        tmp_path / "search-js", query="helper", languages=["javascript"],
+    )
+    assert javascript_results
+    # Search results include module/file hits (symbol_id is None for those),
+    # not just symbol hits, so filter on entity_id, mirroring the language
+    # scoping check the module's existing single-language filter test uses
+    # (test_single_language_filter_excludes_the_other_language).
+    assert all(item.entity_id.startswith("js:") for item in javascript_results)
+
+    python_results = _search(
+        tmp_path / "search-py", query="helper", languages=["python"],
+    )
+    assert python_results
+    assert all(item.entity_id.startswith("py:") for item in python_results)
+
+
+def test_search_reports_accurate_ranges_for_a_javascript_symbol(tmp_path):
+    results = _search(tmp_path / "ranges", query="Widget", languages=["javascript"])
+    widget = next(item for item in results if item.local_name == "Widget")
+    source = (FIXTURES / "mixed_python_typescript_javascript" / "widget.jsx").read_bytes()
+    assert source[widget.start_byte:widget.end_byte].startswith(b"Widget")
+    assert widget.start_line >= 1 and widget.end_line >= widget.start_line
+
+
+def _context_for(cache_base: Path, *, path_suffix: str) -> dict[str, object]:
+    """Run one CodeGraphContext.context() query the way the MCP tool does.
+
+    Seeds on the file's module id rather than a symbol id: DECLARES and
+    IMPORTS relations for top-level declarations are sourced from the
+    module (see resolver.py's `source_module_id` fallback when there is no
+    enclosing symbol), not from any single symbol, so only a module seed
+    reaches both edge kinds directly. depth=2 then lets the traversal step
+    from the module's DECLARES-linked symbols (app.js's `run` and `Panel`)
+    to their own CALLS and INHERITS relations.
+    """
+    project_dir = FIXTURES / "mixed_python_typescript_javascript"
+    indexer = _build_indexer(cache_base, project_dir, languages=_ALL_LANGUAGES)
+    built = indexer.build(force=True)
+    assert built["state"] == "ready"
+    module_id = next(
+        row["module_id"] for row in indexer.build_rows().tables["files"]
+        if row["path"].endswith(path_suffix)
+    )
+    request = context_module.validate_context_request([module_id], depth=2)
+    engine = context_module.CodeGraphContext(_DOMAIN, None, 1_000_000)
+    with indexer.store.read_lease() as connection:
+        return engine.context(connection, request)
+
+
+def test_context_for_a_javascript_symbol_returns_its_relations(tmp_path):
+    result = _context_for(tmp_path / "context", path_suffix="app.js")
+    kinds = {row["relation_type"] for row in result["relations"]}
+    assert {"DECLARES", "IMPORTS", "CALLS", "INHERITS"} <= kinds
 
 
 def test_typescript_files_respect_exclude_patterns(tmp_path):

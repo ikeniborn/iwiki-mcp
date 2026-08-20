@@ -23,6 +23,7 @@ class SymbolIndex:
     by_module_local: Mapping[tuple[str, str], tuple[SymbolRecord, ...]]
     modules_by_qualified: Mapping[str, tuple[FileRecord, ...]]
     module_backed_file_ids: frozenset[str]
+    languages_by_file_id: Mapping[str, str] = field(default_factory=dict)
     _adapter_evidence: tuple[tuple[str, str, str, str, str], ...] = field(
         default=(), repr=False, compare=False
     )
@@ -50,6 +51,9 @@ class SymbolIndex:
             module_backed_file_ids=frozenset(
                 item.file.file_id for item in parsed if item.file.module_id
             ),
+            languages_by_file_id={
+                item.file.file_id: item.file.language for item in parsed
+            },
             _adapter_evidence=tuple(sorted({
                 evidence
                 for item in parsed
@@ -91,6 +95,23 @@ class SymbolIndex:
                 if _symbol_module(symbol)
             ),
         )
+
+
+LANGUAGE_FAMILIES = {
+    "python": frozenset({"python"}),
+    "typescript": frozenset({"typescript", "javascript"}),
+    "javascript": frozenset({"javascript", "typescript"}),
+}
+
+
+def family_languages(language: str) -> frozenset[str] | None:
+    """Languages whose declarations may satisfy ``language``'s references.
+
+    ``None`` means "apply no filter": an unknown language keeps the
+    pre-scoping behaviour, so nothing regresses for callers this map does
+    not describe.
+    """
+    return LANGUAGE_FAMILIES.get(language)
 
 
 def _valid_adapter_evidence(value: object) -> bool:
@@ -224,6 +245,7 @@ def declaration_relations(
 def _symbol_candidates(
     reference: ReferenceRecord,
     index: SymbolIndex,
+    language: str,
 ) -> tuple[SymbolRecord, ...]:
     candidates = index.by_qualified.get(reference.target_reference or "", ())
     candidates = tuple(
@@ -235,21 +257,34 @@ def _symbol_candidates(
     )
     if reference.relation_type == "INHERITS":
         candidates = tuple(item for item in candidates if item.kind == "class")
+    allowed = family_languages(language)
+    if allowed is not None:
+        candidates = tuple(
+            item for item in candidates
+            if index.languages_by_file_id.get(item.file_id, "") in allowed
+            or item.file_id not in index.languages_by_file_id
+        )
     return candidates
 
 
 def _module_prefix_candidates(
     target: str,
     index: SymbolIndex,
+    language: str,
 ) -> tuple[FileRecord, ...]:
+    allowed = family_languages(language)
     names = tuple(
-        name for name in index.modules_by_qualified
-        if target == name or target.startswith(name + ".")
+        name for name, files in index.modules_by_qualified.items()
+        if (target == name or target.startswith(name + "."))
+        and (allowed is None or any(item.language in allowed for item in files))
     )
     if not names:
         return ()
     longest = max(names, key=lambda name: (len(name), name))
-    return index.modules_by_qualified[longest]
+    return tuple(
+        item for item in index.modules_by_qualified[longest]
+        if allowed is None or item.language in allowed
+    )
 
 
 def resolve_references(
@@ -267,13 +302,13 @@ def resolve_references(
             continue
         force_unresolved = reference.resolution_hint == "unresolved"
         symbol_candidates = (
-            () if force_unresolved else _symbol_candidates(reference, index)
+            () if force_unresolved else _symbol_candidates(reference, index, language)
         )
-        exact_modules = (
-            index.modules_by_qualified.get(target, ())
-            if reference.relation_type == "IMPORTS" and not force_unresolved
-            else ()
-        )
+        allowed = family_languages(language)
+        exact_modules = tuple(
+            item for item in index.modules_by_qualified.get(target, ())
+            if allowed is None or item.language in allowed
+        ) if reference.relation_type == "IMPORTS" and not force_unresolved else ()
         module_only = reference.target_kind_hint == "module"
         if module_only:
             symbol_candidates = ()
@@ -281,7 +316,7 @@ def resolve_references(
             () if (force_unresolved
                    or reference.resolution_scope != "project"
                    or symbol_candidates or exact_modules)
-            else _module_prefix_candidates(target, index)
+            else _module_prefix_candidates(target, index, language)
         )
         typed_targets: tuple[tuple[FileRecord | None, SymbolRecord | None], ...]
         if exact_modules and module_only:
