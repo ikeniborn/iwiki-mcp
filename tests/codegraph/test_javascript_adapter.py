@@ -411,6 +411,30 @@ def test_jsx_element_produces_no_relation():
     assert parsed.references == ()
 
 
+def test_bare_call_inside_a_class_method_does_not_resolve_to_a_sibling_member():
+    source = b"class Widget {\n  helper() {}\n  m() { helper(); }\n}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    call = next(ref for ref in parsed.references if ref.relation_type == "CALLS")
+    assert call.target_reference == "helper"
+    assert not call.target_reference.endswith(".helper")
+    assert call.resolution_hint == "unresolved"
+    assert call.resolution_scope is None
+
+
+def test_this_qualified_call_inside_a_class_method_is_skipped():
+    source = b"class Widget {\n  helper() {}\n  m() { this.helper(); }\n}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    assert _calls(parsed) == set()
+
+
+def test_bare_call_inside_a_plain_function_still_resolves_at_file_scope():
+    source = b"function helper() {}\nfunction run() { helper(); }\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    call = next(ref for ref in parsed.references if ref.relation_type == "CALLS")
+    assert call.target_reference == "src.app.helper"
+    assert call.resolution_scope == "file"
+
+
 def test_call_resolves_across_files_to_a_typescript_function():
     adapter = _adapter()
     javascript = adapter.parse_file(

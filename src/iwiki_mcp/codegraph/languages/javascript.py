@@ -445,11 +445,20 @@ def _call_target(
         ),
         None,
     )
+    class_qualified_names = {
+        symbol.qualified_name for symbol in symbols if symbol.kind == "class"
+    }
     candidates = _ecmascript.heritage_scope_candidates(
         enclosing_qualified_name, module_dotted_name,
     )
     tail = ".".join(parts)
     for scope in candidates:
+        # A class body is not a lexical scope for a bare identifier call --
+        # `helper()` inside a method never resolves to a sibling class member
+        # without `this.`, unlike an `extends` target, which IS a lexical
+        # name. Skip any rung that names a class to avoid inventing that edge.
+        if scope in class_qualified_names:
+            continue
         candidate = f"{scope}.{tail}"
         if candidate in qualified_names:
             return candidate, "file", None
@@ -457,7 +466,7 @@ def _call_target(
 
 
 def call_references(
-    source, root, *, file_record, symbols, aliases, importer_path, module_dotted_name,
+    root, *, file_record, symbols, aliases, importer_path, module_dotted_name,
 ):
     """CALLS edges for statically decidable callees only.
 
@@ -465,9 +474,11 @@ def call_references(
       * a `type_arguments` child -- the tsx grammar parses the plain-JS
         comparison chain `a < b > (c)` as a call with type arguments, so
         extracting it would invent an edge that does not exist in JS;
-      * a tagged template (``tag`text` ``), which the grammar also shapes
-        as a call_expression, but whose `arguments` field is a
-        template_string rather than an argument list;
+      * a missing `arguments` field or one shaped as a `template_string` --
+        covers both a tagged template (``tag`text` ``), whose `arguments`
+        field the grammar fills with the template_string instead of an
+        argument list, and a paren-less `new Foo;`, whose `arguments` field
+        is simply absent;
       * a computed callee (`o[k]()`) and a callee that is itself a call
         (`f()()`) -- neither reaches member_chain;
       * `require(...)`, already modelled as IMPORTS.
@@ -637,7 +648,7 @@ class JavaScriptAdapter:
             *require_references(source, root, file_record=file, symbols=symbols),
             *heritage_references,
             *call_references(
-                source, root, file_record=file, symbols=symbols, aliases=aliases,
+                root, file_record=file, symbols=symbols, aliases=aliases,
                 importer_path=relative_path, module_dotted_name=module_dotted_name,
             ),
         )
