@@ -336,3 +336,91 @@ def test_inherits_resolves_across_files_to_a_typescript_class():
     base = next(s for s in typescript.symbols if s.local_name == "Base")
     assert inherits.resolution_state == "resolved"
     assert inherits.target_symbol_id == base.symbol_id
+
+
+def _calls(parsed):
+    return {ref.target_reference for ref in parsed.references if ref.relation_type == "CALLS"}
+
+
+def test_calls_are_extracted_for_plain_and_member_callees():
+    source = (
+        b"import { helper } from './lib';\n"
+        b"function local() { return 1; }\n"
+        b"class Widget {}\n"
+        b"export function run(o) {\n"
+        b"  local();\n"
+        b"  helper();\n"
+        b"  o.a.b();\n"
+        b"  new Widget();\n"
+        b"  return o[key]();\n"
+        b"}\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    targets = _calls(parsed)
+    assert "src.app.local" in targets
+    assert "src.lib.helper" in targets
+    assert "o.a.b" in targets
+    assert "src.app.Widget" in targets
+    assert not any("key" in target for target in targets)
+
+
+def test_call_scope_selection():
+    source = (
+        b"import { helper } from './lib';\n"
+        b"function local() {}\n"
+        b"function run() { helper(); local(); unknownThing(); }\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    by_target = {
+        ref.target_reference: ref
+        for ref in parsed.references if ref.relation_type == "CALLS"
+    }
+    assert by_target["src.lib.helper"].resolution_scope == "project"
+    assert by_target["src.app.local"].resolution_scope == "file"
+    assert by_target["unknownThing"].resolution_hint == "unresolved"
+    assert by_target["unknownThing"].resolution_scope is None
+
+
+def test_call_source_is_the_enclosing_symbol():
+    source = b"function outer() { inner(); }\nfunction inner() {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    call = next(ref for ref in parsed.references if ref.relation_type == "CALLS")
+    outer = next(s for s in parsed.symbols if s.local_name == "outer")
+    assert call.source_symbol_id == outer.symbol_id
+    assert call.source_module_id is None
+
+
+def test_type_arguments_pseudo_call_is_not_extracted():
+    parsed = _adapter().parse_file(b"const r = a < b > (c);\n", "src/app.js")
+    assert _calls(parsed) == set()
+
+
+def test_call_of_call_and_tagged_template_are_skipped():
+    source = b"function run() { f()(); tag`text`; }\nfunction f() {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    assert _calls(parsed) == {"src.app.f"}
+
+
+def test_require_call_is_not_also_a_call_reference():
+    parsed = _adapter().parse_file(b"const x = require('./y');\n", "src/app.js")
+    assert _calls(parsed) == set()
+
+
+def test_jsx_element_produces_no_relation():
+    parsed = _adapter().parse_file(b"const A = () => <Child />;\n", "src/a.jsx")
+    assert parsed.references == ()
+
+
+def test_call_resolves_across_files_to_a_typescript_function():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import { helper } from './lib';\nexport function run() { helper(); }\n",
+        "src/app.js",
+    )
+    typescript = _typescript_parsed(b"export function helper() {}\n", "src/lib.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    relations = adapter.resolve_references(javascript, index).relations
+    call = next(r for r in relations if r.relation_type == "CALLS")
+    helper = next(s for s in typescript.symbols if s.local_name == "helper")
+    assert call.resolution_state == "resolved"
+    assert call.target_symbol_id == helper.symbol_id

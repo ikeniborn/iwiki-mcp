@@ -408,6 +408,103 @@ def expand_alias(aliases, importer_path, parts):
     return ".".join((module, *segments))
 
 
+def _walk(node):
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(reversed(current.children))
+
+
+def _call_reference(node, target, scope, hint, file_record):
+    return ReferenceRecord(
+        source_symbol_id=None,
+        source_file_id=file_record.file_id,
+        relation_type="CALLS",
+        target_reference=target,
+        source_line=node.start_point[0] + 1,
+        source_byte=node.start_byte,
+        source_end_line=node.end_point[0] + 1,
+        source_end_byte=node.end_byte,
+        resolution_scope=scope,
+        resolution_hint=hint,
+    )
+
+
+def _call_target(
+    parts, *, aliases, importer_path, qualified_names, symbols, node, module_dotted_name,
+):
+    expanded = expand_alias(aliases, importer_path, parts)
+    if expanded is not None:
+        return expanded, "project", None
+    enclosing_id = enclosing_symbol_id(symbols, node)
+    enclosing_qualified_name = next(
+        (
+            symbol.qualified_name for symbol in symbols
+            if symbol.symbol_id == enclosing_id
+        ),
+        None,
+    )
+    candidates = _ecmascript.heritage_scope_candidates(
+        enclosing_qualified_name, module_dotted_name,
+    )
+    tail = ".".join(parts)
+    for scope in candidates:
+        candidate = f"{scope}.{tail}"
+        if candidate in qualified_names:
+            return candidate, "file", None
+    return tail, None, "unresolved"
+
+
+def call_references(
+    source, root, *, file_record, symbols, aliases, importer_path, module_dotted_name,
+):
+    """CALLS edges for statically decidable callees only.
+
+    Skipped, deliberately:
+      * a `type_arguments` child -- the tsx grammar parses the plain-JS
+        comparison chain `a < b > (c)` as a call with type arguments, so
+        extracting it would invent an edge that does not exist in JS;
+      * a tagged template (``tag`text` ``), which the grammar also shapes
+        as a call_expression, but whose `arguments` field is a
+        template_string rather than an argument list;
+      * a computed callee (`o[k]()`) and a callee that is itself a call
+        (`f()()`) -- neither reaches member_chain;
+      * `require(...)`, already modelled as IMPORTS.
+    """
+    references = []
+    qualified_names = {symbol.qualified_name for symbol in symbols}
+    for node in _walk(root):
+        if node.type not in ("call_expression", "new_expression"):
+            continue
+        if any(child.type == "type_arguments" for child in node.children):
+            continue
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None or arguments.type == "template_string":
+            continue
+        field = "function" if node.type == "call_expression" else "constructor"
+        callee = node.child_by_field_name(field)
+        if callee is None or callee.type not in ("identifier", "member_expression"):
+            continue
+        parts = member_chain(callee)
+        if parts is None or parts == ("require",):
+            continue
+        target, scope, hint = _call_target(
+            parts,
+            aliases=aliases,
+            importer_path=importer_path,
+            qualified_names=qualified_names,
+            symbols=symbols,
+            node=node,
+            module_dotted_name=module_dotted_name,
+        )
+        references.append(attribute(
+            _call_reference(node, target, scope, hint, file_record),
+            symbols, file_record, node,
+        ))
+    return tuple(references)
+
+
 def resolve_specifier(reference, importer_path, index):
     """Bind a relative specifier to a project module, or leave it alone."""
     candidate = dotted_candidate(importer_path, reference.target_reference or "")
@@ -539,6 +636,10 @@ class JavaScriptAdapter:
             *_ecmascript.esm_import_references(source, root, file_record=file),
             *require_references(source, root, file_record=file, symbols=symbols),
             *heritage_references,
+            *call_references(
+                source, root, file_record=file, symbols=symbols, aliases=aliases,
+                importer_path=relative_path, module_dotted_name=module_dotted_name,
+            ),
         )
         return _JavaScriptParsedFile(
             file=file, symbols=tuple(symbols), references=references,
