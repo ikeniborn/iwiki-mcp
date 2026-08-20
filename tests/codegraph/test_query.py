@@ -599,6 +599,44 @@ def test_unregistered_language_rejected():
         validate_search_request("foo", languages=["ruby"])
 
 
+def test_snapshot_scoped_filter_reports_the_snapshot_languages():
+    from iwiki_mcp.codegraph.query import CodeGraphLanguageUnavailableError
+
+    with pytest.raises(CodeGraphLanguageUnavailableError) as failure:
+        validate_search_request(
+            "foo",
+            languages=["typescript"],
+            configured_languages=("javascript", "python"),
+            languages_source="snapshot",
+        )
+
+    assert failure.value.code == "unsupported_language"
+    assert failure.value.available == ("javascript", "python")
+
+
+def test_snapshot_scope_keeps_invalid_config_for_unknown_languages():
+    # A language this build cannot parse stays a contract error: no
+    # republished snapshot would make it queryable.
+    with pytest.raises(CodeGraphQueryError, match="unsupported language") as failure:
+        validate_search_request(
+            "foo",
+            languages=["cobol"],
+            configured_languages=("python",),
+            languages_source="snapshot",
+        )
+
+    assert failure.value.code == "invalid_config"
+
+
+def test_config_scoped_filter_keeps_the_generic_contract_error():
+    with pytest.raises(CodeGraphQueryError, match="unsupported language") as failure:
+        validate_search_request(
+            "foo", languages=["typescript"], configured_languages=("python",)
+        )
+
+    assert failure.value.code == "invalid_config"
+
+
 def test_multi_language_query_filters_both_languages_in_sql():
     request = validate_search_request(
         "foo", languages=["python", "typescript"],

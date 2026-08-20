@@ -225,15 +225,13 @@ def test_search_handler_accepts_explicit_typescript_filter(
     assert calls == [f"search:{seed_binding.primary}"]
 
 
-def test_search_handler_threads_configured_languages_to_postgres_path(
-    monkeypatch,
-):
-    # Regression for C3 (item 2): the PostgreSQL hosted-read call site
-    # never passed configured_languages, so it always validated against
-    # the ("python",) module default regardless of the project's real
-    # code_graph.languages config -- silently dropping TypeScript results
-    # for a project configured with languages = ["python", "typescript"]
-    # even when the caller applied no explicit languages filter.
+def test_search_handler_defers_languages_to_the_active_snapshot(monkeypatch):
+    # Regression for the hosted read path: the PostgreSQL call site used
+    # to validate the languages filter against the server's own project
+    # directory, which for the HTTP transport is just wherever
+    # server.toml lives -- silently dropping every non-python row of a
+    # snapshot the client published as python + javascript. The reader
+    # now calls back with the snapshot's declared languages instead.
     postgres_binding = server.base.PostgresBinding(
         host="localhost",
         port=5432,
@@ -253,16 +251,20 @@ def test_search_handler_threads_configured_languages_to_postgres_path(
     monkeypatch.setattr(
         server, "_resolved_binding", lambda: postgres_binding
     )
+
+    def fail_config(project_dir):
+        raise AssertionError("hosted reads must not read a project config")
+
     monkeypatch.setattr(
-        server._codegraph_config,
-        "load_code_graph_config",
-        lambda project_dir: CodeGraphConfig(languages=("python", "typescript")),
+        server._codegraph_config, "load_code_graph_config", fail_config
     )
     captured = []
 
     class _FakeReader:
-        def search(self, request):
-            captured.append(request)
+        """Answer as a snapshot published with python + javascript."""
+
+        def search(self, build_request):
+            captured.append(build_request(("javascript", "python")))
             return {"results": []}
 
     monkeypatch.setattr(server, "_postgres_code_reader", lambda bind: _FakeReader())
@@ -271,13 +273,21 @@ def test_search_handler_threads_configured_languages_to_postgres_path(
 
     assert "error" not in result
     assert len(captured) == 1
-    assert set(captured[0].languages) == {"python", "typescript"}
+    assert set(captured[0].languages) == {"javascript", "python"}
 
     captured.clear()
-    result = server.wiki_code_search("run", languages=["typescript"])
+    result = server.wiki_code_search("run", languages=["javascript"])
 
     assert "error" not in result
-    assert captured[0].languages == ("typescript",)
+    assert captured[0].languages == ("javascript",)
+
+    captured.clear()
+    assert server.wiki_code_search("run", languages=["typescript"]) == {
+        "error": "language not available in the active snapshot",
+        "code": "unsupported_language",
+        "hint": "the active snapshot declares: javascript, python",
+    }
+    assert captured == []
 
 
 @pytest.mark.parametrize(
