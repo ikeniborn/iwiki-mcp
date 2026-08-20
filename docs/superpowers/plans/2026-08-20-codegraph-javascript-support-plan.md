@@ -29,36 +29,51 @@ SQLite/PostgreSQL snapshot store.
 - JavaScript identity is exactly `language = "javascript"`, `prefix = "js"`,
   `extensions = (".js", ".jsx", ".mjs", ".cjs")`, `adapter_version = "javascript-adapter-v1"`.
 - No schema migration and no publication-protocol change.
-- Python and TypeScript records stay byte-identical; Tasks 1–2 capture the baselines that
-  prove it and every later task must keep them green.
 - `uv run flake8 src tests` must stay clean (max-line-length 100); there is no formatter,
   so match surrounding style by hand.
-- Tests never hit the network; follow the existing `monkeypatch` patterns in
-  `tests/codegraph/`.
+- Tests never hit the network.
 - Emit no relation on a guess: unresolvable targets keep their raw text with
   `resolution_hint = "unresolved"`.
+
+### HUMAN CHECKPOINT — stop rules
+
+Halt and request approval before proceeding if any task would:
+
+1. **Change TypeScript or Python output** — i.e. produce any diff in
+   `tests/codegraph/fixtures/typescript_golden.json` or
+   `tests/codegraph/fixtures/mixed_python_typescript_rows.json`. These files are captured
+   in Tasks 1–2 from unmodified code and are the intent's health-metric proof. A diff means
+   the change is not output-preserving. **Never regenerate a baseline to make a task pass** —
+   report the diff and stop. The capture scripts exist only for Tasks 1–2; re-running one
+   later is a stop-rule violation, not a fix.
+2. **Add a runtime dependency** to `pyproject.toml`.
+3. **Touch** `src/iwiki_mcp/codegraph/schema.py` or the publication path.
+
+These are the intent's proposal-first zones; no task resolves one autonomously.
 
 ---
 
 ### Task 1: TypeScript adapter-level golden baseline
 
 Captures TypeScript's current output **before** any refactor. Every later task keeps this
-test green. This task must be committed before Task 3 touches `typescript.py`.
+test green. Must be committed before Task 3 touches `typescript.py`.
 
 **Files:**
 - Create: `tests/fixtures/codegraph/typescript_golden/walker.ts`
 - Create: `tests/fixtures/codegraph/typescript_golden/shapes.ts`
-- Create: `tests/codegraph/fixtures/typescript_golden.json` (generated, committed)
+- Create: `tests/fixtures/codegraph/typescript_golden/view.tsx`
+- Create: `tests/codegraph/tools/capture_typescript_golden.py`
+- Create: `tests/codegraph/fixtures/typescript_golden.json` (generated once, committed)
 - Create: `tests/codegraph/test_typescript_golden.py`
 
 **Interfaces:**
 - Consumes: `iwiki_mcp.codegraph.languages.typescript.TypeScriptAdapter`,
   `iwiki_mcp.codegraph.resolver.SymbolIndex`.
-- Produces: `tests/codegraph/test_typescript_golden.py::_serialize_parsed(adapter, path, source)`
-  returning a JSON-ready dict — reused by no other task, but the golden JSON file it
-  writes is the contract Task 3 must not break.
+- Produces: `tests/codegraph/tools/capture_typescript_golden.py::capture() -> dict` and the
+  committed `typescript_golden.json`. The test module has **no** write path — the frozen
+  JSON is the contract Task 3 must not break.
 
-- [ ] **Step 1: Create the fixture exercising every walker branch the refactor touches**
+- [ ] **Step 1: Create the fixtures exercising every walker branch the refactor touches**
 
 `tests/fixtures/codegraph/typescript_golden/walker.ts`:
 
@@ -96,45 +111,56 @@ export class Walker extends defaultThing implements other {
 ```typescript
 export type Alias = string;
 export enum Mode { On, Off }
-export interface Shape extends Base { size: number; }
 export interface Base { id: string; }
+export interface Shape extends Base { size: number; }
 
 export namespace Outer {
-  export class Inner extends Base2 {}
   export class Base2 {}
+  export class Inner extends Base2 {}
 }
 ```
 
-- [ ] **Step 2: Write the golden test with a regeneration guard**
+`tests/fixtures/codegraph/typescript_golden/view.tsx` — the `.tsx` path exists so the
+grammar-selection seam (`_grammar_name` stays in `typescript.py`, `get_parser` moves) is
+baselined too:
 
-`tests/codegraph/test_typescript_golden.py`:
+```typescript
+import { Shape } from "./shapes";
+
+export const View = (props: { shape: Shape }) => <div id="v">{props.shape.size}</div>;
+
+export function identity<T>(value: T): T { return value; }
+```
+
+- [ ] **Step 2: Write the capture script (the only writer of the golden file)**
+
+`tests/codegraph/tools/capture_typescript_golden.py`:
 
 ```python
-"""Byte-level baseline of TypeScript adapter output, captured pre-refactor.
+"""Capture the pre-refactor TypeScript adapter baseline.
 
-Regenerating GOLDEN_PATH is an explicit, reviewed act: run this module with
-IWIKI_REGENERATE_TYPESCRIPT_GOLDEN=1 and commit the diff deliberately. A silent
-regeneration would defeat the whole point of the baseline.
+Run once, from unmodified source, in Task 1 of the JavaScript code-graph
+plan. It is deliberately NOT importable by the test module: a test that
+can rewrite its own baseline is not a baseline.
 """
 import dataclasses
 import json
-import os
+import sys
 from pathlib import Path
 
-from iwiki_mcp.codegraph.languages.typescript import TypeScriptAdapter
-from iwiki_mcp.codegraph.resolver import SymbolIndex
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "codegraph" / "typescript_golden"
-GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "typescript_golden.json"
-SOURCES = ("walker.ts", "shapes.ts")
+from iwiki_mcp.codegraph.languages.typescript import TypeScriptAdapter  # noqa: E402
+from iwiki_mcp.codegraph.resolver import SymbolIndex  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURES = ROOT / "fixtures" / "codegraph" / "typescript_golden"
+GOLDEN_PATH = ROOT / "codegraph" / "fixtures" / "typescript_golden.json"
+SOURCES = ("walker.ts", "shapes.ts", "view.tsx")
 
 
-def _adapter():
-    return TypeScriptAdapter("golden-domain", (), parser_version="golden-parser")
-
-
-def _capture():
-    adapter = _adapter()
+def capture():
+    adapter = TypeScriptAdapter("golden-domain", (), parser_version="golden-parser")
     parsed = {
         name: adapter.parse_file((FIXTURES / name).read_bytes(), name)
         for name in SOURCES
@@ -154,35 +180,87 @@ def _capture():
     return captured
 
 
-def test_typescript_output_matches_golden_baseline():
-    captured = _capture()
-    if os.environ.get("IWIKI_REGENERATE_TYPESCRIPT_GOLDEN") == "1":
-        GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        GOLDEN_PATH.write_text(json.dumps(captured, indent=2, sort_keys=True) + "\n")
-    golden = json.loads(GOLDEN_PATH.read_text())
-    assert captured == golden
+if __name__ == "__main__":
+    GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    GOLDEN_PATH.write_text(json.dumps(capture(), indent=2, sort_keys=True) + "\n")
+    print(f"wrote {GOLDEN_PATH}")
 ```
 
-- [ ] **Step 3: Run it to verify it fails (no golden file yet)**
+- [ ] **Step 3: Write the read-only test**
+
+`tests/codegraph/test_typescript_golden.py`:
+
+```python
+"""TypeScript adapter output must match the pre-refactor baseline byte for byte.
+
+A failure here means the refactor changed TypeScript behaviour, which the
+intent forbids. Fix the code. Regenerating the baseline is a stop-rule
+violation (see the plan's HUMAN CHECKPOINT).
+"""
+import dataclasses
+import json
+from pathlib import Path
+
+from iwiki_mcp.codegraph.languages.typescript import TypeScriptAdapter
+from iwiki_mcp.codegraph.resolver import SymbolIndex
+
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "codegraph" / "typescript_golden"
+GOLDEN_PATH = Path(__file__).resolve().parent / "fixtures" / "typescript_golden.json"
+SOURCES = ("walker.ts", "shapes.ts", "view.tsx")
+
+
+def _capture():
+    adapter = TypeScriptAdapter("golden-domain", (), parser_version="golden-parser")
+    parsed = {
+        name: adapter.parse_file((FIXTURES / name).read_bytes(), name)
+        for name in SOURCES
+    }
+    index = SymbolIndex.from_parsed_files(parsed.values())
+    return {
+        name: {
+            "file": dataclasses.asdict(item.file),
+            "symbols": [dataclasses.asdict(symbol) for symbol in item.symbols],
+            "references": [dataclasses.asdict(ref) for ref in item.references],
+            "relations": [
+                dataclasses.asdict(rel)
+                for rel in adapter.resolve_references(item, index).relations
+            ],
+            "parse_warnings": list(item.warnings),
+            "resolve_warnings": list(adapter.resolve_references(item, index).warnings),
+        }
+        for name, item in parsed.items()
+    }
+
+
+def test_typescript_output_matches_golden_baseline():
+    assert _capture() == json.loads(GOLDEN_PATH.read_text())
+```
+
+- [ ] **Step 4: Run it to verify it fails (no golden file yet)**
 
 Run: `uv run pytest tests/codegraph/test_typescript_golden.py -v`
 Expected: FAIL with `FileNotFoundError` on `typescript_golden.json`.
 
-- [ ] **Step 4: Generate the golden file from the current, unmodified adapter**
+- [ ] **Step 5: Verify the working tree is clean, then capture**
 
 ```bash
-IWIKI_REGENERATE_TYPESCRIPT_GOLDEN=1 uv run pytest tests/codegraph/test_typescript_golden.py -q
+git status --porcelain src/iwiki_mcp/codegraph/
+uv run python tests/codegraph/tools/capture_typescript_golden.py
 ```
 
-- [ ] **Step 5: Run it again without the env var to verify it passes**
+Expected: the `git status` output is **empty** — capturing from a partially refactored tree
+would bake the new behaviour into the baseline and silently void the guard. If it is not
+empty, stop and clean the tree first.
+
+- [ ] **Step 6: Run the test again to verify it passes**
 
 Run: `uv run pytest tests/codegraph/test_typescript_golden.py -v`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add tests/fixtures/codegraph/typescript_golden tests/codegraph/test_typescript_golden.py tests/codegraph/fixtures/typescript_golden.json
+git add tests/fixtures/codegraph/typescript_golden tests/codegraph/tools tests/codegraph/test_typescript_golden.py tests/codegraph/fixtures/typescript_golden.json
 git commit -m "test(codegraph): capture TypeScript adapter golden baseline pre-refactor"
 ```
 
@@ -190,54 +268,65 @@ git commit -m "test(codegraph): capture TypeScript adapter golden baseline pre-r
 
 ### Task 2: Run-level Python + TypeScript baseline
 
-Proves the intent's "Done when" comparison: a full index run over the mixed fixture
-repository produces byte-identical Python and TypeScript rows before and after the change.
+Proves the intent's "Done when" comparison at snapshot-row level.
 
 **Files:**
-- Create: `tests/codegraph/fixtures/mixed_python_typescript_rows.json` (generated, committed)
+- Create: `tests/codegraph/tools/capture_mixed_baseline.py`
+- Create: `tests/codegraph/fixtures/mixed_python_typescript_rows.json` (generated once,
+  committed)
 - Create: `tests/codegraph/test_mixed_language_baseline.py`
 - Read for reference: `tests/codegraph/test_mixed_language_indexing.py:17-68`
 
 **Interfaces:**
-- Consumes: the `_build_indexer` helper pattern from
-  `tests/codegraph/test_mixed_language_indexing.py:17-55`, `indexer.build_rows().tables`.
-- Produces: `tests/codegraph/test_mixed_language_baseline.py::_pinned_factories()` returning
-  `dict[str, AdapterFactory]` with fixed version strings — reused conceptually by Task 11.
+- Consumes: `tests/codegraph/test_mixed_language_indexing.py::_build_indexer(cache_base,
+  project_dir, *, languages, adapter_factories=None, exclude=())` — imported, **not**
+  copied. It points `project_dir` straight at the fixture directory and builds a
+  `CodeGraphConfig(languages=..., exclude=...)` in Python; no `.iwiki.toml` is written or
+  read, and nothing is monkeypatched.
+- Produces:
+  - `tests/codegraph/test_mixed_language_baseline.py::pinned_factories(domain)
+    -> dict[str, AdapterFactory]` — version strings pinned so `parser_version` cannot drift
+    with an installed dependency bump. Task 12 imports it.
+  - `tests/codegraph/test_mixed_language_baseline.py::baseline_rows(tables) -> dict`.
 
-- [ ] **Step 1: Read the existing helper so the baseline builds the same way**
+- [ ] **Step 1: Read the existing helper before writing anything**
 
 Run: `sed -n 1,70p tests/codegraph/test_mixed_language_indexing.py`
-Expected: the `_build_indexer(...)` helper signature, its `adapter_factories` parameter, and
-the `build_rows().tables` usage.
+Expected: `_build_indexer`'s exact signature, its `adapter_factories` parameter, the
+`_DOMAIN` constant, `(cache_base / _DOMAIN).mkdir(parents=True)` (note: **no**
+`exist_ok=True`, so each call needs its own `cache_base`), and the `build_rows().tables`
+usage.
 
-- [ ] **Step 2: Write the baseline test**
+- [ ] **Step 2: Write the shared helpers and the read-only test**
 
-`tests/codegraph/test_mixed_language_baseline.py` — mirror `_build_indexer` from
-`test_mixed_language_indexing.py`, but always pass pinned factories so `parser_version`
-cannot drift with an installed dependency bump:
+`tests/codegraph/test_mixed_language_baseline.py`:
 
 ```python
-"""Run-level baseline: Python + TypeScript rows must not move.
+"""Run-level baseline: Python + TypeScript snapshot rows must not move.
 
-Version strings are pinned rather than read from installed distributions, so a
-dependency bump changes no baseline row (only `parser_version` would drift;
-identifiers do not hash it).
+Version strings are pinned rather than read from installed distributions,
+so a dependency bump changes no baseline row (only `parser_version` would
+drift; identifiers do not hash it).
 
-Regenerate deliberately with IWIKI_REGENERATE_MIXED_BASELINE=1.
+A failure here means the change perturbed Python or TypeScript output.
+Fix the code; regenerating the baseline is a stop-rule violation.
 """
 import json
-import os
 from pathlib import Path
 
 from iwiki_mcp.codegraph import indexer as codegraph_indexer
 from iwiki_mcp.codegraph.languages import python as codegraph_python
 from iwiki_mcp.codegraph.languages import typescript as codegraph_typescript
 
-BASELINE_PATH = Path(__file__).resolve().parent / "fixtures" / "mixed_python_typescript_rows.json"
+from .test_mixed_language_indexing import FIXTURES, _build_indexer
+
+BASELINE_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "mixed_python_typescript_rows.json"
+)
 BASELINE_LANGUAGES = ("python", "typescript")
 
 
-def _pinned_factories(domain):
+def pinned_factories(domain):
     return {
         "python": codegraph_indexer.AdapterFactory(
             create=lambda paths: codegraph_python.PythonAdapter(
@@ -260,56 +349,72 @@ def _pinned_factories(domain):
     }
 
 
-def _baseline_rows(tables):
-    rows = {}
-    for table in ("files", "symbols", "relations"):
-        rows[table] = sorted(
-            (
-                {key: value for key, value in row.items()}
-                for row in tables[table]
-            ),
+def baseline_rows(tables):
+    return {
+        table: sorted(
+            (dict(row) for row in tables[table]),
             key=lambda row: json.dumps(row, sort_keys=True),
         )
-    return rows
+        for table in ("files", "symbols", "relations")
+    }
 
 
-def test_python_typescript_rows_match_baseline(tmp_path, monkeypatch):
-    tables = _build_mixed_tables(tmp_path, monkeypatch, languages=BASELINE_LANGUAGES)
-    captured = _baseline_rows(tables)
-    if os.environ.get("IWIKI_REGENERATE_MIXED_BASELINE") == "1":
-        BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        BASELINE_PATH.write_text(json.dumps(captured, indent=2, sort_keys=True) + "\n")
-    baseline = json.loads(BASELINE_PATH.read_text())
-    assert captured == baseline
+def build_mixed_tables(cache_base, *, languages, factories):
+    """Build the mixed fixture once. `cache_base` must be unique per call.
+
+    `_build_indexer` does `(cache_base / _DOMAIN).mkdir(parents=True)` with
+    no `exist_ok`, so reusing one directory for two builds raises
+    FileExistsError before any assertion runs.
+    """
+    cache_base.mkdir(parents=True, exist_ok=True)
+    indexer = _build_indexer(
+        cache_base,
+        FIXTURES / "mixed_python_typescript",
+        languages=languages,
+        adapter_factories=factories,
+    )
+    return indexer.build_rows().tables
+
+
+def test_python_typescript_rows_match_baseline(tmp_path):
+    tables = build_mixed_tables(
+        tmp_path / "baseline",
+        languages=BASELINE_LANGUAGES,
+        factories=pinned_factories("mixed-domain"),
+    )
+    assert baseline_rows(tables) == json.loads(BASELINE_PATH.read_text())
 ```
 
-`_build_mixed_tables(tmp_path, monkeypatch, *, languages)` is a local helper copied from
-`test_mixed_language_indexing.py`'s `_build_indexer` usage: it copies
-`tests/fixtures/codegraph/mixed_python_typescript/` into `tmp_path`, writes an
-`.iwiki.toml` whose `code_graph.languages` is `languages`, constructs the indexer with
-`_pinned_factories(domain)`, and returns `indexer.build_rows().tables`. Read the existing
-file and reuse its exact construction so the two tests cannot diverge.
+Read `test_mixed_language_indexing.py` for the real names of `FIXTURES` and the domain
+constant that `_build_indexer` expects, and use those exact spellings.
 
-- [ ] **Step 3: Run to verify it fails (no baseline file)**
+- [ ] **Step 3: Write the capture script**
+
+`tests/codegraph/tools/capture_mixed_baseline.py` imports `build_mixed_tables`,
+`baseline_rows`, `pinned_factories`, and `BASELINE_LANGUAGES` from the test module, builds
+into a `tempfile.TemporaryDirectory()`, and writes
+`json.dumps(..., indent=2, sort_keys=True) + "\n"` to `BASELINE_PATH`. Like Task 1's
+script, it is the only writer.
+
+- [ ] **Step 4: Run to verify the test fails (no baseline file)**
 
 Run: `uv run pytest tests/codegraph/test_mixed_language_baseline.py -v`
 Expected: FAIL with `FileNotFoundError`.
 
-- [ ] **Step 4: Generate the baseline from the current, unmodified code**
+- [ ] **Step 5: Verify the tree is clean, capture, and re-run**
 
 ```bash
-IWIKI_REGENERATE_MIXED_BASELINE=1 uv run pytest tests/codegraph/test_mixed_language_baseline.py -q
+git status --porcelain src/iwiki_mcp/codegraph/
+uv run python tests/codegraph/tools/capture_mixed_baseline.py
+uv run pytest tests/codegraph/test_mixed_language_baseline.py -v && uv run pytest -q
 ```
 
-- [ ] **Step 5: Verify it passes and the whole suite is green**
-
-Run: `uv run pytest tests/codegraph/test_mixed_language_baseline.py -v && uv run pytest -q`
-Expected: PASS, full suite green.
+Expected: empty `git status`, then PASS, then the full suite green.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/codegraph/test_mixed_language_baseline.py tests/codegraph/fixtures/mixed_python_typescript_rows.json
+git add tests/codegraph/test_mixed_language_baseline.py tests/codegraph/tools/capture_mixed_baseline.py tests/codegraph/fixtures/mixed_python_typescript_rows.json
 git commit -m "test(codegraph): capture run-level Python/TypeScript row baseline"
 ```
 
@@ -317,19 +422,20 @@ git commit -m "test(codegraph): capture run-level Python/TypeScript row baseline
 
 ### Task 3: Extract the shared ECMAScript core
 
-Pure move plus profile parameterization. TypeScript behaviour must not change; Tasks 1–2
-are the proof.
+Move plus one extraction, plus profile parameterization. TypeScript behaviour must not
+change; Tasks 1–2 are the proof.
 
 **Files:**
 - Create: `src/iwiki_mcp/codegraph/languages/_ecmascript.py`
 - Modify: `src/iwiki_mcp/codegraph/languages/typescript.py` (whole file restructured)
-- Test: `tests/codegraph/test_typescript_golden.py` (existing, must stay green),
-  `tests/codegraph/test_typescript_adapter.py` (existing, must stay green)
+- Test: `tests/codegraph/test_typescript_golden.py`,
+  `tests/codegraph/test_mixed_language_baseline.py`,
+  `tests/codegraph/test_typescript_adapter.py` (all existing, all must stay green)
 
 **Interfaces:**
 - Consumes: nothing new.
 - Produces, in `_ecmascript.py`:
-  - `LanguageProfile(language: str, prefix: str, kind_by_node: Mapping[str, str],
+  - `LanguageProfile(language: str, prefix: str, kind_by_node: Mapping[str, str] = {},
     handles_interface: bool = True, handles_namespace: bool = True,
     object_literal_scope: bool = False, declaration_hooks: tuple = ())` — frozen dataclass.
   - `get_parser(grammar: str) -> Any`
@@ -338,9 +444,13 @@ are the proof.
   - `param_signature(source, params_node) -> str`
   - `return_type_signature(source, return_type_node) -> str`
   - `visibility(name: str) -> str`
-  - `PendingHeritage` (frozen dataclass, gains a `resolution_scope: str = "file"` field)
+  - `PendingHeritage` — frozen dataclass, gains `resolution_scope: str = "file"`
   - `pending_heritage_references(source, node, *, owner_symbol_id, source_file_id,
-    owner_qualified=None) -> tuple[PendingHeritage, ...]`
+    owner_qualified=None, resolution_scope="file", target_rewriter=None)
+    -> tuple[PendingHeritage, ...]` where
+    `target_rewriter: Callable[[str], tuple[str, str] | None] | None` maps a raw heritage
+    name to `(target_reference, resolution_scope)`, or returns `None` to fall through to
+    the scope-candidate probe. TypeScript passes `None` and is unchanged.
   - `heritage_scope_candidates(owner_qualified, module_dotted_name) -> tuple[str, ...]`
   - `resolve_heritage_references(pending, qualified_names, module_dotted_name)
     -> tuple[ReferenceRecord, ...]`
@@ -357,23 +467,40 @@ Expected: PASS.
 
 - [ ] **Step 2: Create `_ecmascript.py` by moving code verbatim**
 
-Move these from `typescript.py` unchanged except for dropping the leading underscore from
-the names listed in **Interfaces**: `_PARSERS`, `_get_parser`, `_text`, `_relative_path`,
-`_param_signature`, `_return_type_signature`, `_visibility`, `_PendingHeritage`,
+Move these from `typescript.py`, dropping the leading underscore for the names listed in
+**Interfaces**: `_PARSERS`, `_get_parser`, `_text`, `_relative_path`, `_param_signature`,
+`_return_type_signature`, `_visibility`, `_PendingHeritage`,
 `_pending_heritage_references`, `_heritage_scope_candidates`,
 `_resolve_heritage_references`, `_import_bindings`, `_extract_references` (renamed
-`esm_import_references`), `_extract_symbols` (renamed `extract_symbols`).
+`esm_import_references`), `_extract_symbols` (renamed `extract_symbols`, taking its
+`_namespace_qualified` inner closure with it).
 
-Do **not** move: `_run_tsc_boost`, `_TSC_BOOST_SCRIPT`, `_TypeScriptParsedFile`,
-`TypeScriptAdapter`, `_grammar_name`. Four existing tests monkeypatch
-`iwiki_mcp.codegraph.languages.typescript._run_tsc_boost`; moving it breaks them.
+`_KIND_BY_NODE` is **not** moved: it becomes the TypeScript profile's `kind_by_node`.
+`extract_symbols` loses its current `language=` / `prefix=` keyword arguments — both come
+from `profile.language` / `profile.prefix`, which feed `file_id` and `symbol_id`.
 
-Add the profile at the top of the new module:
+Do **not** move, per spec R2.1: `_run_tsc_boost`, `_TSC_BOOST_SCRIPT`,
+`_TypeScriptParsedFile`, `TypeScriptAdapter._probe_boost_once`, `TypeScriptAdapter`,
+`_grammar_name`. Four tests monkeypatch
+`iwiki_mcp.codegraph.languages.typescript._run_tsc_boost`
+(`test_typescript_adapter.py:422,436,459,481`); moving it breaks them.
+
+`_ecmascript.py` needs these imports: `hashlib`; `dataclass`, `field` from `dataclasses`;
+`PurePosixPath`, `PureWindowsPath` from `pathlib`; `Any`, `Callable`, `Mapping` from
+`typing`; and from `..models`: `FileRecord`, `ReferenceRecord`, `SymbolRecord`,
+`compact_casefold`, `file_id`, `symbol_id`, `token_key`.
+
+Add the profile at the top:
 
 ```python
 @dataclass(frozen=True)
 class LanguageProfile:
-    """Per-language switches for the shared ECMAScript walker."""
+    """Per-language switches for the shared ECMAScript walker.
+
+    Every default reproduces TypeScript's current behaviour, so a profile
+    built with only language/prefix/kind_by_node drives the walker exactly
+    as `typescript.py` did before the extraction.
+    """
 
     language: str
     prefix: str
@@ -384,17 +511,36 @@ class LanguageProfile:
     declaration_hooks: tuple = ()
 ```
 
-Every default reproduces TypeScript's current behaviour, so a profile built with only
-`language`/`prefix`/`kind_by_node` drives the walker exactly as today.
+- [ ] **Step 3: Extract the deduplication block into a function**
 
-- [ ] **Step 3: Parameterize the walker with the profile**
+The dedup logic is currently **inlined** in `TypeScriptAdapter.parse_file`
+(`typescript.py:600-625`: the `symbols_by_id` loop, the `duplicate_symbol_ids` set, the
+sort, and the `warnings` tuple). Extract it verbatim into:
 
-Inside `extract_symbols`, replace the hard-coded branches with profile lookups:
+```python
+def dedupe_symbols(symbols):
+    """Collapse colliding symbol_ids, keeping the last by start byte.
+
+    Anonymous scopes (IIFEs, callback bodies, if/try blocks) contribute no
+    qualified-name segment, so same-named siblings there genuinely collide.
+    This guarantees the build never hits the PRIMARY KEY constraint and
+    surfaces the degradation instead of hiding it.
+    """
+```
+
+returning `(symbols_list, warnings_tuple)`. `parse_file` calls it in place. This is an
+extraction, not a move — Task 1's golden test is what proves it behaviour-preserving.
+
+- [ ] **Step 4: Parameterize the walker with the profile**
+
+Inside `extract_symbols`:
 
 - `if ctype in _KIND_BY_NODE` becomes `if ctype in profile.kind_by_node`.
 - the `interface_declaration` branch runs only `if profile.handles_interface`.
 - the `internal_module` and ambient `module` branches run only `if profile.handles_namespace`.
-- the `variable_declarator` `else` arm becomes:
+- the `variable_declarator` arm gains a middle branch. Real order today
+  (`typescript.py:321-344`) is `if (value is arrow_function|function_expression and
+  name_node is not None)` → `else: walk(declarator, owner_qualified)`; insert between them:
 
 ```python
                     elif (
@@ -414,6 +560,9 @@ Inside `extract_symbols`, replace the hard-coded branches with profile lookups:
                         walk(declarator, owner_qualified)
 ```
 
+  With `object_literal_scope=False` the branch short-circuits, so TypeScript keeps its
+  exact current path.
+
 - the catch-all `else` arm consults hooks before recursing:
 
 ```python
@@ -427,20 +576,25 @@ Inside `extract_symbols`, replace the hard-coded branches with profile lookups:
                     walk(child, owner_qualified)
 ```
 
-Signature ordering for the hook contract:
-`hook(node, owner_qualified, make_symbol, symbols) -> bool`, where `make_symbol` is the
-walker's closure `(node, kind, name_node, *, owner_qualified=None, params_node=None,
-return_type_node=None, is_async=False) -> tuple[str, str]`.
+  Hook contract: `hook(node, owner_qualified, make_symbol, symbols) -> bool`, where
+  `make_symbol` is the walker's closure
+  `(node, kind, name_node, *, owner_qualified=None, params_node=None,
+  return_type_node=None, is_async=False) -> tuple[str, str]`. TypeScript's profile has no
+  hooks, so the loop is empty for it.
 
-- [ ] **Step 4: Add the per-reference heritage scope**
+- [ ] **Step 5: Add the per-reference heritage scope and rewriter**
 
-`PendingHeritage` gains `resolution_scope: str = "file"`;
-`pending_heritage_references` gains a keyword-only `resolution_scope: str = "file"` that it
-stamps onto each record; `resolve_heritage_references` passes `item.resolution_scope` into
-the emitted `ReferenceRecord` instead of the literal `"file"`. TypeScript passes nothing,
-so it keeps `"file"`.
+`PendingHeritage` gains `resolution_scope: str = "file"` and
+`target_reference_override: str | None = None`.
+`pending_heritage_references` gains keyword-only `resolution_scope="file"` and
+`target_rewriter=None`; for each heritage target it calls
+`target_rewriter(name)` when one is supplied, and stores the returned
+`(target_reference, resolution_scope)` on the record when the call returns a value.
+`resolve_heritage_references` uses `item.target_reference_override` when present —
+skipping the scope-candidate probe entirely — and otherwise behaves exactly as today,
+stamping `item.resolution_scope` instead of the literal `"file"`.
 
-- [ ] **Step 5: Rewrite `typescript.py` to delegate**
+- [ ] **Step 6: Rewrite `typescript.py` to delegate**
 
 Keep `TypeScriptAdapter`'s class attributes, `__init__` signature, boost probing, and
 `_grammar_name`. Define the profile once at module level:
@@ -456,25 +610,22 @@ _TYPESCRIPT_PROFILE = _ecmascript.LanguageProfile(
 )
 ```
 
-`parse_file` calls `_ecmascript.get_parser`, `_ecmascript.extract_symbols(...,
-profile=_TYPESCRIPT_PROFILE, ...)`, `_ecmascript.dedupe_symbols`,
-`_ecmascript.resolve_heritage_references`, and `_ecmascript.esm_import_references`, in the
-same order and with the same arguments as today.
+`parse_file` calls `_ecmascript.get_parser(_grammar_name(relative_path))`,
+`_ecmascript.extract_symbols(..., profile=_TYPESCRIPT_PROFILE, ...)`,
+`_ecmascript.dedupe_symbols`, `_ecmascript.resolve_heritage_references`, and
+`_ecmascript.esm_import_references`, in the same order and with the same arguments as
+today.
 
-- [ ] **Step 6: Run the baselines and the TypeScript suite**
+- [ ] **Step 7: Run the baselines and the TypeScript suite**
 
 Run: `uv run pytest tests/codegraph/test_typescript_golden.py tests/codegraph/test_typescript_adapter.py tests/codegraph/test_mixed_language_baseline.py -v`
-Expected: PASS, with no golden diff. A golden failure means the move was not
-behaviour-preserving — fix the move, never the golden file.
+Expected: PASS with no golden diff. A golden failure is a HUMAN CHECKPOINT hit — fix the
+move, report the diff; never touch the baseline.
 
-- [ ] **Step 7: Run the full suite and the linter**
-
-Run: `uv run pytest -q && uv run flake8 src tests`
-Expected: PASS, no lint output.
-
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Full suite, linter, commit**
 
 ```bash
+uv run pytest -q && uv run flake8 src tests
 git add src/iwiki_mcp/codegraph/languages/_ecmascript.py src/iwiki_mcp/codegraph/languages/typescript.py
 git commit -m "refactor(codegraph): extract shared ECMAScript core from TypeScript adapter"
 ```
@@ -489,33 +640,91 @@ git commit -m "refactor(codegraph): extract shared ECMAScript core from TypeScri
 - Test: `tests/codegraph/test_resolver.py`
 
 **Interfaces:**
-- Consumes: `FileRecord.language` (`models.py:164`), `ParsedFile.file`.
+- Consumes: `FileRecord.language` (`models.py:164`), `models.file_id`, `models.module_id`.
 - Produces:
   - `SymbolIndex.languages_by_file_id: Mapping[str, str]` — declared **before**
-    `_adapter_evidence` and defaulted to an empty mapping.
+    `_adapter_evidence`, `field(default_factory=dict)`.
   - `resolver.LANGUAGE_FAMILIES: Mapping[str, frozenset[str]]`
   - `resolver.family_languages(language: str) -> frozenset[str] | None` — `None` means
     "do not filter".
   - `_symbol_candidates(reference, index, language)` and
     `_module_prefix_candidates(target, index, language)` — both gain the third parameter.
+    Each has exactly one call site (`resolver.py:270`, `resolver.py:284`).
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests with their own record builders**
 
-Append to `tests/codegraph/test_resolver.py`:
+`tests/codegraph/test_resolver.py` has no record factories — every existing test runs the
+Python adapter (`_parse(adapter, path, source)` at `:43`). Add these local helpers and
+tests:
+
+```python
+def _language_file_record(*, language, prefix, path, module_qualified_name):
+    local_name = module_qualified_name.rsplit(".", 1)[-1]
+    return FileRecord(
+        file_id=file_id(language, prefix, "domain", path),
+        repository_id="domain",
+        path=path,
+        path_casefold=compact_casefold(path),
+        file_local_name=path.rsplit("/", 1)[-1],
+        file_name_tokens_casefold=token_key(path.rsplit("/", 1)[-1]),
+        language=language,
+        content_hash="0" * 64,
+        parser_version="test-parser",
+        size_bytes=0,
+        start_line=1,
+        end_line=1,
+        start_byte=0,
+        end_byte=0,
+        module_key=path,
+        module_id=module_id(language, prefix, "domain", path, module_qualified_name),
+        module_qualified_name=module_qualified_name,
+        module_local_name=local_name,
+        module_name_tokens_casefold=token_key(module_qualified_name, local_name),
+    )
+
+
+def _empty_parsed(file):
+    return ParsedFile(file=file, symbols=(), references=(), warnings=())
+
+
+def _module_reference(*, source_file_id, target_reference):
+    return ReferenceRecord(
+        source_symbol_id=None,
+        source_file_id=source_file_id,
+        source_module_id=None,
+        relation_type="IMPORTS",
+        target_reference=target_reference,
+        source_line=1,
+        source_byte=0,
+        source_end_line=1,
+        source_end_byte=1,
+        binding_name="thing",
+        binding_kind="implicit_binding",
+        binding_name_tokens_casefold=token_key("thing"),
+        target_kind_hint="module",
+        resolution_scope="project",
+    )
+```
+
+Read `models.py` for `FileRecord` / `ReferenceRecord` / `ParsedFile` field order and add
+any required field this snippet omits — every persisted constructor parameter is required,
+including nullable ones. Then:
 
 ```python
 def test_python_import_ignores_same_named_javascript_module():
-    python_file = _file_record(language="python", path="src/utils.py",
-                               module_qualified_name="src.utils")
-    javascript_file = _file_record(language="javascript", path="src/utils.js",
-                                   module_qualified_name="src.utils")
-    index = SymbolIndex.from_parsed_files((
-        _parsed(python_file), _parsed(javascript_file),
-    ))
-    reference = _reference(
-        relation_type="IMPORTS", target_reference="src.utils",
-        target_kind_hint="module", resolution_scope="project",
-        source_file_id="py-source",
+    python_file = _language_file_record(
+        language="python", prefix="py", path="src/utils.py",
+        module_qualified_name="src.utils",
+    )
+    javascript_file = _language_file_record(
+        language="javascript", prefix="js", path="src/utils.js",
+        module_qualified_name="src.utils",
+    )
+    index = SymbolIndex.from_parsed_files(
+        (_empty_parsed(python_file), _empty_parsed(javascript_file))
+    )
+    reference = _module_reference(
+        source_file_id=python_file.file_id, target_reference="src.utils",
     )
     relations = resolve_references("python", "py", "domain", (reference,), index)
     assert len(relations) == 1
@@ -523,14 +732,20 @@ def test_python_import_ignores_same_named_javascript_module():
     assert relations[0].target_module_id == python_file.module_id
 
 
-def test_javascript_import_resolves_into_typescript_module():
-    typescript_file = _file_record(language="typescript", path="src/shapes.ts",
-                                   module_qualified_name="src.shapes")
-    index = SymbolIndex.from_parsed_files((_parsed(typescript_file),))
-    reference = _reference(
-        relation_type="IMPORTS", target_reference="src.shapes",
-        target_kind_hint="module", resolution_scope="project",
-        source_file_id="js-source",
+def test_javascript_import_resolves_into_a_typescript_module():
+    typescript_file = _language_file_record(
+        language="typescript", prefix="ts", path="src/shapes.ts",
+        module_qualified_name="src.shapes",
+    )
+    javascript_file = _language_file_record(
+        language="javascript", prefix="js", path="src/app.js",
+        module_qualified_name="src.app",
+    )
+    index = SymbolIndex.from_parsed_files(
+        (_empty_parsed(typescript_file), _empty_parsed(javascript_file))
+    )
+    reference = _module_reference(
+        source_file_id=javascript_file.file_id, target_reference="src.shapes",
     )
     relations = resolve_references("javascript", "js", "domain", (reference,), index)
     assert relations[0].resolution_state == "resolved"
@@ -538,31 +753,24 @@ def test_javascript_import_resolves_into_typescript_module():
 
 
 def test_unknown_language_is_not_filtered():
-    other_file = _file_record(language="ruby", path="src/thing.rb",
-                              module_qualified_name="src.thing")
-    index = SymbolIndex.from_parsed_files((_parsed(other_file),))
-    reference = _reference(
-        relation_type="IMPORTS", target_reference="src.thing",
-        target_kind_hint="module", resolution_scope="project",
-        source_file_id="rb-source",
+    other_file = _language_file_record(
+        language="ruby", prefix="rb", path="src/thing.rb",
+        module_qualified_name="src.thing",
+    )
+    index = SymbolIndex.from_parsed_files((_empty_parsed(other_file),))
+    reference = _module_reference(
+        source_file_id="rb-source", target_reference="src.thing",
     )
     relations = resolve_references("ruby", "rb", "domain", (reference,), index)
     assert relations[0].resolution_state == "resolved"
 ```
 
-Reuse the module's existing record-building helpers; if `_file_record` / `_parsed` /
-`_reference` do not exist under those names, read the file and use whatever helpers it
-already defines rather than inventing new ones.
-
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/codegraph/test_resolver.py -k "same_named_javascript or into_typescript or unknown_language" -v`
-Expected: FAIL — the Python case resolves `ambiguous` (two candidates) instead of
-`resolved`.
+Run: `uv run pytest tests/codegraph/test_resolver.py -k "same_named_javascript or into_a_typescript or unknown_language" -v`
+Expected: FAIL — the first test yields `ambiguous` with two candidates.
 
 - [ ] **Step 3: Implement the scoping**
-
-In `resolver.py`:
 
 ```python
 LANGUAGE_FAMILIES = {
@@ -575,28 +783,48 @@ LANGUAGE_FAMILIES = {
 def family_languages(language: str) -> frozenset[str] | None:
     """Languages whose declarations may satisfy ``language``'s references.
 
-    ``None`` means "apply no filter" -- an unknown language keeps the
-    pre-scoping behaviour so nothing regresses for callers this map does
+    ``None`` means "apply no filter": an unknown language keeps the
+    pre-scoping behaviour, so nothing regresses for callers this map does
     not describe.
     """
     return LANGUAGE_FAMILIES.get(language)
 ```
 
-`SymbolIndex` gains, declared before `_adapter_evidence`:
+`SymbolIndex` gains, immediately before `_adapter_evidence`:
 
 ```python
     languages_by_file_id: Mapping[str, str] = field(default_factory=dict)
 ```
 
-`from_parsed_files` populates it with `{item.file.file_id: item.file.language for item in parsed}`.
+`from_parsed_files` passes
+`languages_by_file_id={item.file.file_id: item.file.language for item in parsed}`;
+`from_symbols` passes nothing and gets the empty default.
 
-`_symbol_candidates(reference, index, language)` filters candidates whose
-`index.languages_by_file_id.get(item.file_id)` is absent from the family (a missing entry
-is never filtered). The `exact_modules` lookup and `_module_prefix_candidates` filter on
-`FileRecord.language` directly.
+`_symbol_candidates(reference, index, language)` — a symbol whose file language is unknown
+is never filtered, because `from_symbols` builds no map:
 
-In `_module_prefix_candidates`, filter `index.modules_by_qualified` **before** the longest
-match is chosen:
+```python
+    allowed = family_languages(language)
+    if allowed is not None:
+        candidates = tuple(
+            item for item in candidates
+            if index.languages_by_file_id.get(item.file_id, "") in allowed
+            or item.file_id not in index.languages_by_file_id
+        )
+```
+
+The `exact_modules` lookup (`resolver.py:273-277`) filters on `FileRecord.language`
+directly — this is the branch that decides the Python-vs-JavaScript ambiguity:
+
+```python
+        allowed = family_languages(language)
+        exact_modules = tuple(
+            item for item in index.modules_by_qualified.get(target, ())
+            if allowed is None or item.language in allowed
+        ) if reference.relation_type == "IMPORTS" and not force_unresolved else ()
+```
+
+`_module_prefix_candidates` filters **before** the longest match is chosen:
 
 ```python
 def _module_prefix_candidates(target, index, language):
@@ -615,20 +843,16 @@ def _module_prefix_candidates(target, index, language):
     )
 ```
 
-- [ ] **Step 4: Run the new tests, then the guarded baselines**
+- [ ] **Step 4: Run the new tests, then the baselines**
 
 Run: `uv run pytest tests/codegraph/test_resolver.py -v && uv run pytest tests/codegraph/test_typescript_golden.py tests/codegraph/test_mixed_language_baseline.py -q`
-Expected: PASS everywhere. TypeScript output cannot change: every TS reference is either
-`unresolved` or file-scoped.
+Expected: PASS. TypeScript cannot move: every TS reference is either `unresolved` or
+file-scoped, and file scope already pins `item.file_id == reference.source_file_id`.
 
-- [ ] **Step 5: Run the full suite and the linter**
-
-Run: `uv run pytest -q && uv run flake8 src tests`
-Expected: PASS, no lint output.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Full suite, linter, commit**
 
 ```bash
+uv run pytest -q && uv run flake8 src tests
 git add src/iwiki_mcp/codegraph/resolver.py tests/codegraph/test_resolver.py
 git commit -m "feat(codegraph): scope resolution candidates by language family"
 ```
@@ -642,23 +866,25 @@ git commit -m "feat(codegraph): scope resolution candidates by language family"
 - Create: `tests/codegraph/test_javascript_adapter.py`
 
 **Interfaces:**
-- Consumes: everything Task 3 exported from `_ecmascript`.
+- Consumes: everything Task 3 exported from `_ecmascript`;
+  `resolver.declaration_relations`, `resolver.resolve_references`, `resolver.sort_relations`.
 - Produces:
   - `javascript.JavaScriptAdapter(repository_id: str, source_paths: tuple[str, ...], *,
-    parser_version: str = "tree-sitter-typescript")` with
-    `language = "javascript"`, `prefix = "js"`,
-    `extensions = (".js", ".jsx", ".mjs", ".cjs")`.
+    parser_version: str = "tree-sitter-typescript")`, with `language = "javascript"`,
+    `prefix = "js"`, `extensions = (".js", ".jsx", ".mjs", ".cjs")`.
   - `javascript.JAVASCRIPT_PROFILE` — the `LanguageProfile` instance.
   - `JavaScriptAdapter.parse_file(source: bytes, path: str) -> ParsedFile`
   - `JavaScriptAdapter.resolve_references(parsed, project_index) -> ResolutionResult`
-    (Task 8 extends this; here it delegates like TypeScript's does).
 
 - [ ] **Step 1: Write the failing tests**
 
 `tests/codegraph/test_javascript_adapter.py`:
 
 ```python
+import pytest
+
 from iwiki_mcp.codegraph.languages.javascript import JavaScriptAdapter
+from iwiki_mcp.codegraph.resolver import SymbolIndex
 
 
 def _adapter():
@@ -706,9 +932,38 @@ def test_function_class_and_arrow_declarations_extracted():
     assert ("method", "src.app.Widget.render") in found
 
 
-def test_anonymous_default_export_emits_no_symbol():
-    parsed = _adapter().parse_file(b"export default function () { return 1; }\n", "a.js")
-    assert parsed.symbols == ()
+def test_private_names_are_marked_private():
+    source = b"function _internal() {}\nclass A { #secret() {} }\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    visibility = {s.local_name: s.visibility for s in parsed.symbols}
+    assert visibility["_internal"] == "private"
+    assert visibility["#secret"] == "private"
+
+
+def test_anonymous_declarations_emit_no_symbol():
+    source = b"export default function () { return 1; }\nconst C = class {};\n"
+    parsed = _adapter().parse_file(source, "a.js")
+    assert not any(symbol.kind == "class" for symbol in parsed.symbols)
+
+
+def test_declares_relations_cover_module_and_class_ownership():
+    source = b"export class Widget { render() {} }\nexport function go() {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    index = SymbolIndex.from_parsed_files((parsed,))
+    relations = _adapter().resolve_references(parsed, index).relations
+    declares = {
+        r.target_symbol_id for r in relations if r.relation_type == "DECLARES"
+    }
+    by_name = {s.qualified_name: s.symbol_id for s in parsed.symbols}
+    assert by_name["src.app.Widget"] in declares
+    assert by_name["src.app.go"] in declares
+    assert by_name["src.app.Widget.render"] in declares
+    method_declare = next(
+        r for r in relations
+        if r.relation_type == "DECLARES"
+        and r.target_symbol_id == by_name["src.app.Widget.render"]
+    )
+    assert method_declare.source_symbol_id == by_name["src.app.Widget"]
 
 
 def test_jsx_parses_without_error():
@@ -718,7 +973,6 @@ def test_jsx_parses_without_error():
 
 
 def test_source_must_be_bytes():
-    import pytest
     with pytest.raises(TypeError):
         _adapter().parse_file("export const a = 1;", "a.js")
 ```
@@ -730,8 +984,6 @@ Expected: FAIL with `ModuleNotFoundError: iwiki_mcp.codegraph.languages.javascri
 
 - [ ] **Step 3: Implement the adapter**
 
-`javascript.py` mirrors `typescript.py`'s `parse_file` with three differences:
-
 ```python
 JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
     language="javascript",
@@ -740,11 +992,13 @@ JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
     handles_interface=False,
     handles_namespace=False,
     object_literal_scope=True,
-    declaration_hooks=(),          # Task 6 adds the prototype hook
+    declaration_hooks=(),          # Task 6 fills this in
 )
 ```
 
-1. the grammar is always `"tsx"` (`_ecmascript.get_parser("tsx")`);
+`parse_file` mirrors `typescript.py`'s with three differences:
+
+1. the grammar is always `tsx`: `_ecmascript.get_parser("tsx")`;
 2. module identity is unconditional — no `is_module` probe:
 
 ```python
@@ -758,20 +1012,31 @@ JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
    `module_name_tokens_casefold=token_key(module_dotted_name, local_name)`, and
    `module_id=module_id(self.language, self.prefix, self.repository_id, relative_path,
    module_dotted_name)`;
-3. no tsc boost — `resolve_references` returns
-   `ResolutionResult(relations=sort_relations((*declares, *resolved)), warnings=())`.
+3. no tsc boost. `resolve_references` is exactly:
 
-- [ ] **Step 4: Run the tests**
+```python
+    def resolve_references(self, parsed, project_index):
+        declares = declaration_relations(
+            self.language, self.prefix, self.repository_id, parsed,
+        )
+        resolved = resolve_references(
+            self.language, self.prefix, self.repository_id,
+            parsed.references, project_index,
+        )
+        return ResolutionResult(
+            relations=sort_relations((*declares, *resolved)), warnings=(),
+        )
+```
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -v`
-Expected: PASS.
+   (Task 8 inserts specifier rewriting before the `resolve_references` call.) Read
+   `typescript.py`'s current call site to confirm the exact argument order before copying.
 
-- [ ] **Step 5: Run the guarded baselines, the full suite, and the linter**
+- [ ] **Step 4: Run the tests, the baselines, the full suite, and the linter**
 
-Run: `uv run pytest -q && uv run flake8 src tests`
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -v && uv run pytest -q && uv run flake8 src tests`
 Expected: PASS, no lint output.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/iwiki_mcp/codegraph/languages/javascript.py tests/codegraph/test_javascript_adapter.py
@@ -783,14 +1048,23 @@ git commit -m "feat(codegraph): add JavaScript adapter with module and base decl
 ### Task 6: Object-literal and prototype methods
 
 **Files:**
-- Modify: `src/iwiki_mcp/codegraph/languages/javascript.py` (add the prototype hook, wire it
-  into `JAVASCRIPT_PROFILE`)
+- Modify: `src/iwiki_mcp/codegraph/languages/javascript.py`
 - Test: `tests/codegraph/test_javascript_adapter.py`
 
 **Interfaces:**
-- Consumes: the hook contract from Task 3
-  (`hook(node, owner_qualified, make_symbol, symbols) -> bool`).
-- Produces: `javascript.prototype_method_hook` with that signature.
+- Consumes: the hook contract from Task 3.
+- Produces:
+  - `javascript.object_pair_hook(node, owner_qualified, make_symbol, symbols) -> bool`
+  - `javascript.prototype_method_hook(node, owner_qualified, make_symbol, symbols) -> bool`
+  - `javascript.member_chain(node) -> tuple[str, ...] | None` — dotted parts of a chain of
+    `identifier` / `property_identifier` nodes joined by non-computed `member_expression`s;
+    `None` if any link is computed, a call, or a non-identifier. Tasks 9 and 10 reuse it.
+
+Note on node shapes, confirmed by probing the tsx grammar: a shorthand method
+(`get() {}`) is a `method_definition` the base walker already claims once
+`object_literal_scope` scopes the recursion; a `pair` with a function or arrow value
+(`post: function () {}`, `put: () => {}`) has **no** walker branch, which is why
+`object_pair_hook` exists. A computed key is `pair › computed_property_name`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -801,15 +1075,19 @@ def test_object_literal_methods_are_scoped_under_the_declarator():
         b"  get(u) { return u; },\n"
         b"  post: function (u) { return u; },\n"
         b"  put: (u) => u,\n"
+        b"  'quoted': (u) => u,\n"
         b"  [dynamic]: (u) => u,\n"
+        b"  ...spread,\n"
         b"  plain: 1,\n"
         b"};\n"
     )
     parsed = _adapter().parse_file(source, "src/api.js")
     names = {symbol.qualified_name for symbol in parsed.symbols}
-    assert {"src.api.api.get", "src.api.api.post", "src.api.api.put"} <= names
+    assert {
+        "src.api.api.get", "src.api.api.post", "src.api.api.put", "src.api.api.quoted",
+    } <= names
     assert not any(name.endswith(".plain") for name in names)
-    assert not any("dynamic" in name for name in names)
+    assert not any("dynamic" in name or "spread" in name for name in names)
 
 
 def test_destructuring_declarator_with_object_initializer_is_skipped():
@@ -837,6 +1115,12 @@ def test_object_literal_method_signature_has_no_return_segment():
     assert symbol.visibility == "public"
 
 
+def test_async_object_literal_method_signature_marks_async():
+    parsed = _adapter().parse_file(b"const api = { async get(a) { return a; } };\n", "s.js")
+    symbol = next(item for item in parsed.symbols if item.local_name == "get")
+    assert symbol.signature == "method|async(a)"
+
+
 def test_duplicate_symbol_identity_warns():
     source = (
         b"if (x) { function dup() { return 1; } }\n"
@@ -848,10 +1132,69 @@ def test_duplicate_symbol_identity_warns():
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "object_literal or prototype or destructuring or duplicate" -v`
-Expected: FAIL — object-literal names missing, prototype method missing.
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "object_literal or prototype or destructuring or async_object or duplicate" -v`
+Expected: FAIL — `pair`-valued members and the prototype method are missing.
 
-- [ ] **Step 3: Implement the prototype hook**
+- [ ] **Step 3: Implement `member_chain` and both hooks**
+
+```python
+def member_chain(node):
+    """Dotted parts of a non-computed member chain, or None.
+
+    Returns None for anything whose target is not decidable statically:
+    a computed access (`a[k]`), a call in the chain (`f().b`), or any
+    non-identifier link. Callers must not guess past a None.
+    """
+    parts = []
+    current = node
+    while current.type == "member_expression":
+        prop = current.child_by_field_name("property")
+        if prop is None or prop.type != "property_identifier":
+            return None
+        parts.append(prop)
+        current = current.child_by_field_name("object")
+        if current is None:
+            return None
+    if current.type != "identifier":
+        return None
+    parts.append(current)
+    return tuple(_text_of(part) for part in reversed(parts))
+```
+
+`_text_of` is a closure-free helper over the module's source bytes; implement
+`member_chain(source, node)` if that reads better — keep the spelling identical wherever
+Tasks 9 and 10 consume it.
+
+```python
+def object_pair_hook(node, owner_qualified, make_symbol, symbols):
+    """Claim `key: function () {}` / `key: () => {}` inside an object literal.
+
+    Shorthand methods are already claimed by the walker's
+    `method_definition` branch; only `pair` nodes need this. Computed keys
+    and spread properties are skipped -- their target is not statically
+    decidable.
+    """
+    if node.type != "pair" or owner_qualified is None:
+        return False
+    key = node.child_by_field_name("key")
+    value = node.child_by_field_name("value")
+    if key is None or value is None:
+        return False
+    if key.type not in ("property_identifier", "string"):
+        return False
+    if value.type not in ("function_expression", "arrow_function"):
+        return False
+    make_symbol(
+        node, "method", key,
+        owner_qualified=owner_qualified,
+        params_node=value.child_by_field_name("parameters"),
+        is_async=any(child.type == "async" for child in value.children),
+    )
+    return True
+```
+
+A `string` key's text arrives quoted; strip the surrounding quotes when building the local
+name so `'quoted'` yields `quoted`.
 
 ```python
 def prototype_method_hook(node, owner_qualified, make_symbol, symbols):
@@ -875,14 +1218,13 @@ def prototype_method_hook(node, owner_qualified, make_symbol, symbols):
         return False
     if value.type not in ("function_expression", "arrow_function"):
         return False
-    parts = _member_chain(left)
+    parts = member_chain(left)
     if parts is None or len(parts) != 3 or parts[1] != "prototype":
         return False
-    owner_name, _, method_name = parts
     owner = next(
         (
             item for item in symbols
-            if item.local_name == owner_name and item.kind in ("class", "function")
+            if item.local_name == parts[0] and item.kind in ("class", "function")
         ),
         None,
     )
@@ -897,23 +1239,15 @@ def prototype_method_hook(node, owner_qualified, make_symbol, symbols):
     return True
 ```
 
-`_member_chain(node)` returns the dotted parts of a non-computed member expression
-(`("Widget", "prototype", "render")`) or `None` for anything computed or non-identifier;
-Task 9 reuses it for `CALLS`, so define it at module level now.
+Then set `declaration_hooks=(object_pair_hook, prototype_method_hook)` in
+`JAVASCRIPT_PROFILE`.
 
-Then set `declaration_hooks=(prototype_method_hook,)` in `JAVASCRIPT_PROFILE`.
+- [ ] **Step 4: Run the JavaScript tests, then verify TypeScript did not move**
 
-- [ ] **Step 4: Run the tests**
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -v && uv run pytest tests/codegraph/test_typescript_golden.py tests/codegraph/test_typescript_adapter.py -q`
+Expected: PASS everywhere. A golden diff is a HUMAN CHECKPOINT hit.
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -v`
-Expected: PASS.
-
-- [ ] **Step 5: Verify TypeScript did not move**
-
-Run: `uv run pytest tests/codegraph/test_typescript_golden.py tests/codegraph/test_typescript_adapter.py -q`
-Expected: PASS.
-
-- [ ] **Step 6: Full suite, linter, commit**
+- [ ] **Step 5: Full suite, linter, commit**
 
 ```bash
 uv run pytest -q && uv run flake8 src tests
@@ -932,9 +1266,11 @@ git commit -m "feat(codegraph): extract JavaScript object-literal and prototype 
 **Interfaces:**
 - Consumes: `_ecmascript.esm_import_references`, `_ecmascript.import_bindings`.
 - Produces:
-  - `javascript.require_references(source, root, *, file_record) -> tuple[ReferenceRecord, ...]`
+  - `javascript.require_references(source, root, *, file_record, symbols)
+    -> tuple[ReferenceRecord, ...]`
   - `javascript.enclosing_symbol_id(symbols, node) -> str | None` — the innermost symbol
-    containing `node`; Task 9 reuses it.
+    whose byte range contains `node`. Tasks 9 and 10 reuse it.
+  - `javascript.attribute(reference, symbols, file_record, node) -> ReferenceRecord`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -975,8 +1311,12 @@ def test_require_produces_import_references():
     assert bindings["aliased"].binding_kind == "explicit_alias"
 
 
-def test_dynamic_and_bare_require_produce_no_reference():
-    source = b"const a = require(name);\nrequire('./side');\n"
+def test_dynamic_bare_and_array_pattern_requires_produce_no_reference():
+    source = (
+        b"const a = require(name);\n"
+        b"require('./side');\n"
+        b"const [first] = require('./tuple');\n"
+    )
     parsed = _adapter().parse_file(source, "src/app.js")
     assert parsed.references == ()
 
@@ -986,38 +1326,64 @@ def test_module_level_reference_sets_module_id_not_symbol_id():
     reference = parsed.references[0]
     assert reference.source_symbol_id is None
     assert reference.source_module_id == parsed.file.module_id
+
+
+def test_reference_inside_a_function_sets_symbol_id_not_module_id():
+    source = b"function go() { const m = require('./m'); return m; }\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    reference = parsed.references[0]
+    go = next(s for s in parsed.symbols if s.local_name == "go")
+    assert reference.source_symbol_id == go.symbol_id
+    assert reference.source_module_id is None
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "esm or require or side_effect or module_level" -v`
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "esm or require or side_effect or module_level or inside_a_function" -v`
 Expected: FAIL — `parsed.references` is empty.
 
 - [ ] **Step 3: Implement**
 
 `parse_file` sets
-`references = (*_ecmascript.esm_import_references(source, root, file_record=file),
-*require_references(source, root, file_record=file))`.
-
-`require_references` walks `lexical_declaration` / `variable_declaration` nodes, and for
-each `variable_declarator` whose value is a `call_expression` with callee `require` and a
-single `string` argument, emits one `ReferenceRecord` per binding:
-
-- an `identifier` name node → one binding, `implicit_binding`;
-- an `object_pattern` name node → one binding per `shorthand_property_identifier_pattern`
-  (`implicit_binding`) and per `pair_pattern` (the value identifier, `explicit_alias`);
-- an `array_pattern` name node → no binding, no reference.
-
-Every emitted record uses `relation_type="IMPORTS"`, the raw specifier as
-`target_reference`, `resolution_hint="unresolved"` (Task 8 rewrites it),
-`binding_name_tokens_casefold=token_key(binding_name)`, and the source attribution rule
-below.
-
-Source attribution, applied to **every** reference JavaScript emits (import, require,
-inherits, call):
 
 ```python
-def _attribute(reference, symbols, file_record, node):
+        references = tuple(
+            attribute(reference, symbols, file, reference_node)
+            for reference, reference_node in (
+                *_esm_pairs(source, root, file),
+                *_require_pairs(source, root, file),
+            )
+        )
+```
+
+or any equivalent that applies the attribution rule below to **every** reference. Keep
+`_ecmascript.esm_import_references` as the ESM producer.
+
+`require_references` walks `lexical_declaration` / `variable_declaration` nodes; for each
+`variable_declarator` whose value is a `call_expression` whose `function` field is the
+identifier `require` with a single `string` argument, it emits one `ReferenceRecord` per
+binding:
+
+- `identifier` name node → one binding, `implicit_binding`;
+- `object_pattern` name node → one binding per `shorthand_property_identifier_pattern`
+  (`implicit_binding`) and per `pair_pattern` (its value `identifier`, `explicit_alias`);
+- `array_pattern` name node → no binding, no reference.
+
+Each record: `relation_type="IMPORTS"`, raw specifier as `target_reference`,
+`resolution_hint="unresolved"` (Task 8 rewrites it),
+`binding_name_tokens_casefold=token_key(binding_name)`.
+
+Attribution — applies to every JavaScript reference, import and call alike:
+
+```python
+def attribute(reference, symbols, file_record, node):
+    """Point a reference at its innermost enclosing symbol.
+
+    `source_module_id` must be None whenever `source_symbol_id` is set:
+    schema.py enforces
+    CHECK (source_module_id IS NULL OR source_symbol_id IS NULL)
+    and the snapshot insert aborts otherwise.
+    """
     symbol_id = enclosing_symbol_id(symbols, node)
     return dataclasses.replace(
         reference,
@@ -1027,18 +1393,10 @@ def _attribute(reference, symbols, file_record, node):
     )
 ```
 
-`source_module_id` must be `None` whenever `source_symbol_id` is set: `schema.py:138`
-enforces `CHECK (source_module_id IS NULL OR source_symbol_id IS NULL)` and the build
-aborts otherwise.
-
-- [ ] **Step 4: Run the tests**
-
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -v`
-Expected: PASS.
-
-- [ ] **Step 5: Full suite, linter, commit**
+- [ ] **Step 4: Run the tests, full suite, linter, commit**
 
 ```bash
+uv run pytest tests/codegraph/test_javascript_adapter.py -v
 uv run pytest -q && uv run flake8 src tests
 git add src/iwiki_mcp/codegraph/languages/javascript.py tests/codegraph/test_javascript_adapter.py
 git commit -m "feat(codegraph): extract ESM and CommonJS imports for JavaScript"
@@ -1050,26 +1408,32 @@ git commit -m "feat(codegraph): extract ESM and CommonJS imports for JavaScript"
 
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/languages/javascript.py`
-  (`JavaScriptAdapter.resolve_references`)
 - Test: `tests/codegraph/test_javascript_adapter.py`
 
 **Interfaces:**
-- Consumes: `SymbolIndex.modules_by_qualified`, `resolver.resolve_references`.
+- Consumes: `SymbolIndex.modules_by_qualified`.
 - Produces:
-  - `javascript.dotted_candidate(importer_path: str, specifier: str) -> str | None` — the
-    normalized dotted module name for a relative specifier, or `None` when the specifier is
-    bare, a URL, a Node builtin, a subpath import, or escapes the repository root.
-  - `javascript.resolve_specifier(reference, importer_path, index) -> ReferenceRecord` —
-    the rewritten reference.
+  - `javascript.dotted_candidate(importer_path: str, specifier: str) -> str | None`
+  - `javascript.resolve_specifier(reference, importer_path, index) -> ReferenceRecord`
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-from iwiki_mcp.codegraph.resolver import SymbolIndex
+from iwiki_mcp.codegraph.languages.javascript import dotted_candidate
+from iwiki_mcp.codegraph.languages.typescript import TypeScriptAdapter
+
+
+def _typescript_parsed(source, path):
+    adapter = TypeScriptAdapter("domain", (), parser_version="test-parser")
+    return adapter.parse_file(source, path)
+
+
+def _imports(adapter, parsed, index):
+    relations = adapter.resolve_references(parsed, index).relations
+    return [item for item in relations if item.relation_type == "IMPORTS"]
 
 
 def test_dotted_candidate_normalizes_and_strips_extensions():
-    from iwiki_mcp.codegraph.languages.javascript import dotted_candidate
     assert dotted_candidate("src/app.js", "./util") == "src.util"
     assert dotted_candidate("src/app.mjs", "./util.js") == "src.util"
     assert dotted_candidate("src/deep/app.js", "../shared/x.ts") == "src.shared.x"
@@ -1081,49 +1445,57 @@ def test_dotted_candidate_normalizes_and_strips_extensions():
 
 
 def test_relative_import_resolves_to_a_typescript_module():
-    javascript = _adapter().parse_file(b"import s from './shapes';\n", "src/app.js")
-    typescript = _typescript_parsed("export const a = 1;\n", "src/shapes.ts")
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './shapes';\n", "src/app.js")
+    typescript = _typescript_parsed(b"export const a = 1;\n", "src/shapes.ts")
     index = SymbolIndex.from_parsed_files((javascript, typescript))
-    relations = _adapter().resolve_references(javascript, index).relations
-    imports = [item for item in relations if item.relation_type == "IMPORTS"]
+    imports = _imports(adapter, javascript, index)
     assert imports[0].resolution_state == "resolved"
     assert imports[0].target_module_id == typescript.file.module_id
 
 
 def test_directory_import_falls_back_to_the_index_candidate():
-    javascript = _adapter().parse_file(b"import s from './dir';\n", "src/app.js")
-    target = _adapter().parse_file(b"export const a = 1;\n", "src/dir/index.js")
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './dir';\n", "src/app.js")
+    target = adapter.parse_file(b"export const a = 1;\n", "src/dir/index.js")
     index = SymbolIndex.from_parsed_files((javascript, target))
-    relations = _adapter().resolve_references(javascript, index).relations
-    imports = [item for item in relations if item.relation_type == "IMPORTS"]
+    imports = _imports(adapter, javascript, index)
     assert imports[0].target_module_id == target.file.module_id
 
 
+def test_same_dotted_name_in_js_and_ts_is_ambiguous():
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './util';\n", "src/app.js")
+    js_target = adapter.parse_file(b"export const a = 1;\n", "src/util.js")
+    ts_target = _typescript_parsed(b"export const a = 1;\n", "src/util.ts")
+    index = SymbolIndex.from_parsed_files((javascript, js_target, ts_target))
+    imports = _imports(adapter, javascript, index)
+    assert len(imports) == 2
+    assert {item.resolution_state for item in imports} == {"ambiguous"}
+
+
 def test_unmatched_relative_specifier_stays_unresolved_without_prefix_matching():
-    javascript = _adapter().parse_file(b"import s from './missing';\n", "src/app.js")
-    sibling = _adapter().parse_file(b"export const a = 1;\n", "src/other.js")
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './missing';\n", "src/app.js")
+    sibling = adapter.parse_file(b"export const a = 1;\n", "src/other.js")
     index = SymbolIndex.from_parsed_files((javascript, sibling))
-    relations = _adapter().resolve_references(javascript, index).relations
-    imports = [item for item in relations if item.relation_type == "IMPORTS"]
+    imports = _imports(adapter, javascript, index)
     assert imports[0].resolution_state == "unresolved"
     assert imports[0].target_reference == "./missing"
 
 
 def test_bare_specifier_stays_unresolved():
-    javascript = _adapter().parse_file(b"import react from 'react';\n", "src/app.js")
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import react from 'react';\n", "src/app.js")
     index = SymbolIndex.from_parsed_files((javascript,))
-    relations = _adapter().resolve_references(javascript, index).relations
-    imports = [item for item in relations if item.relation_type == "IMPORTS"]
+    imports = _imports(adapter, javascript, index)
     assert imports[0].resolution_state == "unresolved"
     assert imports[0].target_reference == "react"
 ```
 
-`_typescript_parsed(source, path)` is a local helper building a
-`TypeScriptAdapter("domain", (), parser_version="test-parser")` and calling `parse_file`.
-
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "candidate or resolves or directory or unmatched or bare" -v`
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "candidate or resolves_to_a_typescript or directory or ambiguous or unmatched or bare" -v`
 Expected: FAIL — `dotted_candidate` does not exist; imports resolve `unresolved`.
 
 - [ ] **Step 3: Implement**
@@ -1135,10 +1507,9 @@ _SPECIFIER_EXTENSIONS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
 def dotted_candidate(importer_path: str, specifier: str) -> str | None:
     """Normalize a relative specifier into a project dotted module name.
 
-    Returns ``None`` for anything whose target is not decidable from the
-    path alone -- bare package names, subpath imports, URLs, Node
-    builtins, and paths escaping the repository root. Guessing those
-    would mean inventing an edge.
+    Returns None for anything whose target is not decidable from the path
+    alone -- bare package names, subpath imports, URLs, Node builtins, and
+    paths escaping the repository root. Guessing those would invent an edge.
     """
     if not specifier.startswith("."):
         return None
@@ -1161,47 +1532,184 @@ def dotted_candidate(importer_path: str, specifier: str) -> str | None:
             break
     parts[-1] = tail.split(".", 1)[0]
     return ".".join(parts)
+
+
+def resolve_specifier(reference, importer_path, index):
+    """Bind a relative specifier to a project module, or leave it alone."""
+    candidate = dotted_candidate(importer_path, reference.target_reference or "")
+    if candidate is None:
+        return reference
+    for probe in (candidate, f"{candidate}.index"):
+        if probe in index.modules_by_qualified:
+            return dataclasses.replace(
+                reference,
+                target_reference=probe,
+                resolution_hint=None,
+                resolution_scope="project",
+                target_kind_hint="module",
+            )
+    return reference
 ```
 
-`resolve_specifier` probes `candidate` then `candidate + ".index"` against
-`index.modules_by_qualified`; the first hit rewrites the reference with
-`target_reference=<hit>`, `resolution_hint=None`, `resolution_scope="project"`,
-`target_kind_hint="module"`. No hit leaves the reference exactly as extracted
-(`resolution_hint="unresolved"`), which also guarantees
-`resolver._module_prefix_candidates` is never consulted for it.
+Leaving an unmatched reference untouched keeps `resolution_hint="unresolved"`, which is
+also what guarantees `resolver._module_prefix_candidates` is never consulted for it.
 
-`JavaScriptAdapter.resolve_references` rebuilds the reference tuple with
-`dataclasses.replace` — `ReferenceRecord` is frozen and `ParsedFile` must not be mutated —
-then calls `declaration_relations` and `resolver.resolve_references` as Task 5 wired them.
+`JavaScriptAdapter.resolve_references` rebuilds the reference tuple before delegating —
+`ReferenceRecord` is frozen and `ParsedFile` must not be mutated:
 
-- [ ] **Step 4: Run the tests, then the full suite and linter**
+```python
+        references = tuple(
+            resolve_specifier(item, parsed.file.path, project_index)
+            if item.relation_type == "IMPORTS" else item
+            for item in parsed.references
+        )
+```
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -v && uv run pytest -q && uv run flake8 src tests`
-Expected: PASS, no lint output.
+then passes `references` (not `parsed.references`) to `resolve_references`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Run the tests, full suite, linter, commit**
 
 ```bash
+uv run pytest tests/codegraph/test_javascript_adapter.py -v
+uv run pytest -q && uv run flake8 src tests
 git add src/iwiki_mcp/codegraph/languages/javascript.py tests/codegraph/test_javascript_adapter.py
 git commit -m "feat(codegraph): resolve relative JavaScript module specifiers"
 ```
 
 ---
 
-### Task 9: INHERITS and CALLS
+### Task 9: Import aliases and INHERITS
 
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/languages/javascript.py`
 - Test: `tests/codegraph/test_javascript_adapter.py`
 
 **Interfaces:**
-- Consumes: `_ecmascript.pending_heritage_references` (with the `resolution_scope`
-  parameter from Task 3), `javascript._member_chain`, `javascript.enclosing_symbol_id`.
+- Consumes: `_ecmascript.pending_heritage_references` with its `resolution_scope` and
+  `target_rewriter` parameters (Task 3), `javascript.dotted_candidate` (Task 8).
 - Produces:
-  - `javascript.call_references(source, root, *, file_record, symbols, aliases)
-    -> tuple[ReferenceRecord, ...]`
-  - `javascript.import_aliases(source, root) -> Mapping[str, str]` — binding name → dotted
-    prefix (`{"shapes": "./shapes"}`), covering both ESM and `require` bindings.
+  - `javascript.ImportAlias` — frozen dataclass `(specifier: str, imported_name: str | None)`
+    where `imported_name` is the name in the exporting module for a named import
+    (`{ helper }` → `"helper"`, `{ a as b }` → `"a"`), and `None` for a default,
+    namespace, or whole-module `require` binding.
+  - `javascript.import_aliases(source, root) -> Mapping[str, ImportAlias]` — keyed by the
+    **local** binding name, covering both ESM clauses and `require` declarators.
+  - `javascript.expand_alias(aliases, importer_path, parts) -> str | None` — dotted target
+    for a member chain whose head is an alias, or `None` when the head is not an alias or
+    the specifier is not resolvable by path arithmetic.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def _inherits(parsed):
+    return next(r for r in parsed.references if r.relation_type == "INHERITS")
+
+
+def test_class_extends_local_base_resolves_in_file_scope():
+    source = b"class Base {}\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.app.Base"
+    assert inherits.resolution_scope == "file"
+
+
+def test_class_extends_imported_base_is_project_scoped():
+    source = b"import { Base } from './base';\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.base.Base"
+    assert inherits.resolution_scope == "project"
+
+
+def test_class_extends_required_base_is_project_scoped():
+    source = b"const { Base } = require('./base');\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.base.Base"
+    assert inherits.resolution_scope == "project"
+
+
+def test_class_extends_bare_import_stays_file_scoped():
+    source = b"import { Base } from 'vendor';\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.app.Base"
+    assert inherits.resolution_scope == "file"
+
+
+def test_inherits_resolves_across_files_to_a_typescript_class():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import { Base } from './base';\nclass Derived extends Base {}\n", "src/app.js",
+    )
+    typescript = _typescript_parsed(b"export class Base {}\n", "src/base.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    relations = adapter.resolve_references(javascript, index).relations
+    inherits = next(r for r in relations if r.relation_type == "INHERITS")
+    base = next(s for s in typescript.symbols if s.local_name == "Base")
+    assert inherits.resolution_state == "resolved"
+    assert inherits.target_symbol_id == base.symbol_id
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "extends or inherits" -v`
+Expected: FAIL — the imported-base cases produce `src.app.Base` with `"file"` scope.
+
+- [ ] **Step 3: Implement**
+
+`import_aliases` collects, per local binding name:
+
+- ESM default import → `ImportAlias(specifier, None)`;
+- ESM named import (`{ a }` or `{ a as b }`) → `ImportAlias(specifier, "a")`;
+- ESM namespace (`* as ns`) → `ImportAlias(specifier, None)`;
+- `const x = require("m")` → `ImportAlias("m", None)`;
+- `const { a: b } = require("m")` → `ImportAlias("m", "a")`.
+
+`expand_alias(aliases, importer_path, parts)` takes the member chain from
+`member_chain`. If `parts[0]` is not an alias, return `None`. Otherwise compute
+`module = dotted_candidate(importer_path, alias.specifier)`; a `None` module (bare
+specifier) returns `None`. Then join: `alias.imported_name` when present, followed by
+`parts[1:]`, all appended to `module`. So `helper()` with `{ helper } from './lib'` in
+`src/app.js` gives `src.lib.helper`, and `ns.foo()` with `* as ns from './lib'` gives
+`src.lib.foo`.
+
+For heritage, pass a rewriter into `pending_heritage_references`:
+
+```python
+        def heritage_rewriter(name):
+            expanded = expand_alias(aliases, relative_path, (name,))
+            if expanded is None:
+                return None
+            return (expanded, "project")
+```
+
+Returning `None` falls through to the shared scope-candidate probe, which is what keeps
+the local-base and bare-import cases at `"file"` scope with the module-qualified target.
+
+- [ ] **Step 4: Run the tests, the golden baseline, the full suite, linter, commit**
+
+```bash
+uv run pytest tests/codegraph/test_javascript_adapter.py tests/codegraph/test_typescript_golden.py -v
+uv run pytest -q && uv run flake8 src tests
+git add src/iwiki_mcp/codegraph/languages/javascript.py tests/codegraph/test_javascript_adapter.py
+git commit -m "feat(codegraph): resolve JavaScript inheritance through import aliases"
+```
+
+---
+
+### Task 10: CALLS
+
+**Files:**
+- Modify: `src/iwiki_mcp/codegraph/languages/javascript.py`
+- Test: `tests/codegraph/test_javascript_adapter.py`
+
+**Interfaces:**
+- Consumes: `javascript.member_chain` (Task 6), `javascript.import_aliases` /
+  `javascript.expand_alias` (Task 9), `javascript.enclosing_symbol_id` /
+  `javascript.attribute` (Task 7), `_ecmascript.heritage_scope_candidates` (Task 3).
+- Produces: `javascript.call_references(source, root, *, file_record, symbols, aliases,
+  importer_path) -> tuple[ReferenceRecord, ...]`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1214,6 +1722,7 @@ def test_calls_are_extracted_for_plain_and_member_callees():
     source = (
         b"import { helper } from './lib';\n"
         b"function local() { return 1; }\n"
+        b"class Widget {}\n"
         b"export function run(o) {\n"
         b"  local();\n"
         b"  helper();\n"
@@ -1221,7 +1730,6 @@ def test_calls_are_extracted_for_plain_and_member_callees():
         b"  new Widget();\n"
         b"  return o[key]();\n"
         b"}\n"
-        b"class Widget {}\n"
     )
     parsed = _adapter().parse_file(source, "src/app.js")
     targets = _calls(parsed)
@@ -1230,6 +1738,23 @@ def test_calls_are_extracted_for_plain_and_member_callees():
     assert "o.a.b" in targets
     assert "src.app.Widget" in targets
     assert not any("key" in target for target in targets)
+
+
+def test_call_scope_selection():
+    source = (
+        b"import { helper } from './lib';\n"
+        b"function local() {}\n"
+        b"function run() { helper(); local(); unknownThing(); }\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    by_target = {
+        ref.target_reference: ref
+        for ref in parsed.references if ref.relation_type == "CALLS"
+    }
+    assert by_target["src.lib.helper"].resolution_scope == "project"
+    assert by_target["src.app.local"].resolution_scope == "file"
+    assert by_target["unknownThing"].resolution_hint == "unresolved"
+    assert by_target["unknownThing"].resolution_scope is None
 
 
 def test_call_source_is_the_enclosing_symbol():
@@ -1246,6 +1771,12 @@ def test_type_arguments_pseudo_call_is_not_extracted():
     assert _calls(parsed) == set()
 
 
+def test_call_of_call_and_tagged_template_are_skipped():
+    source = b"function run() { f()(); tag`text`; }\nfunction f() {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    assert _calls(parsed) == {"src.app.f"}
+
+
 def test_require_call_is_not_also_a_call_reference():
     parsed = _adapter().parse_file(b"const x = require('./y');\n", "src/app.js")
     assert _calls(parsed) == set()
@@ -1256,114 +1787,164 @@ def test_jsx_element_produces_no_relation():
     assert parsed.references == ()
 
 
-def test_class_extends_local_base_resolves_in_file_scope():
-    source = b"class Base {}\nclass Derived extends Base {}\n"
-    parsed = _adapter().parse_file(source, "src/app.js")
-    inherits = next(r for r in parsed.references if r.relation_type == "INHERITS")
-    assert inherits.target_reference == "src.app.Base"
-    assert inherits.resolution_scope == "file"
-
-
-def test_class_extends_imported_base_is_project_scoped():
-    source = b"import { Base } from './base';\nclass Derived extends Base {}\n"
-    parsed = _adapter().parse_file(source, "src/app.js")
-    inherits = next(r for r in parsed.references if r.relation_type == "INHERITS")
-    assert inherits.target_reference == "src.base.Base"
-    assert inherits.resolution_scope == "project"
+def test_call_resolves_across_files_to_a_typescript_function():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import { helper } from './lib';\nexport function run() { helper(); }\n",
+        "src/app.js",
+    )
+    typescript = _typescript_parsed(b"export function helper() {}\n", "src/lib.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    relations = adapter.resolve_references(javascript, index).relations
+    call = next(r for r in relations if r.relation_type == "CALLS")
+    helper = next(s for s in typescript.symbols if s.local_name == "helper")
+    assert call.resolution_state == "resolved"
+    assert call.target_symbol_id == helper.symbol_id
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "calls or type_arguments or extends or jsx_element" -v`
-Expected: FAIL — no `CALLS` references exist yet.
+Run: `uv run pytest tests/codegraph/test_javascript_adapter.py -k "call or type_arguments or jsx_element" -v`
+Expected: FAIL — no `CALLS` references exist.
 
 - [ ] **Step 3: Implement**
 
-`import_aliases` collects binding name → specifier from ESM clauses and `require`
-declarators. A target head that is an alias expands to
-`dotted_candidate(importer_path, specifier)` — path arithmetic only, no index probe, since
-`parse_file` has no index — plus the remaining chain segments; an unexpandable alias leaves
-the raw name.
+```python
+def call_references(source, root, *, file_record, symbols, aliases, importer_path):
+    """CALLS edges for statically decidable callees only.
 
-`call_references` walks every `call_expression` / `new_expression` and skips:
+    Skipped, deliberately:
+      * a `type_arguments` child -- the tsx grammar parses the plain-JS
+        comparison chain `a < b > (c)` as a call with type arguments, so
+        extracting it would invent an edge that does not exist in JS;
+      * a computed callee (`o[k]()`), a callee that is itself a call
+        (`f()()`), and tagged templates -- `member_chain` returns None;
+      * `require(...)`, already modelled as IMPORTS.
+    """
+    references = []
+    qualified_names = {symbol.qualified_name for symbol in symbols}
+    for node in _walk(root):
+        if node.type not in ("call_expression", "new_expression"):
+            continue
+        if any(child.type == "type_arguments" for child in node.children):
+            continue
+        field = "function" if node.type == "call_expression" else "constructor"
+        callee = node.child_by_field_name(field)
+        if callee is None:
+            continue
+        parts = member_chain(callee) if callee.type in (
+            "identifier", "member_expression",
+        ) else None
+        if parts is None:
+            continue
+        if parts == ("require",):
+            continue
+        target, scope, hint = _call_target(
+            parts, aliases, importer_path, qualified_names, symbols, node,
+        )
+        references.append(attribute(
+            _call_reference(node, target, scope, hint, file_record),
+            symbols, file_record, node,
+        ))
+    return tuple(references)
+```
 
-- nodes with a `type_arguments` child — the tsx grammar parses the plain-JavaScript
-  comparison `a < b > (c)` as exactly that shape, so extracting it would invent an edge;
-- a computed callee, a callee that is itself a call, and tagged templates
-  (`_member_chain` returns `None`);
-- `require(...)` — Task 7 already models it as `IMPORTS`.
+`_call_target` applies the ladder:
 
-Scope selection: alias head → `resolution_scope="project"`; otherwise, if the dotted target
-matches a `qualified_name` in this file's symbols (innermost enclosing scope first, then
-outward to the module, using `_ecmascript.heritage_scope_candidates`) →
-`resolution_scope="file"`; otherwise the raw callee text with
-`resolution_hint="unresolved"` and no scope.
+1. `expand_alias(aliases, importer_path, parts)` returns a dotted target →
+   `(target, "project", None)`;
+2. otherwise probe the file's own scopes with
+   `_ecmascript.heritage_scope_candidates(enclosing_qualified_name, module_dotted_name)`,
+   innermost first: the first `f"{scope}.{'.'.join(parts)}"` present in `qualified_names`
+   → `(candidate, "file", None)`;
+3. otherwise `(".".join(parts), None, "unresolved")`.
 
-For `INHERITS`, call
-`_ecmascript.pending_heritage_references(..., resolution_scope="project")` when the
-heritage head is an import alias, and let the default `"file"` stand otherwise.
+`_walk(root)` is a depth-first generator over all descendants; `python.py` has one
+(`self._walk`) to model it on. `_call_reference` builds the `ReferenceRecord` with
+`relation_type="CALLS"`, the node's line/byte range, and no binding fields.
 
-- [ ] **Step 4: Run the tests, TypeScript baselines, full suite, and linter**
-
-Run: `uv run pytest tests/codegraph/test_javascript_adapter.py tests/codegraph/test_typescript_golden.py -v && uv run pytest -q && uv run flake8 src tests`
-Expected: PASS, no lint output.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Run the tests, the golden baseline, the full suite, linter, commit**
 
 ```bash
+uv run pytest tests/codegraph/test_javascript_adapter.py tests/codegraph/test_typescript_golden.py -v
+uv run pytest -q && uv run flake8 src tests
 git add src/iwiki_mcp/codegraph/languages/javascript.py tests/codegraph/test_javascript_adapter.py
-git commit -m "feat(codegraph): extract JavaScript inheritance and call relations"
+git commit -m "feat(codegraph): extract JavaScript call relations"
 ```
 
 ---
 
-### Task 10: Configuration and server wiring
+### Task 11: Configuration and server wiring
 
 **Files:**
-- Modify: `src/iwiki_mcp/codegraph/config.py:22` (`KNOWN_LANGUAGES`), `:99-102`
+- Modify: `src/iwiki_mcp/codegraph/config.py:22` (`KNOWN_LANGUAGES`), `:100-102`
   (validation message)
-- Modify: `src/iwiki_mcp/server.py:54` (import), `:90-102` (version constants),
-  `:110-148` (factory registry)
+- Modify: `src/iwiki_mcp/server.py:54` (import), `:97-102` (version constants), `:105-149`
+  (factory registry)
 - Test: `tests/codegraph/test_config_location_models.py`,
   `tests/codegraph/test_server_tools.py`, `tests/codegraph/test_indexer_runtime.py`
 
 **Interfaces:**
-- Consumes: `javascript.JavaScriptAdapter` from Task 5.
+- Consumes: `javascript.JavaScriptAdapter` (Task 5).
 - Produces: `_code_graph_adapter_factories(...)["javascript"]` — an `AdapterFactory` with
   `extensions=(".js", ".jsx", ".mjs", ".cjs")` and
   `adapter_version="javascript-adapter-v1"`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests using the helpers each module really has**
+
+`test_config_location_models.py` has no `_write_config`; its language tests use
+`CodeGraphConfig.from_mapping({...})` (see `test_languages_accepts_typescript` at `:561`).
+Follow that pattern:
 
 ```python
-def test_javascript_is_a_known_language(tmp_path):
-    config = _write_config(tmp_path, languages=["python", "javascript"])
-    assert load_code_graph_config(tmp_path).languages == ("python", "javascript")
+def test_languages_accepts_javascript():
+    config = CodeGraphConfig.from_mapping({"languages": ["python", "javascript"]})
+    assert config.languages == ("python", "javascript")
 
 
-def test_unknown_language_message_lists_javascript(tmp_path):
-    _write_config(tmp_path, languages=["ruby"])
+def test_languages_rejects_unknown_language_message_lists_javascript():
     with pytest.raises(CodeGraphConfigError) as excinfo:
-        load_code_graph_config(tmp_path)
+        CodeGraphConfig.from_mapping({"languages": ["ruby"]})
     assert "python, typescript, javascript" in str(excinfo.value)
+```
 
+`test_indexer_runtime.py` has no `_fingerprint`; it imports `parser_fingerprint` from
+`iwiki_mcp.codegraph.fingerprint`, whose signature is fully keyword-only
+(`fingerprint.py:88-98`). Compare two direct calls with every other argument held constant:
 
+```python
+def test_adding_javascript_changes_the_configured_language_fingerprint():
+    common = dict(
+        schema_version=2,
+        parser_version="p",
+        grammar_version="g",
+        adapter_version="a",
+        resolver_version="r",
+        normalizer_version="n",
+        unicode_data_version="u",
+    )
+    without = parser_fingerprint(languages=("python",), **common)
+    with_js = parser_fingerprint(languages=("python", "javascript"), **common)
+    assert without != with_js
+```
+
+Read `fingerprint.py:88-98` and pass the real argument names/values; the point is that only
+`languages` differs.
+
+In `test_server_tools.py`:
+
+```python
 def test_javascript_factory_is_registered():
     factories = server._code_graph_adapter_factories("domain")
     factory = factories["javascript"]
     assert factory.extensions == (".js", ".jsx", ".mjs", ".cjs")
     assert factory.adapter_version == "javascript-adapter-v1"
-    assert factory.create(()).language == "javascript"
-
-
-def test_adding_javascript_changes_the_configured_language_fingerprint(tmp_path):
-    without = _fingerprint(tmp_path, languages=("python",))
-    with_js = _fingerprint(tmp_path, languages=("python", "javascript"))
-    assert without != with_js
+    adapter = factory.create(())
+    assert adapter.language == "javascript"
+    assert adapter.parser_version.startswith("tree-sitter-typescript:")
 ```
 
-Match each new test to the helpers its existing module already provides (`_write_config`,
-`_fingerprint`); read the file before adding, and reuse rather than redefine.
+The last assertion pins spec R3.2's version-string format on a factory-built adapter.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1409,135 +1990,189 @@ and registers:
         ),
 ```
 
-The tsx grammar artifact is shared with TypeScript, so the version strings are shared too;
+The tsx grammar artifact is shared with TypeScript, so the version strings are shared;
 `language` / `prefix` / `adapter_version` are what distinguish the two.
 
-- [ ] **Step 4: Run the tests, full suite, and linter**
-
-Run: `uv run pytest -q && uv run flake8 src tests`
-Expected: PASS, no lint output.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Run the tests, full suite, linter, commit**
 
 ```bash
+uv run pytest -q && uv run flake8 src tests
 git add src/iwiki_mcp/codegraph/config.py src/iwiki_mcp/server.py tests/codegraph
 git commit -m "feat(codegraph): register JavaScript language in config and server"
 ```
 
 ---
 
-### Task 11: Mixed-language indexing
+### Task 12: Mixed-language indexing, search, and context
 
 **Files:**
-- Create: `tests/fixtures/codegraph/mixed_python_typescript_javascript/` (Python +
-  TypeScript + JavaScript sources, including a Python module and a JavaScript module that
-  share a dotted name)
+- Create: `tests/fixtures/codegraph/mixed_python_typescript_javascript/`
 - Modify: `tests/codegraph/test_mixed_language_indexing.py`
 
 **Interfaces:**
-- Consumes: the `_build_indexer` helper in that module, Task 10's factory registry.
-- Produces: no new production interface.
+- Consumes: `_build_indexer` (same module), `pinned_factories` from
+  `tests/codegraph/test_mixed_language_baseline.py` extended with a pinned `"javascript"`
+  entry, and the module's existing search helpers (it already has
+  `test_mixed_repo_search_returns_both_languages` and
+  `test_single_language_filter_excludes_the_other_language` — mirror their construction).
+- Produces:
+  - `test_mixed_language_indexing.py::_build_tables(cache_base, *, languages)` — wraps
+    `_build_indexer` and returns `build_rows().tables`. **`cache_base` must be unique per
+    call**: `_build_indexer` does `(cache_base / _DOMAIN).mkdir(parents=True)` with no
+    `exist_ok`, so two builds in one test need `tmp_path / "a"` and `tmp_path / "b"`.
+  - `test_mixed_language_indexing.py::_rows_for_languages(tables, table, prefixes)` —
+    filters by identifier prefix, **not** by a `language` column: only `files` rows carry
+    `language`; `SymbolRecord` and `RelationRecord` do not. `symbol_id` and `relation_id`
+    are `f"{prefix}:{kind}:{sha256}"` (`models.py:25-28`), so filter `symbols` on
+    `row["symbol_id"].startswith(prefix + ":")` and `relations` on
+    `row["relation_id"].startswith(prefix + ":")`, and `files` on `row["language"]`.
 
 - [ ] **Step 1: Create the fixture**
 
 ```
-mixed_python_typescript_javascript/
-  service.py            # imports .helpers
-  helpers.py
-  shared/utils.py       # dotted name "shared.utils"
-  shared/utils.js       # SAME dotted name -- the R6.1 collision guard
-  shapes.ts             # export const shape = 1;
-  app.js                # import { shape } from './shapes'; calls a local function
-  legacy.cjs            # const helper = require('./app'); module.exports = {}
+tests/fixtures/codegraph/mixed_python_typescript_javascript/
+  __init__.py           # package evidence, as the existing mixed fixture has
+  service.py            # from .helpers import assist
+  helpers.py            # def assist(): ...
+  shared/__init__.py
+  shared/utils.py       # dotted name "shared.utils" -- the collision partner
+  shared/utils.js       # SAME dotted name -- the R6.1 guard
+  shapes.ts             # export class Shape {}; export function build() {}
+  app.js                # import { build } from './shapes'; local call; class extends Shape
+  esm.mjs               # import { build } from './shapes.js';  -- extension-bearing specifier
+  legacy.cjs            # const app = require('./app'); module.exports = {};
   widget.jsx            # export const Widget = () => <div />;
 ```
+
+Mirror `tests/fixtures/codegraph/mixed_python_typescript/` for the Python side so the
+Python adapter derives `shared.utils` the same way; confirm with the existing fixture's
+layout before writing.
 
 - [ ] **Step 2: Write the failing tests**
 
 ```python
-def test_javascript_rows_carry_their_own_language(tmp_path, monkeypatch):
-    tables = _build_tables(tmp_path, monkeypatch,
-                           languages=("python", "typescript", "javascript"))
-    languages = {row["language"] for row in tables["files"]}
-    assert languages == {"python", "typescript", "javascript"}
+def test_javascript_rows_carry_their_own_language(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    assert {row["language"] for row in tables["files"]} == {
+        "python", "typescript", "javascript",
+    }
     extensions = {
         row["path"].rsplit(".", 1)[-1]
         for row in tables["files"] if row["language"] == "javascript"
     }
-    assert extensions == {"js", "jsx", "cjs"}
+    assert extensions == {"js", "jsx", "cjs", "mjs"}
 
 
-def test_identifiers_do_not_collide_across_languages(tmp_path, monkeypatch):
-    tables = _build_tables(tmp_path, monkeypatch,
-                           languages=("python", "typescript", "javascript"))
+def test_identifiers_do_not_collide_across_languages(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
     for table, key in (("symbols", "symbol_id"), ("relations", "relation_id")):
         identifiers = [row[key] for row in tables[table]]
         assert len(identifiers) == len(set(identifiers))
 
 
-def test_javascript_import_resolves_into_typescript(tmp_path, monkeypatch):
-    tables = _build_tables(tmp_path, monkeypatch,
-                           languages=("python", "typescript", "javascript"))
-    resolved = [
-        row for row in tables["relations"]
-        if row["relation_type"] == "IMPORTS"
+def test_javascript_import_resolves_into_typescript(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    shapes_module_id = next(
+        row["module_id"] for row in tables["files"] if row["path"].endswith("shapes.ts")
+    )
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "IMPORTS"
         and row["resolution_state"] == "resolved"
-        and row["target_module_id"]
-    ]
-    assert resolved
+        and row["target_module_id"] == shapes_module_id
+        for row in tables["relations"]
+    )
 
 
-def test_python_rows_are_unchanged_by_adding_javascript(tmp_path, monkeypatch):
-    without = _build_tables(tmp_path, monkeypatch, languages=("python", "typescript"))
-    with_js = _build_tables(tmp_path, monkeypatch,
-                            languages=("python", "typescript", "javascript"))
-    for table in ("files", "symbols", "relations"):
-        before = _rows_for_languages(without, table, {"python", "typescript"})
-        after = _rows_for_languages(with_js, table, {"python", "typescript"})
-        assert before == after
+def test_mjs_extension_bearing_specifier_resolves(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    esm_file_id = next(
+        row["file_id"] for row in tables["files"] if row["path"].endswith("esm.mjs")
+    )
+    assert any(
+        row["source_file_id"] == esm_file_id
+        and row["relation_type"] == "IMPORTS"
+        and row["resolution_state"] == "resolved"
+        for row in tables["relations"]
+    )
+
+
+def test_python_and_typescript_rows_are_unchanged_by_adding_javascript(tmp_path):
+    without = _build_tables(tmp_path / "without", languages=("python", "typescript"))
+    with_js = _build_tables(tmp_path / "with", languages=_ALL_LANGUAGES)
+    assert _rows_for_languages(without, "files", {"python", "typescript"}) == \
+        _rows_for_languages(with_js, "files", {"python", "typescript"})
+    for table, prefixes in (("symbols", ("py", "ts")), ("relations", ("py", "ts"))):
+        assert _rows_for_languages(without, table, prefixes) == \
+            _rows_for_languages(with_js, table, prefixes)
 ```
 
-`_rows_for_languages(tables, table, languages)` filters by the row's own `language` for
-`files`/`symbols`, and for `relations` by the language prefix of `relation_id`
-(`py:` / `ts:` / `js:`), returning a sorted list of dicts.
+Plus the search and context coverage the intent's outcomes require — mirror the
+construction of the module's existing search tests:
 
-- [ ] **Step 2b: Run to verify they fail**
+```python
+def test_search_filtered_to_javascript_returns_only_javascript_symbols(tmp_path):
+    results = _search(tmp_path / "search", query="Widget", languages=["javascript"])
+    assert results
+    assert all(item.symbol_id.startswith("js:") for item in results)
 
-Run: `uv run pytest tests/codegraph/test_mixed_language_indexing.py -k "javascript or unchanged" -v`
-Expected: FAIL — the fixture-driven build has no JavaScript rows until the fixture and the
-factory wiring from Task 10 are both in place; the "unchanged" test is the R6.1 guard.
 
-- [ ] **Step 3: Make them pass**
+def test_search_reports_accurate_ranges_for_a_javascript_symbol(tmp_path):
+    results = _search(tmp_path / "ranges", query="Widget", languages=["javascript"])
+    widget = next(item for item in results if item.local_name == "Widget")
+    source = (FIXTURES / "mixed_python_typescript_javascript" / "widget.jsx").read_bytes()
+    assert source[widget.start_byte:widget.end_byte].startswith(b"Widget")
+    assert widget.start_line >= 1 and widget.end_line >= widget.start_line
 
-No production change should be required. If `test_python_rows_are_unchanged_by_adding_javascript`
-fails, the cause is a real language-scoping gap in Task 4 — fix `resolver.py`, never the
-assertion.
 
-- [ ] **Step 4: Run every baseline, the full suite, and the linter**
+def test_context_for_a_javascript_symbol_returns_its_relations(tmp_path):
+    relations = _context(tmp_path / "context", symbol_query="app")
+    assert {item.relation_type for item in relations} >= {
+        "DECLARES", "IMPORTS", "CALLS", "INHERITS",
+    }
+```
+
+`_search` and `_context` wrap whatever query entry points the module's existing search
+tests use — read them and reuse the same call shape rather than inventing one. Adjust the
+asserted attribute names to the real `SearchResult` / `ContextRelation` fields
+(`models.py`).
+
+- [ ] **Step 3: Run to verify they fail**
+
+Run: `uv run pytest tests/codegraph/test_mixed_language_indexing.py -k "javascript or mjs or unchanged or context" -v`
+Expected: FAIL — the new fixture is not yet indexed with the JavaScript factory.
+
+- [ ] **Step 4: Make them pass**
+
+No production change is expected. If
+`test_python_and_typescript_rows_are_unchanged_by_adding_javascript` fails, diff the two
+row sets, identify which `_symbol_candidates` / `exact_modules` /
+`_module_prefix_candidates` branch admitted the JavaScript candidate, fix `resolver.py`,
+and re-run Task 4's tests plus both baselines. Never adjust the assertion, and never remove
+the shared `shared.utils` dotted name from the fixture — that collision is the point.
+
+- [ ] **Step 5: Run every baseline, the full suite, and the linter**
 
 Run: `uv run pytest -q && uv run flake8 src tests`
 Expected: PASS, no lint output.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add tests/fixtures/codegraph/mixed_python_typescript_javascript tests/codegraph/test_mixed_language_indexing.py
+git add tests/fixtures/codegraph/mixed_python_typescript_javascript tests/codegraph/test_mixed_language_indexing.py tests/codegraph/test_mixed_language_baseline.py
 git commit -m "test(codegraph): cover mixed Python/TypeScript/JavaScript indexing"
 ```
 
 ---
 
-### Task 12: Documentation, wiki, and release
+### Task 13: Documentation, wiki, and release
 
 **Files:**
-- Modify: `docs/architecture.md`
-- Modify: `README.md`
-- Modify: `docs/README.ru.md`
-- Modify: `pyproject.toml` (patch version bump)
+- Modify: `docs/architecture.md`, `README.md`, `docs/README.ru.md`, `pyproject.toml`
 - Wiki: the bound iwiki page covering code-graph languages
 
 **Interfaces:**
-- Consumes: the shipped behaviour of Tasks 5–11.
+- Consumes: the shipped behaviour of Tasks 5–12.
 - Produces: no code interface.
 
 - [ ] **Step 1: Find every place that enumerates code-graph languages**
@@ -1547,17 +2182,17 @@ Expected: the code-graph language lists that need JavaScript added.
 
 - [ ] **Step 2: Update `docs/architecture.md`**
 
-Document: the `_ecmascript.py` shared core and the `LanguageProfile` seam; the JavaScript
-adapter's identity (`javascript` / `js` / four extensions / tsx grammar, no new
-dependency); every JavaScript file being module-backed; relative-specifier resolution with
-the `.index` candidate; language-family scoping in `resolver.py` and why it exists.
+Document: the `_ecmascript.py` shared core and the `LanguageProfile` seam; JavaScript's
+identity (`javascript` / `js` / four extensions / tsx grammar, no new dependency); every
+JavaScript file being module-backed and why; relative-specifier resolution with the
+`.index` candidate; language-family scoping in `resolver.py` and the collision it prevents.
 
 - [ ] **Step 3: Update `README.md` and `docs/README.ru.md` identically**
 
-Add JavaScript to the code-graph language list with its extensions and its stated limits:
-no type inference, no bundler/tsconfig alias resolution, JS→TS edges only (TypeScript
-imports stay unresolved), dynamic `require` and computed member access not extracted.
-The two files must stay equivalent — English in `README.md`, Russian in `docs/README.ru.md`.
+Add JavaScript to the code-graph language list with its four extensions and its limits: no
+type inference, no bundler/tsconfig alias resolution, JS→TS edges only (TypeScript imports
+stay unresolved), dynamic `require` and computed member access not extracted. English in
+`README.md`, Russian in `docs/README.ru.md`, same information.
 
 - [ ] **Step 4: Bump the version**
 
@@ -1565,18 +2200,25 @@ Patch bump in `pyproject.toml`, per the repository's versioning rule.
 
 - [ ] **Step 5: Update the bound wiki**
 
-Apply the iwiki Project Binding protocol, then update the code-graph language page with
-`wiki_update_page` (pass the page's current `revision` as `expected_revision`), and run
-`wiki_lint`.
+Apply the iwiki Project Binding protocol, update the code-graph language page with
+`wiki_update_page` (pass the page's current `revision` as `expected_revision`), then run
+`wiki_lint` and confirm it reports no new finding.
 
-- [ ] **Step 6: Final verification**
-
-Run: `uv run pytest -q && uv run flake8 src tests`
-Expected: PASS, no lint output.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Mechanical documentation check**
 
 ```bash
+rg -c "javascript|JavaScript" README.md docs/README.ru.md docs/architecture.md
+rg -n "\.mjs" README.md docs/README.ru.md docs/architecture.md
+rg -n "^version" pyproject.toml
+```
+
+Expected: a non-zero count for every file; `.mjs` present in all three; the version line
+one patch above the previous value.
+
+- [ ] **Step 7: Final verification and commit**
+
+```bash
+uv run pytest -q && uv run flake8 src tests
 git add docs README.md pyproject.toml
 git commit -m "docs(codegraph): document JavaScript support and bump version"
 ```
@@ -1585,29 +2227,46 @@ git commit -m "docs(codegraph): document JavaScript support and bump version"
 
 ## Task dependency order
 
-1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12.
+1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13.
 
-Tasks 1 and 2 **must** land before Task 3: they are the pre-refactor baselines. Task 4 is
-independent of Tasks 5–9 in code but must precede Task 11, which asserts its guarantee.
-Task 10 must precede Task 11, which needs the registered factory.
+Tasks 1 and 2 **must** land before Task 3: they are the pre-refactor baselines, and Task 1
+Step 5 verifies the working tree is clean before capturing. Task 4 is independent of
+Tasks 5–10 in code but must precede Task 12, which asserts its guarantee. Task 11 must
+precede Task 12, which needs the registered factory.
 
 ## Spec coverage map
 
-| Spec | Task |
-|---|---|
-| R2.1, R2.2, R2.3, R2.4 | 3 (verified by 1) |
-| R3.1, R3.2, R3.3 | 5, 10 |
-| R4.1 | 5 |
-| R4.2, R4.3, R4.4, R4.5 | 6 |
-| R5.1, R5.2, R5.6 | 7 |
-| R5.3 | 8 |
-| R5.4, R5.5, R5.7 | 9 |
-| R6.1 | 4 (guarded by 11) |
-| R6.2, R6.3, R6.4 | 10 |
-| R7.1 | 1, 2 |
-| R7.2 | 5, 6, 7, 8, 9 |
-| R7.3 | 11 |
-| R7.4, R7.6 | 10 |
-| R7.5 | 5, 10 |
-| R7.7 | every task's final step |
-| R8 | 12 |
+| Spec | Implemented by | Tested by |
+|---|---|---|
+| R2.1, R2.2, R2.3 | 3 | 1, 3 |
+| R2.4 | 3 | 1, 2 |
+| R3.1 | 5 | 5, 11 |
+| R3.2 | 5, 11 | 11 |
+| R3.3 | 5 | 5, 12 |
+| R4.1 | 5 | 5 |
+| R4.2 | 3, 6 | 6 |
+| R4.3 | 6 | 6 |
+| R4.4 | 6 | 6 |
+| R4.5 | 3 | 6 |
+| R5.1 | 7 | 7 |
+| R5.2 | 7 | 7 |
+| R5.3 | 8 | 8, 12 |
+| R5.4 | 3, 9 | 9 |
+| R5.5 | 10 | 10 |
+| R5.6 | 7 | 7 |
+| R5.7 | 8, 9, 10 | 8, 10 |
+| R6.1 | 4 | 4, 12 |
+| R6.2, R6.3 | 11 | 11 |
+| R6.4 | 11 | 11 |
+| R7.1 | 1, 2 | 1, 2 |
+| R7.2 | — | 5, 6, 7, 8, 9, 10 |
+| R7.3 | — | 12 |
+| R7.4 | 11 | 11, 12 |
+| R7.5 | 5, 11 | 5, 11, 12 |
+| R7.6 | 11 | 11 |
+| R7.7 | — | every task's final step |
+| R8 | 13 | 13 |
+| Intent outcome: index `.js/.jsx/.mjs/.cjs` | 5, 11 | 12 |
+| Intent outcome: search + language filter | 11 | 12 |
+| Intent outcome: context relations | 7, 9, 10 | 12 |
+| Intent outcome: mixed repo, no collisions | 4, 11 | 12 |
