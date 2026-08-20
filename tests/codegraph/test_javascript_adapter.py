@@ -1,11 +1,22 @@
 import pytest
 
-from iwiki_mcp.codegraph.languages.javascript import JavaScriptAdapter
+from iwiki_mcp.codegraph.languages.javascript import JavaScriptAdapter, dotted_candidate
+from iwiki_mcp.codegraph.languages.typescript import TypeScriptAdapter
 from iwiki_mcp.codegraph.resolver import SymbolIndex
 
 
 def _adapter():
     return JavaScriptAdapter("domain", (), parser_version="test-parser")
+
+
+def _typescript_parsed(source, path):
+    adapter = TypeScriptAdapter("domain", (), parser_version="test-parser")
+    return adapter.parse_file(source, path)
+
+
+def _imports(adapter, parsed, index):
+    relations = adapter.resolve_references(parsed, index).relations
+    return [item for item in relations if item.relation_type == "IMPORTS"]
 
 
 def test_adapter_identity():
@@ -215,3 +226,63 @@ def test_reference_inside_a_function_sets_symbol_id_not_module_id():
     go = next(s for s in parsed.symbols if s.local_name == "go")
     assert reference.source_symbol_id == go.symbol_id
     assert reference.source_module_id is None
+
+
+def test_dotted_candidate_normalizes_and_strips_extensions():
+    assert dotted_candidate("src/app.js", "./util") == "src.util"
+    assert dotted_candidate("src/app.mjs", "./util.js") == "src.util"
+    assert dotted_candidate("src/deep/app.js", "../shared/x.ts") == "src.shared.x"
+    assert dotted_candidate("src/app.js", "react") is None
+    assert dotted_candidate("src/app.js", "node:fs") is None
+    assert dotted_candidate("src/app.js", "#alias/thing") is None
+    assert dotted_candidate("src/app.js", "https://cdn/x.js") is None
+    assert dotted_candidate("app.js", "../outside") is None
+
+
+def test_relative_import_resolves_to_a_typescript_module():
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './shapes';\n", "src/app.js")
+    typescript = _typescript_parsed(b"export const a = 1;\n", "src/shapes.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    imports = _imports(adapter, javascript, index)
+    assert imports[0].resolution_state == "resolved"
+    assert imports[0].target_module_id == typescript.file.module_id
+
+
+def test_directory_import_falls_back_to_the_index_candidate():
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './dir';\n", "src/app.js")
+    target = adapter.parse_file(b"export const a = 1;\n", "src/dir/index.js")
+    index = SymbolIndex.from_parsed_files((javascript, target))
+    imports = _imports(adapter, javascript, index)
+    assert imports[0].target_module_id == target.file.module_id
+
+
+def test_same_dotted_name_in_js_and_ts_is_ambiguous():
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './util';\n", "src/app.js")
+    js_target = adapter.parse_file(b"export const a = 1;\n", "src/util.js")
+    ts_target = _typescript_parsed(b"export const a = 1;\n", "src/util.ts")
+    index = SymbolIndex.from_parsed_files((javascript, js_target, ts_target))
+    imports = _imports(adapter, javascript, index)
+    assert len(imports) == 2
+    assert {item.resolution_state for item in imports} == {"ambiguous"}
+
+
+def test_unmatched_relative_specifier_stays_unresolved_without_prefix_matching():
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import s from './missing';\n", "src/app.js")
+    sibling = adapter.parse_file(b"export const a = 1;\n", "src/other.js")
+    index = SymbolIndex.from_parsed_files((javascript, sibling))
+    imports = _imports(adapter, javascript, index)
+    assert imports[0].resolution_state == "unresolved"
+    assert imports[0].target_reference == "./missing"
+
+
+def test_bare_specifier_stays_unresolved():
+    adapter = _adapter()
+    javascript = adapter.parse_file(b"import react from 'react';\n", "src/app.js")
+    index = SymbolIndex.from_parsed_files((javascript,))
+    imports = _imports(adapter, javascript, index)
+    assert imports[0].resolution_state == "unresolved"
+    assert imports[0].target_reference == "react"

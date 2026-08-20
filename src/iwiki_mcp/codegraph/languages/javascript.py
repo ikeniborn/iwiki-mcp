@@ -245,6 +245,56 @@ def require_references(source, root, *, file_record, symbols):
     return tuple(references)
 
 
+_SPECIFIER_EXTENSIONS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
+
+
+def dotted_candidate(importer_path: str, specifier: str) -> str | None:
+    """Normalize a relative specifier into a project dotted module name.
+
+    Returns None for anything whose target is not decidable from the path
+    alone -- bare package names, subpath imports, URLs, Node builtins, and
+    paths escaping the repository root. Guessing those would invent an edge.
+    """
+    if not specifier.startswith("."):
+        return None
+    parts = list(PurePosixPath(importer_path).parent.parts)
+    for segment in PurePosixPath(specifier).parts:
+        if segment == ".":
+            continue
+        if segment == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(segment)
+    if not parts:
+        return None
+    tail = parts[-1]
+    for extension in _SPECIFIER_EXTENSIONS:
+        if tail.casefold().endswith(extension):
+            tail = tail[: -len(extension)]
+            break
+    parts[-1] = tail.split(".", 1)[0]
+    return ".".join(parts)
+
+
+def resolve_specifier(reference, importer_path, index):
+    """Bind a relative specifier to a project module, or leave it alone."""
+    candidate = dotted_candidate(importer_path, reference.target_reference or "")
+    if candidate is None:
+        return reference
+    for probe in (candidate, f"{candidate}.index"):
+        if probe in index.modules_by_qualified:
+            return replace(
+                reference,
+                target_reference=probe,
+                resolution_hint=None,
+                resolution_scope="project",
+                target_kind_hint="module",
+            )
+    return reference
+
+
 JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
     language="javascript",
     prefix="js",
@@ -360,9 +410,14 @@ class JavaScriptAdapter:
         declares = declaration_relations(
             self.language, self.prefix, self.repository_id, parsed,
         )
+        references = tuple(
+            resolve_specifier(item, parsed.file.path, project_index)
+            if item.relation_type == "IMPORTS" else item
+            for item in parsed.references
+        )
         resolved = resolve_references(
             self.language, self.prefix, self.repository_id,
-            parsed.references, project_index,
+            references, project_index,
         )
         return ResolutionResult(
             relations=sort_relations((*declares, *resolved)), warnings=(),
