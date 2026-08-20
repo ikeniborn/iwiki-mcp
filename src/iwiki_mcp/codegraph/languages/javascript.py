@@ -7,7 +7,7 @@ probe) and there is no opt-in type boost.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from pathlib import PurePosixPath
 
@@ -15,6 +15,7 @@ from . import _ecmascript
 from ..models import (
     FileRecord,
     ParsedFile,
+    ReferenceRecord,
     ResolutionResult,
     compact_casefold,
     file_id,
@@ -117,6 +118,131 @@ def prototype_method_hook(node, owner_qualified, make_symbol, symbols):
         is_async=any(child.type == "async" for child in value.children),
     )
     return True
+
+
+def enclosing_symbol_id(symbols, node):
+    """The innermost symbol whose byte range contains `node`, or None.
+
+    "Innermost" means the smallest span among all containing candidates;
+    Tasks 9 and 10 reuse this exact function to attribute INHERITS/CALLS
+    references the same way.
+    """
+    candidates = [
+        symbol for symbol in symbols
+        if symbol.start_byte <= node.start_byte and node.end_byte <= symbol.end_byte
+    ]
+    if not candidates:
+        return None
+    innermost = min(candidates, key=lambda symbol: symbol.end_byte - symbol.start_byte)
+    return innermost.symbol_id
+
+
+def attribute(reference, symbols, file_record, node):
+    """Point a reference at its innermost enclosing symbol.
+
+    `source_module_id` must be None whenever `source_symbol_id` is set:
+    schema.py enforces
+    CHECK (source_module_id IS NULL OR source_symbol_id IS NULL)
+    and the snapshot insert aborts otherwise.
+    """
+    symbol_id = enclosing_symbol_id(symbols, node)
+    return replace(
+        reference,
+        source_symbol_id=symbol_id,
+        source_file_id=file_record.file_id,
+        source_module_id=file_record.module_id if symbol_id is None else None,
+    )
+
+
+def _require_specifier(source, value):
+    """The literal specifier a `require(...)` call targets, or None.
+
+    Only a single-argument call whose sole argument is a string literal is
+    trusted; a computed/dynamic argument (`require(name)`) is not guessed
+    at.
+    """
+    if value.type != "call_expression":
+        return None
+    func = value.child_by_field_name("function")
+    if func is None or func.type != "identifier":
+        return None
+    if _ecmascript.text(source, func) != "require":
+        return None
+    arguments = value.child_by_field_name("arguments")
+    if arguments is None:
+        return None
+    named_arguments = arguments.named_children
+    if len(named_arguments) != 1 or named_arguments[0].type != "string":
+        return None
+    return _ecmascript.text(source, named_arguments[0]).strip("\"'")
+
+
+def _require_bindings(source, name_node):
+    """(binding_name, binding_kind) pairs a `require(...)` LHS pattern binds.
+
+    An `array_pattern` (`const [first] = require(...)`) yields no bindings
+    -- positional destructuring off a CommonJS export is not a decidable
+    named binding, so it produces no reference at all (trust rule).
+    """
+    if name_node.type == "identifier":
+        return ((_ecmascript.text(source, name_node), "implicit_binding"),)
+    if name_node.type == "object_pattern":
+        bindings = []
+        for item in name_node.children:
+            if item.type == "shorthand_property_identifier_pattern":
+                bindings.append((_ecmascript.text(source, item), "implicit_binding"))
+            elif item.type == "pair_pattern":
+                value = item.child_by_field_name("value")
+                if value is not None and value.type == "identifier":
+                    bindings.append((_ecmascript.text(source, value), "explicit_alias"))
+        return tuple(bindings)
+    return ()
+
+
+def require_references(source, root, *, file_record, symbols):
+    """CommonJS `require(...)` bindings, attributed to their enclosing scope.
+
+    Unlike ESM imports (module-level only), a `require` can sit inside a
+    function, so each reference is run through `attribute` to point it at
+    its innermost enclosing symbol instead of the module.
+    """
+    references = []
+
+    def walk(node):
+        for child in node.children:
+            if child.type in ("lexical_declaration", "variable_declaration"):
+                for declarator in child.children:
+                    if declarator.type != "variable_declarator":
+                        continue
+                    value = declarator.child_by_field_name("value")
+                    name_node = declarator.child_by_field_name("name")
+                    if value is None or name_node is None:
+                        continue
+                    specifier = _require_specifier(source, value)
+                    if specifier is None:
+                        continue
+                    for binding_name, binding_kind in _require_bindings(source, name_node):
+                        reference = ReferenceRecord(
+                            source_symbol_id=None,
+                            source_file_id=file_record.file_id,
+                            relation_type="IMPORTS",
+                            target_reference=specifier,
+                            source_line=declarator.start_point[0] + 1,
+                            source_byte=declarator.start_byte,
+                            source_end_line=declarator.end_point[0] + 1,
+                            source_end_byte=declarator.end_byte,
+                            binding_name=binding_name,
+                            binding_kind=binding_kind,
+                            binding_name_tokens_casefold=token_key(binding_name),
+                            resolution_hint="unresolved",
+                        )
+                        references.append(
+                            attribute(reference, symbols, file_record, declarator)
+                        )
+            walk(child)
+
+    walk(root)
+    return tuple(references)
 
 
 JAVASCRIPT_PROFILE = _ecmascript.LanguageProfile(
@@ -222,6 +348,7 @@ class JavaScriptAdapter:
         )
         references = (
             *_ecmascript.esm_import_references(source, root, file_record=file),
+            *require_references(source, root, file_record=file, symbols=symbols),
             *heritage_references,
         )
         return _JavaScriptParsedFile(

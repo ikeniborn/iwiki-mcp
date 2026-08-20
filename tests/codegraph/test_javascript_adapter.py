@@ -153,3 +153,65 @@ def test_duplicate_symbol_identity_warns():
     )
     parsed = _adapter().parse_file(source, "src/dup.js")
     assert "duplicate_symbol_identity" in parsed.warnings
+
+
+def _references_by_binding(parsed):
+    return {ref.binding_name: ref for ref in parsed.references}
+
+
+def test_esm_imports_produce_one_reference_per_binding():
+    source = (
+        b"import thing, { named as renamed, other } from './shapes';\n"
+        b"import * as ns from './shapes';\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    bindings = _references_by_binding(parsed)
+    assert bindings["thing"].binding_kind == "implicit_binding"
+    assert bindings["renamed"].binding_kind == "explicit_alias"
+    assert bindings["other"].binding_kind == "implicit_binding"
+    assert bindings["ns"].binding_kind == "explicit_alias"
+    assert all(ref.relation_type == "IMPORTS" for ref in parsed.references)
+
+
+def test_side_effect_import_produces_no_reference():
+    parsed = _adapter().parse_file(b"import './shapes';\n", "src/app.js")
+    assert parsed.references == ()
+
+
+def test_require_produces_import_references():
+    source = (
+        b"const shapes = require('./shapes');\n"
+        b"const { named, other: aliased } = require('./more');\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    bindings = _references_by_binding(parsed)
+    assert bindings["shapes"].target_reference == "./shapes"
+    assert bindings["shapes"].binding_kind == "implicit_binding"
+    assert bindings["named"].binding_kind == "implicit_binding"
+    assert bindings["aliased"].binding_kind == "explicit_alias"
+
+
+def test_dynamic_bare_and_array_pattern_requires_produce_no_reference():
+    source = (
+        b"const a = require(name);\n"
+        b"require('./side');\n"
+        b"const [first] = require('./tuple');\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    assert parsed.references == ()
+
+
+def test_module_level_reference_sets_module_id_not_symbol_id():
+    parsed = _adapter().parse_file(b"import a from './b';\n", "src/app.js")
+    reference = parsed.references[0]
+    assert reference.source_symbol_id is None
+    assert reference.source_module_id == parsed.file.module_id
+
+
+def test_reference_inside_a_function_sets_symbol_id_not_module_id():
+    source = b"function go() { const m = require('./m'); return m; }\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    reference = parsed.references[0]
+    go = next(s for s in parsed.symbols if s.local_name == "go")
+    assert reference.source_symbol_id == go.symbol_id
+    assert reference.source_module_id is None
