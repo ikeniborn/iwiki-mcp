@@ -274,6 +274,111 @@ def test_typescript_anonymous_scope_collisions_deduplicate_with_warning(tmp_path
     assert len(symbol_ids) == len(set(symbol_ids))
 
 
+_ALL_LANGUAGES = ("python", "typescript", "javascript")
+
+
+def _build_tables(cache_base: Path, *, languages: tuple[str, ...]):
+    project_dir = FIXTURES / "mixed_python_typescript_javascript"
+    indexer = _build_indexer(cache_base, project_dir, languages=languages)
+    return indexer.build_rows().tables
+
+
+def _rows_for_languages(tables, table, prefixes):
+    if table == "files":
+        return [row for row in tables[table] if row["language"] in prefixes]
+    key = "symbol_id" if table == "symbols" else "relation_id"
+    return [
+        row for row in tables[table]
+        if any(row[key].startswith(prefix + ":") for prefix in prefixes)
+    ]
+
+
+def _search(cache_base: Path, *, query: str, languages: list[str]):
+    project_dir = FIXTURES / "mixed_python_typescript_javascript"
+    indexer = _build_indexer(cache_base, project_dir, languages=_ALL_LANGUAGES)
+    built = indexer.build(force=True)
+    assert built["state"] == "ready"
+    request = validate_search_request(
+        query, languages=languages, configured_languages=_ALL_LANGUAGES, limit=100,
+    )
+    with indexer.store.read_lease() as connection:
+        return CodeGraphQuery(_DOMAIN).search(connection, request)
+
+
+def test_javascript_rows_carry_their_own_language(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    assert {row["language"] for row in tables["files"]} == {
+        "python", "typescript", "javascript",
+    }
+    extensions = {
+        row["path"].rsplit(".", 1)[-1]
+        for row in tables["files"] if row["language"] == "javascript"
+    }
+    assert extensions == {"js", "jsx", "cjs", "mjs"}
+
+
+def test_identifiers_do_not_collide_across_languages(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    for table, key in (("symbols", "symbol_id"), ("relations", "relation_id")):
+        identifiers = [row[key] for row in tables[table]]
+        assert len(identifiers) == len(set(identifiers))
+
+
+def test_javascript_import_resolves_into_typescript(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    shapes_module_id = next(
+        row["module_id"] for row in tables["files"] if row["path"].endswith("shapes.ts")
+    )
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "IMPORTS"
+        and row["resolution_state"] == "resolved"
+        and row["target_module_id"] == shapes_module_id
+        for row in tables["relations"]
+    )
+
+
+def test_mjs_extension_bearing_specifier_resolves(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    esm_file_id = next(
+        row["file_id"] for row in tables["files"] if row["path"].endswith("esm.mjs")
+    )
+    assert any(
+        row["source_file_id"] == esm_file_id
+        and row["relation_type"] == "IMPORTS"
+        and row["resolution_state"] == "resolved"
+        for row in tables["relations"]
+    )
+
+
+def test_python_and_typescript_rows_are_unchanged_by_adding_javascript(tmp_path):
+    without = _build_tables(tmp_path / "without", languages=("python", "typescript"))
+    with_js = _build_tables(tmp_path / "with", languages=_ALL_LANGUAGES)
+    assert _rows_for_languages(without, "files", {"python", "typescript"}) == \
+        _rows_for_languages(with_js, "files", {"python", "typescript"})
+    for table, prefixes in (("symbols", ("py", "ts")), ("relations", ("py", "ts"))):
+        assert _rows_for_languages(without, table, prefixes) == \
+            _rows_for_languages(with_js, table, prefixes)
+
+
+def test_search_filtered_to_javascript_returns_only_javascript_symbols(tmp_path):
+    results = _search(tmp_path / "search", query="Widget", languages=["javascript"])
+    assert results
+    # Search results include module/file hits (symbol_id is None for those),
+    # not just symbol hits, so filter on entity_id, mirroring the language
+    # scoping check the module's existing single-language filter test uses
+    # (test_single_language_filter_excludes_the_other_language).
+    assert all(item.entity_id.startswith("js:") for item in results)
+
+
+def test_search_reports_accurate_ranges_for_a_javascript_symbol(tmp_path):
+    results = _search(tmp_path / "ranges", query="Widget", languages=["javascript"])
+    widget = next(item for item in results if item.local_name == "Widget")
+    source = (FIXTURES / "mixed_python_typescript_javascript" / "widget.jsx").read_bytes()
+    assert source[widget.start_byte:widget.end_byte].startswith(b"Widget")
+    assert widget.start_line >= 1 and widget.end_line >= widget.start_line
+
+
 def test_typescript_files_respect_exclude_patterns(tmp_path):
     project_dir = FIXTURES / "mixed_python_typescript"
     indexer = _build_indexer(
