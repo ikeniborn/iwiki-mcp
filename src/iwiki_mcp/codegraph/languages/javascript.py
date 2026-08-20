@@ -281,16 +281,28 @@ def dotted_candidate(importer_path: str, specifier: str) -> str | None:
 
 @dataclass(frozen=True)
 class ImportAlias:
-    """A local binding name's source specifier and, for named imports, the
-    name it has in the exporting module.
+    """A local binding name's source specifier and what shape it binds.
 
-    `imported_name` is `None` for a default import, a namespace import
-    (`* as ns`), and a whole-module `require` binding -- those bind the
-    module itself, not one of its named exports.
+    `binding_shape` decides how `expand_alias` treats a member chain whose
+    head is this binding:
+
+      * `"named"` -- `{ a }` / `{ a as b }` / `const { a } = require(...)`.
+        `imported_name` carries the name in the exporting module; the chain
+        expands to `<module>.<imported name>` plus its remaining segments.
+      * `"namespace"` -- `* as ns`, and a whole-module `const m =
+        require(...)`. Both genuinely bind the module object, so the chain
+        expands to `<module>` plus its remaining segments.
+      * `"default"` -- `import thing from './m'`. `thing` is the value the
+        module default-exports, whose shape is not statically known;
+        `thing.build` is a property of that value and has nothing to do
+        with a named export `build`. Never expanded (trust rule).
+
+    `imported_name` is `None` for every shape other than `"named"`.
     """
 
     specifier: str
     imported_name: str | None
+    binding_shape: str = "named"
 
 
 def _require_alias_bindings(source, name_node):
@@ -345,7 +357,7 @@ def import_aliases(source: bytes, root) -> Mapping[str, "ImportAlias"]:
             for item in clause.children:
                 if item.type == "identifier":
                     local = _ecmascript.text(source, item)
-                    aliases[local] = ImportAlias(specifier, None)
+                    aliases[local] = ImportAlias(specifier, None, "default")
                 elif item.type == "named_imports":
                     for specifier_node in item.children:
                         if specifier_node.type != "import_specifier":
@@ -368,7 +380,7 @@ def import_aliases(source: bytes, root) -> Mapping[str, "ImportAlias"]:
                     )
                     if name_node is not None:
                         local = _ecmascript.text(source, name_node)
-                        aliases[local] = ImportAlias(specifier, None)
+                        aliases[local] = ImportAlias(specifier, None, "namespace")
         elif child.type in ("lexical_declaration", "variable_declaration"):
             for declarator in child.children:
                 if declarator.type != "variable_declarator":
@@ -381,21 +393,28 @@ def import_aliases(source: bytes, root) -> Mapping[str, "ImportAlias"]:
                 if specifier is None:
                     continue
                 for local, imported_name in _require_alias_bindings(source, name_node):
-                    aliases[local] = ImportAlias(specifier, imported_name)
+                    # A whole-module `const m = require(...)` really does bind
+                    # the module object under CommonJS, so it is namespace-like
+                    # -- unlike an ESM default import.
+                    aliases[local] = ImportAlias(
+                        specifier, imported_name,
+                        "named" if imported_name is not None else "namespace",
+                    )
     return aliases
 
 
 def expand_alias(aliases, importer_path, parts):
     """Dotted target for a member chain whose head is an alias, or None.
 
-    `None` when `parts[0]` is not an alias, or when the alias's specifier is
-    not resolvable by path arithmetic (a bare package name) -- the trust
-    rule `dotted_candidate` already enforces.
+    `None` when `parts[0]` is not an alias, when the alias binds an ESM
+    default export (whose value's shape is not statically known), or when
+    the alias's specifier is not resolvable by path arithmetic (a bare
+    package name) -- the trust rule `dotted_candidate` already enforces.
     """
     if not parts:
         return None
     alias = aliases.get(parts[0])
-    if alias is None:
+    if alias is None or alias.binding_shape == "default":
         return None
     module = dotted_candidate(importer_path, alias.specifier)
     if module is None:
@@ -445,19 +464,24 @@ def _call_target(
         ),
         None,
     )
-    class_qualified_names = {
-        symbol.qualified_name for symbol in symbols if symbol.kind == "class"
+    # Only a function-like body is a lexical scope for a bare identifier
+    # call. A class body and an object literal are not: `helper()` inside a
+    # method never binds to a sibling member without `this.`/the object
+    # name, unlike an `extends` target, which IS a lexical name. So admit a
+    # candidate rung only when it is the module scope or the qualified name
+    # of a function-like symbol; everything else -- class bodies, object
+    # literals, any future non-lexical scope -- is skipped rather than
+    # enumerated as an exclusion.
+    lexical_scope_names = {
+        symbol.qualified_name for symbol in symbols
+        if symbol.kind in ("function", "async_function", "method")
     }
     candidates = _ecmascript.heritage_scope_candidates(
         enclosing_qualified_name, module_dotted_name,
     )
     tail = ".".join(parts)
     for scope in candidates:
-        # A class body is not a lexical scope for a bare identifier call --
-        # `helper()` inside a method never resolves to a sibling class member
-        # without `this.`, unlike an `extends` target, which IS a lexical
-        # name. Skip any rung that names a class to avoid inventing that edge.
-        if scope in class_qualified_names:
+        if scope != module_dotted_name and scope not in lexical_scope_names:
             continue
         candidate = f"{scope}.{tail}"
         if candidate in qualified_names:

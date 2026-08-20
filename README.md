@@ -446,9 +446,15 @@ execution of `node`/`tsc`/a bundler, and `node_modules` is not traversed. tsconf
 jsconfig path aliases and `package.json` `imports`/`exports` maps are not read, so a
 bare specifier stays unresolved. A dynamic `require(expr)`, a computed member access
 (`o[k]()`), a call of a call (`f()()`), and a tagged template produce no edge. A bare
-call inside a class method does not bind to a sibling method, because JavaScript
-itself requires `this.` for that — `this.m()` and `super.m()` are not extracted. One
-known limitation: a local binding or parameter that shadows an imported name still
+call inside a class method or an object-literal method does not bind to a sibling
+member, because JavaScript itself requires `this.`/the object name for that — only a
+function-like enclosing scope or the module scope is probed, and `this.m()` and
+`super.m()` are not extracted. A value imported as a default export
+(`import thing from './m'`) is never expanded into module members: `thing` is the
+default-exported value, whose shape is not statically known, so `thing.build()` is not
+treated as the module's named export `build` and stays unresolved. A namespace import
+(`import * as ns`) and a whole-module `const m = require('./m')` do expand, because
+both genuinely bind the module object. One known limitation: a local binding or parameter that shadows an imported name still
 expands to the import when a call target is built, because the resolver does not track
 real lexical scope; fixing that is out of this MVP's scope.
 

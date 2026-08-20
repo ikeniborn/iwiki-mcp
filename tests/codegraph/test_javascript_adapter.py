@@ -435,6 +435,78 @@ def test_bare_call_inside_a_plain_function_still_resolves_at_file_scope():
     assert call.resolution_scope == "file"
 
 
+def test_bare_call_inside_an_object_literal_method_does_not_resolve_to_a_sibling():
+    source = b"const api = { helper() { return 1; }, get() { helper(); } };\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    call = next(ref for ref in parsed.references if ref.relation_type == "CALLS")
+    assert call.target_reference == "helper"
+    assert call.resolution_hint == "unresolved"
+    assert call.resolution_scope is None
+
+
+def test_bare_call_inside_an_object_literal_method_resolves_a_module_level_function():
+    source = (
+        b"function helper() { return 1; }\n"
+        b"const api = { get() { helper(); } };\n"
+    )
+    parsed = _adapter().parse_file(source, "src/app.js")
+    call = next(ref for ref in parsed.references if ref.relation_type == "CALLS")
+    assert call.target_reference == "src.app.helper"
+    assert call.resolution_scope == "file"
+
+
+def test_default_import_member_call_is_not_expanded_into_module_members():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import thing from './m';\nexport function run() { thing.build(); }\n",
+        "src/app.js",
+    )
+    target = adapter.parse_file(b"export function build() {}\n", "src/m.js")
+    assert _calls(javascript) == {"thing.build"}
+    call = next(ref for ref in javascript.references if ref.relation_type == "CALLS")
+    assert call.resolution_hint == "unresolved"
+    assert call.resolution_scope is None
+    index = SymbolIndex.from_parsed_files((javascript, target))
+    relations = adapter.resolve_references(javascript, index).relations
+    resolved_calls = [
+        r for r in relations
+        if r.relation_type == "CALLS" and r.resolution_state == "resolved"
+    ]
+    assert resolved_calls == []
+
+
+def test_namespace_import_member_call_still_resolves():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import * as ns from './m';\nexport function run() { ns.build(); }\n",
+        "src/app.js",
+    )
+    target = adapter.parse_file(b"export function build() {}\n", "src/m.js")
+    assert _calls(javascript) == {"src.m.build"}
+    index = SymbolIndex.from_parsed_files((javascript, target))
+    relations = adapter.resolve_references(javascript, index).relations
+    call = next(r for r in relations if r.relation_type == "CALLS")
+    build = next(s for s in target.symbols if s.local_name == "build")
+    assert call.resolution_state == "resolved"
+    assert call.target_symbol_id == build.symbol_id
+
+
+def test_require_whole_module_member_call_still_resolves():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"const m = require('./m');\nexport function run() { m.build(); }\n",
+        "src/app.js",
+    )
+    target = adapter.parse_file(b"export function build() {}\n", "src/m.js")
+    assert _calls(javascript) == {"src.m.build"}
+    index = SymbolIndex.from_parsed_files((javascript, target))
+    relations = adapter.resolve_references(javascript, index).relations
+    call = next(r for r in relations if r.relation_type == "CALLS")
+    build = next(s for s in target.symbols if s.local_name == "build")
+    assert call.resolution_state == "resolved"
+    assert call.target_symbol_id == build.symbol_id
+
+
 def test_call_resolves_across_files_to_a_typescript_function():
     adapter = _adapter()
     javascript = adapter.parse_file(
