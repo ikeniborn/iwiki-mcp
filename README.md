@@ -454,7 +454,13 @@ function-like enclosing scope or the module scope is probed, and `this.m()` and
 default-exported value, whose shape is not statically known, so `thing.build()` is not
 treated as the module's named export `build` and stays unresolved. A namespace import
 (`import * as ns`) and a whole-module `const m = require('./m')` do expand, because
-both genuinely bind the module object. One known limitation: a local binding or parameter that shadows an imported name still
+both genuinely bind the module object. The same non-expandability reaches `extends`: a
+class extending a default-imported base (`import Base from './base'; class X extends
+Base {}`) produces no project-scoped, resolved INHERITS edge — the heritage target
+falls back to the module-qualified name in the importing file and stays unresolved,
+matching what the TypeScript adapter already does for every imported heritage target.
+A named import (`import { Base } from './base'`) still resolves INHERITS across files.
+One known limitation: a local binding or parameter that shadows an imported name still
 expands to the import when a call target is built, because the resolver does not track
 real lexical scope; fixing that is out of this MVP's scope.
 

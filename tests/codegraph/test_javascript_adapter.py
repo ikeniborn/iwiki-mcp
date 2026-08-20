@@ -308,6 +308,40 @@ def test_class_extends_imported_base_is_project_scoped():
     assert inherits.resolution_scope == "project"
 
 
+def test_class_extends_default_imported_base_stays_file_scoped_unresolved():
+    # A default import's shape is not statically known, so it is never
+    # expandable -- INHERITS falls back to the module-qualified name in the
+    # importing file and never reaches the actual base class, unlike a named
+    # import of the same base (contrasted below).
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import Base from './base';\nclass Derived extends Base {}\n", "src/app.js",
+    )
+    typescript = _typescript_parsed(b"export class Base {}\n", "src/base.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    inherits = _inherits(javascript)
+    assert inherits.target_reference == "src.app.Base"
+    assert inherits.resolution_scope == "file"
+    relations = adapter.resolve_references(javascript, index).relations
+    resolved = next(r for r in relations if r.relation_type == "INHERITS")
+    assert resolved.resolution_state == "unresolved"
+    assert resolved.target_symbol_id is None
+
+
+def test_class_extends_named_imported_base_resolves_across_files():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import { Base } from './base';\nclass Derived extends Base {}\n", "src/app.js",
+    )
+    typescript = _typescript_parsed(b"export class Base {}\n", "src/base.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    relations = adapter.resolve_references(javascript, index).relations
+    resolved = next(r for r in relations if r.relation_type == "INHERITS")
+    base = next(s for s in typescript.symbols if s.local_name == "Base")
+    assert resolved.resolution_state == "resolved"
+    assert resolved.target_symbol_id == base.symbol_id
+
+
 def test_class_extends_required_base_is_project_scoped():
     source = b"const { Base } = require('./base');\nclass Derived extends Base {}\n"
     parsed = _adapter().parse_file(source, "src/app.js")
