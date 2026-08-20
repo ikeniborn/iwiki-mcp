@@ -1,3 +1,18 @@
+---
+chain:
+  intent: docs/superpowers/intents/2026-08-20-codegraph-javascript-support-intent.md
+  spec: docs/superpowers/specs/2026-08-20-codegraph-javascript-support-design.md
+review:
+  plan_hash: c0ed918687cf0b0f
+  last_run: 2026-08-20
+  phases:
+    structure: {status: passed}
+    coverage: {status: passed}
+    dependencies: {status: passed}
+    verifiability: {status: passed}
+    consistency: {status: passed}
+  findings: []
+---
 # JavaScript Code-Graph Support Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -390,11 +405,39 @@ constant that `_build_indexer` expects, and use those exact spellings.
 
 - [ ] **Step 3: Write the capture script**
 
-`tests/codegraph/tools/capture_mixed_baseline.py` imports `build_mixed_tables`,
-`baseline_rows`, `pinned_factories`, and `BASELINE_LANGUAGES` from the test module, builds
-into a `tempfile.TemporaryDirectory()`, and writes
-`json.dumps(..., indent=2, sort_keys=True) + "\n"` to `BASELINE_PATH`. Like Task 1's
-script, it is the only writer.
+`tests/codegraph/tools/capture_mixed_baseline.py` is the only writer of the baseline. The
+test module uses a *relative* import, so the script must put **both** the repo root and
+`src` on `sys.path` and import it by its absolute package path:
+
+```python
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
+
+from tests.codegraph.test_mixed_language_baseline import (  # noqa: E402
+    BASELINE_LANGUAGES, BASELINE_PATH, baseline_rows, build_mixed_tables,
+    pinned_factories,
+)
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory() as tmp:
+        tables = build_mixed_tables(
+            Path(tmp) / "baseline",
+            languages=BASELINE_LANGUAGES,
+            factories=pinned_factories("mixed-domain"),
+        )
+    BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BASELINE_PATH.write_text(json.dumps(baseline_rows(tables), indent=2, sort_keys=True) + "\n")
+    print(f"wrote {BASELINE_PATH}")
+```
+
+Use the real domain constant `_DOMAIN` from `test_mixed_language_indexing.py` in place of
+the literal `"mixed-domain"` — `_build_indexer` derives its cache path from it.
 
 - [ ] **Step 4: Run to verify the test fails (no baseline file)**
 
@@ -444,20 +487,28 @@ change; Tasks 1–2 are the proof.
   - `param_signature(source, params_node) -> str`
   - `return_type_signature(source, return_type_node) -> str`
   - `visibility(name: str) -> str`
-  - `PendingHeritage` — frozen dataclass, gains `resolution_scope: str = "file"`
+  - `PendingHeritage` — frozen dataclass, gains `resolution_scope: str = "file"` and
+    `target_reference_override: str | None = None`
   - `pending_heritage_references(source, node, *, owner_symbol_id, source_file_id,
-    owner_qualified=None, resolution_scope="file", target_rewriter=None)
+    owner_qualified=None, target_rewriter=None)
     -> tuple[PendingHeritage, ...]` where
     `target_rewriter: Callable[[str], tuple[str, str] | None] | None` maps a raw heritage
     name to `(target_reference, resolution_scope)`, or returns `None` to fall through to
     the scope-candidate probe. TypeScript passes `None` and is unchanged.
+  - `make_symbol` (the walker's closure) gains keyword-only `local_name: str | None = None`,
+    overriding the name it would otherwise read from `name_node`. TypeScript never passes
+    it; Task 6 uses it for quoted object-literal keys.
   - `heritage_scope_candidates(owner_qualified, module_dotted_name) -> tuple[str, ...]`
   - `resolve_heritage_references(pending, qualified_names, module_dotted_name)
     -> tuple[ReferenceRecord, ...]`
   - `import_bindings(source, clause) -> tuple[tuple[str, str], ...]`
   - `esm_import_references(source, root, *, file_record) -> tuple[ReferenceRecord, ...]`
   - `extract_symbols(source, root, *, profile, repository_id, relative_path, file_record,
-    module_dotted_name) -> tuple[tuple[SymbolRecord, ...], tuple[PendingHeritage, ...]]`
+    module_dotted_name, heritage_rewriter=None)
+    -> tuple[tuple[SymbolRecord, ...], tuple[PendingHeritage, ...]]`. The walker forwards
+    `heritage_rewriter` to every `pending_heritage_references` call it makes; the rewriter
+    is per-file (it closes over the file's import aliases and path), which is why it is a
+    call parameter and not a `LanguageProfile` field. TypeScript passes nothing.
   - `dedupe_symbols(symbols) -> tuple[list[SymbolRecord], tuple[str, ...]]`
 
 - [ ] **Step 1: Confirm the baselines are green before touching anything**
@@ -579,20 +630,46 @@ Inside `extract_symbols`:
   Hook contract: `hook(node, owner_qualified, make_symbol, symbols) -> bool`, where
   `make_symbol` is the walker's closure
   `(node, kind, name_node, *, owner_qualified=None, params_node=None,
-  return_type_node=None, is_async=False) -> tuple[str, str]`. TypeScript's profile has no
-  hooks, so the loop is empty for it.
+  return_type_node=None, is_async=False, local_name=None) -> tuple[str, str]`. Hooks get
+  no `source` argument — they read node text through `node.text`. TypeScript's profile has
+  no hooks, so the loop is empty for it.
+
+  A hook returning `True` stops the walker recursing into that node. That is intended:
+  a function nested inside `post: function () {…}` is not extracted, while one inside a
+  shorthand `get() {…}` is, because the shorthand goes through the base walker. Neither
+  shape is a documented requirement, so no test pins it.
 
 - [ ] **Step 5: Add the per-reference heritage scope and rewriter**
 
 `PendingHeritage` gains `resolution_scope: str = "file"` and
 `target_reference_override: str | None = None`.
-`pending_heritage_references` gains keyword-only `resolution_scope="file"` and
-`target_rewriter=None`; for each heritage target it calls
-`target_rewriter(name)` when one is supplied, and stores the returned
-`(target_reference, resolution_scope)` on the record when the call returns a value.
-`resolve_heritage_references` uses `item.target_reference_override` when present —
-skipping the scope-candidate probe entirely — and otherwise behaves exactly as today,
-stamping `item.resolution_scope` instead of the literal `"file"`.
+
+`pending_heritage_references` gains keyword-only `target_rewriter=None`; for each heritage
+target it calls `target_rewriter(name)` when one is supplied and stores the returned
+`(target_reference, resolution_scope)` as `target_reference_override` / `resolution_scope`
+on the record. A `None` return (or no rewriter) leaves both at their defaults.
+
+`extract_symbols` gains keyword-only `heritage_rewriter=None` and passes it through as
+`target_rewriter=` at both of its `pending_heritage_references` call sites (the
+`class_declaration` and `interface_declaration` branches). This is the only path by which
+`javascript.py` can reach that call — the walker owns it.
+
+`resolve_heritage_references` uses `item.target_reference_override` when present, skipping
+the scope-candidate probe entirely, and otherwise behaves exactly as today; it stamps
+`item.resolution_scope` instead of the literal `"file"`.
+
+Also add the `local_name` override to `make_symbol`:
+
+```python
+    def make_symbol(
+        node, kind, name_node, *, owner_qualified=None,
+        params_node=None, return_type_node=None, is_async=False,
+        local_name=None,
+    ):
+        local_name = local_name if local_name is not None else text(source, name_node)
+```
+
+TypeScript never passes it, so the golden baseline is unaffected.
 
 - [ ] **Step 6: Rewrite `typescript.py` to delegate**
 
@@ -654,8 +731,9 @@ git commit -m "refactor(codegraph): extract shared ECMAScript core from TypeScri
 - [ ] **Step 1: Write the failing tests with their own record builders**
 
 `tests/codegraph/test_resolver.py` has no record factories — every existing test runs the
-Python adapter (`_parse(adapter, path, source)` at `:43`). Add these local helpers and
-tests:
+Python adapter (`_parse(adapter, path, source)` at `:43`). Its import line currently pulls
+only `ReferenceRecord, SymbolRecord, token_key`; extend it with `FileRecord`, `ParsedFile`,
+`compact_casefold`, `file_id`, and `module_id`. Then add these local helpers and tests:
 
 ```python
 def _language_file_record(*, language, prefix, path, module_qualified_name):
@@ -1158,12 +1236,14 @@ def member_chain(node):
     if current.type != "identifier":
         return None
     parts.append(current)
-    return tuple(_text_of(part) for part in reversed(parts))
+    return tuple(
+        part.text.decode("utf-8", "replace") for part in reversed(parts)
+    )
 ```
 
-`_text_of` is a closure-free helper over the module's source bytes; implement
-`member_chain(source, node)` if that reads better — keep the spelling identical wherever
-Tasks 9 and 10 consume it.
+`member_chain(node)` is the **only** spelling: the hook contract passes no `source`, so it
+reads text through `node.text`. Tasks 9 and 10 consume it under exactly this name and
+arity.
 
 ```python
 def object_pair_hook(node, owner_qualified, make_symbol, symbols):
@@ -1189,12 +1269,14 @@ def object_pair_hook(node, owner_qualified, make_symbol, symbols):
         owner_qualified=owner_qualified,
         params_node=value.child_by_field_name("parameters"),
         is_async=any(child.type == "async" for child in value.children),
+        local_name=key.text.decode("utf-8", "replace").strip("\"'"),
     )
     return True
 ```
 
-A `string` key's text arrives quoted; strip the surrounding quotes when building the local
-name so `'quoted'` yields `quoted`.
+The `local_name` override is why Task 3 added that parameter: a `string` key's node text
+arrives quoted (`b"'quoted'"`), and `make_symbol` would otherwise build the qualified name
+`src.api.api.'quoted'`.
 
 ```python
 def prototype_method_hook(node, owner_qualified, make_symbol, symbols):
@@ -1347,17 +1429,17 @@ Expected: FAIL — `parsed.references` is empty.
 `parse_file` sets
 
 ```python
-        references = tuple(
-            attribute(reference, symbols, file, reference_node)
-            for reference, reference_node in (
-                *_esm_pairs(source, root, file),
-                *_require_pairs(source, root, file),
-            )
+        references = (
+            *_ecmascript.esm_import_references(source, root, file_record=file),
+            *require_references(source, root, file_record=file, symbols=symbols),
         )
 ```
 
-or any equivalent that applies the attribution rule below to **every** reference. Keep
-`_ecmascript.esm_import_references` as the ESM producer.
+`esm_import_references` needs no attribution wrapper: it only walks `root.children`, so an
+ESM import is always module-level and it already sets `source_symbol_id=None` +
+`source_module_id=file.module_id` (`typescript.py:416-419`). `require_references` and
+`call_references` (Task 10) call `attribute` themselves, because they have the node in hand
+and a `require`/call can sit inside a function.
 
 `require_references` walks `lexical_declaration` / `variable_declaration` nodes; for each
 `variable_declarator` whose value is a `call_expression` whose `function` field is the
@@ -1674,18 +1756,32 @@ specifier) returns `None`. Then join: `alias.imported_name` when present, follow
 `src/app.js` gives `src.lib.helper`, and `ns.foo()` with `* as ns from './lib'` gives
 `src.lib.foo`.
 
-For heritage, pass a rewriter into `pending_heritage_references`:
+For heritage, `parse_file` builds the rewriter and hands it to the walker — that is the
+only route to the `pending_heritage_references` call, which lives inside `extract_symbols`:
 
 ```python
+        aliases = import_aliases(source, root)
+
         def heritage_rewriter(name):
             expanded = expand_alias(aliases, relative_path, (name,))
             if expanded is None:
                 return None
             return (expanded, "project")
+
+        symbols, pending_heritage = _ecmascript.extract_symbols(
+            source, root,
+            profile=JAVASCRIPT_PROFILE,
+            repository_id=self.repository_id,
+            relative_path=relative_path,
+            file_record=file,
+            module_dotted_name=module_dotted_name,
+            heritage_rewriter=heritage_rewriter,
+        )
 ```
 
 Returning `None` falls through to the shared scope-candidate probe, which is what keeps
 the local-base and bare-import cases at `"file"` scope with the module-qualified target.
+Note `import_aliases` must run before `extract_symbols`; both read the same parsed tree.
 
 - [ ] **Step 4: Run the tests, the golden baseline, the full suite, linter, commit**
 
@@ -1709,7 +1805,7 @@ git commit -m "feat(codegraph): resolve JavaScript inheritance through import al
   `javascript.expand_alias` (Task 9), `javascript.enclosing_symbol_id` /
   `javascript.attribute` (Task 7), `_ecmascript.heritage_scope_candidates` (Task 3).
 - Produces: `javascript.call_references(source, root, *, file_record, symbols, aliases,
-  importer_path) -> tuple[ReferenceRecord, ...]`.
+  importer_path, module_dotted_name) -> tuple[ReferenceRecord, ...]`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1810,15 +1906,20 @@ Expected: FAIL — no `CALLS` references exist.
 - [ ] **Step 3: Implement**
 
 ```python
-def call_references(source, root, *, file_record, symbols, aliases, importer_path):
+def call_references(
+    source, root, *, file_record, symbols, aliases, importer_path, module_dotted_name,
+):
     """CALLS edges for statically decidable callees only.
 
     Skipped, deliberately:
       * a `type_arguments` child -- the tsx grammar parses the plain-JS
         comparison chain `a < b > (c)` as a call with type arguments, so
         extracting it would invent an edge that does not exist in JS;
-      * a computed callee (`o[k]()`), a callee that is itself a call
-        (`f()()`), and tagged templates -- `member_chain` returns None;
+      * a tagged template (``tag`text` ``), which the grammar also shapes
+        as a call_expression, but whose `arguments` field is a
+        template_string rather than an argument list;
+      * a computed callee (`o[k]()`) and a callee that is itself a call
+        (`f()()`) -- neither reaches member_chain;
       * `require(...)`, already modelled as IMPORTS.
     """
     references = []
@@ -1828,19 +1929,24 @@ def call_references(source, root, *, file_record, symbols, aliases, importer_pat
             continue
         if any(child.type == "type_arguments" for child in node.children):
             continue
+        arguments = node.child_by_field_name("arguments")
+        if arguments is None or arguments.type == "template_string":
+            continue
         field = "function" if node.type == "call_expression" else "constructor"
         callee = node.child_by_field_name(field)
-        if callee is None:
+        if callee is None or callee.type not in ("identifier", "member_expression"):
             continue
-        parts = member_chain(callee) if callee.type in (
-            "identifier", "member_expression",
-        ) else None
-        if parts is None:
-            continue
-        if parts == ("require",):
+        parts = member_chain(callee)
+        if parts is None or parts == ("require",):
             continue
         target, scope, hint = _call_target(
-            parts, aliases, importer_path, qualified_names, symbols, node,
+            parts,
+            aliases=aliases,
+            importer_path=importer_path,
+            qualified_names=qualified_names,
+            symbols=symbols,
+            node=node,
+            module_dotted_name=module_dotted_name,
         )
         references.append(attribute(
             _call_reference(node, target, scope, hint, file_record),
@@ -1856,12 +1962,17 @@ def call_references(source, root, *, file_record, symbols, aliases, importer_pat
 2. otherwise probe the file's own scopes with
    `_ecmascript.heritage_scope_candidates(enclosing_qualified_name, module_dotted_name)`,
    innermost first: the first `f"{scope}.{'.'.join(parts)}"` present in `qualified_names`
-   → `(candidate, "file", None)`;
+   → `(candidate, "file", None)`. `enclosing_qualified_name` is the `qualified_name` of the
+   symbol whose `symbol_id` `enclosing_symbol_id(symbols, node)` returns, or `None` at
+   module level — `heritage_scope_candidates` already handles `None` by returning just the
+   module scope;
 3. otherwise `(".".join(parts), None, "unresolved")`.
 
-`_walk(root)` is a depth-first generator over all descendants; `python.py` has one
-(`self._walk`) to model it on. `_call_reference` builds the `ReferenceRecord` with
-`relation_type="CALLS"`, the node's line/byte range, and no binding fields.
+`_walk(root)` is a depth-first generator over all descendants; `python.py` has one as a
+method (`self._walk`, used at `:240,484,632`) to model it on. `_call_reference` builds a
+`ReferenceRecord` with `relation_type="CALLS"`, the node's line/byte range, the given
+`target` / `resolution_scope` / `resolution_hint`, and no binding fields; its source fields
+are placeholders because `attribute` overwrites them immediately.
 
 - [ ] **Step 4: Run the tests, the golden baseline, the full suite, linter, commit**
 
@@ -2010,12 +2121,13 @@ git commit -m "feat(codegraph): register JavaScript language in config and serve
 - Modify: `tests/codegraph/test_mixed_language_indexing.py`
 
 **Interfaces:**
-- Consumes: `_build_indexer` (same module), `pinned_factories` from
-  `tests/codegraph/test_mixed_language_baseline.py` extended with a pinned `"javascript"`
-  entry, and the module's existing search helpers (it already has
+- Consumes: `_build_indexer` (same module) with its **default** factories
+  (`server._code_graph_adapter_factories`) — pinned versions are a Task-2 baseline concern
+  and are not needed here — and the module's existing search helpers (it already has
   `test_mixed_repo_search_returns_both_languages` and
   `test_single_language_filter_excludes_the_other_language` — mirror their construction).
 - Produces:
+  - `test_mixed_language_indexing.py::_ALL_LANGUAGES = ("python", "typescript", "javascript")`
   - `test_mixed_language_indexing.py::_build_tables(cache_base, *, languages)` — wraps
     `_build_indexer` and returns `build_rows().tables`. **`cache_base` must be unique per
     call**: `_build_indexer` does `(cache_base / _DOMAIN).mkdir(parents=True)` with no
@@ -2038,7 +2150,10 @@ tests/fixtures/codegraph/mixed_python_typescript_javascript/
   shared/utils.py       # dotted name "shared.utils" -- the collision partner
   shared/utils.js       # SAME dotted name -- the R6.1 guard
   shapes.ts             # export class Shape {}; export function build() {}
-  app.js                # import { build } from './shapes'; local call; class extends Shape
+  app.js                # import { build, Shape } from './shapes';
+                        #   both are imported: `build()` gives a resolved cross-file CALLS,
+                        #   `class Panel extends Shape {}` a resolved cross-file INHERITS.
+                        #   Also declares and calls a local function, for the file-scoped case.
   esm.mjs               # import { build } from './shapes.js';  -- extension-bearing specifier
   legacy.cjs            # const app = require('./app'); module.exports = {};
   widget.jsx            # export const Widget = () => <div />;
@@ -2125,21 +2240,20 @@ def test_search_reports_accurate_ranges_for_a_javascript_symbol(tmp_path):
     assert widget.start_line >= 1 and widget.end_line >= widget.start_line
 
 
-def test_context_for_a_javascript_symbol_returns_its_relations(tmp_path):
-    relations = _context(tmp_path / "context", symbol_query="app")
-    assert {item.relation_type for item in relations} >= {
-        "DECLARES", "IMPORTS", "CALLS", "INHERITS",
-    }
 ```
 
-`_search` and `_context` wrap whatever query entry points the module's existing search
-tests use — read them and reuse the same call shape rather than inventing one. Adjust the
-asserted attribute names to the real `SearchResult` / `ContextRelation` fields
-(`models.py`).
+Context coverage is **Task 13**, not this task: `wiki_code_context` currently rejects
+non-Python seeds (`context.py:22`), so it cannot be asserted here.
+
+`_search` wraps the query entry point the module's existing search tests use:
+`indexer.build(force=True)` → `with indexer.store.read_lease() as connection:` →
+`CodeGraphQuery(_DOMAIN).search(connection, validate_search_request(query,
+languages=[...], configured_languages=_ALL_LANGUAGES, limit=...))`. Read those tests and
+reuse the same shape rather than inventing one.
 
 - [ ] **Step 3: Run to verify they fail**
 
-Run: `uv run pytest tests/codegraph/test_mixed_language_indexing.py -k "javascript or mjs or unchanged or context" -v`
+Run: `uv run pytest tests/codegraph/test_mixed_language_indexing.py -k "javascript or mjs or unchanged or search" -v`
 Expected: FAIL — the new fixture is not yet indexed with the JavaScript factory.
 
 - [ ] **Step 4: Make them pass**
@@ -2165,7 +2279,96 @@ git commit -m "test(codegraph): cover mixed Python/TypeScript/JavaScript indexin
 
 ---
 
-### Task 13: Documentation, wiki, and release
+### Task 13: Accept non-Python context seeds
+
+`wiki_code_context` rejects every seed that is not `py:` (`context.py:22`), so the intent's
+"`wiki_code_context` returns JavaScript relations" outcome is unreachable without this.
+Widening the pattern to the registered language prefixes also unblocks TypeScript, which
+has been silently unreachable in context since it shipped. Approved during design review as
+an addition to the spec's §6.
+
+**Files:**
+- Modify: `src/iwiki_mcp/codegraph/context.py:22-24` (`_CANONICAL_ENTITY_ID`)
+- Modify: `tests/codegraph/test_context.py` (the existing test that asserts a `ts:` seed is
+  rejected must be updated — it encodes the old contract)
+- Test: `tests/codegraph/test_context.py`, `tests/codegraph/test_mixed_language_indexing.py`
+
+**Interfaces:**
+- Consumes: the JavaScript relations from Tasks 7, 9, 10; the mixed fixture from Task 12.
+- Produces: no new name — only a widened `_CANONICAL_ENTITY_ID`.
+
+- [ ] **Step 1: Find the tests that encode the Python-only contract**
+
+Run: `rg -n "CANONICAL_ENTITY_ID|typed entity ID|ts:symbol|py:symbol" src/iwiki_mcp/codegraph/context.py tests/codegraph/test_context.py`
+Expected: the regex at `context.py:22-24`, its error path, and the existing test asserting a
+non-`py:` seed is rejected.
+
+- [ ] **Step 2: Write the failing tests**
+
+In `tests/codegraph/test_context.py`, update the rejection test so it asserts what is still
+true — a seed with an **unregistered** prefix (`rb:symbol:<64 hex>`) or a malformed id is
+rejected — and add acceptance:
+
+```python
+def test_javascript_and_typescript_seeds_are_accepted():
+    digest = "a" * 64
+    request = validate_context_request([f"js:symbol:{digest}", f"ts:symbol:{digest}"])
+    assert len(request.seeds) == 2
+
+
+def test_unregistered_language_prefix_is_still_rejected():
+    with pytest.raises(CodeGraphContextError):
+        validate_context_request(["rb:symbol:" + "a" * 64])
+```
+
+In `tests/codegraph/test_mixed_language_indexing.py`, add the end-to-end assertion the
+intent's outcome names — note `context()` returns a **dict** whose `"relations"` entries are
+plain dicts (`context.py:684-687`), not objects:
+
+```python
+def test_context_for_a_javascript_symbol_returns_its_relations(tmp_path):
+    result = _context_for(tmp_path / "context", path_suffix="app.js")
+    kinds = {row["relation_type"] for row in result["relations"]}
+    assert {"DECLARES", "IMPORTS", "CALLS", "INHERITS"} <= kinds
+```
+
+`_context_for` builds the mixed snapshot exactly as `_build_tables` does, reads the
+`js:symbol:` id of a symbol in `app.js` from the `symbols` table, and calls
+`CodeGraphContext(_DOMAIN).context(connection, validate_context_request([seed]))` inside the
+same `read_lease()` block the search helper uses. Read `context.py`'s public entry point and
+`test_context.py`'s existing construction before writing it.
+
+- [ ] **Step 3: Run to verify they fail**
+
+Run: `uv run pytest tests/codegraph/test_context.py tests/codegraph/test_mixed_language_indexing.py -k "seed or context" -v`
+Expected: FAIL — `CodeGraphContextError: seeds must contain typed entity IDs`.
+
+- [ ] **Step 4: Implement**
+
+```python
+_CANONICAL_ENTITY_ID = re.compile(
+    r"(?:py|ts|js):(?:file|module|symbol):[0-9a-f]{64}\Z"
+)
+```
+
+Keep the prefix list in sync with the adapter prefixes registered in `server.py`; add a
+comment saying so, in the style of the repository's existing "keep in sync" notes.
+
+- [ ] **Step 5: Run the tests, every baseline, the full suite, and the linter**
+
+Run: `uv run pytest -q && uv run flake8 src tests`
+Expected: PASS, no lint output. The Python context path is unchanged — `py:` still matches.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/iwiki_mcp/codegraph/context.py tests/codegraph/test_context.py tests/codegraph/test_mixed_language_indexing.py
+git commit -m "feat(codegraph): accept TypeScript and JavaScript context seeds"
+```
+
+---
+
+### Task 14: Documentation, wiki, and release
 
 **Files:**
 - Modify: `docs/architecture.md`, `README.md`, `docs/README.ru.md`, `pyproject.toml`
@@ -2227,12 +2430,13 @@ git commit -m "docs(codegraph): document JavaScript support and bump version"
 
 ## Task dependency order
 
-1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13.
+1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14.
 
 Tasks 1 and 2 **must** land before Task 3: they are the pre-refactor baselines, and Task 1
 Step 5 verifies the working tree is clean before capturing. Task 4 is independent of
 Tasks 5–10 in code but must precede Task 12, which asserts its guarantee. Task 11 must
-precede Task 12, which needs the registered factory.
+precede Task 12, which needs the registered factory. Task 13 needs Task 12's fixture and
+the relations from Tasks 7/9/10.
 
 ## Spec coverage map
 
@@ -2265,8 +2469,12 @@ precede Task 12, which needs the registered factory.
 | R7.5 | 5, 11 | 5, 11, 12 |
 | R7.6 | 11 | 11 |
 | R7.7 | — | every task's final step |
-| R8 | 13 | 13 |
+| R8 | 14 | 14 |
 | Intent outcome: index `.js/.jsx/.mjs/.cjs` | 5, 11 | 12 |
 | Intent outcome: search + language filter | 11 | 12 |
-| Intent outcome: context relations | 7, 9, 10 | 12 |
+| Intent outcome: context relations | 7, 9, 10, 13 | 13 |
 | Intent outcome: mixed repo, no collisions | 4, 11 | 12 |
+
+Task 13 is an addition to the spec's §6, approved during design review: the intent's
+context outcome is unreachable without it, because `wiki_code_context` accepts only `py:`
+seeds today. Fold it back into the spec before `/check-chain result`.

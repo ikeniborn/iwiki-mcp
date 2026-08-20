@@ -2,7 +2,7 @@
 chain:
   intent: docs/superpowers/intents/2026-08-20-codegraph-javascript-support-intent.md
 review:
-  spec_hash: 22cb48ff192a159c
+  spec_hash: 5cce39a4be7ebfb2
   last_run: 2026-08-20
   phases:
     structure: {status: passed}
@@ -102,7 +102,7 @@ valid monkeypatch target for the four existing boost tests.
 | `handles_interface` | `bool` | `True` | `False` |
 | `handles_namespace` | `bool` | `True` | `False` |
 | `object_literal_scope` | `bool` | `False` | `True` |
-| `declaration_hooks` | `tuple[Callable, ...]` | `()` | `(prototype_method_hook,)` |
+| `declaration_hooks` | `tuple[Callable, ...]` | `()` | `(object_pair_hook, prototype_method_hook)` |
 
 Every flag defaults to TypeScript's current behaviour, so a TypeScript profile drives the
 shared code down exactly the paths `typescript.py` takes today.
@@ -112,7 +112,9 @@ shared code down exactly the paths `typescript.py` takes today.
 claimed the node — the walker then does **not** recurse into that node — and `False`
 otherwise. `make_symbol` is the walker's closure
 `(node, kind, name_node, *, owner_qualified=None, params_node=None,
-return_type_node=None, is_async=False) -> (qualified_name, symbol_id)`. Hooks are
+return_type_node=None, is_async=False, local_name=None) -> (qualified_name, symbol_id)`,
+where `local_name` overrides the name read from `name_node` — needed for quoted
+object-literal keys, never passed by TypeScript. Hooks are
 consulted in the walker's catch-all `else` branch, before its default recursion; a hook
 returning `True` replaces that recursion. The object-literal case is **not** a hook (see
 R4.2) precisely because `variable_declarator` and `method_definition` are claimed by
@@ -398,7 +400,20 @@ extensions from R3.1, the versions from R3.2, and
 `runtime.py`, `query.py`, and `sqlite_adapter.py` need no change — they read
 `KNOWN_LANGUAGES` or the configured list.
 
-### R6.4 — Snapshot invalidation
+### R6.4 — Context seeds accept the registered language prefixes
+
+`codegraph/context.py:22` gates seeds with
+`_CANONICAL_ENTITY_ID = re.compile(r"py:(?:file|module|symbol):[0-9a-f]{64}\Z")`, so
+`wiki_code_context` rejects every non-Python seed — TypeScript included, silently, since it
+shipped. The pattern widens to `(?:py|ts|js)`, kept in sync with the adapter prefixes
+registered in `server.py`. An unregistered prefix is still rejected, and the Python path is
+unchanged.
+
+Without this the intent's "`wiki_code_context` returns JavaScript relations" outcome is
+unreachable: the relations exist in the snapshot but no request can name a JavaScript seed.
+Added to this spec after design review of the implementation plan.
+
+### R6.5 — Snapshot invalidation
 
 Adding a language to `code_graph.languages` changes the configured-language fingerprint,
 so an existing snapshot rebuilds; no schema migration and no publication-protocol change
@@ -471,7 +486,13 @@ language filter.
 ### R7.6 — Fingerprint
 
 Adding `"javascript"` to `code_graph.languages` changes the configured-language
-fingerprint and forces a rebuild (R6.4).
+fingerprint and forces a rebuild (R6.5).
+
+### R7.8 — Context seeds
+
+A `js:` and a `ts:` seed are accepted by context request validation, an unregistered prefix
+is still rejected, and a context request for a JavaScript symbol in the mixed fixture
+returns its `DECLARES`, `IMPORTS`, `CALLS`, and `INHERITS` relations (R6.4).
 
 ### R7.7 — Suite health
 
