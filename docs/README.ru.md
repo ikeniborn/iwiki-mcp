@@ -356,8 +356,8 @@ extension, физическое удаление wiki и автоматичес�
 ## Python code graph MVP
 
 Опциональный code graph — отдельный локальный SQLite-кэш проекта, привязанного к
-primary wiki-домену. Он индексирует Python и/или TypeScript/TSX-исходники, в
-зависимости от настроенных `languages`, и не меняет `wiki_search` или Markdown/vector
+primary wiki-домену. Он индексирует Python, TypeScript/TSX и/или JavaScript-исходники,
+в зависимости от настроенных `languages`, и не меняет `wiki_search` или Markdown/vector
 индексы wiki. Пути кэша выводятся из wiki-base и primary domain:
 
 ```text
@@ -369,13 +369,13 @@ primary wiki-домену. Он индексирует Python и/или TypeScri
 ```
 
 Настройте его в `.iwiki.toml` привязанного проекта. Все значения необязательны;
-ниже приведены defaults. `languages` принимает `python` и/или `typescript`; значения
-`exclude` должны быть безопасными относительными путями.
+ниже приведены defaults. `languages` принимает `python`, `typescript` и/или
+`javascript`; значения `exclude` должны быть безопасными относительными путями.
 
 ```toml
 [code_graph]
 enabled = true
-languages = ["python", "typescript"]
+languages = ["python", "typescript", "javascript"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
 max_full_rebuild_seconds = 10
@@ -422,6 +422,37 @@ delivery. Поддержка TypeScript — это статическое изв
 (декларации, импорты, class/interface heritage); члены interface не извлекаются, а
 подпроцесс TypeScript Compiler API из `typescript_type_boost` — opt-in,
 best-effort и пока не подключает реальную типовую информацию к резолвингу.
+
+Поддержка JavaScript (расширения `.js`, `.jsx`, `.mjs`, `.cjs`) — это тоже статическое
+извлечение только через Tree-sitter, с той же грамматикой `tsx`, что и у
+TypeScript/TSX — синтаксический суперсет JavaScript, включая JSX, поэтому новая
+зависимость парсера не добавлялась. В отличие от TypeScript, каждый JavaScript-файл
+безусловно module-backed (без проверки на top-level import/export), потому что
+CommonJS-файл, который только присваивает `module.exports`, всё равно должен быть
+разрешимой целью импорта. Извлекаемые декларации: классы, методы, функции (включая
+`async`), arrow- и function-выражения через `const`/`let`/`var`, методы object-literal
+(shorthand и `key: function`/`key: arrow`), а также ES5 prototype-методы
+(`C.prototype.m = ...`, только если `C` уже является символом, объявленным в том же
+файле). Relations: `DECLARES`, `IMPORTS` (и ESM `import`, и CommonJS `require`, включая
+деструктурированный `require`), `CALLS`, `INHERITS`. Относительный specifier
+(`./util.js`) резолвится в project module с отброшенным расширением, с fallback
+`<dir>.index` для импорта директории — именно это позволяет JavaScript-файлу
+импортировать TypeScript-модуль. `wiki_code_context` принимает seeds `js:` и `ts:`, а
+не только `py:`.
+
+Приоритет дизайна JavaScript — доверие важнее покрытия: он никогда не создаёт
+спекулятивное ребро. JS→TS импорты резолвятся, а TS→JS — нет: собственный резолвинг
+импортов TypeScript не менялся и там остаётся unresolved. Нет вывода типов, нет
+выполнения `node`/`tsc`/бандлера, `node_modules` не обходится. Алиасы путей из
+tsconfig/jsconfig и карты `imports`/`exports` из `package.json` не читаются, поэтому
+bare specifier остаётся unresolved. Динамический `require(expr)`, computed member
+access (`o[k]()`), вызов вызова (`f()()`) и tagged template не создают ребро. Голый
+вызов внутри метода класса не привязывается к соседнему методу, потому что сам
+JavaScript требует для этого `this.` — `this.m()` и `super.m()` не извлекаются.
+Известное ограничение: локальная переменная или параметр, которые shadow-ят имя
+импорта, всё равно разворачиваются в импорт при построении цели вызова, потому что
+резолвер не отслеживает реальную лексическую область видимости; исправление этого
+выходит за рамки MVP.
 
 ### Распределённая публикация code graph
 

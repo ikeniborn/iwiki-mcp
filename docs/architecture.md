@@ -105,26 +105,63 @@ matrix and operator commands.
 
 ## Optional Python code graph
 
-The code graph is an independent local SQLite cache for Python and/or TypeScript/TSX
-source in the bound project. It is not part of the wiki Markdown/vector index and does
-not participate in `wiki_search`. `CodeGraphLocationResolver` derives its database,
-WAL, SHM, lock, and metadata paths beneath `<base>/.iwiki/` from the primary domain.
-The cache is rebuildable and never starts a build during server startup.
+The code graph is an independent local SQLite cache for Python, TypeScript/TSX, and/or
+JavaScript source in the bound project. It is not part of the wiki Markdown/vector
+index and does not participate in `wiki_search`. `CodeGraphLocationResolver` derives
+its database, WAL, SHM, lock, and metadata paths beneath `<base>/.iwiki/` from the
+primary domain. The cache is rebuildable and never starts a build during server
+startup.
 
 `codegraph.config` loads the `[code_graph]` table from `.iwiki.toml`: `enabled`,
 `languages`, `auto_rebuild`, rebuild/file limits, `include_tests`, and safe relative
-`exclude` paths. `languages` accepts `python` and/or `typescript`. `wiki_code_index`
-requests a full build for the configured languages; when `auto_rebuild="bounded"`, a
-read request may use only its bounded rebuild budget. Schema-v1 stores are incompatible
-and replaced by a deterministic full rebuild. Missing, stale, busy, failed, or
-incompatible states remain fail-soft and cannot prevent wiki tools from serving
-Markdown/vector data.
+`exclude` paths. `languages` accepts `python`, `typescript`, and/or `javascript`.
+`wiki_code_index` requests a full build for the configured languages; when
+`auto_rebuild="bounded"`, a read request may use only its bounded rebuild budget.
+Schema-v1 stores are incompatible and replaced by a deterministic full rebuild.
+Missing, stale, busy, failed, or incompatible states remain fail-soft and cannot
+prevent wiki tools from serving Markdown/vector data.
 
 The MCP boundary contains exactly `wiki_code_status`, `wiki_code_index`,
 `wiki_code_search`, and `wiki_code_context`. Search returns typed file/module/symbol
-entities. Context accepts exact typed entity-ID seeds and applies bounded direction,
-depth, relation, node, file, and source-byte limits; `include_source` defaults to
-`false`. Source discovery and source reads enforce project-root safety.
+entities. Context accepts exact typed entity-ID seeds (`py:`, `ts:`, or `js:`) and
+applies bounded direction, depth, relation, node, file, and source-byte limits;
+`include_source` defaults to `false`. Source discovery and source reads enforce
+project-root safety.
+
+### Shared ECMAScript core
+
+`codegraph/languages/_ecmascript.py` is the framework shared by the TypeScript and
+JavaScript adapters: the Tree-sitter walker, the heritage (`extends`/`implements`)
+resolver, the ESM `import` extractor, and symbol dedup all live there once. Each
+adapter drives that shared walker through a `LanguageProfile` — a frozen dataclass
+carrying `language`, `prefix`, `kind_by_node` (extra Tree-sitter node types to
+declaration kinds), and three switches: `handles_interface`, `handles_namespace`, and
+`object_literal_scope`, plus an optional tuple of `declaration_hooks` the walker calls
+for constructs a profile alone can't express. `typescript.py` is now a thin adapter
+over this core: it supplies only what is TypeScript-specific — the `typescript`/`tsx`
+grammar choice, its `LanguageProfile` (`handles_interface`/`handles_namespace` true,
+`enum`/`type_alias` kinds), and the opt-in `tsc` type-boost subprocess. Two committed
+pre-refactor baselines (a golden TypeScript adapter snapshot and a Python/TypeScript
+run-level row count) guard that the extraction left TypeScript's output byte-identical.
+
+`javascript.py` reuses the same walker with `object_literal_scope=True` and two
+`declaration_hooks` — one claims `key: function`/`key: arrow` object-literal methods,
+the other claims ES5 `C.prototype.m = ...` assignments, but only when `C` is already a
+symbol declared in the same file. It parses with the `tsx` grammar too (a syntactic
+superset of JavaScript, so no new dependency), and unlike TypeScript, every JavaScript
+file is unconditionally module-backed: there is no top-level import/export probe,
+because a CommonJS file that only assigns `module.exports` must still be a resolvable
+import target for other files that `require` it. A relative specifier (`./util.js`)
+resolves to a project module with its extension stripped, with a `<dir>.index`
+fallback for directory imports; this is the mechanism that lets a JavaScript file's
+`import`/`require` resolve to a TypeScript module.
+
+`codegraph/resolver.py`'s `LANGUAGE_FAMILIES` scopes reference resolution by language
+family: `python` resolves only against `python` declarations; `typescript` and
+`javascript` resolve against each other's declarations as well as their own. This
+prevents a same-named Python symbol from ever satisfying a JavaScript or TypeScript
+reference (and vice versa) purely because the two languages happen to share an
+identifier — a collision the pre-family-scoping resolver could not have avoided.
 
 The offline benchmark command is:
 
@@ -138,7 +175,9 @@ It blocks release when any search warm maximum is not below `<500 ms`. The stric
 Incremental indexing is not part of the Python MVP; it requires a separate
 specification and delivery. TypeScript support is Tree-sitter-only static extraction
 (declarations, imports, class/interface heritage), not interface members, and does not
-yet wire real type information into resolution.
+yet wire real type information into resolution. JavaScript support is the same
+Tree-sitter-only extraction over the shared ECMAScript core described above (see
+"Shared ECMAScript core"), across `.js`, `.jsx`, `.mjs`, and `.cjs`.
 
 ## Layered architecture
 
