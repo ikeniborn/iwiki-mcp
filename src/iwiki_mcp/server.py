@@ -52,6 +52,7 @@ from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .codegraph.languages import python as _codegraph_python  # noqa: F401
 from .codegraph.languages import typescript as _codegraph_typescript
+from .codegraph.languages import javascript as _codegraph_javascript  # noqa: F401
 from .lock import mutation_lock
 from .engine import classify, rerank
 from .engine import frontmatter as _fm
