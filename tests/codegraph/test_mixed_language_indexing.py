@@ -322,6 +322,40 @@ def test_identifiers_do_not_collide_across_languages(tmp_path):
     for table, key in (("symbols", "symbol_id"), ("relations", "relation_id")):
         identifiers = [row[key] for row in tables[table]]
         assert len(identifiers) == len(set(identifiers))
+    # The fixture's intended collision must actually exist: shared/utils.py
+    # and shared/utils.js both derive the dotted qualified name
+    # "shared.utils.helper" -- if that collision ever stopped existing, this
+    # guard test would be protecting against nothing.
+    colliding_symbol_ids = {
+        row["symbol_id"] for row in tables["symbols"]
+        if row["qualified_name"] == "shared.utils.helper"
+    }
+    assert len(colliding_symbol_ids) == 2
+    prefixes = {symbol_id.split(":", 1)[0] for symbol_id in colliding_symbol_ids}
+    assert prefixes == {"py", "js"}
+
+
+def test_javascript_cross_file_calls_and_inherits_resolve_into_typescript(tmp_path):
+    tables = _build_tables(tmp_path / "all", languages=_ALL_LANGUAGES)
+    symbol_ids_by_qualified_name = {
+        row["qualified_name"]: row["symbol_id"] for row in tables["symbols"]
+    }
+    build_symbol_id = symbol_ids_by_qualified_name["shapes.build"]
+    shape_symbol_id = symbol_ids_by_qualified_name["shapes.Shape"]
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "CALLS"
+        and row["resolution_state"] == "resolved"
+        and row["target_symbol_id"] == build_symbol_id
+        for row in tables["relations"]
+    )
+    assert any(
+        row["relation_id"].startswith("js:")
+        and row["relation_type"] == "INHERITS"
+        and row["resolution_state"] == "resolved"
+        and row["target_symbol_id"] == shape_symbol_id
+        for row in tables["relations"]
+    )
 
 
 def test_javascript_import_resolves_into_typescript(tmp_path):
@@ -343,10 +377,14 @@ def test_mjs_extension_bearing_specifier_resolves(tmp_path):
     esm_file_id = next(
         row["file_id"] for row in tables["files"] if row["path"].endswith("esm.mjs")
     )
+    shapes_module_id = next(
+        row["module_id"] for row in tables["files"] if row["path"].endswith("shapes.ts")
+    )
     assert any(
         row["source_file_id"] == esm_file_id
         and row["relation_type"] == "IMPORTS"
         and row["resolution_state"] == "resolved"
+        and row["target_module_id"] == shapes_module_id
         for row in tables["relations"]
     )
 
@@ -362,13 +400,24 @@ def test_python_and_typescript_rows_are_unchanged_by_adding_javascript(tmp_path)
 
 
 def test_search_filtered_to_javascript_returns_only_javascript_symbols(tmp_path):
-    results = _search(tmp_path / "search", query="Widget", languages=["javascript"])
-    assert results
+    # "helper" exists in BOTH shared/utils.py and shared/utils.js (the R6.1
+    # collision fixture), so filtering by language must actually narrow the
+    # result set rather than merely coexist with a JavaScript-unique term.
+    javascript_results = _search(
+        tmp_path / "search-js", query="helper", languages=["javascript"],
+    )
+    assert javascript_results
     # Search results include module/file hits (symbol_id is None for those),
     # not just symbol hits, so filter on entity_id, mirroring the language
     # scoping check the module's existing single-language filter test uses
     # (test_single_language_filter_excludes_the_other_language).
-    assert all(item.entity_id.startswith("js:") for item in results)
+    assert all(item.entity_id.startswith("js:") for item in javascript_results)
+
+    python_results = _search(
+        tmp_path / "search-py", query="helper", languages=["python"],
+    )
+    assert python_results
+    assert all(item.entity_id.startswith("py:") for item in python_results)
 
 
 def test_search_reports_accurate_ranges_for_a_javascript_symbol(tmp_path):
