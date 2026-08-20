@@ -286,3 +286,53 @@ def test_bare_specifier_stays_unresolved():
     imports = _imports(adapter, javascript, index)
     assert imports[0].resolution_state == "unresolved"
     assert imports[0].target_reference == "react"
+
+
+def _inherits(parsed):
+    return next(r for r in parsed.references if r.relation_type == "INHERITS")
+
+
+def test_class_extends_local_base_resolves_in_file_scope():
+    source = b"class Base {}\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.app.Base"
+    assert inherits.resolution_scope == "file"
+
+
+def test_class_extends_imported_base_is_project_scoped():
+    source = b"import { Base } from './base';\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.base.Base"
+    assert inherits.resolution_scope == "project"
+
+
+def test_class_extends_required_base_is_project_scoped():
+    source = b"const { Base } = require('./base');\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.base.Base"
+    assert inherits.resolution_scope == "project"
+
+
+def test_class_extends_bare_import_stays_file_scoped():
+    source = b"import { Base } from 'vendor';\nclass Derived extends Base {}\n"
+    parsed = _adapter().parse_file(source, "src/app.js")
+    inherits = _inherits(parsed)
+    assert inherits.target_reference == "src.app.Base"
+    assert inherits.resolution_scope == "file"
+
+
+def test_inherits_resolves_across_files_to_a_typescript_class():
+    adapter = _adapter()
+    javascript = adapter.parse_file(
+        b"import { Base } from './base';\nclass Derived extends Base {}\n", "src/app.js",
+    )
+    typescript = _typescript_parsed(b"export class Base {}\n", "src/base.ts")
+    index = SymbolIndex.from_parsed_files((javascript, typescript))
+    relations = adapter.resolve_references(javascript, index).relations
+    inherits = next(r for r in relations if r.relation_type == "INHERITS")
+    base = next(s for s in typescript.symbols if s.local_name == "Base")
+    assert inherits.resolution_state == "resolved"
+    assert inherits.target_symbol_id == base.symbol_id

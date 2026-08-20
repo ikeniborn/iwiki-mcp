@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 from pathlib import PurePosixPath
+from typing import Mapping
 
 from . import _ecmascript
 from ..models import (
@@ -278,6 +279,135 @@ def dotted_candidate(importer_path: str, specifier: str) -> str | None:
     return ".".join(parts)
 
 
+@dataclass(frozen=True)
+class ImportAlias:
+    """A local binding name's source specifier and, for named imports, the
+    name it has in the exporting module.
+
+    `imported_name` is `None` for a default import, a namespace import
+    (`* as ns`), and a whole-module `require` binding -- those bind the
+    module itself, not one of its named exports.
+    """
+
+    specifier: str
+    imported_name: str | None
+
+
+def _require_alias_bindings(source, name_node):
+    """(local_name, imported_name) pairs a `require(...)` LHS pattern binds.
+
+    Mirrors `_require_bindings` but also keeps the exporting-module name for
+    a `{ a: b }` pair pattern, which `expand_alias` needs to build the
+    dotted target. An `array_pattern` yields no bindings, same trust rule
+    as `_require_bindings`.
+    """
+    if name_node.type == "identifier":
+        return ((_ecmascript.text(source, name_node), None),)
+    if name_node.type == "object_pattern":
+        bindings = []
+        for item in name_node.children:
+            if item.type == "shorthand_property_identifier_pattern":
+                local = _ecmascript.text(source, item)
+                bindings.append((local, local))
+            elif item.type == "pair_pattern":
+                key = item.child_by_field_name("key")
+                value = item.child_by_field_name("value")
+                if key is not None and value is not None and value.type == "identifier":
+                    bindings.append(
+                        (_ecmascript.text(source, value), _ecmascript.text(source, key))
+                    )
+        return tuple(bindings)
+    return ()
+
+
+def import_aliases(source: bytes, root) -> Mapping[str, "ImportAlias"]:
+    """Local binding name -> `ImportAlias`, for ESM imports and `require`.
+
+    Module-level declarations only, matching `esm_import_references`'s and
+    `require_references`'s own top-level import surface for this file: a
+    heritage target is a class-level identifier, which can only be bound by
+    a module-level import/require in scope for the class declaration.
+    """
+    aliases: dict[str, ImportAlias] = {}
+    for child in root.children:
+        if child.type == "import_statement":
+            source_node = child.child_by_field_name("source")
+            if source_node is None:
+                continue
+            specifier = _ecmascript.text(source, source_node).strip("\"'")
+            clause = next(
+                (grandchild for grandchild in child.children
+                 if grandchild.type == "import_clause"),
+                None,
+            )
+            if clause is None:
+                continue
+            for item in clause.children:
+                if item.type == "identifier":
+                    local = _ecmascript.text(source, item)
+                    aliases[local] = ImportAlias(specifier, None)
+                elif item.type == "named_imports":
+                    for specifier_node in item.children:
+                        if specifier_node.type != "import_specifier":
+                            continue
+                        name_node = specifier_node.child_by_field_name("name")
+                        alias_node = specifier_node.child_by_field_name("alias")
+                        if name_node is None:
+                            continue
+                        imported_name = _ecmascript.text(source, name_node)
+                        local = (
+                            _ecmascript.text(source, alias_node)
+                            if alias_node is not None else imported_name
+                        )
+                        aliases[local] = ImportAlias(specifier, imported_name)
+                elif item.type == "namespace_import":
+                    name_node = next(
+                        (grandchild for grandchild in item.children
+                         if grandchild.type == "identifier"),
+                        None,
+                    )
+                    if name_node is not None:
+                        local = _ecmascript.text(source, name_node)
+                        aliases[local] = ImportAlias(specifier, None)
+        elif child.type in ("lexical_declaration", "variable_declaration"):
+            for declarator in child.children:
+                if declarator.type != "variable_declarator":
+                    continue
+                value = declarator.child_by_field_name("value")
+                name_node = declarator.child_by_field_name("name")
+                if value is None or name_node is None:
+                    continue
+                specifier = _require_specifier(source, value)
+                if specifier is None:
+                    continue
+                for local, imported_name in _require_alias_bindings(source, name_node):
+                    aliases[local] = ImportAlias(specifier, imported_name)
+    return aliases
+
+
+def expand_alias(aliases, importer_path, parts):
+    """Dotted target for a member chain whose head is an alias, or None.
+
+    `None` when `parts[0]` is not an alias, or when the alias's specifier is
+    not resolvable by path arithmetic (a bare package name) -- the trust
+    rule `dotted_candidate` already enforces.
+    """
+    if not parts:
+        return None
+    alias = aliases.get(parts[0])
+    if alias is None:
+        return None
+    module = dotted_candidate(importer_path, alias.specifier)
+    if module is None:
+        return None
+    segments = tuple(parts[1:])
+    if alias.imported_name is not None:
+        segments = (alias.imported_name, *segments)
+    if not segments:
+        return module
+    return ".".join((module, *segments))
+
+
 def resolve_specifier(reference, importer_path, index):
     """Bind a relative specifier to a project module, or leave it alone."""
     candidate = dotted_candidate(importer_path, reference.target_reference or "")
@@ -369,11 +499,20 @@ class JavaScriptAdapter:
             module_local_name=local_name,
             module_name_tokens_casefold=token_key(module_dotted_name, local_name),
         )
+        aliases = import_aliases(source, root)
+
+        def heritage_rewriter(name):
+            expanded = expand_alias(aliases, relative_path, (name,))
+            if expanded is None:
+                return None
+            return (expanded, "project")
+
         symbols, pending_heritage = _ecmascript.extract_symbols(
             source, root,
             profile=JAVASCRIPT_PROFILE,
             repository_id=self.repository_id, relative_path=relative_path,
             file_record=file, module_dotted_name=module_dotted_name,
+            heritage_rewriter=heritage_rewriter,
         )
         # Safety net for genuine `symbol_id` collisions that scoping alone
         # cannot prevent: declarations inside anonymous/block scopes (arrow
