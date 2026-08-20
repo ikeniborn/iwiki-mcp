@@ -10,7 +10,16 @@ from pathlib import Path
 import pytest
 
 from iwiki_mcp.codegraph.languages.python import PythonAdapter as _PythonAdapter
-from iwiki_mcp.codegraph.models import ReferenceRecord, SymbolRecord, token_key
+from iwiki_mcp.codegraph.models import (
+    FileRecord,
+    ParsedFile,
+    ReferenceRecord,
+    SymbolRecord,
+    compact_casefold,
+    file_id,
+    module_id,
+    token_key,
+)
 from iwiki_mcp.codegraph import resolver as resolver_module
 from iwiki_mcp.codegraph.resolver import resolve_references
 from iwiki_mcp.codegraph.resolver import SymbolIndex
@@ -54,6 +63,108 @@ def _target_name(relation, index):
         if any(item.module_id == relation.target_module_id for item in candidates):
             return qualified_name
     return None
+
+
+def _language_file_record(*, language, prefix, path, module_qualified_name):
+    local_name = module_qualified_name.rsplit(".", 1)[-1]
+    return FileRecord(
+        file_id=file_id(language, prefix, "domain", path),
+        repository_id="domain",
+        path=path,
+        path_casefold=compact_casefold(path),
+        file_local_name=path.rsplit("/", 1)[-1],
+        file_name_tokens_casefold=token_key(path.rsplit("/", 1)[-1]),
+        language=language,
+        content_hash="0" * 64,
+        parser_version="test-parser",
+        size_bytes=0,
+        start_line=1,
+        end_line=1,
+        start_byte=0,
+        end_byte=0,
+        module_key=path,
+        module_id=module_id(language, prefix, "domain", path, module_qualified_name),
+        module_qualified_name=module_qualified_name,
+        module_local_name=local_name,
+        module_name_tokens_casefold=token_key(module_qualified_name, local_name),
+    )
+
+
+def _empty_parsed(file):
+    return ParsedFile(file=file, symbols=(), references=(), warnings=())
+
+
+def _module_reference(*, source_file_id, target_reference):
+    return ReferenceRecord(
+        source_symbol_id=None,
+        source_file_id=source_file_id,
+        source_module_id=None,
+        relation_type="IMPORTS",
+        target_reference=target_reference,
+        source_line=1,
+        source_byte=0,
+        source_end_line=1,
+        source_end_byte=1,
+        binding_name="thing",
+        binding_kind="implicit_binding",
+        binding_name_tokens_casefold=token_key("thing"),
+        target_kind_hint="module",
+        resolution_scope="project",
+    )
+
+
+def test_python_import_ignores_same_named_javascript_module():
+    python_file = _language_file_record(
+        language="python", prefix="py", path="src/utils.py",
+        module_qualified_name="src.utils",
+    )
+    javascript_file = _language_file_record(
+        language="javascript", prefix="js", path="src/utils.js",
+        module_qualified_name="src.utils",
+    )
+    index = SymbolIndex.from_parsed_files(
+        (_empty_parsed(python_file), _empty_parsed(javascript_file))
+    )
+    reference = _module_reference(
+        source_file_id=python_file.file_id, target_reference="src.utils",
+    )
+    relations = resolve_references("python", "py", "domain", (reference,), index)
+    assert len(relations) == 1
+    assert relations[0].resolution_state == "resolved"
+    assert relations[0].target_module_id == python_file.module_id
+
+
+def test_javascript_import_resolves_into_a_typescript_module():
+    typescript_file = _language_file_record(
+        language="typescript", prefix="ts", path="src/shapes.ts",
+        module_qualified_name="src.shapes",
+    )
+    javascript_file = _language_file_record(
+        language="javascript", prefix="js", path="src/app.js",
+        module_qualified_name="src.app",
+    )
+    index = SymbolIndex.from_parsed_files(
+        (_empty_parsed(typescript_file), _empty_parsed(javascript_file))
+    )
+    reference = _module_reference(
+        source_file_id=javascript_file.file_id, target_reference="src.shapes",
+    )
+    relations = resolve_references("javascript", "js", "domain", (reference,), index)
+    assert relations[0].resolution_state == "resolved"
+    assert relations[0].target_module_id == typescript_file.module_id
+
+
+def test_unknown_language_is_not_filtered():
+    other_file = _language_file_record(
+        language="ruby", prefix="rb", path="src/thing.rb",
+        module_qualified_name="src.thing",
+    )
+    index = SymbolIndex.from_parsed_files((_empty_parsed(other_file),))
+    reference = _module_reference(
+        source_file_id="rb-source", target_reference="src.thing",
+    )
+    relations = resolve_references("ruby", "rb", "domain", (reference,), index)
+    assert relations[0].resolution_state == "resolved"
 
 
 def test_resolves_known_and_keeps_ambiguous_and_external_references():
