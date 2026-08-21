@@ -47,6 +47,14 @@ def test_config_rejects_non_positive_confirmation_ttl(monkeypatch):
         BotConfig.load()
 
 
+def test_config_rejects_non_positive_telegram_id(monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setenv("IWIKI_BOT_ALLOWED_TELEGRAM_IDS", "-1")
+
+    with pytest.raises(BotConfigError, match="IWIKI_BOT_ALLOWED_TELEGRAM_IDS"):
+        BotConfig.load()
+
+
 def test_allowlist_denies_unknown_id():
     policy = AccessPolicy(frozenset({1001}))
 

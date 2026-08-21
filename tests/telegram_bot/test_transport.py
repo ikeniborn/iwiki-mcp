@@ -11,6 +11,9 @@ class FakeConversation:
     def __init__(self):
         self.calls = []
 
+    def expire_state(self):
+        self.calls.append(("expire_state",))
+
     async def list_domains(self, telegram_id):
         self.calls.append(("list_domains", telegram_id))
         return BotReply("Available domains:", ("domain:team",))
@@ -180,6 +183,7 @@ async def test_poll_once_advances_offset(transport):
     transport._api = updates
 
     assert await transport.poll_once(None) == 44
+    assert transport.conversation.calls == [("expire_state",)]
 
 
 def test_help_does_not_load_configuration(monkeypatch, capsys):

@@ -30,11 +30,29 @@ class ConversationService:
         self._confirmation_ttl_seconds = confirmation_ttl_seconds
         self._temporary_directory = temporary_directory
         self._clock = clock
-        self._selected_domains: dict[int, str] = {}
+        self._selected_domains: dict[int, tuple[str, float]] = {}
         self._pending_writes: dict[str, PendingWrite] = {}
 
     def _allowed(self, telegram_id: int) -> bool:
         return self._access.allows(telegram_id)
+
+    def expire_state(self) -> None:
+        now = self._clock()
+        self._selected_domains = {
+            telegram_id: selected
+            for telegram_id, selected in self._selected_domains.items()
+            if selected[1] > now
+        }
+        self._pending_writes = {
+            token: pending
+            for token, pending in self._pending_writes.items()
+            if pending.expires_at > now
+        }
+
+    def _selected_domain(self, telegram_id: int) -> str | None:
+        self.expire_state()
+        selected = self._selected_domains.get(telegram_id)
+        return selected[0] if selected is not None else None
 
     async def list_domains(self, telegram_id: int) -> BotReply:
         if not self._allowed(telegram_id):
@@ -54,13 +72,16 @@ class ConversationService:
             return BotReply("Wiki service is unavailable.")
         if domain not in domains:
             return BotReply("Domain is not available.")
-        self._selected_domains[telegram_id] = domain
+        self._selected_domains[telegram_id] = (
+            domain,
+            self._clock() + self._confirmation_ttl_seconds,
+        )
         return BotReply(f"Selected domain: {domain}")
 
     async def answer_question(self, telegram_id: int, question: str) -> BotReply:
         if not self._allowed(telegram_id):
             return BotReply("Access denied.")
-        domain = self._selected_domains.get(telegram_id)
+        domain = self._selected_domain(telegram_id)
         if domain is None:
             return BotReply("Select a domain first.")
         return await self._answer_selected(domain, question)
@@ -93,7 +114,7 @@ class ConversationService:
     ) -> BotReply:
         if not self._allowed(telegram_id):
             return BotReply("Access denied.")
-        domain = self._selected_domains.get(telegram_id)
+        domain = self._selected_domain(telegram_id)
         if domain is None:
             return BotReply("Select a domain first.")
 
@@ -160,7 +181,7 @@ class ConversationService:
     def _write_domain(self, telegram_id: int) -> str | BotReply:
         if not self._allowed(telegram_id):
             return BotReply("Access denied.")
-        domain = self._selected_domains.get(telegram_id)
+        domain = self._selected_domain(telegram_id)
         if domain is None:
             return BotReply("Select a domain first.")
         return domain

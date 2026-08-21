@@ -38,7 +38,18 @@ class FakeInference:
 
 
 @pytest.fixture
-def service(tmp_path):
+def clock():
+    value = [100.0]
+
+    def now():
+        return value[0]
+
+    now.value = value
+    return now
+
+
+@pytest.fixture
+def service(tmp_path, clock):
     remote = FakeRemote()
     inference = FakeInference()
     value = ConversationService(
@@ -47,6 +58,7 @@ def service(tmp_path):
         inference,
         confirmation_ttl_seconds=300,
         temporary_directory=tmp_path,
+        clock=clock,
     )
     value.remote = remote
     value.inference = inference
@@ -101,3 +113,14 @@ async def test_voice_file_is_removed_after_transcription(service, tmp_path):
     assert reply.text == "Answer"
     assert ("transcribe", "voice.ogg", b"audio") in service.inference.calls
     assert list(Path(tmp_path).iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_selected_domain_expires_from_memory(service, clock):
+    await service.select_domain(1001, "team")
+    clock.value[0] = 401.0
+
+    service.expire_state()
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Select a domain first."

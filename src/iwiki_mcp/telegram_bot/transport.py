@@ -201,6 +201,7 @@ class TelegramTransport:
         await self._send(chat_id, reply)
 
     async def poll_once(self, offset: int | None) -> int | None:
+        self._conversation.expire_state()
         arguments: dict[str, object] = {"timeout": 30}
         if offset is not None:
             arguments["offset"] = offset
