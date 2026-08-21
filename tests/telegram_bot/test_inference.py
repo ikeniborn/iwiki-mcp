@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -67,6 +68,42 @@ async def test_answer_posts_only_question_and_selected_context():
     assert "Question" in seen["json"]["messages"][1]["content"]
     assert "Selected context" in seen["json"]["messages"][1]["content"]
 
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_answer_emits_content_free_usage_telemetry(caplog):
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "private answer"}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 3,
+                    "total_tokens": 15,
+                },
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with caplog.at_level(logging.INFO, logger="iwiki_mcp.telegram_bot.inference"):
+        await client.answer("private question", "private context")
+
+    record = caplog.records[-1]
+    assert record.operation == "chat"
+    assert record.outcome == "success"
+    assert record.elapsed_ms >= 0
+    assert record.usage == {
+        "prompt_tokens": 12,
+        "completion_tokens": 3,
+        "total_tokens": 15,
+    }
+    assert "private" not in record.getMessage()
     await http.aclose()
 
 

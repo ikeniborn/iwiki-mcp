@@ -106,6 +106,9 @@ answers, transcriptions, or voice files. Selected domains and pending previews e
 after the confirmation TTL; the polling loop removes expired state even when no new
 message arrives. Operational logs must contain only operation
 type, outcome, elapsed time, and aggregate usage; never log content or credentials.
+Inference calls emit one content-free structured record with `operation`, `outcome`,
+`elapsed_ms`, and a numeric `usage` allowlist copied from the provider response. Use
+those fields for separate text/voice latency and transcription-cost aggregation.
 
 ## Failure behavior
 

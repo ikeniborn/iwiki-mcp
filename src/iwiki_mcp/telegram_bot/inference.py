@@ -1,8 +1,23 @@
 """OpenAI-compatible text and audio inference client."""
 
+import logging
+import time
 from typing import Any
 
 import httpx
+
+
+LOGGER = logging.getLogger(__name__)
+_USAGE_FIELDS = frozenset({
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "input_tokens",
+    "output_tokens",
+    "audio_seconds",
+    "duration",
+    "seconds",
+})
 
 
 class InferenceError(RuntimeError):
@@ -56,38 +71,77 @@ class InferenceClient:
         )
 
     async def _complete(self, instruction: str, request: str, context: str) -> str:
-        payload = await self._post_json(
-            "/chat/completions",
-            json={
-                "model": self._chat_model,
-                "messages": [
-                    {"role": "system", "content": instruction},
-                    {
-                        "role": "user",
-                        "content": f"Request:\n{request}\n\nWiki context:\n{context}",
-                    },
-                ],
-                "temperature": 0,
-            },
-        )
+        started = time.monotonic()
         try:
+            payload = await self._post_json(
+                "/chat/completions",
+                json={
+                    "model": self._chat_model,
+                    "messages": [
+                        {"role": "system", "content": instruction},
+                        {
+                            "role": "user",
+                            "content": f"Request:\n{request}\n\nWiki context:\n{context}",
+                        },
+                    ],
+                    "temperature": 0,
+                },
+            )
             content = payload["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise InferenceError("invalid_inference_response")
         except (KeyError, IndexError, TypeError) as exc:
+            self._record_telemetry("chat", "failure", started, {})
             raise InferenceError("invalid_inference_response") from exc
-        if not isinstance(content, str) or not content.strip():
-            raise InferenceError("invalid_inference_response")
+        except InferenceError:
+            self._record_telemetry("chat", "failure", started, {})
+            raise
+        self._record_telemetry("chat", "success", started, payload)
         return content
 
     async def transcribe(self, filename: str, audio: bytes) -> str:
-        payload = await self._post_json(
-            "/audio/transcriptions",
-            data={"model": self._transcription_model},
-            files={"file": (filename, audio, "audio/ogg")},
-        )
-        text = payload.get("text")
-        if not isinstance(text, str) or not text.strip():
-            raise InferenceError("invalid_inference_response")
+        started = time.monotonic()
+        try:
+            payload = await self._post_json(
+                "/audio/transcriptions",
+                data={"model": self._transcription_model},
+                files={"file": (filename, audio, "audio/ogg")},
+            )
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise InferenceError("invalid_inference_response")
+        except InferenceError:
+            self._record_telemetry("transcription", "failure", started, {})
+            raise
+        self._record_telemetry("transcription", "success", started, payload)
         return text
+
+    @staticmethod
+    def _record_telemetry(
+        operation: str,
+        outcome: str,
+        started: float,
+        payload: dict[str, object],
+    ) -> None:
+        raw_usage = payload.get("usage")
+        usage = {}
+        if isinstance(raw_usage, dict):
+            usage = {
+                key: value
+                for key, value in raw_usage.items()
+                if key in _USAGE_FIELDS
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+        LOGGER.info(
+            "inference operation completed",
+            extra={
+                "operation": operation,
+                "outcome": outcome,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "usage": usage,
+            },
+        )
 
     async def _post_json(self, path: str, **kwargs: Any) -> dict[str, object]:
         try:
