@@ -21,7 +21,9 @@ async def run_bot(config: BotConfig) -> None:
         config.transcription_model,
     )
     try:
+        await inference.probe()
         async with open_remote_iwiki(config.iwiki_url, config.iwiki_token) as remote:
+            await remote.list_domains()
             conversation = ConversationService(
                 access,
                 remote,

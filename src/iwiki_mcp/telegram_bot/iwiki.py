@@ -60,6 +60,8 @@ class RemoteIwikiClient:
             isinstance(domain, str) for domain in domains
         ):
             raise RemoteIwikiError("invalid_remote_response")
+        if not domains:
+            raise RemoteIwikiError("no_remote_domains")
         return domains
 
     async def search(self, domain: str, query: str) -> list[dict[str, object]]:

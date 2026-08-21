@@ -102,7 +102,9 @@ WantedBy=multi-user.target
 Run exactly one bot process per Telegram token: long-poll offsets are process-local.
 The service keeps selected domains and pending previews only in memory. It has no
 database and does not persist Telegram updates, messages, user identifiers, prompts,
-answers, transcriptions, or voice files. Operational logs must contain only operation
+answers, transcriptions, or voice files. Selected domains and pending previews expire
+after the confirmation TTL; the polling loop removes expired state even when no new
+message arrives. Operational logs must contain only operation
 type, outcome, elapsed time, and aggregate usage; never log content or credentials.
 
 ## Failure behavior

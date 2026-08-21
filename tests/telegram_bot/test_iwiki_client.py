@@ -13,6 +13,15 @@ async def test_list_domains_returns_server_visible_domains():
 
 
 @pytest.mark.asyncio
+async def test_list_domains_rejects_empty_remote_scope():
+    async def call_tool(name, arguments):
+        return {"domains": []}
+
+    with pytest.raises(RemoteIwikiError, match="no_remote_domains"):
+        await RemoteIwikiClient(call_tool).list_domains()
+
+
+@pytest.mark.asyncio
 async def test_search_forces_selected_domain_only():
     calls = []
 

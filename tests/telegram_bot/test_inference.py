@@ -7,6 +7,45 @@ from iwiki_mcp.telegram_bot.inference import InferenceClient, InferenceError
 
 
 @pytest.mark.asyncio
+async def test_probe_requires_configured_chat_model():
+    seen = {}
+
+    def handler(request):
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"data": [{"id": "chat-model"}]})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    await client.probe()
+
+    assert seen == {
+        "method": "GET",
+        "url": "https://models.example/v1/models",
+    }
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_rejects_missing_chat_model():
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "other-model"}]})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError, match="configured_model_unavailable"):
+        await client.probe()
+
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_answer_posts_only_question_and_selected_context():
     seen = {}
 

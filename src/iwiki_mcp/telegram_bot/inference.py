@@ -29,6 +29,22 @@ class InferenceClient:
         if self._owns_http:
             await self._http.aclose()
 
+    async def probe(self) -> None:
+        try:
+            response = await self._http.get(
+                f"{self._base_url}/models",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise InferenceError("inference_failed") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list) or self._chat_model not in {
+            item.get("id") for item in data if isinstance(item, dict)
+        }:
+            raise InferenceError("configured_model_unavailable")
+
     async def answer(self, question: str, context: str) -> str:
         return await self._complete(
             "Answer only from the supplied wiki context.", question, context

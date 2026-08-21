@@ -1,7 +1,10 @@
 import pytest
+from contextlib import asynccontextmanager
 
+import iwiki_mcp.telegram_bot.main as main_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.config import BotConfig
+from iwiki_mcp.telegram_bot.inference import InferenceError
 from iwiki_mcp.telegram_bot.main import main
 from iwiki_mcp.telegram_bot.models import BotReply, WritePreview
 from iwiki_mcp.telegram_bot.transport import TelegramTransport
@@ -199,3 +202,84 @@ def test_help_does_not_load_configuration(monkeypatch, capsys):
 
     assert captured.value.code == 0
     assert "Telegram client for remote iwiki" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_runner_stops_before_remote_when_inference_probe_fails(monkeypatch):
+    events = []
+
+    class FailingInference:
+        def __init__(self, *arguments):
+            pass
+
+        async def probe(self):
+            events.append("probe")
+            raise InferenceError("configured_model_unavailable")
+
+        async def close(self):
+            events.append("close")
+
+    def unexpected_remote(*arguments):
+        raise AssertionError("remote connection must not open after failed probe")
+
+    monkeypatch.setattr(main_module, "InferenceClient", FailingInference)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", unexpected_remote)
+    config = BotConfig(
+        "telegram-token",
+        "https://wiki.example/mcp",
+        "iwiki-token",
+        frozenset({1001}),
+        "https://models.example/v1",
+        "llm-key",
+        "chat-model",
+        "audio-model",
+        300,
+    )
+
+    with pytest.raises(InferenceError, match="configured_model_unavailable"):
+        await main_module.run_bot(config)
+
+    assert events == ["probe", "close"]
+
+
+@pytest.mark.asyncio
+async def test_runner_probes_remote_scope_before_polling(monkeypatch):
+    events = []
+
+    class ReadyInference:
+        def __init__(self, *arguments):
+            pass
+
+        async def probe(self):
+            events.append("inference_probe")
+
+        async def close(self):
+            events.append("inference_close")
+
+    class EmptyRemote:
+        async def list_domains(self):
+            events.append("remote_probe")
+            raise RuntimeError("no_remote_domains")
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        yield EmptyRemote()
+
+    monkeypatch.setattr(main_module, "InferenceClient", ReadyInference)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+    config = BotConfig(
+        "telegram-token",
+        "https://wiki.example/mcp",
+        "iwiki-token",
+        frozenset({1001}),
+        "https://models.example/v1",
+        "llm-key",
+        "chat-model",
+        "audio-model",
+        300,
+    )
+
+    with pytest.raises(RuntimeError, match="no_remote_domains"):
+        await main_module.run_bot(config)
+
+    assert events == ["inference_probe", "remote_probe", "inference_close"]
