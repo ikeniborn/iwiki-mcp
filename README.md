@@ -487,6 +487,20 @@ staging_retention_seconds = 86400
 staging_cleanup_limit = 100
 ```
 
+The published snapshot — not the reading server's own configuration — decides which
+languages a hosted read may return. `wiki_code_search` on PostgreSQL storage derives its
+language filter from the active snapshot's header, intersected with the languages the
+running server binary can query, so a hosted server needs no `code_graph.languages` of
+its own and its project directory may be empty. An unfiltered search returns rows in
+every language the snapshot declares; a filter naming a language the snapshot lacks
+returns `{"error": ..., "code": "unsupported_language", "hint": "the active snapshot
+declares: ..."}` (previously the misleading `invalid_config`), while a language this
+build cannot parse still returns `invalid_config`. A language the snapshot declares but
+the server binary does not know is dropped from the filter and reported in `warnings` as
+`unknown_snapshot_language:<name>`. Publishing a broader language set therefore widens
+what that domain's hosted reads return. Local `sqlite` reads are unchanged: there the
+project's own `code_graph.languages` stays authoritative.
+
 A ready snapshot older than a positive `max_snapshot_age_seconds` returns
 `stale_snapshot` and no rows, while status keeps reporting age and timestamps. Value
 `0` disables age rejection entirely. The hosted server enforces its own validated

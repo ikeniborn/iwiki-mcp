@@ -55,6 +55,22 @@ class CodeGraphQueryError(CodeGraphError):
     code = "invalid_config"
 
 
+class CodeGraphLanguageUnavailableError(CodeGraphQueryError):
+    """Raised when a filter names a language the queried snapshot lacks.
+
+    Distinct from the generic contract error so a hosted caller can tell
+    "this build does not know that language" (`invalid_config`) apart from
+    "the active snapshot was published without it" (`unsupported_language`),
+    which is actionable by republishing the snapshot.
+    """
+
+    code = "unsupported_language"
+
+    def __init__(self, available: tuple[str, ...]) -> None:
+        super().__init__("language not in the active snapshot")
+        self.available = available
+
+
 @dataclass(frozen=True)
 class ValidatedSearchRequest:
     """Pure validated input consumed by the SQLite query boundary."""
@@ -109,6 +125,7 @@ def validate_search_request(
     path: str | None = None,
     languages: list[str] | None = None,
     configured_languages: tuple[str, ...] = ("python",),
+    languages_source: str = "config",
     limit: int = 20,
 ) -> ValidatedSearchRequest:
     """Validate public inputs without touching binding, status, or SQLite."""
@@ -149,10 +166,18 @@ def validate_search_request(
         not isinstance(languages, list)
         or not languages
         or any(
-            language not in KNOWN_LANGUAGES or language not in configured_languages
+            not isinstance(language, str) or language not in KNOWN_LANGUAGES
             for language in languages
         )
     ):
+        raise CodeGraphQueryError("unsupported language")
+    elif any(language not in configured_languages for language in languages):
+        # Known to this build but outside the queried scope. Only the
+        # snapshot-scoped caller can act on that, so only it gets the
+        # distinguishable error; a project-config mismatch stays
+        # `invalid_config` as before.
+        if languages_source == "snapshot":
+            raise CodeGraphLanguageUnavailableError(tuple(configured_languages))
         raise CodeGraphQueryError("unsupported language")
     else:
         normalized_languages = tuple(sorted(set(languages)))

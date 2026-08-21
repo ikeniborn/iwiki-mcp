@@ -31,6 +31,7 @@ from ..codegraph.publication import (
     graph_payload_revision,
     header_payload,
 )
+from ..codegraph.config import KNOWN_LANGUAGES
 from ..codegraph.query import (
     MATCH_RANK,
     ValidatedSearchRequest,
@@ -1188,6 +1189,25 @@ def _context_node_from_row(row: tuple[Any, ...]) -> ContextNode:
 _SELECTOR_SPECIFICITY = {"source_glob": 0, "file": 1, "symbol": 2}
 
 
+def snapshot_language_scope(header: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a snapshot header's declared languages into usable and unknown.
+
+    The published header -- not the server's own project configuration --
+    is the authority for what a hosted read may return. A language the
+    running binary cannot query is dropped rather than allowed to reach
+    the SQL layer, and reported so the caller can tell an empty result
+    from a version skew.
+    """
+    declared = header.get("languages") if isinstance(header, dict) else None
+    values = declared if isinstance(declared, list) else []
+    known = {value for value in values if value in KNOWN_LANGUAGES}
+    unknown = {
+        value for value in values
+        if isinstance(value, str) and value not in KNOWN_LANGUAGES
+    }
+    return tuple(sorted(known)), tuple(sorted(unknown))
+
+
 class PostgresCodeGraphReader:
     """Answer bounded reads from one active PostgreSQL graph snapshot."""
 
@@ -1289,13 +1309,40 @@ class PostgresCodeGraphReader:
         except (ValueError, psycopg.Error):
             return {"domain": self.domain, **MISSING_READ_RESULT}
 
-    def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
-        """Rank entities of one fresh snapshot without reading project source."""
+    def _snapshot_header(self, cursor, scope: tuple):
+        cursor.execute(
+            "SELECT header FROM iwiki.code_graph_snapshots "
+            "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
+            scope,
+        )
+        row = cursor.fetchone()
+        return None if row is None else row[0]
+
+    def search(
+        self,
+        request: ValidatedSearchRequest | Callable[
+            [tuple[str, ...]], ValidatedSearchRequest
+        ],
+    ) -> dict[str, object]:
+        """Rank entities of one fresh snapshot without reading project source.
+
+        `request` may be a builder taking the active snapshot's declared
+        languages: the language filter can only be validated once the
+        snapshot is known, and the snapshot is resolved here.
+        """
         try:
             with self._read() as cursor:
                 status, scope = self._status(cursor)
                 if scope is None:
                     return {**status, "results": []}
+                if callable(request):
+                    languages, unknown = snapshot_language_scope(
+                        self._snapshot_header(cursor, scope)
+                    )
+                    status["warnings"] = list(status["warnings"]) + [
+                        f"unknown_snapshot_language:{name}" for name in unknown
+                    ]
+                    request = request(languages)
                 results = self._search(cursor, scope, request)
         except (ValueError, psycopg.Error):
             return {"domain": self.domain, **MISSING_READ_RESULT, "results": []}

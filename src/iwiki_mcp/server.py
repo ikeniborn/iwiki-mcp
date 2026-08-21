@@ -168,22 +168,6 @@ def _code_graph_adapter_factories(repository_id, config=None):
     }
 
 
-def _code_graph_configured_languages(binding) -> tuple[str, ...]:
-    """Resolve the project's configured code-graph languages for validation.
-
-    Mirrors the fallback `CodeGraphRuntime.search` itself applies (see
-    `runtime.py`: `self.config.languages if self.config is not None else
-    ("python",)`) so a request-validation call site that runs before (or
-    instead of) a runtime is constructed still validates a `languages`
-    filter against the project's real `code_graph.languages` config, not
-    the `("python",)` module default.
-    """
-    try:
-        return _codegraph_config.load_code_graph_config(binding.project_dir).languages
-    except _codegraph_config.CodeGraphConfigError:
-        return ("python",)
-
-
 def _code_runtime(binding: base.Binding):
     """Compose configured language adapters without initializing parsers."""
     try:
@@ -1214,13 +1198,19 @@ def wiki_code_search(
     if _is_postgres(bind):
         if bind.primary is None:
             return _missing_code_primary()
+        # Hosted reads answer from the published snapshot, so the snapshot
+        # header -- not this server's project directory, which for the HTTP
+        # transport is just wherever server.toml lives -- decides which
+        # languages a filter may name. The reader resolves the active
+        # snapshot and calls back with its declared languages.
         return _postgres_code_reader(bind).search(
-            _codegraph_runtime.validate_search_request(
+            lambda snapshot_languages: _codegraph_runtime.validate_search_request(
                 query,
                 kinds=kinds,
                 path=path,
                 languages=languages,
-                configured_languages=_code_graph_configured_languages(bind),
+                configured_languages=snapshot_languages,
+                languages_source="snapshot",
                 limit=limit,
             )
         )

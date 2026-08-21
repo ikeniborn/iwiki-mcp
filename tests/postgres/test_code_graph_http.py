@@ -143,6 +143,62 @@ def test_hosted_reads_report_missing_before_publication(hosted_empty_code):
 
 
 @pytest.mark.postgres_integration
+def test_hosted_search_follows_the_published_snapshot_languages(
+    hosted_mixed_language_code,
+):
+    # The hosted server's project directory holds no .iwiki.toml, so the
+    # only authority for the language filter is the snapshot header the
+    # client published (python + javascript here).
+    from iwiki_mcp import server
+
+    filtered = server.wiki_code_search("needleWidget", languages=["javascript"])
+    assert "error" not in filtered
+    assert [item["local_name"] for item in filtered["results"]] == ["needleWidget"]
+
+    unfiltered = server.wiki_code_search("needleWidget")
+    assert "error" not in unfiltered
+    assert [item["local_name"] for item in unfiltered["results"]] == ["needleWidget"]
+
+    assert server.wiki_code_search("needle", languages=["typescript"]) == {
+        "error": "language not available in the active snapshot",
+        "code": "unsupported_language",
+        "hint": "the active snapshot declares: javascript, python",
+    }
+
+
+@pytest.mark.postgres_integration
+def test_hosted_python_only_snapshot_keeps_its_language_scope(hosted_ready_code):
+    # Regression: a python-only deployment must observe no behaviour
+    # change -- same results, and a javascript filter still refused.
+    from iwiki_mcp import server
+
+    results = server.wiki_code_search("needle", languages=["python"])["results"]
+    assert [item["match"] for item in results] == EXPECTED_MATCHES
+
+    assert server.wiki_code_search("needle", languages=["javascript"]) == {
+        "error": "language not available in the active snapshot",
+        "code": "unsupported_language",
+        "hint": "the active snapshot declares: python",
+    }
+    assert server.wiki_code_search("needle", languages=["cobol"]) == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
+@pytest.mark.postgres_integration
+def test_hosted_search_without_snapshot_stays_missing(hosted_empty_code):
+    from iwiki_mcp import server
+
+    result = server.wiki_code_search("needle", languages=["python"])
+
+    assert result["state"] == "missing"
+    assert result["error"] == "missing_snapshot"
+    assert result["results"] == []
+
+
+@pytest.mark.postgres_integration
 def test_hosted_index_without_checkout_is_safe(hosted_empty_code):
     from iwiki_mcp import server
 

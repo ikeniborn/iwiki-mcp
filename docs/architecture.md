@@ -128,6 +128,19 @@ applies bounded direction, depth, relation, node, file, and source-byte limits;
 `include_source` defaults to `false`. Source discovery and source reads enforce
 project-root safety.
 
+On PostgreSQL storage the snapshot header — not `[code_graph].languages` — is the
+authority for the read path's language filter. `postgres.codegraph`'s reader resolves
+the active snapshot first, then `snapshot_language_scope` intersects the header's
+declared `languages` with the binary's `KNOWN_LANGUAGES`; `server.wiki_code_search`
+passes a request builder that only validates the caller's filter once that scope is
+known. This keeps write and read paths on one contract: a hosted server holds no
+checkout and its project directory (for HTTP, wherever `server.toml` lives) says
+nothing about what was published. A filter outside the snapshot's scope is
+`unsupported_language`, distinct from the `invalid_config` a language unknown to the
+binary returns; header languages the binary cannot query are dropped and reported in
+`warnings`. The local SQLite path is unchanged and still validates against the
+project's configured languages.
+
 ### Shared ECMAScript core
 
 `codegraph/languages/_ecmascript.py` is the framework shared by the TypeScript and

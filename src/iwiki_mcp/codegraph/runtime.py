@@ -194,6 +194,15 @@ def _invalid_config() -> dict[str, object]:
     }
 
 
+def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
+    declared = ", ".join(available) if available else "no language"
+    return {
+        "error": "language not available in the active snapshot",
+        "code": "unsupported_language",
+        "hint": "the active snapshot declares: " + declared,
+    }
+
+
 def _rebuild_failed() -> dict[str, object]:
     return {
         "error": "code graph rebuild failed",
@@ -235,6 +244,8 @@ def sanitized_error(error: CodeGraphError) -> dict[str, object]:
     code = getattr(error, "code", "rebuild_failed")
     if code == "invalid_config":
         return _invalid_config()
+    if code == "unsupported_language":
+        return _unsupported_language(getattr(error, "available", ()))
     if code == "not_configured":
         return _not_configured()
     if code == "busy":

@@ -356,7 +356,15 @@ class GraphFixture:
     lock_timeout_ms = 500
 
     def __init__(
-        self, dsn, admin_dsn, iwiki_id, domain, *, owner_id=None, rows=None
+        self,
+        dsn,
+        admin_dsn,
+        iwiki_id,
+        domain,
+        *,
+        owner_id=None,
+        rows=None,
+        languages=("python",),
     ):
         from iwiki_mcp.codegraph import publication
         from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
@@ -379,7 +387,7 @@ class GraphFixture:
             parser_fingerprint="parser-fixture",
             normalizer_version="normalizer-1",
             unicode_data_version="15.1",
-            languages=("python",),
+            languages=tuple(languages),
             expected_counts=self.expected_counts,
             graph_payload_revision=publication.graph_payload_revision(self.rows),
         )
@@ -741,7 +749,7 @@ def _ranked_entity_id(kind, identity):
     return f"py:{kind}:{digest}"
 
 
-def _ranked_file(repository_id, identity, path, *, module=None):
+def _ranked_file(repository_id, identity, path, *, module=None, language="python"):
     from iwiki_mcp.codegraph import models
 
     local_name = path.rsplit("/", 1)[-1]
@@ -752,7 +760,7 @@ def _ranked_file(repository_id, identity, path, *, module=None):
         "path_casefold": models.compact_casefold(path),
         "file_local_name": local_name,
         "file_name_tokens_casefold": models.token_key(local_name),
-        "language": "python",
+        "language": language,
         "content_hash": f"hash:{identity}",
         "parser_version": "fixture",
         "size_bytes": 10,
@@ -910,6 +918,35 @@ def _ranked_rows(repository_id):
     }
 
 
+_JAVASCRIPT_SYMBOL = "needleWidget"
+
+
+def _mixed_language_rows(repository_id):
+    """Seed the ranked python fixture plus one JavaScript file and symbol."""
+    rows = _ranked_rows(repository_id)
+    return {
+        **rows,
+        "files": [
+            *rows["files"],
+            _ranked_file(
+                repository_id,
+                "javascript-widget",
+                "web/widget.js",
+                language="javascript",
+            ),
+        ],
+        "symbols": [
+            *rows["symbols"],
+            _ranked_symbol(
+                "javascript-widget",
+                "javascript-widget",
+                f"widget.{_JAVASCRIPT_SYMBOL}",
+                _JAVASCRIPT_SYMBOL,
+            ),
+        ],
+    }
+
+
 class SqliteRankedReader:
     """Rank the shared fixture through the authoritative SQLite query path."""
 
@@ -945,7 +982,9 @@ class RankedPair:
         self.request = request
 
 
-def _provisioned_graph(clean_postgres, runtime_principal, rows=None):
+def _provisioned_graph(
+    clean_postgres, runtime_principal, rows=None, languages=("python",)
+):
     from iwiki_mcp.postgres.auth import AuthStore
     from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
 
@@ -969,7 +1008,14 @@ def _provisioned_graph(clean_postgres, runtime_principal, rows=None):
     role_dsn = SecretDsn(
         make_conninfo(**{**values, "user": role, "password": password})
     )
-    return GraphFixture(role_dsn, clean_postgres, "wiki-a", "docs", rows=rows)
+    return GraphFixture(
+        role_dsn,
+        clean_postgres,
+        "wiki-a",
+        "docs",
+        rows=rows,
+        languages=languages,
+    )
 
 
 @pytest.fixture
@@ -989,6 +1035,19 @@ def pg_ready_graph(pg_ranked_graph):
     result = pg_ranked_graph.finalize(pg_ranked_graph.complete_session())
     assert result["state"] == "ready"
     return pg_ranked_graph
+
+
+@pytest.fixture
+def pg_mixed_language_graph(clean_postgres, runtime_principal):
+    graph = _provisioned_graph(
+        clean_postgres,
+        runtime_principal,
+        rows=_mixed_language_rows("docs"),
+        languages=("python", "javascript"),
+    )
+    result = graph.finalize(graph.complete_session())
+    assert result["state"] == "ready"
+    return graph
 
 
 class HostedCodeBinding:
@@ -1053,6 +1112,15 @@ def hosted_ready_code(pg_ready_graph, monkeypatch):
     from iwiki_mcp import server
 
     bound, token = _bind_hosted_code(pg_ready_graph, monkeypatch)
+    yield bound
+    server._AUTH_CONTEXT.reset(token)
+
+
+@pytest.fixture
+def hosted_mixed_language_code(pg_mixed_language_graph, monkeypatch):
+    from iwiki_mcp import server
+
+    bound, token = _bind_hosted_code(pg_mixed_language_graph, monkeypatch)
     yield bound
     server._AUTH_CONTEXT.reset(token)
 
