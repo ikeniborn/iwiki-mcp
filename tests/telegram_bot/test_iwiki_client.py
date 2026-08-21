@@ -29,6 +29,18 @@ async def test_search_forces_selected_domain_only():
 
 
 @pytest.mark.asyncio
+async def test_search_normalizes_iwiki_file_to_page_slug():
+    async def call_tool(name, arguments):
+        return {"results": [{"file": "guide/a.md", "heading": "Answer"}]}
+
+    results = await RemoteIwikiClient(call_tool).search("team", "question")
+
+    assert results == [
+        {"file": "guide/a.md", "slug": "guide/a", "heading": "Answer"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_read_page_never_changes_domain_scope():
     calls = []
 

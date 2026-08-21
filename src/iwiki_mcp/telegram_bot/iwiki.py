@@ -71,7 +71,18 @@ class RemoteIwikiClient:
             isinstance(result, dict) for result in results
         ):
             raise RemoteIwikiError("invalid_remote_response")
-        return results
+        normalized: list[dict[str, object]] = []
+        for result in results:
+            item = dict(result)
+            if not isinstance(item.get("slug"), str):
+                file_name = item.get("file")
+                if not isinstance(file_name, str):
+                    raise RemoteIwikiError("invalid_remote_response")
+                item["slug"] = (
+                    file_name[:-3] if file_name.endswith(".md") else file_name
+                )
+            normalized.append(item)
+        return normalized
 
     async def read_page(
         self, domain: str, slug: str, heading: str | None = None
