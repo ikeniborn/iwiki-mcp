@@ -12,6 +12,13 @@ review:
 chain:
   intent: docs/superpowers/intents/2026-08-21-telegram-domain-bot-service-intent.md
   spec: docs/superpowers/specs/2026-08-21-telegram-domain-bot-service-design.md
+result_check:
+  verdict: needs_work
+  source: plan
+  plan_hash: 44fccd9a95080435
+  last_run: 2026-08-22
+  reviewed: true
+  docs_checked: true
 ---
 
 # Telegram Domain Bot Service Implementation Plan
