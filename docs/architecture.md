@@ -443,7 +443,11 @@ PostgreSQL driver errors are caught separately and become a stable
 tools under PostgreSQL return `unsupported_storage` before touching local paths. Domain
 grant tools outside hosted PostgreSQL return `unsupported_transport` with actual storage
 and transport. Missing capabilities or malformed protected envelopes fail before dispatch
-with HTTP 403; transaction-time authority loss returns in-band `access_denied`.
+in `http._authorize_tool`: for one `tools/call` the refusal is sent by
+`_send_tool_access_denied` as a JSON-RPC `-32001 access_denied` error over HTTP 200,
+carrying the request's own id; a batch (or any non-object payload) has no single id and
+keeps the HTTP 403 `_send_error` path, as do authentication, origin, and session
+failures. Transaction-time authority loss returns in-band `access_denied`.
 
 ## Startup / process lifecycle
 

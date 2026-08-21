@@ -321,8 +321,13 @@ Hosted creation возвращает полный scope creator-токена:
 Точный retry меняет только `already_existed` на `true`. Grant list возвращает
 `{"domain":<domain>,"grants":[{"token_id":...,"owner":...,"can_read":...,"can_write":...,"can_manage_grants":...}]}`.
 Set возвращает `domain`, `token_id`, `can_read`, `can_write`; revoke — `domain`,
-`token_id`, `revoked`. Отсутствующее право или malformed protected arguments дают HTTP
-403 `{"error":"access denied"}`. Потеря права после dispatch, self-target и
+`token_id`, `revoked`. Одиночный `tools/call`, отклонённый до dispatch — отсутствующее
+право, malformed protected arguments или переданный клиентом `iwiki_id`, — возвращает
+HTTP 200 с одной JSON-RPC ошибкой
+`{"code":-32001,"message":"access_denied","data":{"hint":...}}`, чтобы MCP-клиент мог
+сопоставить отказ с id своего запроса. Batch-запрос, отклонённый так же, остаётся на HTTP
+403 `{"error":"access denied"}`, так как у batch нет одного id; отказы аутентификации,
+origin и session тоже остаются на HTTP 401/403/404. Потеря права после dispatch, self-target и
 foreign/missing state внутри транзакции дают HTTP 200 с in-band tool result
 `{"error":"access_denied",...}`. Некорректные syntax/flags дают очищенную MCP/tool
 validation failure.

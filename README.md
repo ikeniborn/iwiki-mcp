@@ -321,8 +321,13 @@ Hosted creation returns the complete creator scope:
 An exact retry changes only `already_existed` to `true`. Grant list returns
 `{"domain":<domain>,"grants":[{"token_id":...,"owner":...,"can_read":...,"can_write":...,"can_manage_grants":...}]}`.
 Set returns the named `domain`, `token_id`, `can_read`, and `can_write`; revoke returns
-the named `domain`, `token_id`, and `revoked` boolean. Missing capability or malformed
-protected arguments return HTTP 403 `{"error":"access denied"}`. Authority lost after
+the named `domain`, `token_id`, and `revoked` boolean. A single `tools/call` refused
+before dispatch — missing capability, malformed protected arguments, or a client-supplied
+`iwiki_id` — answers HTTP 200 with one JSON-RPC error
+`{"code":-32001,"message":"access_denied","data":{"hint":...}}`, so an MCP client can
+correlate the refusal with its request id. A batch request refused the same way keeps
+HTTP 403 `{"error":"access denied"}`, since a batch carries no single id; authentication,
+origin, and session failures likewise stay on HTTP 401/403/404. Authority lost after
 dispatch, self-target, and foreign/missing transactional state return HTTP 200 with the
 in-band `{"error":"access_denied",...}` tool result. Invalid syntax or grant flags
 return a sanitized MCP/tool validation failure.

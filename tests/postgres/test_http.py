@@ -112,6 +112,28 @@ def _tool_result(response):
     return json.loads(response.json()["result"]["content"][0]["text"])
 
 
+def _assert_tool_denied(response, *, request_id=2):
+    """Assert the JSON-RPC shape of a `tools/call` refused at the gate.
+
+    A single `tools/call` denied by `http._authorize_tool` answers as one
+    JSON-RPC error over HTTP 200 -- matching the `access_denied` code the
+    tool handlers themselves return for the same condition -- instead of
+    an HTTP status the MCP client cannot correlate with its request.
+    """
+    assert response.status_code == 200
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": -32001,
+            "message": "access_denied",
+            "data": {
+                "hint": "the authenticated context does not allow this operation"
+            },
+        },
+    }
+
+
 def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
     runtime = hosted_runtime.runtime
     auth = hosted_runtime.auth
@@ -202,8 +224,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             {"domain": "private", "slug": "hidden"},
             session_id=session_id,
         )
-        assert denied.status_code == 403
-        assert denied.json() == {"error": "access denied"}
+        _assert_tool_denied(denied)
         assert "private" not in denied.text
 
         client_iwiki = _tool_call(
@@ -213,7 +234,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             {"iwiki_id": "wiki-b"},
             session_id=session_id,
         )
-        assert client_iwiki.status_code == 403
+        _assert_tool_denied(client_iwiki)
         assert "wiki-b" not in client_iwiki.text
 
         missing = _initialize(client, None)
@@ -304,7 +325,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             },
             session_id=read_only_session,
         )
-        assert write_denied.status_code == 403
+        _assert_tool_denied(write_denied)
 
         narrowed = _tool_call(
             client,
@@ -329,7 +350,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             },
             session_id=session_id,
         )
-        assert write_after_narrow.status_code == 403
+        _assert_tool_denied(write_after_narrow)
 
         auth.set_wiki_active("wiki-a", False)
         disabled_response = _initialize(client, disabled)
@@ -344,6 +365,37 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             assert cursor.fetchone()[0] == "30s"
             cursor.execute("SHOW lock_timeout")
             assert cursor.fetchone()[0] == "5s"
+
+
+def test_denied_batch_request_keeps_the_http_status_path(hosted_runtime):
+    # The JSON-RPC denial shape covers one request, which carries an `id`
+    # the client can correlate. A batch has no single id, so it keeps the
+    # HTTP 403 path -- the boundary that makes the single-request shape safe.
+    runtime = hosted_runtime.runtime
+    token = hosted_runtime.token
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session_id = _initialize(client, token).headers["mcp-session-id"]
+        denied_batch = _request(
+            client,
+            token,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "wiki_read_page",
+                        "arguments": {"domain": "private", "slug": "hidden"},
+                    },
+                }
+            ],
+            session_id=session_id,
+        )
+
+    assert denied_batch.status_code == 403
+    assert denied_batch.json() == {"error": "access denied"}
+    assert "private" not in denied_batch.text
 
 
 def test_hosted_runtime_rejects_git_before_listener(
@@ -749,8 +801,8 @@ def test_hosted_domain_creation_and_content_grant_lifecycle(hosted_runtime):
             {"domain": "docs"},
             session_id=outsider_session,
         )
-        assert denied_create.status_code == 403
-        assert denied_list.status_code == 403
+        _assert_tool_denied(denied_create)
+        _assert_tool_denied(denied_list)
 
         malformed_create = _request(
             client,
@@ -773,9 +825,10 @@ def test_hosted_domain_creation_and_content_grant_lifecycle(hosted_runtime):
             {"name": "denied", "iwiki_id": "wiki-b"},
             session_id=creator_session,
         )
-        assert malformed_create.status_code == 403
-        assert malformed_create.json() == {"error": "access denied"}
-        assert tenant_override.status_code == 403
+        # Malformed `arguments` on a protected tool is still a denial of that
+        # one request, so it answers in the same JSON-RPC shape.
+        _assert_tool_denied(malformed_create, request_id=4)
+        _assert_tool_denied(tenant_override)
 
         invalid_domain = _tool_result(
             _tool_call(
