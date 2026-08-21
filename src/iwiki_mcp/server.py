@@ -30,6 +30,7 @@ from pydantic import Field
 from . import admin as _admin  # noqa: F401
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from . import http as _http  # noqa: F401
+from .telegram_bot import main as _telegram_bot_main  # noqa: F401
 from .postgres import migrations as _postgres_migrations  # noqa: F401
 from .postgres import auth as _postgres_auth  # noqa: F401
 from .postgres import store as _postgres_store  # noqa: F401
