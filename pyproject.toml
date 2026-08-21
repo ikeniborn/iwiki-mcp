@@ -25,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 iwiki-mcp = "iwiki_mcp.server:main"
+iwiki-telegram-bot = "iwiki_mcp.telegram_bot.main:main"
 
 [project.optional-dependencies]
 dev = [
