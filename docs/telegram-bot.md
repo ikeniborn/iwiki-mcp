@@ -14,11 +14,11 @@ and write access only where Telegram-originated changes are permitted.
 
 The inference credential must authorize only inference. Do not deploy the bot with a
 credential that also grants runtime control, audit-log access, metrics, or GPU tool
-administration. The provider must not retain prompts, wiki context, answers,
-transcriptions, or audio after processing. In particular, the current Framework
-single edge token and 30-day raw request/response audit do not satisfy this boundary;
-an inference-only credential or gateway plus bot-request audit exclusion is required
-before production use.
+administration. Provider-side inference audit retention is an operator policy and is
+not a bot acceptance gate. The bot process itself still must not persist prompts,
+wiki context, answers, transcriptions, or audio after processing. The current
+Framework edge token remains unsuitable because it grants non-inference capabilities;
+production requires an inference-only credential or gateway.
 
 Unknown Telegram IDs receive no domain metadata and trigger no iwiki or inference
 call. Page creation and section updates always show a preview with Confirm and Reject
