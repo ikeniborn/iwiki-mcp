@@ -5,6 +5,10 @@
 ## Что это
 
 iwiki-mcp — общая wiki-служба с доменами и MCP-доступом из Codex и Claude Code.
+
+Отдельно разворачиваемый [Telegram-бот](telegram-bot.md) позволяет сотрудникам из
+allowlist выбирать домены, задавать текстовые или голосовые вопросы и подтверждать
+изменения страниц через hosted iwiki.
 Поддерживаются локальная Git-синхронизируемая база или tenant-isolated PostgreSQL,
 через stdio или hosted Streamable HTTP по матрице ниже.
 

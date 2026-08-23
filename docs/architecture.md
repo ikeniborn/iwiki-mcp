@@ -17,6 +17,16 @@ PostgreSQL and selects an isolated wiki from each bearer token. Coding agents au
 Markdown pages; the server validates structure, persists and indexes content, and
 answers hybrid (vector + lexical + link-graph) search inside the effective domain scope.
 
+The optional `iwiki_mcp.telegram_bot` package is a third, independently deployed
+client process, not an MCP server runtime. `TelegramTransport` owns long polling;
+`AccessPolicy` denies unknown Telegram IDs before outbound work; `RemoteIwikiClient`
+uses one scoped hosted-MCP token; `InferenceClient` calls OpenAI-compatible chat and
+audio endpoints; and `ConversationService` keeps only in-memory domain selection and
+expiring write previews. It sends inference only content retrieved from the selected
+domain. Create and section-update mutations require explicit confirmation, while
+updates use a fresh remote revision and section hash without conflict retry. See the
+[operator guide](telegram-bot.md).
+
 Three nouns anchor everything:
 
 - **Base** — a Git directory pointed at by `IWIKI_BASE_DIR`, or a PostgreSQL tenant

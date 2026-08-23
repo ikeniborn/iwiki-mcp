@@ -8,6 +8,10 @@ iwiki-mcp is a shared wiki service split into domains and queried over MCP from 
 and Claude Code. It supports a Git-synced local base or tenant-isolated PostgreSQL,
 over stdio or hosted Streamable HTTP as described below.
 
+An optional separately deployed [Telegram bot service](docs/telegram-bot.md) lets
+allowlisted employees select domains, ask text or voice questions, and confirm page
+changes through a hosted iwiki server.
+
 ## Install
 
 Requires Python `>=3.10`. The recommended tool is [`uv`](https://docs.astral.sh/uv/); `pipx` works as a drop-in alternative.

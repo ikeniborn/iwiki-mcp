@@ -1,6 +1,6 @@
 [project]
 name = "iwiki-mcp"
-version = "0.7.169"
+version = "0.7.175"
 description = "MCP server for a shared Git or PostgreSQL wiki split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 iwiki-mcp = "iwiki_mcp.server:main"
+iwiki-telegram-bot = "iwiki_mcp.telegram_bot.main:main"
 
 [project.optional-dependencies]
 dev = [
