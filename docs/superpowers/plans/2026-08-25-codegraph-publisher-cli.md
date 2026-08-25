@@ -12,6 +12,13 @@ review:
 chain:
   intent: docs/superpowers/intents/2026-08-24-codegraph-publisher-cli-intent.md
   spec: docs/superpowers/specs/2026-08-25-codegraph-publisher-cli-design.md
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: e474835e4cb2a6cf
+  last_run: 2026-08-25
+  reviewed: true
+  docs_checked: true
 ---
 # Codegraph Publisher CLI Implementation Plan
 
