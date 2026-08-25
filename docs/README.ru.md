@@ -528,13 +528,14 @@ active snapshot declares: ..."}` (раньше — вводящий в забл�
 `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` только из окружения
 исполнения, и оба отсутствуют в status, логах, заголовках снапшота, ошибках и repr
 объектов. Прямой режим PostgreSQL переиспользует существующий блок `[storage]` и
-`IWIKI_DB_PASSWORD`.
+требует `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL` и `IWIKI_EMBED_DIMENSIONS` (plus
+optional `IWIKI_RERANK_MODEL`, когда он настроен).
 
 | Режим | Публикует в | Требует |
 | --- | --- | --- |
-| `sqlite` | Локальный кэш code graph рядом с базой wiki | Локальный checkout |
-| `postgres` | Настроенную базу PostgreSQL wiki | Локальный checkout плюс `[storage]` и `IWIKI_DB_PASSWORD` |
-| `mcp` | Аутентифицированный удалённый сервер iwiki | Локальный checkout плюс `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` |
+| `sqlite` | Локальный кэш code graph рядом с базой wiki | Локальный checkout; нет mode-specific publication environment variables |
+| `postgres` | Настроенную базу PostgreSQL wiki | Локальный checkout плюс `[storage]`, `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL` и `IWIKI_EMBED_DIMENSIONS` (optional `IWIKI_RERANK_MODEL`) |
+| `mcp` | Authenticated Streamable HTTP endpoint на той же машине или удалённый | Локальный checkout плюс `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` |
 
 `wiki_code_index` остаётся локальной операцией извлечения. На сервере без checkout он
 возвращает `source_unavailable` и не создаёт ни сессии, ни снапшота; запускайте индексер
@@ -618,6 +619,10 @@ environment. Для `postgres` также требуются `IWIKI_EMBED_MODEL`
 должен быть root-owned mode `0600`; он передаёт `IWIKI_DB_PASSWORD`,
 `IWIKI_EMBED_MODEL`, `IWIKI_EMBED_DIMENSIONS` и optional `IWIKI_RERANK_MODEL` без
 значений в unit. Dedicated account `iwiki` должен иметь доступ к checkout.
+Mode-specific EnvironmentFile contents: `postgres` использует `IWIKI_DB_PASSWORD`,
+`IWIKI_EMBED_MODEL` и `IWIKI_EMBED_DIMENSIONS` (optional `IWIKI_RERANK_MODEL`); `mcp`
+использует `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN`; `sqlite` не
+требует mode-specific publication variables.
 
 ```ini
 [Unit]

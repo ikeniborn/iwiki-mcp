@@ -522,13 +522,15 @@ rejection states the exact limit and what was received instead of a bare `invali
 Secrets never enter `.iwiki.toml`. MCP mode reads `IWIKI_CODE_GRAPH_MCP_URL` and
 `IWIKI_CODE_GRAPH_MCP_TOKEN` from the runtime environment only, and both are absent
 from status, logs, snapshot headers, errors, and object reprs. Direct PostgreSQL mode
-reuses the existing `[storage]` block and `IWIKI_DB_PASSWORD`.
+reuses the existing `[storage]` block and requires `IWIKI_DB_PASSWORD`,
+`IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional
+`IWIKI_RERANK_MODEL` when configured).
 
 | Mode | Publishes to | Requires |
 | --- | --- | --- |
-| `sqlite` | The local code-graph cache next to the wiki base | A local checkout |
-| `postgres` | The configured PostgreSQL wiki database | A local checkout plus `[storage]` and `IWIKI_DB_PASSWORD` |
-| `mcp` | An authenticated remote iwiki server | A local checkout plus `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` |
+| `sqlite` | The local code-graph cache next to the wiki base | A local checkout; no mode-specific publication environment variables |
+| `postgres` | The configured PostgreSQL wiki database | A local checkout plus `[storage]`, `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (optional `IWIKI_RERANK_MODEL`) |
+| `mcp` | An authenticated Streamable HTTP endpoint on same machine or remote | A local checkout plus `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` |
 
 `wiki_code_index` stays a local extraction operation. On a server without a checkout it
 returns `source_unavailable` and creates no session and no snapshot; run the indexer on
@@ -608,6 +610,10 @@ Install scheduling outside this repository. Save the service as
 file root-owned mode `0600`; it supplies `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and
 `IWIKI_EMBED_DIMENSIONS` (plus optional `IWIKI_RERANK_MODEL`) without embedding values
 in the unit. The dedicated `iwiki` account needs access to the checkout.
+Mode-specific EnvironmentFile contents: `postgres` uses `IWIKI_DB_PASSWORD`,
+`IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional `IWIKI_RERANK_MODEL`);
+`mcp` uses `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN`; `sqlite` needs
+no mode-specific publication variables.
 
 ```ini
 [Unit]

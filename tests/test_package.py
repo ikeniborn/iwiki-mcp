@@ -194,6 +194,46 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
     normalized_english_publisher = " ".join(english_publisher.split())
     normalized_russian_publisher = " ".join(russian_publisher.split())
     normalized_architecture_publisher = " ".join(architecture_publisher.split())
+
+    def mode_table(text: str, heading: str) -> str:
+        start = text.index(heading)
+        end = text.index("\n\n`wiki_code_index`", start)
+        return " ".join(text[start:end].split())
+
+    english_mode_table = mode_table(english, "| Mode | Publishes to | Requires |")
+    russian_mode_table = mode_table(russian, "| Режим | Публикует в | Требует |")
+    assert all(
+        term in english_mode_table
+        for term in (
+            "`sqlite`",
+            "no mode-specific publication environment variables",
+            "`postgres`",
+            "`[storage]`",
+            "`IWIKI_DB_PASSWORD`",
+            "`IWIKI_EMBED_MODEL`",
+            "`IWIKI_EMBED_DIMENSIONS`",
+            "`mcp`",
+            "authenticated Streamable HTTP endpoint on same machine or remote",
+            "`IWIKI_CODE_GRAPH_MCP_URL`",
+            "`IWIKI_CODE_GRAPH_MCP_TOKEN`",
+        )
+    )
+    assert all(
+        term in russian_mode_table
+        for term in (
+            "`sqlite`",
+            "нет mode-specific publication environment variables",
+            "`postgres`",
+            "`[storage]`",
+            "`IWIKI_DB_PASSWORD`",
+            "`IWIKI_EMBED_MODEL`",
+            "`IWIKI_EMBED_DIMENSIONS`",
+            "`mcp`",
+            "Authenticated Streamable HTTP endpoint на той же машине или удалённый",
+            "`IWIKI_CODE_GRAPH_MCP_URL`",
+            "`IWIKI_CODE_GRAPH_MCP_TOKEN`",
+        )
+    )
     assert all(
         term in normalized_english_publisher
         for term in (
@@ -207,6 +247,9 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "/etc/systemd/system/iwiki-codegraph-publisher.timer",
             "root-owned mode `0600`",
             "access to the checkout",
+            "Mode-specific EnvironmentFile contents: `postgres` uses",
+            "`mcp` uses `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN`",
+            "`sqlite` needs no mode-specific publication variables",
         )
     )
     assert all(
@@ -222,6 +265,9 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "/etc/systemd/system/iwiki-codegraph-publisher.timer",
             "root-owned mode `0600`",
             "доступ к checkout",
+            "Mode-specific EnvironmentFile contents: `postgres` использует",
+            "`mcp` использует `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN`",
+            "`sqlite` не требует mode-specific publication variables",
         )
     )
     assert all(
