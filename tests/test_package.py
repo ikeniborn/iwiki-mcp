@@ -166,6 +166,56 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
     for text in (english, russian):
         assert all(term in text for term in systemd_contract)
 
+    def publisher_section(text: str, heading: str, next_heading: str) -> str:
+        start = text.index(heading)
+        end = text.index(next_heading, start)
+        return text[start:end]
+
+    english_publisher = publisher_section(
+        english,
+        "### Scheduled publisher operation",
+        "### SQLite snapshot profiles and commit uncertainty",
+    )
+    russian_publisher = publisher_section(
+        russian,
+        "### Плановая публикация оператором",
+        "### Профили снапшота SQLite и неопределённость коммита",
+    )
+    architecture_publisher = publisher_section(
+        architecture,
+        "### Publication application and operator boundary",
+        "### Shared ECMAScript core",
+    )
+    normalized_english_publisher = " ".join(english_publisher.split())
+    normalized_russian_publisher = " ".join(russian_publisher.split())
+    normalized_architecture_publisher = " ".join(architecture_publisher.split())
+    assert all(
+        term in normalized_english_publisher
+        for term in (
+            "`sqlite` publishes to",
+            "`postgres` uses existing publisher abstraction",
+            "`mcp` uses same publication protocol",
+        )
+    )
+    assert all(
+        term in normalized_russian_publisher
+        for term in (
+            "`sqlite` публикует в",
+            "`postgres` использует существующую publisher abstraction",
+            "`mcp` использует тот же publication protocol",
+        )
+    )
+    assert all(
+        term in normalized_architecture_publisher
+        for term in (
+            "`sqlite`",
+            "direct `postgres`",
+            "`mcp` target",
+            "PostgreSQL uses the publisher abstraction",
+            "MCP publication can address local stdio or remote HTTP",
+        )
+    )
+
     tracked_artifacts = frozenset(
         path
         for path in (
