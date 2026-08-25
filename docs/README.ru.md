@@ -587,16 +587,15 @@ checkout, учётные данные или сформированные изд
 iwiki-mcp code publish --project <checkout> [--json]
 ```
 
-`sqlite` публикует в local target/cache `<project>/.iwiki/code-<domain>.sqlite3`;
-`postgres` использует существующую publisher abstraction с настроенным прямым
-PostgreSQL binding, без raw SQL; `mcp` использует тот же publication protocol через
-local или remote Streamable HTTP endpoint, заданный `IWIKI_CODE_GRAPH_MCP_URL` и token.
-Local endpoint — это HTTP server на той же машине, никогда не stdio. Local и remote
-HTTP publication эквивалентны: выбирайте цель, заданную единственным `publish_mode`, и
-не придумывайте fallback.
-PostgreSQL source cache остаётся локальным по пути
-`<project>/.iwiki/code-<domain>.sqlite3`, исключается через `.git/info/exclude` и не
-является fallback target.
+`sqlite` публикует в local target/cache под настроенным Git Wiki base по пути
+`<wiki-base>/.iwiki/code-<domain>.sqlite3`; `postgres` использует существующую publisher
+abstraction с настроенным прямым PostgreSQL binding, без raw SQL; `mcp` использует тот
+же publication protocol через local или remote Streamable HTTP endpoint, заданный
+`IWIKI_CODE_GRAPH_MCP_URL` и token. Local endpoint — это HTTP server на той же машине,
+никогда не stdio. Local и remote HTTP publication эквивалентны: выбирайте цель,
+заданную единственным `publish_mode`, и не придумывайте fallback. Только PostgreSQL
+source cache остаётся локальным по пути `<project>/.iwiki/code-<domain>.sqlite3`,
+исключается через `.git/info/exclude` и не является fallback target.
 
 | Output | Значение | Exit status |
 | --- | --- | --- |

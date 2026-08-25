@@ -580,15 +580,15 @@ Run publisher on machine holding checkout. For every valid exactly-one `publish_
 iwiki-mcp code publish --project <checkout> [--json]
 ```
 
-`sqlite` publishes to local target/cache at `<project>/.iwiki/code-<domain>.sqlite3`;
-`postgres` uses existing publisher abstraction with configured direct PostgreSQL binding,
-never raw SQL; and `mcp` uses same publication protocol through a local or remote
-Streamable HTTP endpoint configured by `IWIKI_CODE_GRAPH_MCP_URL` and its token. A local
-endpoint is an HTTP server on same machine, never stdio. Local and remote HTTP
-publication are equivalent targets: choose one configured by single `publish_mode`; do
-not improvise fallback. PostgreSQL source cache
-remains local at `<project>/.iwiki/code-<domain>.sqlite3`, is excluded through
-`.git/info/exclude`, and is not fallback target.
+`sqlite` publishes to the local target/cache under the configured Git Wiki base at
+`<wiki-base>/.iwiki/code-<domain>.sqlite3`; `postgres` uses existing publisher
+abstraction with configured direct PostgreSQL binding, never raw SQL; and `mcp` uses
+same publication protocol through a local or remote Streamable HTTP endpoint configured
+by `IWIKI_CODE_GRAPH_MCP_URL` and its token. A local endpoint is an HTTP server on same
+machine, never stdio. Local and remote HTTP publication are equivalent targets: choose
+one configured by single `publish_mode`; do not improvise fallback. Only the PostgreSQL
+source cache remains local at `<project>/.iwiki/code-<domain>.sqlite3`, is excluded
+through `.git/info/exclude`, and is not fallback target.
 
 | Output | Meaning | Exit status |
 | --- | --- | --- |

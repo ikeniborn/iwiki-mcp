@@ -88,6 +88,7 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
     for text in (english, russian, architecture):
         assert command in text
         assert "<project>/.iwiki/code-<domain>.sqlite3" in text
+        assert "<wiki-base>/.iwiki/code-<domain>.sqlite3" in text
         assert ".git/info/exclude" in text
         assert "IWIKI_DB_PASSWORD" in text
         assert "IWIKI_EMBED_MODEL" in text
@@ -238,6 +239,10 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         term in normalized_english_publisher
         for term in (
             "`sqlite` publishes to",
+            "configured Git Wiki base",
+            "`<wiki-base>/.iwiki/code-<domain>.sqlite3`",
+            "Only the PostgreSQL source cache remains local at "
+            "`<project>/.iwiki/code-<domain>.sqlite3`",
             "`postgres` uses existing publisher abstraction",
             "`mcp` uses same publication protocol",
             "local or remote Streamable HTTP endpoint",
@@ -256,6 +261,10 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         term in normalized_russian_publisher
         for term in (
             "`sqlite` публикует в",
+            "настроенным Git Wiki base",
+            "`<wiki-base>/.iwiki/code-<domain>.sqlite3`",
+            "Только PostgreSQL source cache остаётся локальным по пути "
+            "`<project>/.iwiki/code-<domain>.sqlite3`",
             "`postgres` использует существующую publisher abstraction",
             "`mcp` использует тот же publication protocol",
             "local или remote Streamable HTTP endpoint",
@@ -274,6 +283,8 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         term in normalized_architecture_publisher
         for term in (
             "`sqlite`",
+            "The SQLite target/cache instead remains under the configured Git Wiki "
+            "base at `<wiki-base>/.iwiki/code-<domain>.sqlite3`",
             "direct `postgres`",
             "`mcp` target",
             "PostgreSQL uses the publisher abstraction",

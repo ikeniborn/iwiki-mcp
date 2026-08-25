@@ -157,13 +157,14 @@ project's configured languages.
 `iwiki-mcp code publish --project <checkout> [--json]` CLI. It separates local source
 context (the checkout rooted at `<project>`) from target binding (the primary domain
 selected by `.iwiki.toml`). The source cache for PostgreSQL publishing is local at
-`<project>/.iwiki/code-<domain>.sqlite3` and is excluded through `.git/info/exclude`;
-the SQLite target/cache has the same project-local location. `publish_mode` selects
-exactly one `sqlite`, direct `postgres`, or `mcp` target. PostgreSQL uses the publisher
-abstraction rather than raw SQL. MCP publication uses a local or remote Streamable HTTP
-endpoint configured by `IWIKI_CODE_GRAPH_MCP_URL` and its token; local means an HTTP
-server on the publisher's machine, never stdio. Those targets are equivalent, and no
-adapter fallback is allowed.
+`<project>/.iwiki/code-<domain>.sqlite3` and is excluded through `.git/info/exclude`.
+The SQLite target/cache instead remains under the configured Git Wiki base at
+`<wiki-base>/.iwiki/code-<domain>.sqlite3`. `publish_mode` selects exactly one `sqlite`,
+direct `postgres`, or `mcp` target. PostgreSQL uses the publisher abstraction rather
+than raw SQL. MCP publication uses a local or remote Streamable HTTP endpoint configured
+by `IWIKI_CODE_GRAPH_MCP_URL` and its token; local means an HTTP server on the
+publisher's machine, never stdio. Those targets are equivalent, and no adapter fallback
+is allowed.
 
 The mode-specific environment boundary admits `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`,
 and `IWIKI_EMBED_DIMENSIONS` for `postgres`, plus optional `IWIKI_RERANK_MODEL` when
