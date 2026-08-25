@@ -18,12 +18,87 @@ from tests.codegraph.synthetic_wiki import (
     _postgres_config,
     create_sqlite_project,
 )
-from tests.postgres.test_code_graph_contract import _McpRoute, _open_session
+from tests.postgres.test_code_graph_contract import _open_session, _request
 
 
 pytestmark = pytest.mark.postgres_integration
 
 _SERVER_MAX_BATCH_ROWS = 1
+
+
+def _hosted_route_failure(reason, *, status=None):
+    hints = {
+        "http_status": "the hosted MCP HTTP call failed",
+        "protocol": "the hosted MCP tool call failed",
+        "malformed_response": "the hosted MCP response was malformed",
+    }
+    result = {
+        "error": "remote_mcp_failed",
+        "reason": reason,
+        "hint": hints[reason],
+    }
+    if status is not None:
+        result["status"] = status
+    return result
+
+
+def _decode_tool_response(response):
+    status = getattr(response, "status_code", None)
+    if status != 200:
+        safe_status = status if isinstance(status, int) else None
+        return _hosted_route_failure("http_status", status=safe_status)
+    try:
+        envelope = response.json()
+    except Exception:
+        return _hosted_route_failure("malformed_response")
+    if not isinstance(envelope, dict):
+        return _hosted_route_failure("malformed_response")
+    if "error" in envelope:
+        return _hosted_route_failure("protocol")
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        return _hosted_route_failure("malformed_response")
+    if result.get("isError") is True:
+        return _hosted_route_failure("protocol")
+    content = result.get("content")
+    if not isinstance(content, list) or len(content) != 1:
+        return _hosted_route_failure("malformed_response")
+    item = content[0]
+    if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+        return _hosted_route_failure("malformed_response")
+    try:
+        payload = json.loads(item["text"])
+    except (TypeError, ValueError):
+        return _hosted_route_failure("malformed_response")
+    if not isinstance(payload, dict):
+        return _hosted_route_failure("malformed_response")
+    return payload
+
+
+class _HostedJsonRpcRoute:
+    """Call hosted tools and sanitize every non-tool JSON-RPC failure."""
+
+    def __init__(self, client, token, session_id):
+        self._client = client
+        self._token = token
+        self._session_id = session_id
+
+    def __repr__(self):
+        return "<redacted hosted MCP CLI route>"
+
+    def call(self, name, arguments):
+        response = _request(
+            self._client,
+            self._token,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+            session_id=self._session_id,
+        )
+        return _decode_tool_response(response)
 
 
 class InProcessMcpTransport:
@@ -76,19 +151,109 @@ class _FakeRoute:
         return dict(self.replies[name])
 
 
-def test_in_process_transport_records_only_denied_auto_bind():
-    route = _FakeRoute({
-        "wiki_bind": {
-            "error": "primary domain must belong to write scope",
-            "hint": "select a primary from the narrowed write scope",
+class _FakeHttpResponse:
+    def __init__(self, payload, *, status_code=200, text="raw response"):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class _DecodedFakeRoute:
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def call(self, name, arguments):
+        self.calls.append((name, dict(arguments)))
+        return _decode_tool_response(self.responses[name])
+
+
+def _tool_result_envelope(payload, *, is_error=False):
+    return {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(payload)}],
+            "isError": is_error,
         },
+    }
+
+
+def test_hosted_route_decoder_returns_normal_tool_result():
+    expected = {"state": "ready", "snapshot_revision": "sha256:fixture"}
+
+    result = _decode_tool_response(
+        _FakeHttpResponse(_tool_result_envelope(expected))
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {
+                "code": -32001,
+                "message": "access_denied sentinel-token private.invalid",
+                "data": {"hint": "sentinel-private-error-data"},
+            },
+        },
+        _tool_result_envelope(
+            {"error": "sentinel-private-tool-error"},
+            is_error=True,
+        ),
+    ],
+    ids=["jsonrpc-error", "tool-is-error"],
+)
+def test_hosted_route_decoder_sanitizes_denied_error_shapes(envelope):
+    result = _decode_tool_response(
+        _FakeHttpResponse(envelope, text="sentinel-private-response-body")
+    )
+
+    assert result == {
+        "error": "remote_mcp_failed",
+        "reason": "protocol",
+        "hint": "the hosted MCP tool call failed",
+    }
+    encoded = json.dumps(result) + repr(result)
+    for forbidden in (
+        "sentinel-token",
+        "private.invalid",
+        "sentinel-private-error-data",
+        "sentinel-private-tool-error",
+        "sentinel-private-response-body",
+    ):
+        assert forbidden not in encoded
+
+
+def test_in_process_transport_records_only_denied_auto_bind():
+    route = _DecodedFakeRoute({
+        "wiki_bind": _FakeHttpResponse({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {
+                "code": -32001,
+                "message": "access_denied sentinel-token private.invalid",
+                "data": {"hint": "sentinel-private-error-data"},
+            },
+        }),
     })
     transport = InProcessMcpTransport(route, "docs")
 
     result = transport.call("wiki_code_publish_begin", {"header": {}})
 
     expected = [("wiki_bind", {"primary": "docs"})]
-    assert result["error"] == "primary domain must belong to write scope"
+    assert result == {
+        "error": "remote_mcp_failed",
+        "reason": "protocol",
+        "hint": "the hosted MCP tool call failed",
+    }
     assert transport.calls == expected
     assert route.calls == expected
 
@@ -221,7 +386,9 @@ def hosted_mcp_cli(
         base_url="http://127.0.0.1:8765",
     ) as client:
         session_id = _open_session(client, hosted_runtime.token)
-        route = _McpRoute(client, hosted_runtime.token, session_id)
+        route = _HostedJsonRpcRoute(
+            client, hosted_runtime.token, session_id
+        )
         transport = InProcessMcpTransport(route, "docs")
         monkeypatch.setattr(
             application,
@@ -305,7 +472,9 @@ def test_read_only_hosted_grant_denies_publication_without_begin_or_abort(
         write_domains=[],
     )["token"]
     session_id = _open_session(hosted_mcp_cli.client, read_only)
-    route = _McpRoute(hosted_mcp_cli.client, read_only, session_id)
+    route = _HostedJsonRpcRoute(
+        hosted_mcp_cli.client, read_only, session_id
+    )
     transport = InProcessMcpTransport(route, "docs")
     monkeypatch.setattr(
         application,

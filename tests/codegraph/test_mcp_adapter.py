@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from io import StringIO
 import json
-import traceback
 
 import pytest
 
@@ -565,7 +564,6 @@ def test_adapter_failure_is_redacted_by_application_and_cli_formatter(
         "caplog": caplog.text,
         "json": json.dumps(payload),
         "repr": repr([payload, outcomes, transports]),
-        "traceback": traceback.format_exc(),
     }
     assert exit_code == 1
     assert stdout.getvalue().count("\n") == 1
@@ -577,10 +575,21 @@ def test_adapter_failure_is_redacted_by_application_and_cli_formatter(
     assert outcomes[0].publication["reason"] == (
         "malformed_response" if failure_kind == "malformed" else "http_status"
     )
+    expected_keys = {"error", "reason", "hint"}
+    if failure_kind == "http":
+        expected_keys.add("status")
+    assert set(outcomes[0].publication) == expected_keys
+    assert all(
+        repr(transport) == "<redacted remote code graph MCP transport>"
+        for transport in transports
+    )
     assert [name for name, _args in session.calls] == [
         "wiki_bind",
         "wiki_code_publish_begin",
     ]
+    assert "Traceback" not in (
+        stdout.getvalue() + stderr.getvalue() + caplog.text
+    )
     for surface in surfaces.values():
         for forbidden in (
             endpoint,
