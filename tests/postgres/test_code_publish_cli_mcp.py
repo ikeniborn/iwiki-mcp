@@ -42,14 +42,31 @@ def _hosted_route_failure(reason, *, status=None):
     return result
 
 
+def _same_json_value(left, right):
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _same_json_value(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_value(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
+def _reject_json_constant(_value):
+    raise ValueError("non-standard JSON constant")
+
+
 def _decode_tool_response(response):
     status = getattr(response, "status_code", None)
-    if status != 200:
+    if type(status) is not int or status != 200:
         safe_status = (
             status
-            if isinstance(status, int)
-            and not isinstance(status, bool)
-            and 100 <= status < 600
+            if type(status) is int and 100 <= status < 600
             else None
         )
         return _hosted_route_failure("http_status", status=safe_status)
@@ -103,14 +120,19 @@ def _decode_tool_response(response):
             return _hosted_route_failure("malformed_response")
         return _hosted_route_failure("protocol")
     try:
-        payload = json.loads(item["text"])
+        payload = json.loads(
+            item["text"], parse_constant=_reject_json_constant
+        )
     except (TypeError, ValueError):
         return _hosted_route_failure("malformed_response")
     if not isinstance(payload, dict):
         return _hosted_route_failure("malformed_response")
     if "structuredContent" in result:
         structured = result["structuredContent"]
-        if not isinstance(structured, dict) or structured != payload:
+        if (
+            not isinstance(structured, dict)
+            or not _same_json_value(structured, payload)
+        ):
             return _hosted_route_failure("malformed_response")
     return payload
 
@@ -251,6 +273,78 @@ def test_hosted_route_decoder_accepts_absent_optional_is_error():
     }))
 
     assert _decode_tool_response(response) == expected
+
+
+@pytest.mark.parametrize("status", [200.0, True, "200"])
+def test_hosted_route_decoder_requires_exact_integer_http_status(status):
+    response = _FakeHttpResponse(
+        _tool_result_envelope({"state": "ready"}),
+        status_code=status,
+    )
+
+    assert _decode_tool_response(response) == _hosted_route_failure(
+        "http_status"
+    )
+
+
+@pytest.mark.parametrize(
+    "text,structured",
+    [
+        ('{"value":true}', {"value": 1}),
+        ('{"value":false}', {"value": 0}),
+        ('{"value":1}', {"value": 1.0}),
+        ('{"value":1.0}', {"value": 1}),
+        ('{"items":[{"value":true}]}', {"items": [{"value": 1}]}),
+    ],
+    ids=[
+        "true-vs-one",
+        "false-vs-zero",
+        "integer-vs-float",
+        "float-vs-integer",
+        "nested-list-bool-vs-integer",
+    ],
+)
+def test_hosted_route_decoder_compares_structured_types_exactly(
+    text, structured
+):
+    response = _FakeHttpResponse(_raw_result_envelope({
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": structured,
+        "isError": False,
+    }))
+
+    assert _decode_tool_response(response) == _hosted_route_failure(
+        "malformed_response"
+    )
+
+
+def test_hosted_route_decoder_ignores_json_whitespace_and_object_key_order():
+    expected = {"alpha": [1, {"ready": True}], "beta": 2}
+    response = _FakeHttpResponse(_raw_result_envelope({
+        "content": [{
+            "type": "text",
+            "text": '{\n  "beta": 2, "alpha": [1, {"ready": true}]\n}',
+        }],
+        "structuredContent": expected,
+        "isError": False,
+    }))
+
+    assert _decode_tool_response(response) == expected
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_hosted_route_decoder_rejects_nonstandard_json_constants(constant):
+    response = _FakeHttpResponse(_raw_result_envelope({
+        "content": [{
+            "type": "text",
+            "text": f'{{"value":{constant}}}',
+        }],
+        "isError": False,
+    }))
+
+    assert _decode_tool_response(response) == _hosted_route_failure(
+        "malformed_response"
+    )
 
 
 @pytest.mark.parametrize(
