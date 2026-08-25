@@ -4,7 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 import os
+from pathlib import Path
 import secrets
+import subprocess
 import time
 from typing import Mapping
 
@@ -353,3 +355,34 @@ def index_and_publish(
         publication=publication,
         duration_ms=max(0, int((time.monotonic() - started) * 1000)),
     )
+
+
+def checkout_root(value: str) -> Path:
+    candidate = Path(value).absolute()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CodeGraphApplicationError(
+            "project must be a Git checkout root"
+        ) from exc
+    root = Path(result.stdout.strip()).absolute()
+    if root != candidate or candidate.is_symlink():
+        raise CodeGraphApplicationError(
+            "project must be a Git checkout root"
+        )
+    return root
+
+
+def publish_project(
+    project_dir: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> CodeGraphPublishOutcome:
+    root = checkout_root(project_dir)
+    binding = wiki_base.resolve_storage_binding(str(root))
+    return index_and_publish(binding, environ=environ)

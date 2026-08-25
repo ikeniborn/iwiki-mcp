@@ -14,6 +14,10 @@ from typing import Mapping, TextIO
 import psycopg
 from psycopg.conninfo import make_conninfo
 
+from . import base as wiki_base
+from .codegraph import application as _codegraph_application
+from .codegraph.config import CodeGraphConfigError
+from .codegraph.mcp_adapter import CodeGraphAdapterError
 from .engine.config import Config
 from .engine.embed import EmbedError, embed_texts
 from .postgres.auth import AuthStore, validate_domain_identifier
@@ -34,7 +38,9 @@ from .postgres.store import (
 
 
 _embed = embed_texts
-_ADMIN_COMMANDS = {"base", "domain", "token", "principal", "schema", "serve"}
+_ADMIN_COMMANDS = {
+    "base", "code", "domain", "token", "principal", "schema", "serve"
+}
 _DOMAIN_MARKER = ".iwiki-domain"
 
 
@@ -44,8 +50,24 @@ class _StrictArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+class _CodeUsageError(Exception):
+    pass
+
+
+class _CodeArgumentParser(_StrictArgumentParser):
+    def error(self, _message: str) -> None:
+        raise _CodeUsageError()
+
+
 def _add_config(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config")
+
+
+def _build_code_publish_parser() -> argparse.ArgumentParser:
+    parser = _CodeArgumentParser(prog="iwiki-mcp code publish")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--json", action="store_true")
+    return parser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--transport", choices=("streamable-http",), default="streamable-http"
     )
+
+    code = commands.add_parser("code")
+    code_commands = code.add_subparsers(
+        dest="code_command",
+        required=True,
+        parser_class=_CodeArgumentParser,
+    )
+    publish = code_commands.add_parser("publish")
+    publish.add_argument("--project", required=True)
+    publish.add_argument("--json", action="store_true")
 
     base = commands.add_parser("base")
     base_commands = base.add_subparsers(
@@ -216,6 +248,127 @@ def _write_json(stream: TextIO, value) -> None:
         json.dumps(value, sort_keys=True, default=_json_default),
         file=stream,
     )
+
+
+def _write_code_json(stream: TextIO, value) -> None:
+    print(json.dumps(value, separators=(",", ":")), file=stream)
+
+
+def _write_code_failure(
+    stream: TextIO,
+    *,
+    json_output: bool,
+    publish_mode: str | None,
+    error: str,
+    duration_ms: int,
+) -> None:
+    if json_output:
+        _write_code_json(
+            stream,
+            {
+                "state": "failed",
+                "publish_mode": publish_mode,
+                "error": error,
+                "duration_ms": duration_ms,
+            },
+        )
+        return
+    messages = {
+        "invalid_usage": "invalid code publish usage",
+        "invalid_config": "code graph configuration failed",
+        "index_failed": "code graph indexing failed",
+        "publication_failed": "code graph publication failed",
+        "internal_error": "code graph publication failed",
+    }
+    print(f"iwiki-mcp: {messages[error]} (code={error})", file=stream)
+
+
+def _run_code_publish(
+    args,
+    env: Mapping[str, str],
+    out: TextIO,
+    err: TextIO,
+) -> int:
+    try:
+        outcome = _codegraph_application.publish_project(
+            args.project,
+            environ=env,
+        )
+    except (
+        wiki_base.BaseError,
+        CodeGraphConfigError,
+        _codegraph_application.CodeGraphApplicationError,
+        CodeGraphAdapterError,
+    ):
+        _write_code_failure(
+            out if args.json else err,
+            json_output=args.json,
+            publish_mode=None,
+            error="invalid_config",
+            duration_ms=0,
+        )
+        return 2
+    except psycopg.Error:
+        _write_code_failure(
+            out if args.json else err,
+            json_output=args.json,
+            publish_mode=None,
+            error="internal_error",
+            duration_ms=0,
+        )
+        return 1
+    except Exception:
+        _write_code_failure(
+            out if args.json else err,
+            json_output=args.json,
+            publish_mode=None,
+            error="internal_error",
+            duration_ms=0,
+        )
+        return 1
+
+    if not outcome.ready:
+        error = (
+            "index_failed"
+            if outcome.index.get("state") != "ready"
+            else "publication_failed"
+        )
+        _write_code_failure(
+            out if args.json else err,
+            json_output=args.json,
+            publish_mode=outcome.publish_mode,
+            error=error,
+            duration_ms=outcome.duration_ms,
+        )
+        return 1
+
+    counts = outcome.index.get("counts", {})
+    if args.json:
+        _write_code_json(
+            out,
+            {
+                "state": "ready",
+                "publish_mode": outcome.publish_mode,
+                "snapshot_revision": outcome.snapshot_revision,
+                "counts": {
+                    "files": counts.get("files", 0),
+                    "symbols": counts.get("symbols", 0),
+                    "relations": counts.get("relations", 0),
+                },
+                "duration_ms": outcome.duration_ms,
+            },
+        )
+    else:
+        print(
+            f"code graph ready mode={outcome.publish_mode} "
+            f"revision={outcome.snapshot_revision} "
+            f"files={counts.get('files', 0)} "
+            f"symbols={counts.get('symbols', 0)} "
+            f"relations={counts.get('relations', 0)} "
+            f"duration_ms={outcome.duration_ms}",
+            file=out,
+        )
+    return 0
 
 
 def _git_root(path: Path) -> Path:
@@ -626,14 +779,35 @@ def run(
     env = os.environ if environ is None else environ
     out = sys.stdout if stdout is None else stdout
     err = sys.stderr if stderr is None else stderr
-    args = build_parser().parse_args(argv)
-    if args.command is not None and args.project is not None:
+    try:
+        if argv[:2] == ["code", "publish"]:
+            args = _build_code_publish_parser().parse_args(argv[2:])
+            args.command = "code"
+            args.code_command = "publish"
+        else:
+            args = build_parser().parse_args(argv)
+    except _CodeUsageError:
+        json_output = argv[:2] == ["code", "publish"] and "--json" in argv
+        _write_code_failure(
+            out if json_output else err,
+            json_output=json_output,
+            publish_mode=None,
+            error="invalid_usage",
+            duration_ms=0,
+        )
+        return 2
+    is_code_publish = (
+        args.command == "code" and args.code_command == "publish"
+    )
+    if args.command is not None and args.project is not None and not is_code_publish:
         print("iwiki-mcp: --project is accepted only for stdio", file=err)
         return 2
     if args.command is None:
         print("iwiki-mcp: administration command is required", file=err)
         return 2
     try:
+        if is_code_publish:
+            return _run_code_publish(args, env, out, err)
         if args.command == "serve":
             from .http import run_server
 
