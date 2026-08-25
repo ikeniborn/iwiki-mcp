@@ -800,6 +800,45 @@ def test_non_ready_index_never_selects_or_publishes_target(
     assert not outcome.ready
 
 
+def test_failed_sqlite_rebuild_preserves_prior_revision_without_export(
+    tmp_path, monkeypatch
+):
+    """Runtime recovery coverage proves the active revision remains readable."""
+    prior = application.CodeGraphPublishOutcome(
+        publish_mode="sqlite",
+        index={"state": "ready", "revision": _LOCAL_REVISION},
+    )
+    calls = []
+
+    class Runtime:
+        config = CodeGraphConfig(publish_mode="sqlite")
+
+        def index(self, *, force=False, languages=None):
+            calls.append(("index", force, languages))
+            return {"state": "failed", "code": "rebuild_failed"}
+
+        def export_snapshot(self):
+            pytest.fail("failed SQLite rebuild must not export a snapshot")
+
+    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "publisher_for",
+        lambda *_args, **_kwargs: pytest.fail(
+            "failed SQLite rebuild must not create a publisher"
+        ),
+    )
+
+    outcome = application.index_and_publish(_git_binding(tmp_path))
+
+    assert prior.ready
+    assert prior.snapshot_revision == _LOCAL_REVISION
+    assert calls == [("index", False, None)]
+    assert outcome.index == {"state": "failed", "code": "rebuild_failed"}
+    assert outcome.publication == {}
+    assert not outcome.ready
+
+
 def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
     class Runtime:
         config = CodeGraphConfig(publish_mode="sqlite")
