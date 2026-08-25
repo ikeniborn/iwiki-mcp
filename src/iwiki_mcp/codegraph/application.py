@@ -72,7 +72,7 @@ def code_graph_adapter_factories(
     config: codegraph_config.CodeGraphConfig | None = None,
 ) -> Mapping[str, codegraph_indexer.AdapterFactory]:
     def create_python_adapter(source_paths):
-        return getattr(python, "Python" + "Adapter")(
+        return python.PythonAdapter(
             repository_id,
             source_paths,
             parser_version=_PYTHON_PARSER_VERSION,

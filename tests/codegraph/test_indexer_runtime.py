@@ -1603,15 +1603,19 @@ def test_full_build_coalesces_only_exact_duplicate_import_relations(
     ]
 
 
-def test_codegraph_core_has_no_python_adapter_dependency():
+def test_codegraph_core_is_language_agnostic_while_application_composes_adapters():
     codegraph = Path(__file__).parents[2] / "src/iwiki_mcp/codegraph"
     core_sources = [
-        path.read_text(encoding="utf-8")
-        for path in codegraph.glob("*.py")
+        (codegraph / name).read_text(encoding="utf-8")
+        for name in ("runtime.py", "indexer.py", "models.py")
     ]
+    application_source = (codegraph / "application.py").read_text(
+        encoding="utf-8"
+    )
 
     assert all(".languages.python" not in source for source in core_sources)
     assert all("PythonAdapter" not in source for source in core_sources)
+    assert "python.PythonAdapter" in application_source
 
 
 def test_status_reports_enabled_and_persisted_duration_without_revision_noise(
