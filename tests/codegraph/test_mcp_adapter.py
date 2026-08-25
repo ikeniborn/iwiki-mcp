@@ -1,10 +1,14 @@
 """Outbound MCP publication and read adapter contracts."""
 from __future__ import annotations
 
+from io import StringIO
 import json
+import traceback
 
 import pytest
 
+from iwiki_mcp import admin
+from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph.context import validate_context_request
 from iwiki_mcp.codegraph.mcp_adapter import (
     McpCodeGraphReader,
@@ -18,6 +22,7 @@ from iwiki_mcp.codegraph.publication import (
     SnapshotHeader,
 )
 from iwiki_mcp.codegraph.query import validate_search_request
+from tests.codegraph.synthetic_wiki import create_sqlite_project
 
 
 _URL = "https://wiki.example/mcp"
@@ -320,14 +325,17 @@ def test_transport_failures_are_sanitized(header, batch, failure, reason):
 
 
 class _Response:
-    def __init__(self, status_code):
+    def __init__(self, status_code, text=""):
         self.status_code = status_code
+        self.text = text
 
 
 class _HttpStatusError(Exception):
-    def __init__(self, status_code):
-        super().__init__("https://wiki.example/mcp returned an error")
-        self.response = _Response(status_code)
+    def __init__(self, status_code, detail=None):
+        super().__init__(
+            detail or "https://wiki.example/mcp returned an error"
+        )
+        self.response = _Response(status_code, detail or "")
 
 
 class _ConnectError(Exception):
@@ -457,3 +465,129 @@ def test_bind_scope_mismatch_is_reported_instead_of_generic_failure(
 
     assert result["error"] == "scope_mismatch"
     assert fake_session.calls == [("wiki_bind", {"primary": "other-domain"})]
+
+
+class _CliFailureSession(_FakeSession):
+    """Fail after a successful bind at the controlled remote-I/O boundary."""
+
+    def __init__(self, *, malformed_body=None, failure=None):
+        super().__init__()
+        self._malformed_body = malformed_body
+        self._call_failure = failure
+
+    async def call_tool(self, name, arguments=None):
+        self.calls.append((name, arguments))
+        if name == "wiki_bind":
+            return _FakeResult(json.dumps({
+                "read": ["docs"],
+                "write": ["docs"],
+                "primary": "docs",
+            }))
+        if self._call_failure is not None:
+            raise self._call_failure
+        return _FakeResult(self._malformed_body)
+
+
+@pytest.mark.parametrize("failure_kind", ["malformed", "http"])
+def test_adapter_failure_is_redacted_by_application_and_cli_formatter(
+    tmp_path,
+    monkeypatch,
+    caplog,
+    failure_kind,
+):
+    endpoint = "https://sentinel-host.private.invalid/mcp"
+    token = "sentinel-bearer-token"
+    response_body = "sentinel-private-response-body"
+    exception_detail = (
+        f"endpoint={endpoint} token={token} body={response_body}"
+    )
+    failure = _HttpStatusError(502, exception_detail)
+    if failure_kind == "malformed":
+        session = _CliFailureSession(malformed_body=response_body)
+    else:
+        session = _CliFailureSession(failure=failure)
+
+    project = create_sqlite_project(tmp_path)
+    config_path = project / ".iwiki.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'publish_mode = "sqlite"', 'publish_mode = "mcp"'
+        ).replace('read_mode = "sqlite"', 'read_mode = "mcp"'),
+        encoding="utf-8",
+    )
+    environment = {
+        "IWIKI_CODE_GRAPH_MCP_URL": endpoint,
+        "IWIKI_CODE_GRAPH_MCP_TOKEN": token,
+    }
+    transports = []
+
+    def transport_factory(*, environ, primary):
+        transport = RemoteMcpTransport(
+            environ=environ,
+            primary=primary,
+            session_factory=lambda _url, _headers: _FakeConnection(session),
+        )
+        transports.append(transport)
+        return transport
+
+    monkeypatch.setattr(
+        application,
+        "RemoteMcpTransport",
+        transport_factory,
+    )
+    real_publish_project = application.publish_project
+    outcomes = []
+
+    def recording_publish_project(*args, **kwargs):
+        outcome = real_publish_project(*args, **kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(
+        application,
+        "publish_project",
+        recording_publish_project,
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = admin.run(
+        ["code", "publish", "--project", str(project), "--json"],
+        stdout=stdout,
+        stderr=stderr,
+        environ=environment,
+    )
+
+    payload = json.loads(stdout.getvalue())
+    surfaces = {
+        "stdout": stdout.getvalue(),
+        "stderr": stderr.getvalue(),
+        "caplog": caplog.text,
+        "json": json.dumps(payload),
+        "repr": repr([payload, outcomes, transports]),
+        "traceback": traceback.format_exc(),
+    }
+    assert exit_code == 1
+    assert stdout.getvalue().count("\n") == 1
+    assert stderr.getvalue() == ""
+    assert payload["state"] == "failed"
+    assert payload["publish_mode"] == "mcp"
+    assert payload["error"] == "publication_failed"
+    assert outcomes[0].publication["error"] == "remote_mcp_failed"
+    assert outcomes[0].publication["reason"] == (
+        "malformed_response" if failure_kind == "malformed" else "http_status"
+    )
+    assert [name for name, _args in session.calls] == [
+        "wiki_bind",
+        "wiki_code_publish_begin",
+    ]
+    for surface in surfaces.values():
+        for forbidden in (
+            endpoint,
+            token,
+            "sentinel-host.private.invalid",
+            response_body,
+            repr(failure),
+            "Traceback",
+        ):
+            assert forbidden not in surface

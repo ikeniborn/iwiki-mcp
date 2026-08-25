@@ -493,6 +493,44 @@ def test_batch_failure_aborts_once_and_never_finalizes(snapshot_fixture):
     assert all(call[0] != "finalize" for call in publisher.calls)
 
 
+def test_safe_adapter_failure_preserves_mcp_mode_and_aborts_once(
+    tmp_path, monkeypatch
+):
+    remote_failure = {
+        "error": "remote_mcp_failed",
+        "reason": "http_status",
+        "status": 503,
+        "hint": "the remote wiki refused the code graph call; see status",
+    }
+    publisher = RecordingPublisher(batch_result=remote_failure)
+
+    class Runtime(SnapshotRuntime):
+        config = CodeGraphConfig(publish_mode="mcp")
+
+        def index(self, *, force=False, languages=None):
+            return {"state": "ready", "revision": _LOCAL_REVISION}
+
+    runtime = Runtime()
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: runtime,
+    )
+    monkeypatch.setattr(
+        application,
+        "publisher_for",
+        lambda *_args, **_kwargs: publisher,
+    )
+
+    outcome = application.index_and_publish(_git_binding(tmp_path))
+
+    assert outcome.publish_mode == "mcp"
+    assert outcome.publication == remote_failure
+    assert not outcome.ready
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+    assert all(call[0] != "finalize" for call in publisher.calls)
+
+
 def test_batch_rejection_aborts_once_and_never_finalizes(snapshot_fixture):
     rejected = {"accepted": False}
     publisher = RecordingPublisher(
