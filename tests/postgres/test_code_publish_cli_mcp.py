@@ -1,6 +1,7 @@
 """Real CLI coverage through the hosted streamable-HTTP MCP route."""
 from __future__ import annotations
 
+from http import HTTPStatus
 from io import StringIO
 import json
 import math
@@ -83,10 +84,12 @@ def _contains_non_finite_float(value):
 
 def _decode_tool_response(response):
     status = getattr(response, "status_code", None)
-    if type(status) is not int or status != 200:
+    if not isinstance(status, int) or isinstance(status, bool) or status != 200:
         safe_status = (
             status
-            if type(status) is int and 100 <= status < 600
+            if isinstance(status, int)
+            and not isinstance(status, bool)
+            and 100 <= status < 600
             else None
         )
         return _hosted_route_failure("http_status", status=safe_status)
@@ -295,6 +298,16 @@ def test_hosted_route_decoder_accepts_absent_optional_is_error():
     response = _FakeHttpResponse(_raw_result_envelope({
         "content": [{"type": "text", "text": json.dumps(expected)}],
     }))
+
+    assert _decode_tool_response(response) == expected
+
+
+def test_hosted_route_decoder_accepts_http_status_enum_from_httpx():
+    expected = {"state": "ready"}
+    response = _FakeHttpResponse(
+        _tool_result_envelope(expected),
+        status_code=HTTPStatus.OK,
+    )
 
     assert _decode_tool_response(response) == expected
 
