@@ -79,6 +79,29 @@ def test_docs_describe_hosted_domain_authority_contract():
     assert "management authority нельзя делегировать" in normalized_russian
 
 
+def test_postgres_tool_matrix_includes_section_mutations():
+    documents = (
+        (Path("README.md"), "### PostgreSQL MCP tool contract", "Git-only tools"),
+        (
+            Path("docs/README.ru.md"),
+            "### Контракт MCP-инструментов PostgreSQL",
+            "Git-only инструменты",
+        ),
+    )
+
+    for path, heading, boundary in documents:
+        text = path.read_text(encoding="utf-8")
+        section = text[text.index(heading):text.index(boundary, text.index(heading))]
+        assert all(
+            tool in section
+            for tool in (
+                "wiki_insert_section",
+                "wiki_delete_section",
+                "wiki_move_section",
+            )
+        )
+
+
 def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
     english = Path("README.md").read_text(encoding="utf-8")
     russian = Path("docs/README.ru.md").read_text(encoding="utf-8")
