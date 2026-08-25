@@ -45,7 +45,13 @@ def _hosted_route_failure(reason, *, status=None):
 def _decode_tool_response(response):
     status = getattr(response, "status_code", None)
     if status != 200:
-        safe_status = status if isinstance(status, int) else None
+        safe_status = (
+            status
+            if isinstance(status, int)
+            and not isinstance(status, bool)
+            and 100 <= status < 600
+            else None
+        )
         return _hosted_route_failure("http_status", status=safe_status)
     try:
         envelope = response.json()
@@ -53,25 +59,59 @@ def _decode_tool_response(response):
         return _hosted_route_failure("malformed_response")
     if not isinstance(envelope, dict):
         return _hosted_route_failure("malformed_response")
+    if (
+        envelope.get("jsonrpc") != "2.0"
+        or type(envelope.get("id")) is not int
+        or envelope["id"] != 2
+    ):
+        return _hosted_route_failure("malformed_response")
     if "error" in envelope:
+        if set(envelope) != {"jsonrpc", "id", "error"}:
+            return _hosted_route_failure("malformed_response")
+        if not isinstance(envelope["error"], dict):
+            return _hosted_route_failure("malformed_response")
         return _hosted_route_failure("protocol")
+    if set(envelope) != {"jsonrpc", "id", "result"}:
+        return _hosted_route_failure("malformed_response")
     result = envelope.get("result")
     if not isinstance(result, dict):
         return _hosted_route_failure("malformed_response")
-    if result.get("isError") is True:
-        return _hosted_route_failure("protocol")
+    result_keys = set(result)
+    if result_keys not in (
+        {"content"},
+        {"content", "isError"},
+        {"content", "structuredContent"},
+        {"content", "structuredContent", "isError"},
+    ):
+        return _hosted_route_failure("malformed_response")
+    if "isError" in result:
+        if not isinstance(result["isError"], bool):
+            return _hosted_route_failure("malformed_response")
     content = result.get("content")
     if not isinstance(content, list) or len(content) != 1:
         return _hosted_route_failure("malformed_response")
     item = content[0]
-    if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+    if (
+        not isinstance(item, dict)
+        or set(item) != {"type", "text"}
+        or item.get("type") != "text"
+        or not isinstance(item.get("text"), str)
+    ):
         return _hosted_route_failure("malformed_response")
+    if result.get("isError") is True:
+        if "structuredContent" in result:
+            return _hosted_route_failure("malformed_response")
+        return _hosted_route_failure("protocol")
     try:
         payload = json.loads(item["text"])
     except (TypeError, ValueError):
         return _hosted_route_failure("malformed_response")
     if not isinstance(payload, dict):
         return _hosted_route_failure("malformed_response")
+    if "structuredContent" in result:
+        structured = result["structuredContent"]
+        if not isinstance(structured, dict) or structured != payload:
+            return _hosted_route_failure("malformed_response")
     return payload
 
 
@@ -172,13 +212,25 @@ class _DecodedFakeRoute:
 
 
 def _tool_result_envelope(payload, *, is_error=False):
+    result = {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "isError": is_error,
+    }
+    if not is_error:
+        result["structuredContent"] = payload
     return {
         "jsonrpc": "2.0",
         "id": 2,
-        "result": {
-            "content": [{"type": "text", "text": json.dumps(payload)}],
-            "isError": is_error,
-        },
+        "result": result,
+    }
+
+
+def _raw_result_envelope(result, **extra):
+    return {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": result,
+        **extra,
     }
 
 
@@ -190,6 +242,15 @@ def test_hosted_route_decoder_returns_normal_tool_result():
     )
 
     assert result == expected
+
+
+def test_hosted_route_decoder_accepts_absent_optional_is_error():
+    expected = {"state": "ready"}
+    response = _FakeHttpResponse(_raw_result_envelope({
+        "content": [{"type": "text", "text": json.dumps(expected)}],
+    }))
+
+    assert _decode_tool_response(response) == expected
 
 
 @pytest.mark.parametrize(
@@ -228,6 +289,237 @@ def test_hosted_route_decoder_sanitizes_denied_error_shapes(envelope):
         "sentinel-private-error-data",
         "sentinel-private-tool-error",
         "sentinel-private-response-body",
+    ):
+        assert forbidden not in encoded
+
+
+@pytest.mark.parametrize(
+    "response,reason,status",
+    [
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "{}"}],
+                "isError": 1,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "{}"}],
+                "isError": "false",
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "image", "text": "{}"}],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({"isError": False})),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [
+                    {"type": "text", "text": "{}"},
+                    {"type": "text", "text": "{}"},
+                ],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": "not-a-list",
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse({
+                **_tool_result_envelope({"state": "ready"}),
+                "jsonrpc": "1.0",
+            }),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse({
+                key: value
+                for key, value in _tool_result_envelope({}).items()
+                if key != "jsonrpc"
+            }),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse({
+                **_tool_result_envelope({"state": "ready"}),
+                "id": 3,
+            }),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse({
+                **_tool_result_envelope({"state": "ready"}),
+                "id": 2.0,
+            }),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse({
+                key: value
+                for key, value in _tool_result_envelope({}).items()
+                if key != "id"
+            }),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse({"jsonrpc": "2.0", "id": 2}),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope([])),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": 7}],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "not-json"}],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "[]"}],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "{}"}],
+                "isError": False,
+                "sentinel-extra-result": "private.invalid",
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "{}"}],
+                "structuredContent": [],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{"type": "text", "text": "{}"}],
+                "structuredContent": {"sentinel": "private.invalid"},
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(_raw_result_envelope({
+                "content": [{
+                    "type": "text",
+                    "text": "{}",
+                    "sentinel-extra-content": "private.invalid",
+                }],
+                "isError": False,
+            })),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(
+                _raw_result_envelope(
+                    {
+                        "content": [{"type": "text", "text": "{}"}],
+                        "isError": False,
+                    },
+                    sentinel_extra_envelope="private.invalid",
+                )
+            ),
+            "malformed_response",
+            None,
+        ),
+        (
+            _FakeHttpResponse(
+                {"sentinel": "private.invalid"},
+                status_code=503,
+                text="sentinel-token private.invalid",
+            ),
+            "http_status",
+            503,
+        ),
+    ],
+    ids=[
+        "integer-is-error",
+        "string-is-error",
+        "non-text-content",
+        "missing-content",
+        "extra-content",
+        "invalid-content",
+        "invalid-jsonrpc",
+        "missing-jsonrpc",
+        "invalid-id",
+        "float-id",
+        "missing-id",
+        "missing-result",
+        "invalid-result",
+        "non-string-text",
+        "non-json-text",
+        "non-object-text",
+        "extra-result-field",
+        "invalid-structured-content",
+        "mismatched-structured-content",
+        "extra-content-field",
+        "extra-envelope-field",
+        "non-200-http",
+    ],
+)
+def test_hosted_route_decoder_fails_closed_on_invalid_envelopes(
+    response, reason, status
+):
+    result = _decode_tool_response(response)
+
+    expected = _hosted_route_failure(reason, status=status)
+    assert result == expected
+    encoded = json.dumps(result) + repr(result)
+    for forbidden in (
+        "sentinel",
+        "private.invalid",
+        "raw response",
+        "not-json",
     ):
         assert forbidden not in encoded
 
