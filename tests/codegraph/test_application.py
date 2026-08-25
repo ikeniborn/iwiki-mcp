@@ -78,23 +78,33 @@ class RecordingPublisher:
         begin_result=None,
         batch_result=None,
         finalize_result=None,
+        begin_exception=None,
         batch_exception=None,
         finalize_exception=None,
         abort_exception=None,
     ):
         self.calls = []
         self.begin_result = begin_result
-        self.batch_result = batch_result or {"accepted": True}
-        self.finalize_result = finalize_result or {
-            "state": "ready",
-            "snapshot_revision": "sha256:remote",
-        }
+        self.batch_result = (
+            {"accepted": True} if batch_result is None else batch_result
+        )
+        self.finalize_result = (
+            {
+                "state": "ready",
+                "snapshot_revision": "sha256:remote",
+            }
+            if finalize_result is None
+            else finalize_result
+        )
+        self.begin_exception = begin_exception
         self.batch_exception = batch_exception
         self.finalize_exception = finalize_exception
         self.abort_exception = abort_exception
 
     def begin(self, header):
         self.calls.append(("begin", header.repository_id))
+        if self.begin_exception is not None:
+            raise self.begin_exception
         if self.begin_result is not None:
             return self.begin_result
         return PublicationSession(
@@ -299,6 +309,7 @@ def test_postgres_target_uses_exact_store_settings(tmp_path, monkeypatch):
             "session_ttl_seconds": 37,
             "staging_retention_seconds": 91,
             "staging_cleanup_limit": 7,
+            "require_database_principal": True,
         },
     }
 
@@ -436,6 +447,30 @@ def test_begin_failure_returns_without_abort(snapshot_fixture):
     assert publisher.calls == [("begin", "project")]
 
 
+def test_begin_exception_reraises_without_abort(snapshot_fixture):
+    original = RuntimeError("begin exploded")
+    publisher = RecordingPublisher(begin_exception=original)
+
+    with pytest.raises(RuntimeError) as failure:
+        application.publish_snapshot(
+            snapshot_fixture.runtime, publisher, snapshot_fixture.config
+        )
+
+    assert failure.value is original
+    assert publisher.calls == [("begin", "project")]
+
+
+def test_malformed_begin_dict_returns_without_abort(snapshot_fixture):
+    publisher = RecordingPublisher(begin_result={})
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == {}
+    assert publisher.calls == [("begin", "project")]
+
+
 def test_batch_failure_aborts_once_and_never_finalizes(snapshot_fixture):
     publisher = RecordingPublisher(
         batch_result={"error": "batch_conflict", "hint": "begin a new session"}
@@ -444,6 +479,41 @@ def test_batch_failure_aborts_once_and_never_finalizes(snapshot_fixture):
         snapshot_fixture.runtime, publisher, snapshot_fixture.config
     )
     assert result["error"] == "batch_conflict"
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+    assert all(call[0] != "finalize" for call in publisher.calls)
+
+
+def test_batch_rejection_aborts_once_and_never_finalizes(snapshot_fixture):
+    rejected = {"accepted": False}
+    publisher = RecordingPublisher(
+        batch_result=rejected,
+        abort_exception=RuntimeError("abort exploded"),
+    )
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == rejected
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+    assert all(call[0] != "finalize" for call in publisher.calls)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [{}, {"state": "accepted"}],
+    ids=["empty", "missing-accepted"],
+)
+def test_malformed_batch_result_aborts_once_and_never_finalizes(
+    snapshot_fixture, malformed
+):
+    publisher = RecordingPublisher(batch_result=malformed)
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == malformed
     assert [call[0] for call in publisher.calls].count("abort") == 1
     assert all(call[0] != "finalize" for call in publisher.calls)
 
@@ -458,6 +528,69 @@ def test_finalize_failure_aborts_once(snapshot_fixture):
     assert result["error"] == "snapshot_conflict"
     assert publisher.calls[-1] == ("abort", "session-a")
     assert [call[0] for call in publisher.calls].count("abort") == 1
+
+
+def test_non_ready_finalize_result_aborts_once(snapshot_fixture):
+    staging = {
+        "state": "staging",
+        "snapshot_revision": "sha256:remote",
+    }
+    publisher = RecordingPublisher(finalize_result=staging)
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == staging
+    assert publisher.calls[-1] == ("abort", "session-a")
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"state": "ready"},
+        {"state": "ready", "snapshot_revision": ""},
+        {"state": "ready", "snapshot_revision": 7},
+    ],
+    ids=["missing", "empty", "non-string"],
+)
+def test_finalize_ready_without_valid_revision_aborts_once(
+    snapshot_fixture, malformed
+):
+    publisher = RecordingPublisher(
+        finalize_result=malformed,
+        abort_exception=RuntimeError("abort exploded"),
+    )
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == malformed
+    assert publisher.calls[-1] == ("abort", "session-a")
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+
+
+def test_exact_batch_and_finalize_success_never_aborts(snapshot_fixture):
+    publisher = RecordingPublisher(
+        batch_result={"accepted": True},
+        finalize_result={
+            "state": "ready",
+            "snapshot_revision": "sha256:remote",
+        },
+    )
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == {
+        "state": "ready",
+        "snapshot_revision": "sha256:remote",
+    }
+    assert publisher.calls[-1] == ("finalize", "session-a")
+    assert all(call[0] != "abort" for call in publisher.calls)
 
 
 @pytest.mark.parametrize("failure_stage", ["batch", "finalize"])

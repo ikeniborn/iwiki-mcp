@@ -230,6 +230,7 @@ def create_postgres_publisher(
         session_ttl_seconds=settings.publication_session_ttl_seconds,
         staging_retention_seconds=settings.staging_retention_seconds,
         staging_cleanup_limit=settings.staging_cleanup_limit,
+        require_database_principal=True,
     )
 
 
@@ -309,11 +310,16 @@ def publish_snapshot(
             max_bytes=max_bytes,
         ):
             accepted = publisher.publish_batch(session, batch)
-            if "error" in accepted:
+            if accepted.get("accepted") is not True:
                 _abort_preserving_failure(publisher, session)
                 return accepted
         finalized = publisher.finalize(session)
-        if "error" in finalized:
+        snapshot_revision = finalized.get("snapshot_revision")
+        if (
+            finalized.get("state") != "ready"
+            or not isinstance(snapshot_revision, str)
+            or not snapshot_revision
+        ):
             _abort_preserving_failure(publisher, session)
         return finalized
     except Exception:
