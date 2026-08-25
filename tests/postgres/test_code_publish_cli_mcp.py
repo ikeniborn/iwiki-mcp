@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from io import StringIO
 import json
+import math
 from pathlib import Path
 import re
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -61,6 +63,24 @@ def _reject_json_constant(_value):
     raise ValueError("non-standard JSON constant")
 
 
+def _raw_httpx_response(payload):
+    return httpx.Response(200, text=json.dumps(payload))
+
+
+def _contains_non_finite_float(value):
+    if type(value) is float:
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(
+            _contains_non_finite_float(key)
+            or _contains_non_finite_float(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_non_finite_float(item) for item in value)
+    return False
+
+
 def _decode_tool_response(response):
     status = getattr(response, "status_code", None)
     if type(status) is not int or status != 200:
@@ -75,6 +95,8 @@ def _decode_tool_response(response):
     except Exception:
         return _hosted_route_failure("malformed_response")
     if not isinstance(envelope, dict):
+        return _hosted_route_failure("malformed_response")
+    if _contains_non_finite_float(envelope):
         return _hosted_route_failure("malformed_response")
     if (
         envelope.get("jsonrpc") != "2.0"
@@ -126,6 +148,8 @@ def _decode_tool_response(response):
     except (TypeError, ValueError):
         return _hosted_route_failure("malformed_response")
     if not isinstance(payload, dict):
+        return _hosted_route_failure("malformed_response")
+    if _contains_non_finite_float(payload):
         return _hosted_route_failure("malformed_response")
     if "structuredContent" in result:
         structured = result["structuredContent"]
@@ -345,6 +369,88 @@ def test_hosted_route_decoder_rejects_nonstandard_json_constants(constant):
     assert _decode_tool_response(response) == _hosted_route_failure(
         "malformed_response"
     )
+
+
+@pytest.mark.parametrize(
+    "text,structured",
+    [
+        ('{"value":1e999}', None),
+        ('{"value":-1e999}', None),
+        ('{"value":1e999}', {"value": float("inf")}),
+        ('{"value":-1e999}', {"value": float("-inf")}),
+        (
+            '{"items":[{"value":1e999}]}',
+            {"items": [{"value": float("inf")}]},
+        ),
+        ('{"value":1e999}', {"value": 0.5}),
+        ('{"value":0.5}', {"value": float("nan")}),
+        ('{"value":0.5}', {"value": float("inf")}),
+    ],
+    ids=[
+        "positive-text-overflow",
+        "negative-text-overflow",
+        "matching-positive-infinity",
+        "matching-negative-infinity",
+        "nested-matching-infinity",
+        "text-infinity-vs-structured-finite",
+        "structured-nan-vs-finite",
+        "structured-infinity-vs-finite",
+    ],
+)
+def test_hosted_route_decoder_rejects_non_finite_tool_payloads(
+    text, structured
+):
+    result = {
+        "content": [{"type": "text", "text": text}],
+        "isError": False,
+    }
+    if structured is not None:
+        result["structuredContent"] = structured
+    response = _raw_httpx_response(_raw_result_envelope(result))
+
+    decoded = _decode_tool_response(response)
+
+    assert decoded == _hosted_route_failure("malformed_response")
+    assert "Infinity" not in json.dumps(decoded)
+    assert "NaN" not in json.dumps(decoded)
+
+
+@pytest.mark.parametrize("number", [float("inf"), float("-inf"), float("nan")])
+def test_hosted_route_decoder_rejects_non_finite_jsonrpc_error_data(number):
+    response = _raw_httpx_response(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {
+                "code": -32001,
+                "message": "access_denied",
+                "data": {
+                    "number": number,
+                    "sentinel": "sentinel-token private.invalid",
+                },
+            },
+        },
+    )
+
+    decoded = _decode_tool_response(response)
+
+    assert decoded == _hosted_route_failure("malformed_response")
+    assert "sentinel" not in json.dumps(decoded) + repr(decoded)
+    assert "private.invalid" not in json.dumps(decoded) + repr(decoded)
+
+
+def test_hosted_route_decoder_accepts_nested_finite_fastmcp_payload():
+    expected = {
+        "items": [1, 1.0, {"enabled": True, "ratio": 0.5}],
+    }
+
+    decoded = _decode_tool_response(
+        _FakeHttpResponse(_tool_result_envelope(expected))
+    )
+
+    assert decoded == expected
+    assert type(decoded["items"][0]) is int
+    assert type(decoded["items"][1]) is float
 
 
 @pytest.mark.parametrize(
