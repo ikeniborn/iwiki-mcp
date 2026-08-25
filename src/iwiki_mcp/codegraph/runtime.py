@@ -9,11 +9,9 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Mapping
+from typing import Mapping, Protocol
 
 from filelock import Timeout
-
-from iwiki_mcp.base import Binding
 
 from . import models as codegraph_models
 from .config import (
@@ -75,6 +73,12 @@ _PHASE_NAMES = (
     "publication",
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class CodeGraphSource(Protocol):
+    base: str
+    project_dir: str
+    primary: str | None
 
 
 class _BuildJob:
@@ -294,7 +298,7 @@ class CodeGraphRuntime:
 
     def __init__(
         self,
-        binding: Binding,
+        binding: CodeGraphSource,
         *,
         adapter_factories: Mapping[str, AdapterFactory] | None = None,
         resolver_version: str = _DEFAULT_RESOLVER_VERSION,
