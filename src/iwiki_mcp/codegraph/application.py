@@ -19,7 +19,11 @@ from . import indexer as codegraph_indexer
 from . import linking
 from . import runtime as codegraph_runtime
 from .languages import javascript, python, typescript
-from .mcp_adapter import McpSnapshotPublisher, RemoteMcpTransport
+from .mcp_adapter import (
+    CodeGraphAdapterError,
+    McpSnapshotPublisher,
+    RemoteMcpTransport,
+)
 from .models import CodeGraphError
 from .publication import (
     PublicationSession,
@@ -30,6 +34,21 @@ from .publication import (
 
 class CodeGraphApplicationError(CodeGraphError):
     code = "invalid_config"
+
+
+class CodeGraphPublishError(CodeGraphError):
+    """Redacted CLI failure after the publication mode is known."""
+
+    def __init__(
+        self,
+        publish_mode: str,
+        error: str,
+        exit_code: int,
+    ) -> None:
+        super().__init__(error)
+        self.publish_mode = publish_mode
+        self.error = error
+        self.exit_code = exit_code
 
 
 @dataclass(frozen=True)
@@ -385,4 +404,23 @@ def publish_project(
 ) -> CodeGraphPublishOutcome:
     root = checkout_root(project_dir)
     binding = wiki_base.resolve_storage_binding(str(root))
-    return index_and_publish(binding, environ=environ)
+    config = codegraph_config.load_code_graph_config(str(root))
+    try:
+        return index_and_publish(binding, environ=environ)
+    except (
+        wiki_base.BaseError,
+        codegraph_config.CodeGraphConfigError,
+        CodeGraphApplicationError,
+        CodeGraphAdapterError,
+    ) as exc:
+        raise CodeGraphPublishError(
+            config.publish_mode,
+            "invalid_config",
+            2,
+        ) from exc
+    except Exception as exc:
+        raise CodeGraphPublishError(
+            config.publish_mode,
+            "internal_error",
+            1,
+        ) from exc

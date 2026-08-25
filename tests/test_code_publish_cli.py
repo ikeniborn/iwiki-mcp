@@ -12,7 +12,7 @@ import pytest
 from iwiki_mcp import admin, base, server
 from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph.application import CodeGraphPublishOutcome
-from iwiki_mcp.codegraph.config import CodeGraphConfigError
+from iwiki_mcp.codegraph.config import CodeGraphConfig, CodeGraphConfigError
 from iwiki_mcp.codegraph.mcp_adapter import CodeGraphAdapterError
 
 
@@ -59,6 +59,45 @@ def _run(argv, monkeypatch, value):
         stdout=stdout,
         stderr=stderr,
         environ={"SENTINEL_ENV": "sentinel-secret"},
+    )
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+def _run_post_resolution_failure(
+    argv,
+    monkeypatch,
+    *,
+    mode,
+    failure,
+):
+    stdout = StringIO()
+    stderr = StringIO()
+    binding = object()
+    monkeypatch.setattr(
+        application,
+        "checkout_root",
+        lambda _value: Path("/safe/project"),
+    )
+    monkeypatch.setattr(
+        application.wiki_base,
+        "resolve_storage_binding",
+        lambda _value: binding,
+    )
+    monkeypatch.setattr(
+        application.codegraph_config,
+        "load_code_graph_config",
+        lambda _value: CodeGraphConfig(publish_mode=mode),
+    )
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(application, "index_and_publish", fail)
+    code = admin.run(
+        argv,
+        stdout=stdout,
+        stderr=stderr,
+        environ={},
     )
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -188,46 +227,173 @@ def test_text_usage_is_one_stable_line_without_argparse_output():
         base.BaseError("sentinel-secret"),
         CodeGraphConfigError("sentinel-secret"),
         application.CodeGraphApplicationError("sentinel-secret"),
-        CodeGraphAdapterError("sentinel-secret"),
     ],
 )
-def test_expected_configuration_failures_are_redacted(monkeypatch, failure):
+@pytest.mark.parametrize("json_output", [False, True])
+def test_expected_configuration_failures_are_redacted(
+    monkeypatch, failure, json_output
+):
+    argv = ["code", "publish", "--project", "/secret/project"]
+    if json_output:
+        argv.append("--json")
     code, stdout, stderr = _run(
-        ["code", "publish", "--project", "/secret/project", "--json"],
+        argv,
         monkeypatch,
         failure,
     )
 
     assert code == 2
-    assert stdout == (
-        '{"state":"failed","publish_mode":null,'
-        '"error":"invalid_config","duration_ms":0}\n'
-    )
-    assert stderr == ""
+    if json_output:
+        assert stdout == (
+            '{"state":"failed","publish_mode":null,'
+            '"error":"invalid_config","duration_ms":0}\n'
+        )
+        assert stderr == ""
+    else:
+        assert stdout == ""
+        assert stderr == (
+            "iwiki-mcp: code graph configuration failed "
+            "(code=invalid_config)\n"
+        )
     assert "sentinel-secret" not in stdout + stderr
     assert "/secret/project" not in stdout + stderr
 
 
+def test_real_invalid_code_graph_config_is_exit_two_json(
+    monkeypatch, tmp_path
+):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(
+        ["git", "init", str(checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wiki = tmp_path / "wiki"
+    (wiki / "docs").mkdir(parents=True)
+    (wiki / "docs" / "page.md").write_text("# Page\n", encoding="utf-8")
+    (checkout / ".iwiki.toml").write_text(
+        f'base = "{wiki}"\n'
+        'read = ["docs"]\n'
+        'write = ["docs"]\n'
+        'primary = "docs"\n'
+        "[code_graph]\n"
+        'publish_mode = "sentinel-invalid-mode"\n',
+        encoding="utf-8",
+    )
+
+    stdout = StringIO()
+    stderr = StringIO()
+    code = admin.run(
+        ["code", "publish", "--project", str(checkout), "--json"],
+        stdout=stdout,
+        stderr=stderr,
+        environ={},
+    )
+
+    assert code == 2
+    assert stdout.getvalue() == (
+        '{"state":"failed","publish_mode":null,'
+        '"error":"invalid_config","duration_ms":0}\n'
+    )
+    assert stderr.getvalue() == ""
+    assert "sentinel-invalid-mode" not in stdout.getvalue()
+    assert str(checkout) not in stdout.getvalue()
+
+
 @pytest.mark.parametrize(
-    "failure",
+    ("mode", "failure", "exit_code", "stable_code"),
     [
-        psycopg.Error("sentinel-driver-error"),
-        RuntimeError("sentinel-runtime-error"),
+        (
+            "mcp",
+            CodeGraphAdapterError("sentinel-adapter-token"),
+            2,
+            "invalid_config",
+        ),
+        (
+            "sqlite",
+            application.CodeGraphApplicationError("sentinel-application-path"),
+            2,
+            "invalid_config",
+        ),
+        (
+            "postgres",
+            psycopg.Error("sentinel-postgres-dsn"),
+            1,
+            "internal_error",
+        ),
+        (
+            "postgres",
+            RuntimeError("sentinel-publication-url"),
+            1,
+            "internal_error",
+        ),
     ],
 )
-def test_runtime_failures_are_redacted_internal_errors(monkeypatch, failure):
-    code, stdout, stderr = _run(
-        ["code", "publish", "--project", "/repo", "--json"],
+@pytest.mark.parametrize("json_output", [False, True])
+def test_post_resolution_failures_preserve_safe_selected_mode(
+    monkeypatch,
+    mode,
+    failure,
+    exit_code,
+    stable_code,
+    json_output,
+):
+    argv = ["code", "publish", "--project", "/ignored"]
+    if json_output:
+        argv.append("--json")
+
+    code, stdout, stderr = _run_post_resolution_failure(
+        argv,
         monkeypatch,
-        failure,
+        mode=mode,
+        failure=failure,
+    )
+
+    assert code == exit_code
+    if json_output:
+        assert stdout == (
+            '{"state":"failed",'
+            f'"publish_mode":"{mode}",'
+            f'"error":"{stable_code}","duration_ms":0}}\n'
+        )
+        assert stderr == ""
+    else:
+        assert stdout == ""
+        assert stderr.count("\n") == 1
+        assert f"(code={stable_code})" in stderr
+    emitted = stdout + stderr
+    assert "sentinel" not in emitted
+    assert "Traceback" not in emitted
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_pre_resolution_runtime_failure_is_redacted_internal_error(
+    monkeypatch, json_output
+):
+    argv = ["code", "publish", "--project", "/repo"]
+    if json_output:
+        argv.append("--json")
+    code, stdout, stderr = _run(
+        argv,
+        monkeypatch,
+        RuntimeError("sentinel-runtime-error"),
     )
 
     assert code == 1
-    assert stdout == (
-        '{"state":"failed","publish_mode":null,'
-        '"error":"internal_error","duration_ms":0}\n'
-    )
-    assert stderr == ""
+    if json_output:
+        assert stdout == (
+            '{"state":"failed","publish_mode":null,'
+            '"error":"internal_error","duration_ms":0}\n'
+        )
+        assert stderr == ""
+    else:
+        assert stdout == ""
+        assert stderr == (
+            "iwiki-mcp: code graph publication failed "
+            "(code=internal_error)\n"
+        )
     assert "sentinel" not in stdout + stderr
     assert "Traceback" not in stdout + stderr
 
@@ -280,7 +446,24 @@ def test_json_publication_failure_keeps_selected_mode(monkeypatch):
     assert stderr == ""
 
 
-def test_failure_output_never_contains_connection_secrets(monkeypatch):
+def test_json_index_failure_keeps_selected_mode(monkeypatch):
+    code, stdout, stderr = _run(
+        ["code", "publish", "--project", "/repo", "--json"],
+        monkeypatch,
+        _outcome(index_state="failed"),
+    )
+
+    assert code == 1
+    assert stdout == (
+        '{"state":"failed","publish_mode":"mcp",'
+        '"error":"index_failed","duration_ms":17}\n'
+    )
+    assert stderr == ""
+
+
+def test_failure_output_never_contains_connection_secrets(
+    monkeypatch, caplog
+):
     secret_text = (
         "token=sentinel-token password=sentinel-password "
         "postgresql://sentinel-user:sentinel-password@db.invalid/wiki "
@@ -293,7 +476,7 @@ def test_failure_output_never_contains_connection_secrets(monkeypatch):
     )
 
     assert code == 1
-    emitted = stdout + stderr
+    emitted = stdout + stderr + caplog.text + repr(json.loads(stdout))
     for sentinel in (
         "sentinel-token",
         "sentinel-password",
