@@ -34,6 +34,7 @@ class InProcessMcpTransport:
         self.primary = primary
         self.reject_batch_at = reject_batch_at
         self.calls = []
+        self.attempts = []
         self._batch_count = 0
 
     def __repr__(self):
@@ -41,13 +42,13 @@ class InProcessMcpTransport:
 
     def call(self, name, arguments):
         recorded = dict(arguments)
-        self.calls.append((name, recorded))
+        self.attempts.append((name, recorded))
         if name != "wiki_bind" and not any(
-            call[0] == "wiki_bind" for call in self.calls[:-1]
+            call[0] == "wiki_bind" for call in self.calls
         ):
             bind_arguments = {"primary": self.primary}
+            self.calls.append(("wiki_bind", bind_arguments))
             bound = self.route.call("wiki_bind", bind_arguments)
-            self.calls.insert(-1, ("wiki_bind", bind_arguments))
             if "error" in bound:
                 return bound
         if name == "wiki_code_publish_batch":
@@ -61,7 +62,57 @@ class InProcessMcpTransport:
                         "the remote wiki refused the code graph call; see status"
                     ),
                 }
+        self.calls.append((name, recorded))
         return self.route.call(name, recorded)
+
+
+class _FakeRoute:
+    def __init__(self, replies):
+        self.replies = replies
+        self.calls = []
+
+    def call(self, name, arguments):
+        self.calls.append((name, dict(arguments)))
+        return dict(self.replies[name])
+
+
+def test_in_process_transport_records_only_denied_auto_bind():
+    route = _FakeRoute({
+        "wiki_bind": {
+            "error": "primary domain must belong to write scope",
+            "hint": "select a primary from the narrowed write scope",
+        },
+    })
+    transport = InProcessMcpTransport(route, "docs")
+
+    result = transport.call("wiki_code_publish_begin", {"header": {}})
+
+    expected = [("wiki_bind", {"primary": "docs"})]
+    assert result["error"] == "primary domain must belong to write scope"
+    assert transport.calls == expected
+    assert route.calls == expected
+
+
+def test_in_process_transport_records_bind_before_forwarded_begin():
+    route = _FakeRoute({
+        "wiki_bind": {
+            "read": ["docs"],
+            "write": ["docs"],
+            "primary": "docs",
+        },
+        "wiki_code_publish_begin": {"session_id": "session-a"},
+    })
+    transport = InProcessMcpTransport(route, "docs")
+
+    result = transport.call("wiki_code_publish_begin", {"header": {}})
+
+    expected = [
+        ("wiki_bind", {"primary": "docs"}),
+        ("wiki_code_publish_begin", {"header": {}}),
+    ]
+    assert result == {"session_id": "session-a"}
+    assert transport.calls == expected
+    assert route.calls == expected
 
 
 class HostedMcpCli:
@@ -307,12 +358,14 @@ def test_later_batch_failure_preserves_revision_and_aborts_once(
     _failure_payload(stdout, stderr)
     current = hosted_mcp_cli.transport.call("wiki_code_status", {})
     call_names = [name for name, _args in transport.calls]
+    attempt_names = [name for name, _args in transport.attempts]
 
     assert exit_code == 1
     assert current["snapshot_revision"] == old_revision
     assert call_names[0] == "wiki_bind"
     assert call_names.count("wiki_code_publish_begin") == 1
-    assert call_names.count("wiki_code_publish_batch") == 2
+    assert call_names.count("wiki_code_publish_batch") == 1
+    assert attempt_names.count("wiki_code_publish_batch") == 2
     assert call_names.count("wiki_code_publish_abort") == 1
     assert call_names.index("wiki_code_publish_begin") < call_names.index(
         "wiki_code_publish_abort"
