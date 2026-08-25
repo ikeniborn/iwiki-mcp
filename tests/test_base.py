@@ -98,6 +98,27 @@ def test_resolve_storage_binding_keeps_absent_project_config_git_default(
     assert bind.base == b
 
 
+def test_resolve_storage_binding_explicit_environ_ignores_process_git_base(
+    tmp_path, monkeypatch
+):
+    process_base = _mkbase(tmp_path / "process", "backend")
+    mapped_base = _mkbase(tmp_path / "mapped", "backend")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n'
+    )
+    monkeypatch.setenv("IWIKI_BASE_DIR", process_base)
+
+    binding = base.resolve_storage_binding(
+        str(proj), environ={"IWIKI_BASE_DIR": mapped_base}
+    )
+
+    assert binding.base == mapped_base
+    with pytest.raises(base.BaseError, match="no wiki base configured"):
+        base.resolve_storage_binding(str(proj), environ={})
+
+
 def _set_postgres_runtime(monkeypatch, *, password="database-secret"):
     monkeypatch.setenv("IWIKI_DB_PASSWORD", password)
     monkeypatch.setenv("IWIKI_EMBED_MODEL", "lemonade-embeddings-bge-m3-q8")
@@ -141,6 +162,38 @@ def test_resolve_binding_builds_immutable_local_postgres_binding(tmp_path, monke
     assert bind.rerank_model == "lemonade-reranker-bge-reranker-v2-m3"
     with pytest.raises(dataclasses.FrozenInstanceError):
         bind.iwiki_id = "other"
+
+
+def test_resolve_storage_binding_explicit_environ_owns_postgres_secrets(
+    tmp_path, monkeypatch
+):
+    proj = tmp_path / "proj-environ"
+    proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["docs"]\nwrite = ["docs"]\nprimary = "docs"\n'
+        '[storage]\ntype = "postgres"\nhost = "db"\nport = 5432\n'
+        'database = "iwiki"\nuser = "user"\nsslmode = "require"\n'
+        'iwiki_id = "personal"\n'
+    )
+    monkeypatch.setenv("IWIKI_DB_PASSWORD", "sentinel-process-password")
+    monkeypatch.setenv("IWIKI_EMBED_MODEL", "sentinel-process-model")
+    monkeypatch.setenv("IWIKI_EMBED_DIMENSIONS", "999")
+    explicit = {
+        "IWIKI_DB_PASSWORD": "mapped-password",
+        "IWIKI_EMBED_MODEL": "mapped-model",
+        "IWIKI_EMBED_DIMENSIONS": "3",
+        "IWIKI_RERANK_MODEL": "mapped-reranker",
+    }
+
+    binding = base.resolve_storage_binding(str(proj), environ=explicit)
+
+    assert binding.password == "mapped-password"
+    assert binding.embed_model == "mapped-model"
+    assert binding.embed_dimensions == 3
+    assert binding.rerank_model == "mapped-reranker"
+    assert "sentinel-process" not in repr(binding)
+    with pytest.raises(base.BaseError, match="database password is required"):
+        base.resolve_storage_binding(str(proj), environ={})
 
 
 def test_postgres_binding_accepts_code_graph_without_identity_override(

@@ -20,8 +20,8 @@ _MAX_NODES = 50
 _MAX_FILES = 20
 _MAX_SOURCE_BYTES = 200_000
 # Prefix alternation must stay in sync with the language prefixes the
-# per-language adapter factories register in server.py
-# (_code_graph_adapter_factories: "py", "ts", "js").
+# codegraph.application.code_graph_adapter_factories registers
+# ("py", "ts", "js").
 _CANONICAL_ENTITY_ID = re.compile(
     r"(?:py|ts|js):(?:file|module|symbol):[0-9a-f]{64}\Z"
 )

@@ -3,7 +3,7 @@ batch sizing when it exceeds the hosted server's own limit — reproduces the ex
 aioperator publish failure this plan fixes."""
 from __future__ import annotations
 
-from iwiki_mcp import server as server_module
+from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.publication import canonical_batch
 from iwiki_mcp.postgres.config import HostedCodeGraphConfig
@@ -43,7 +43,7 @@ def test_client_local_max_batch_rows_above_server_default_no_longer_rejected():
     # larger than the server's default.
     config = CodeGraphConfig(max_batch_rows=5000, max_batch_bytes=1_000_000)
 
-    max_rows, max_bytes = server_module._effective_batch_bounds(session, config)
+    max_rows, max_bytes = application.effective_batch_bounds(session, config)
 
     # Before this plan: this would be 5000 (config), producing a single oversized
     # batch of e.g. 4001 symbol rows that the server then rejects with invalid_batch.
@@ -65,7 +65,7 @@ def test_client_local_max_batch_rows_above_server_default_no_longer_rejected():
     assert rejected["limit"] == 1000
     assert rejected["received"] == 4001
 
-    # But a client using the FIXED _effective_batch_bounds never builds a batch
+    # But a client using the FIXED effective_batch_bounds never builds a batch
     # this large in the first place — chunking 4001 rows at max_rows=1000 yields
     # batches of size <= 1000, all of which pass:
     chunk = oversized_rows[:max_rows]

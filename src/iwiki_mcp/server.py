@@ -9,7 +9,6 @@ import datetime as _dt
 from dataclasses import replace
 import functools
 from hashlib import sha256
-from importlib.metadata import PackageNotFoundError, version
 import json
 import logging
 import os
@@ -40,10 +39,9 @@ from .postgres import codegraph as _postgres_codegraph  # noqa: F401
 from .codegraph import config as _codegraph_config  # noqa: F401
 from .codegraph import discovery as _codegraph_discovery  # noqa: F401
 from .codegraph import fingerprint as _codegraph_fingerprint  # noqa: F401
-from .codegraph import indexer as _codegraph_indexer
 from .codegraph import linking as _codegraph_linking
+from .codegraph import application as _codegraph_application  # noqa: F401
 from .codegraph import location as _codegraph_location  # noqa: F401
-from .codegraph import mcp_adapter as _codegraph_mcp_adapter  # noqa: F401
 from .codegraph import models as _codegraph_models  # noqa: F401
 from .codegraph import publication as _codegraph_publication  # noqa: F401
 from .codegraph import runtime as _codegraph_runtime  # noqa: F401
@@ -51,9 +49,6 @@ from .codegraph import schema as _codegraph_schema  # noqa: F401
 from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
-from .codegraph.languages import python as _codegraph_python  # noqa: F401
-from .codegraph.languages import typescript as _codegraph_typescript
-from .codegraph.languages import javascript as _codegraph_javascript
 from .lock import mutation_lock
 from .engine import classify, rerank
 from .engine import frontmatter as _fm
@@ -87,103 +82,6 @@ from .storage import expected_revision_required, section_conflict
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _distribution_version(name: str) -> str:
-    try:
-        return version(name)
-    except PackageNotFoundError:
-        return "unavailable"
-
-
-_PYTHON_PARSER_VERSION = (
-    "tree-sitter-python:" + _distribution_version("tree-sitter-python")
-)
-_TYPESCRIPT_PARSER_VERSION = (
-    "tree-sitter-typescript:" + _distribution_version("tree-sitter-typescript")
-)
-
-
-def _code_graph_adapter_factories(repository_id, config=None):
-    def create_python_adapter(source_paths):
-        return _codegraph_python.PythonAdapter(
-            repository_id,
-            source_paths,
-            parser_version=_PYTHON_PARSER_VERSION,
-        )
-
-    def create_typescript_adapter(source_paths):
-        return _codegraph_typescript.TypeScriptAdapter(
-            repository_id,
-            source_paths,
-            parser_version=_TYPESCRIPT_PARSER_VERSION,
-            type_boost_enabled=bool(
-                config is not None and config.typescript_type_boost
-            ),
-        )
-
-    def create_javascript_adapter(source_paths):
-        return _codegraph_javascript.JavaScriptAdapter(
-            repository_id,
-            source_paths,
-            parser_version=_TYPESCRIPT_PARSER_VERSION,
-        )
-
-    return {
-        "python": _codegraph_indexer.AdapterFactory(
-            create=create_python_adapter,
-            extensions=(".py",),
-            parser_version=_PYTHON_PARSER_VERSION,
-            grammar_version=";".join((
-                "tree-sitter:" + _distribution_version("tree-sitter"),
-                "tree-sitter-language-pack:"
-                + _distribution_version("tree-sitter-language-pack"),
-                _PYTHON_PARSER_VERSION,
-            )),
-            adapter_version="python-adapter-v2",
-        ),
-        "typescript": _codegraph_indexer.AdapterFactory(
-            create=create_typescript_adapter,
-            extensions=(".ts", ".tsx"),
-            parser_version=_TYPESCRIPT_PARSER_VERSION,
-            grammar_version=";".join((
-                "tree-sitter:" + _distribution_version("tree-sitter"),
-                "tree-sitter-language-pack:"
-                + _distribution_version("tree-sitter-language-pack"),
-                _TYPESCRIPT_PARSER_VERSION,
-            )),
-            adapter_version="typescript-adapter-v1",
-        ),
-        "javascript": _codegraph_indexer.AdapterFactory(
-            create=create_javascript_adapter,
-            extensions=(".js", ".jsx", ".mjs", ".cjs"),
-            parser_version=_TYPESCRIPT_PARSER_VERSION,
-            grammar_version=";".join((
-                "tree-sitter:" + _distribution_version("tree-sitter"),
-                "tree-sitter-language-pack:"
-                + _distribution_version("tree-sitter-language-pack"),
-                _TYPESCRIPT_PARSER_VERSION,
-            )),
-            adapter_version="javascript-adapter-v1",
-        ),
-    }
-
-
-def _code_runtime(binding: base.Binding):
-    """Compose configured language adapters without initializing parsers."""
-    try:
-        code_config = _codegraph_config.load_code_graph_config(binding.project_dir)
-    except _codegraph_config.CodeGraphConfigError:
-        code_config = None
-    runtime = _codegraph_runtime.CodeGraphRuntime(
-        binding,
-        adapter_factories=_code_graph_adapter_factories(binding.primary, code_config),
-    )
-    if runtime._indexer is not None:
-        runtime._indexer.wiki_selector_resolver = (
-            _codegraph_linking.WikiSelectorResolver(binding.base)
-        )
-    return runtime
 
 
 class _ActivityReceiveStream:
@@ -912,38 +810,12 @@ _CODE_PUBLICATION_LOCK_TIMEOUT_MS = 5000
 
 
 def _postgres_code_store(binding: base.PostgresBinding, owner_id: str):
-    settings = _hosted_code_graph_settings()
-    return _postgres_codegraph.PostgresCodeGraphStore(
-        binding.connection_dsn(),
-        binding.iwiki_id,
-        binding.primary,
+    return _codegraph_application.create_postgres_publisher(
+        binding,
         owner_id,
+        _hosted_code_graph_settings(),
         lock_timeout_ms=_CODE_PUBLICATION_LOCK_TIMEOUT_MS,
-        session_ttl_seconds=settings.publication_session_ttl_seconds,
-        staging_retention_seconds=settings.staging_retention_seconds,
-        staging_cleanup_limit=settings.staging_cleanup_limit,
     )
-
-
-# The SQLite factory returns None on purpose: local SQLite publication is the
-# indexer's own atomic path, so no external publisher object exists for it.
-_code_publisher_factories = {
-    "sqlite": lambda binding, config: None,
-    "postgres": lambda binding, config: _postgres_code_store(
-        binding, secrets.token_hex(16)
-    ),
-    "mcp": lambda binding, config: _codegraph_mcp_adapter.McpSnapshotPublisher(
-        _codegraph_mcp_adapter.RemoteMcpTransport(primary=binding.primary)
-    ),
-}
-
-
-def _code_publisher(binding, mode: str, config=None):
-    """Build exactly the publisher the selected mode names, without fallback."""
-    factory = _code_publisher_factories.get(mode)
-    if factory is None:
-        raise _codegraph_models.CodeGraphError("unknown publish mode")
-    return factory(binding, config)
 
 
 def _session_reference(session_id: str):
@@ -1060,53 +932,6 @@ _CODE_INVALID_HEADER = {
 }
 
 
-def _effective_batch_bounds(session, config) -> tuple[int, int]:
-    """Prefer the hosted server's reported batch bounds, validated against
-    this codebase's own hard ceiling; fall back to local config otherwise."""
-    rows_limit = session.max_batch_rows
-    if (
-        not isinstance(rows_limit, int)
-        or isinstance(rows_limit, bool)
-        # keep in sync with HostedCodeGraphConfig.__post_init__ bounds (postgres/config.py)
-        or not 1 <= rows_limit <= 5000
-    ):
-        rows_limit = config.max_batch_rows
-    bytes_limit = session.max_batch_bytes
-    if (
-        not isinstance(bytes_limit, int)
-        or isinstance(bytes_limit, bool)
-        # keep in sync with HostedCodeGraphConfig.__post_init__ bounds (postgres/config.py)
-        or not 1 <= bytes_limit <= 5_000_000
-    ):
-        bytes_limit = config.max_batch_bytes
-    return rows_limit, bytes_limit
-
-
-def _publish_local_snapshot(runtime, binding, config) -> dict:
-    """Send the freshly indexed local snapshot to the selected publisher."""
-    publisher = _code_publisher(binding, config.publish_mode, config)
-    if publisher is None:
-        return {}
-    exported = runtime.export_snapshot()
-    if isinstance(exported, dict):
-        return exported
-    header, rows = exported
-    session = publisher.begin(header)
-    if isinstance(session, dict):
-        return session
-    max_rows, max_bytes = _effective_batch_bounds(session, config)
-    for batch in _codegraph_publication.iter_snapshot_batches(
-        rows,
-        max_rows=max_rows,
-        max_bytes=max_bytes,
-    ):
-        accepted = publisher.publish_batch(session, batch)
-        if "error" in accepted:
-            publisher.abort(session)
-            return accepted
-    return publisher.finalize(session)
-
-
 def _code_publication_service(binding):
     """Resolve the only publication target this authenticated call may use."""
     if not _is_postgres(binding):
@@ -1132,7 +957,9 @@ def wiki_code_status() -> dict:
         return _postgres_code_reader(bind).status()
     if bind.primary is None:
         return _missing_code_primary()
-    return _code_runtime(bind).status()
+    return _codegraph_application.code_runtime(
+        _codegraph_application.source_context(bind)
+    ).status()
 
 
 @_safe
@@ -1154,19 +981,9 @@ def wiki_code_index(
         return dict(_CODE_SOURCE_UNAVAILABLE)
     if bind.primary is None:
         return _missing_code_primary()
-    runtime = _code_runtime(bind)
-    result = runtime.index(force=force, languages=languages)
-    config = runtime.config
-    if (
-        config is None
-        or config.publish_mode == "sqlite"
-        or result.get("state") != "ready"
-    ):
-        return result
-    return {
-        **result,
-        "publication": _publish_local_snapshot(runtime, bind, config),
-    }
+    return _codegraph_application.index_and_publish(
+        bind, force=force, languages=languages
+    ).tool_result()
 
 
 @_safe
@@ -1217,7 +1034,9 @@ def wiki_code_search(
         )
     if bind.primary is None:
         return _missing_code_primary()
-    return _code_runtime(bind).search(
+    return _codegraph_application.code_runtime(
+        _codegraph_application.source_context(bind)
+    ).search(
         query,
         kinds=kinds,
         path=path,
@@ -1269,7 +1088,9 @@ def wiki_code_context(
         )
     if bind.primary is None:
         return _missing_code_primary()
-    return _code_runtime(bind).context(
+    return _codegraph_application.code_runtime(
+        _codegraph_application.source_context(bind)
+    ).context(
         seeds,
         direction=direction,
         depth=depth,
@@ -3174,7 +2995,9 @@ def wiki_lint(domain: str | None = None) -> dict:
                     "hint": "code graph follows the bound primary domain",
                 }
             else:
-                runtime = _code_runtime(bind)
+                runtime = _codegraph_application.code_runtime(
+                    _codegraph_application.source_context(bind)
+                )
                 code_report = _codegraph_linking.lint_domain(
                     visible_domains[target],
                     domain=target,

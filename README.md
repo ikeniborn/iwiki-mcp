@@ -293,7 +293,7 @@ exactly, or when the maintenance artifact digests do not reproduce.
 
 | PostgreSQL support | Tools |
 | --- | --- |
-| Supported | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
+| Supported | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_insert_section`, `wiki_delete_section`, `wiki_move_section`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
 | Hosted PostgreSQL only | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
 | Supported code graph | `wiki_code_status`, `wiki_code_search`, `wiki_code_context` |
 | Hosted PostgreSQL only | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort` |
@@ -522,13 +522,15 @@ rejection states the exact limit and what was received instead of a bare `invali
 Secrets never enter `.iwiki.toml`. MCP mode reads `IWIKI_CODE_GRAPH_MCP_URL` and
 `IWIKI_CODE_GRAPH_MCP_TOKEN` from the runtime environment only, and both are absent
 from status, logs, snapshot headers, errors, and object reprs. Direct PostgreSQL mode
-reuses the existing `[storage]` block and `IWIKI_DB_PASSWORD`.
+reuses the existing `[storage]` block and requires `IWIKI_DB_PASSWORD`,
+`IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional
+`IWIKI_RERANK_MODEL` when configured).
 
 | Mode | Publishes to | Requires |
 | --- | --- | --- |
-| `sqlite` | The local code-graph cache next to the wiki base | A local checkout |
-| `postgres` | The configured PostgreSQL wiki database | A local checkout plus `[storage]` and `IWIKI_DB_PASSWORD` |
-| `mcp` | An authenticated remote iwiki server | A local checkout plus `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` |
+| `sqlite` | The local code-graph cache next to the wiki base | A local checkout; no mode-specific publication environment variables |
+| `postgres` | The configured PostgreSQL wiki database | A local checkout plus `[storage]`, `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (optional `IWIKI_RERANK_MODEL`) |
+| `mcp` | An authenticated Streamable HTTP endpoint on same machine or remote | A local checkout plus `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN` |
 
 `wiki_code_index` stays a local extraction operation. On a server without a checkout it
 returns `source_unavailable` and creates no session and no snapshot; run the indexer on
@@ -568,6 +570,91 @@ unbounded result or load a whole graph implicitly.
 
 The first publication into an empty domain is an ordinary session: status reports
 `missing_snapshot` until the first `finalize` succeeds.
+
+### Scheduled publisher operation
+
+Run publisher on machine holding checkout. For every valid exactly-one `publish_mode`
+(`sqlite`, `postgres`, or `mcp`), use same command:
+
+```bash
+iwiki-mcp code publish --project <checkout> [--json]
+```
+
+`sqlite` publishes to the local target/cache under the configured Git Wiki base at
+`<wiki-base>/.iwiki/code-<domain>.sqlite3`; `postgres` uses existing publisher
+abstraction with configured direct PostgreSQL binding, never raw SQL; and `mcp` uses
+same publication protocol through a local or remote Streamable HTTP endpoint configured
+by `IWIKI_CODE_GRAPH_MCP_URL` and its token. A local endpoint is an HTTP server on same
+machine, never stdio. Local and remote HTTP publication are equivalent targets: choose
+one configured by single `publish_mode`; do not improvise fallback. Only the PostgreSQL
+source cache remains local at `<project>/.iwiki/code-<domain>.sqlite3`, is excluded
+through `.git/info/exclude`, and is not fallback target.
+
+| Output | Meaning | Exit status |
+| --- | --- | --- |
+| Text | Human-readable output format | Either format exits by outcome |
+| `--json` | Compact machine-readable output format | Either format exits by outcome |
+
+Text and `--json` choose only output format. Either format exits `0` when ready, `1`
+for runtime/publication failure, or `2` for usage/configuration failure.
+
+Both text stderr and compact JSON redact secrets and operational location data: no
+password, token, URL, DSN, or checkout path is emitted. `postgres` reads
+`IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional
+`IWIKI_RERANK_MODEL` when configured); `mcp` reads `IWIKI_CODE_GRAPH_MCP_URL` and
+`IWIKI_CODE_GRAPH_MCP_TOKEN` from protected runtime environment.
+
+Install scheduling outside this repository. Save the service as
+`/etc/systemd/system/iwiki-codegraph-publisher.service` and the timer as
+`/etc/systemd/system/iwiki-codegraph-publisher.timer`. Keep the protected environment
+file root-owned mode `0600`; it supplies `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and
+`IWIKI_EMBED_DIMENSIONS` (plus optional `IWIKI_RERANK_MODEL`) without embedding values
+in the unit. The dedicated `iwiki` account needs access to the checkout.
+Mode-specific EnvironmentFile contents: `postgres` uses `IWIKI_DB_PASSWORD`,
+`IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional `IWIKI_RERANK_MODEL`);
+`mcp` uses `IWIKI_CODE_GRAPH_MCP_URL` and `IWIKI_CODE_GRAPH_MCP_TOKEN`; `sqlite` needs
+no mode-specific publication variables.
+
+```ini
+[Unit]
+Description=Publish iwiki code graph
+
+[Service]
+Type=oneshot
+User=iwiki
+WorkingDirectory=/srv/project
+EnvironmentFile=/etc/iwiki/codegraph-publisher.env
+ExecStart=/usr/local/bin/iwiki-mcp code publish --project /srv/project --json
+```
+
+```ini
+[Unit]
+Description=Schedule iwiki code graph publication
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=iwiki-codegraph-publisher.service
+
+[Install]
+WantedBy=timers.target
+```
+
+For any CI provider, make protected secret variables available to job environment and
+run identical command; this documentation intentionally adds no provider workflow file:
+
+```bash
+export IWIKI_DB_PASSWORD
+export IWIKI_EMBED_MODEL
+export IWIKI_EMBED_DIMENSIONS
+export IWIKI_CODE_GRAPH_MCP_URL
+export IWIKI_CODE_GRAPH_MCP_TOKEN
+iwiki-mcp code publish --project <checkout> --json
+```
+
+Before `wiki_code_search` or `wiki_code_context`, verify `wiki_code_status` reports
+`fresh == true`. Use Markdown `wiki_search` separately when only wiki semantics are
+needed. Unified wiki/code search remains future work and is not implemented.
 
 ### SQLite snapshot profiles and commit uncertainty
 

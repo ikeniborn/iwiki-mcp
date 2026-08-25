@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from iwiki_mcp import server
+from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph import context as context_module
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.indexer import CodeGraphIndexer
@@ -29,9 +29,8 @@ def _build_indexer(
     ``iwiki_mcp.codegraph.runtime.CodeGraphRuntime.__init__`` (see
     ``runtime.py`` around the ``CodeGraphIndexer(...)`` call): a
     ``CodeGraphLocationResolver`` resolves the on-disk cache paths, and
-    ``server._code_graph_adapter_factories`` is the production composition
-    root for the per-language adapter factories (also reused directly by
-    ``tests/codegraph/test_server_tools.py::test_adapter_factories_include_typescript``).
+    ``application.code_graph_adapter_factories`` is the production composition
+    root for the per-language adapter factories.
     """
     (cache_base / _DOMAIN).mkdir(parents=True)
     config = CodeGraphConfig(languages=languages, exclude=exclude)
@@ -41,7 +40,7 @@ def _build_indexer(
     factories = (
         adapter_factories
         if adapter_factories is not None
-        else server._code_graph_adapter_factories(_DOMAIN)
+        else application.code_graph_adapter_factories(_DOMAIN)
     )
     return CodeGraphIndexer(
         cache_base=str(cache_base),
@@ -93,7 +92,7 @@ def test_mixed_repo_search_returns_both_languages(tmp_path):
 
 def test_python_only_repo_search_unaffected(tmp_path):
     project_dir = FIXTURES / "python_basic"
-    mixed_factories = server._code_graph_adapter_factories(_DOMAIN)
+    mixed_factories = application.code_graph_adapter_factories(_DOMAIN)
     python_only_factories = {"python": mixed_factories["python"]}
 
     # Build once the way the repository was indexed before TypeScript
