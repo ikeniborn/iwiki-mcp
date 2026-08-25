@@ -9,6 +9,12 @@ from iwiki_mcp.codegraph.publication import PublicationSession, SnapshotHeader
 from iwiki_mcp.storage import GitBinding, PostgresBinding
 
 
+_LOCAL_REVISION = "sha256:" + "c" * 64
+_REMOTE_REVISION = "sha256:" + "d" * 64
+_BASE_REVISION = "sha256:" + "e" * 64
+_PAYLOAD_REVISION = "sha256:" + "f" * 64
+
+
 def _postgres_binding(project: Path) -> PostgresBinding:
     return PostgresBinding(
         host="127.0.0.1",
@@ -58,7 +64,7 @@ def _exported_snapshot():
         unicode_data_version="15.1",
         languages=("python",),
         expected_counts={kind: len(value) for kind, value in rows.items()},
-        graph_payload_revision="sha256:payload",
+        graph_payload_revision=_PAYLOAD_REVISION,
     )
     return header, rows
 
@@ -91,7 +97,7 @@ class RecordingPublisher:
         self.finalize_result = (
             {
                 "state": "ready",
-                "snapshot_revision": "sha256:remote",
+                "snapshot_revision": _REMOTE_REVISION,
             }
             if finalize_result is None
             else finalize_result
@@ -110,7 +116,7 @@ class RecordingPublisher:
         return PublicationSession(
             session_id="session-a",
             lease_expires_at="2026-08-25T00:00:00Z",
-            base_snapshot_revision="sha256:old",
+            base_snapshot_revision=_BASE_REVISION,
             base_markdown_token=0,
             max_batch_rows=1,
             max_batch_bytes=1_000_000,
@@ -533,7 +539,7 @@ def test_finalize_failure_aborts_once(snapshot_fixture):
 def test_non_ready_finalize_result_aborts_once(snapshot_fixture):
     staging = {
         "state": "staging",
-        "snapshot_revision": "sha256:remote",
+        "snapshot_revision": _REMOTE_REVISION,
     }
     publisher = RecordingPublisher(finalize_result=staging)
 
@@ -567,9 +573,39 @@ def test_finalize_ready_without_valid_revision_aborts_once(
         snapshot_fixture.runtime, publisher, snapshot_fixture.config
     )
 
-    assert result == malformed
+    assert result == {"state": "failed", "error": "publication_failed"}
     assert publisher.calls[-1] == ("abort", "session-a")
     assert [call[0] for call in publisher.calls].count("abort") == 1
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        "sha256:remote",
+        "sha256:" + "A" * 64,
+        "sha256:" + "a" * 63,
+        "https://private.invalid/revision",
+        "token-secret\nsha256:" + "a" * 64,
+    ],
+)
+def test_ready_finalize_rejects_noncanonical_revision_and_aborts_once(
+    snapshot_fixture, revision
+):
+    publisher = RecordingPublisher(
+        finalize_result={
+            "state": "ready",
+            "snapshot_revision": revision,
+        }
+    )
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == {"state": "failed", "error": "publication_failed"}
+    assert publisher.calls[-1] == ("abort", "session-a")
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+    assert revision not in repr(result)
 
 
 def test_exact_batch_and_finalize_success_never_aborts(snapshot_fixture):
@@ -577,7 +613,7 @@ def test_exact_batch_and_finalize_success_never_aborts(snapshot_fixture):
         batch_result={"accepted": True},
         finalize_result={
             "state": "ready",
-            "snapshot_revision": "sha256:remote",
+            "snapshot_revision": _REMOTE_REVISION,
         },
     )
 
@@ -587,10 +623,40 @@ def test_exact_batch_and_finalize_success_never_aborts(snapshot_fixture):
 
     assert result == {
         "state": "ready",
-        "snapshot_revision": "sha256:remote",
+        "snapshot_revision": _REMOTE_REVISION,
     }
     assert publisher.calls[-1] == ("finalize", "session-a")
     assert all(call[0] != "abort" for call in publisher.calls)
+
+
+def test_code_runtime_lets_runtime_own_the_single_config_load(
+    tmp_path, monkeypatch
+):
+    source = application.CodeGraphSourceContext(
+        base=str(tmp_path),
+        project_dir=str(tmp_path),
+        primary="docs",
+        wiki_base=None,
+    )
+    calls = []
+
+    class Runtime:
+        def __init__(self, actual_source, *, adapter_factories):
+            calls.append((actual_source, adapter_factories))
+            self.config = CodeGraphConfig(publish_mode="mcp")
+            self._indexer = None
+
+    monkeypatch.setattr(application.codegraph_runtime, "CodeGraphRuntime", Runtime)
+    monkeypatch.setattr(
+        application.codegraph_config,
+        "load_code_graph_config",
+        lambda _project: pytest.fail("application loaded config separately"),
+    )
+
+    runtime = application.code_runtime(source)
+
+    assert runtime.config.publish_mode == "mcp"
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("failure_stage", ["batch", "finalize"])
@@ -655,36 +721,36 @@ def test_abort_failure_never_replaces_raised_exception(snapshot_fixture):
         ),
         (
             "sqlite",
-            {"state": "ready", "revision": "sha256:local"},
+            {"state": "ready", "revision": _LOCAL_REVISION},
             {},
             True,
-            "sha256:local",
-            {"state": "ready", "revision": "sha256:local"},
+            _LOCAL_REVISION,
+            {"state": "ready", "revision": _LOCAL_REVISION},
         ),
         (
             "mcp",
-            {"state": "ready", "revision": "sha256:local"},
-            {"state": "ready", "snapshot_revision": "sha256:remote"},
+            {"state": "ready", "revision": _LOCAL_REVISION},
+            {"state": "ready", "snapshot_revision": _REMOTE_REVISION},
             True,
-            "sha256:remote",
+            _REMOTE_REVISION,
             {
                 "state": "ready",
-                "revision": "sha256:local",
+                "revision": _LOCAL_REVISION,
                 "publication": {
                     "state": "ready",
-                    "snapshot_revision": "sha256:remote",
+                    "snapshot_revision": _REMOTE_REVISION,
                 },
             },
         ),
         (
             "postgres",
-            {"state": "ready", "revision": "sha256:local"},
+            {"state": "ready", "revision": _LOCAL_REVISION},
             {"error": "snapshot_conflict"},
             False,
             None,
             {
                 "state": "ready",
-                "revision": "sha256:local",
+                "revision": _LOCAL_REVISION,
                 "publication": {"error": "snapshot_conflict"},
             },
         ),
@@ -739,7 +805,7 @@ def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
         config = CodeGraphConfig(publish_mode="sqlite")
 
         def index(self, *, force=False, languages=None):
-            return {"state": "ready", "revision": "sha256:local"}
+            return {"state": "ready", "revision": _LOCAL_REVISION}
 
         def export_snapshot(self):
             raise AssertionError("SQLite must not export a snapshot")
@@ -749,11 +815,11 @@ def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
     outcome = application.index_and_publish(_git_binding(tmp_path))
 
     assert outcome.ready
-    assert outcome.snapshot_revision == "sha256:local"
+    assert outcome.snapshot_revision == _LOCAL_REVISION
     assert outcome.publication == {}
     assert outcome.tool_result() == {
         "state": "ready",
-        "revision": "sha256:local",
+        "revision": _LOCAL_REVISION,
     }
 
 
@@ -768,7 +834,7 @@ def test_ready_external_index_publishes_through_selected_target(
 
         def index(self, *, force=False, languages=None):
             calls.append(("index", force, languages))
-            return {"state": "ready", "revision": "sha256:local"}
+            return {"state": "ready", "revision": _LOCAL_REVISION}
 
     runtime = Runtime()
     monkeypatch.setattr(application, "code_runtime", lambda _source: runtime)
@@ -794,5 +860,5 @@ def test_ready_external_index_publishes_through_selected_target(
         ("publisher", "git", "mcp", environment),
     ]
     assert outcome.ready
-    assert outcome.snapshot_revision == "sha256:remote"
+    assert outcome.snapshot_revision == _REMOTE_REVISION
     assert outcome.duration_ms >= 0

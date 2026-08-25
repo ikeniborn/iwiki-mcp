@@ -295,14 +295,18 @@ def _run_code_publish(
             environ=env,
         )
     except _codegraph_application.CodeGraphPublishError as exc:
+        error, exit_code = {
+            "configuration": ("invalid_config", 2),
+            "internal": ("internal_error", 1),
+        }[exc.category]
         _write_code_failure(
             out if args.json else err,
             json_output=args.json,
             publish_mode=exc.publish_mode,
-            error=exc.error,
+            error=error,
             duration_ms=0,
         )
-        return exc.exit_code
+        return exit_code
     except (
         wiki_base.BaseError,
         CodeGraphConfigError,

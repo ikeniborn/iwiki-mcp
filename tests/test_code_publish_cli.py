@@ -5,6 +5,7 @@ from io import StringIO
 import json
 from pathlib import Path
 import subprocess
+import traceback
 
 import psycopg
 import pytest
@@ -14,6 +15,10 @@ from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph.application import CodeGraphPublishOutcome
 from iwiki_mcp.codegraph.config import CodeGraphConfig, CodeGraphConfigError
 from iwiki_mcp.codegraph.mcp_adapter import CodeGraphAdapterError
+
+
+_LOCAL_REVISION = "sha256:" + "c" * 64
+_REMOTE_REVISION = "sha256:" + "d" * 64
 
 
 def _outcome(
@@ -27,11 +32,11 @@ def _outcome(
         index={
             "state": index_state,
             "counts": {"files": 1, "symbols": 2, "relations": 3},
-            **({"revision": "sha256:local"} if mode == "sqlite" else {}),
+            **({"revision": _LOCAL_REVISION} if mode == "sqlite" else {}),
         },
         publication={
             "state": publication_state,
-            "snapshot_revision": "sha256:remote",
+            "snapshot_revision": _REMOTE_REVISION,
         },
         duration_ms=17,
     )
@@ -81,18 +86,18 @@ def _run_post_resolution_failure(
     monkeypatch.setattr(
         application.wiki_base,
         "resolve_storage_binding",
-        lambda _value: binding,
+        lambda _value, *, environ=None: binding,
     )
-    monkeypatch.setattr(
-        application.codegraph_config,
-        "load_code_graph_config",
-        lambda _value: CodeGraphConfig(publish_mode=mode),
-    )
+    monkeypatch.setattr(application, "source_context", lambda _binding: object())
+    monkeypatch.setattr(application, "validate_target", lambda *_args: None)
 
-    def fail(*_args, **_kwargs):
-        raise failure
+    class Runtime:
+        config = CodeGraphConfig(publish_mode=mode)
 
-    monkeypatch.setattr(application, "index_and_publish", fail)
+        def index(self, *, force=False, languages=None):
+            raise failure
+
+    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
     code = admin.run(
         argv,
         stdout=stdout,
@@ -111,7 +116,7 @@ def test_text_success_is_one_concise_stdout_line(monkeypatch):
 
     assert code == 0
     assert stdout == (
-        "code graph ready mode=mcp revision=sha256:remote "
+        f"code graph ready mode=mcp revision={_REMOTE_REVISION} "
         "files=1 symbols=2 relations=3 duration_ms=17\n"
     )
     assert stderr == ""
@@ -127,7 +132,7 @@ def test_json_success_is_exactly_one_compact_object(monkeypatch):
     assert code == 0
     assert stdout == (
         '{"state":"ready","publish_mode":"mcp",'
-        '"snapshot_revision":"sha256:remote",'
+        f'"snapshot_revision":"{_REMOTE_REVISION}",'
         '"counts":{"files":1,"symbols":2,"relations":3},'
         '"duration_ms":17}\n'
     )
@@ -504,13 +509,15 @@ def test_publish_project_resolves_root_and_delegates(monkeypatch, tmp_path):
     monkeypatch.setattr(
         application.wiki_base,
         "resolve_storage_binding",
-        lambda value: calls.append(("binding", value)) or binding,
+        lambda value, *, environ=None: (
+            calls.append(("binding", value, environ)) or binding
+        ),
     )
     monkeypatch.setattr(
         application,
         "index_and_publish",
-        lambda value, *, environ=None: (
-            calls.append(("publish", value, environ)) or outcome
+        lambda value, *, environ=None, redact_failures=False: (
+            calls.append(("publish", value, environ, redact_failures)) or outcome
         ),
     )
 
@@ -518,9 +525,47 @@ def test_publish_project_resolves_root_and_delegates(monkeypatch, tmp_path):
 
     assert result is outcome
     assert calls == [
-        ("binding", str(checkout.absolute())),
-        ("publish", binding, environ),
+        ("binding", str(checkout.absolute()), environ),
+        ("publish", binding, environ, True),
     ]
+
+
+def test_publish_project_redacted_failure_has_no_raw_exception_chain(
+    monkeypatch, tmp_path
+):
+    secret = "sentinel-token://user:password@private.invalid/absolute/path"
+    binding = object()
+    monkeypatch.setattr(
+        application,
+        "checkout_root",
+        lambda _value: tmp_path,
+    )
+    monkeypatch.setattr(
+        application.wiki_base,
+        "resolve_storage_binding",
+        lambda _value, *, environ=None: binding,
+    )
+    monkeypatch.setattr(application, "source_context", lambda _binding: object())
+
+    class Runtime:
+        config = CodeGraphConfig(publish_mode="mcp")
+
+        def index(self, *, force=False, languages=None):
+            raise RuntimeError(secret)
+
+    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+
+    with pytest.raises(application.CodeGraphPublishError) as caught:
+        application.publish_project(str(tmp_path), environ={})
+
+    failure = caught.value
+    rendered = "".join(traceback.format_exception(failure))
+    inspected = rendered + repr(failure) + str(failure)
+    assert secret not in inspected
+    assert failure.__cause__ is None
+    assert failure.__context__ is None
+    assert failure.publish_mode == "mcp"
+    assert failure.category == "internal"
 
 
 def test_checkout_root_rejects_non_root_and_symlink(tmp_path):

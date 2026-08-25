@@ -8,7 +8,7 @@ from pathlib import Path
 import secrets
 import subprocess
 import time
-from typing import Mapping
+from typing import Callable, Mapping
 
 from iwiki_mcp import base as wiki_base
 from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
@@ -30,6 +30,7 @@ from .publication import (
     SnapshotPublisher,
     iter_snapshot_batches,
 )
+from .store import _is_canonical_revision
 
 
 class CodeGraphApplicationError(CodeGraphError):
@@ -42,13 +43,11 @@ class CodeGraphPublishError(CodeGraphError):
     def __init__(
         self,
         publish_mode: str,
-        error: str,
-        exit_code: int,
+        category: str,
     ) -> None:
-        super().__init__(error)
+        super().__init__(category)
         self.publish_mode = publish_mode
-        self.error = error
-        self.exit_code = exit_code
+        self.category = category
 
 
 @dataclass(frozen=True)
@@ -150,6 +149,10 @@ _TYPESCRIPT_PARSER_VERSION = (
 def code_graph_adapter_factories(
     repository_id: str,
     config: codegraph_config.CodeGraphConfig | None = None,
+    *,
+    config_getter: Callable[
+        [], codegraph_config.CodeGraphConfig | None
+    ] | None = None,
 ) -> Mapping[str, codegraph_indexer.AdapterFactory]:
     def create_python_adapter(source_paths):
         return python.PythonAdapter(
@@ -159,12 +162,14 @@ def code_graph_adapter_factories(
         )
 
     def create_typescript_adapter(source_paths):
+        active_config = config_getter() if config_getter is not None else config
         return typescript.TypeScriptAdapter(
             repository_id,
             source_paths,
             parser_version=_TYPESCRIPT_PARSER_VERSION,
             type_boost_enabled=bool(
-                config is not None and config.typescript_type_boost
+                active_config is not None
+                and active_config.typescript_type_boost
             ),
         )
 
@@ -218,14 +223,19 @@ def code_graph_adapter_factories(
 def code_runtime(
     source: CodeGraphSourceContext,
 ) -> codegraph_runtime.CodeGraphRuntime:
-    try:
-        config = codegraph_config.load_code_graph_config(source.project_dir)
-    except codegraph_config.CodeGraphConfigError:
-        config = None
+    runtime_holder: list[codegraph_runtime.CodeGraphRuntime] = []
+
+    def current_config() -> codegraph_config.CodeGraphConfig | None:
+        return runtime_holder[0].config if runtime_holder else None
+
     runtime = codegraph_runtime.CodeGraphRuntime(
         source,
-        adapter_factories=code_graph_adapter_factories(source.primary, config),
+        adapter_factories=code_graph_adapter_factories(
+            source.primary,
+            config_getter=current_config,
+        ),
     )
+    runtime_holder.append(runtime)
     if runtime._indexer is not None and source.wiki_base is not None:
         runtime._indexer.wiki_selector_resolver = linking.WikiSelectorResolver(
             source.wiki_base
@@ -336,12 +346,12 @@ def publish_snapshot(
                 return accepted
         finalized = publisher.finalize(session)
         snapshot_revision = finalized.get("snapshot_revision")
-        if (
-            finalized.get("state") != "ready"
-            or not isinstance(snapshot_revision, str)
-            or not snapshot_revision
-        ):
+        if finalized.get("state") != "ready":
             _abort_preserving_failure(publisher, session)
+            return finalized
+        if not _is_canonical_revision(snapshot_revision):
+            _abort_preserving_failure(publisher, session)
+            return {"state": "failed", "error": "publication_failed"}
         return finalized
     except Exception:
         if session is not None:
@@ -355,19 +365,41 @@ def index_and_publish(
     force: bool = False,
     languages: list[str] | None = None,
     environ: Mapping[str, str] | None = None,
+    redact_failures: bool = False,
 ) -> CodeGraphPublishOutcome:
     started = time.monotonic()
     runtime = code_runtime(source_context(binding))
+    if redact_failures and getattr(runtime, "_configuration_error", False):
+        raise codegraph_config.CodeGraphConfigError(
+            "code graph configuration is invalid"
+        )
     config = runtime.config
     mode = None if config is None else config.publish_mode
-    if config is not None:
-        validate_target(binding, config.publish_mode)
-    indexed = runtime.index(force=force, languages=languages)
-    publication: dict[str, object] = {}
-    if config is not None and indexed.get("state") == "ready":
-        publisher = publisher_for(binding, config, environ=environ)
-        if publisher is not None:
-            publication = publish_snapshot(runtime, publisher, config)
+    failure_category = None
+    try:
+        if config is not None:
+            validate_target(binding, config.publish_mode)
+        indexed = runtime.index(force=force, languages=languages)
+        publication: dict[str, object] = {}
+        if config is not None and indexed.get("state") == "ready":
+            publisher = publisher_for(binding, config, environ=environ)
+            if publisher is not None:
+                publication = publish_snapshot(runtime, publisher, config)
+    except (
+        wiki_base.BaseError,
+        codegraph_config.CodeGraphConfigError,
+        CodeGraphApplicationError,
+        CodeGraphAdapterError,
+    ):
+        if not redact_failures:
+            raise
+        failure_category = "configuration"
+    except Exception:
+        if not redact_failures:
+            raise
+        failure_category = "internal"
+    if failure_category is not None:
+        raise CodeGraphPublishError(mode, failure_category) from None
     return CodeGraphPublishOutcome(
         publish_mode=mode,
         index=dict(indexed),
@@ -403,24 +435,9 @@ def publish_project(
     environ: Mapping[str, str] | None = None,
 ) -> CodeGraphPublishOutcome:
     root = checkout_root(project_dir)
-    binding = wiki_base.resolve_storage_binding(str(root))
-    config = codegraph_config.load_code_graph_config(str(root))
-    try:
-        return index_and_publish(binding, environ=environ)
-    except (
-        wiki_base.BaseError,
-        codegraph_config.CodeGraphConfigError,
-        CodeGraphApplicationError,
-        CodeGraphAdapterError,
-    ) as exc:
-        raise CodeGraphPublishError(
-            config.publish_mode,
-            "invalid_config",
-            2,
-        ) from exc
-    except Exception as exc:
-        raise CodeGraphPublishError(
-            config.publish_mode,
-            "internal_error",
-            1,
-        ) from exc
+    binding = wiki_base.resolve_storage_binding(str(root), environ=environ)
+    return index_and_publish(
+        binding,
+        environ=environ,
+        redact_failures=True,
+    )

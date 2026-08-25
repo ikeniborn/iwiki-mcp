@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from . import ignore
 from .postgres.config import ConfigError as PostgresConfigError
@@ -210,7 +210,10 @@ def merge_read_scope(
 
 
 def _postgres_binding(
-    cfg: dict[str, Any], resolved_project_dir: str, storage: dict[str, Any]
+    cfg: dict[str, Any],
+    resolved_project_dir: str,
+    storage: dict[str, Any],
+    environ: Mapping[str, str] | None = None,
 ) -> PostgresBinding:
     for name in ("read", "write"):
         if not isinstance(cfg.get(name), list) or not cfg[name]:
@@ -239,8 +242,8 @@ def _postgres_binding(
     if not isinstance(iwiki_id, str) or not iwiki_id.strip():
         raise BaseError("storage.iwiki_id is required for local postgres storage")
     try:
-        database = load_postgres_config(storage)
-        models = load_model_config()
+        database = load_postgres_config(storage, environ)
+        models = load_model_config(environ)
     except PostgresConfigError as exc:
         raise BaseError(str(exc)) from exc
     return PostgresBinding(
@@ -263,7 +266,10 @@ def _postgres_binding(
 
 def resolve_storage_binding(
     project_dir: str | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> Binding | PostgresBinding:
+    env = os.environ if environ is None else environ
     resolved_project_dir = resolve_project_dir(project_dir)
     cfg = _load_storage_project_config(resolved_project_dir)
     storage = cfg.get("storage")
@@ -280,11 +286,16 @@ def resolve_storage_binding(
             "iwiki_id", "read", "write", "primary"
         }:
             raise BaseError("code_graph cannot override postgres binding identity")
-        return _postgres_binding(cfg, resolved_project_dir, storage)
+        return _postgres_binding(
+            cfg,
+            resolved_project_dir,
+            storage,
+            environ=env,
+        )
     if storage_type != "git":
         raise BaseError(f"unsupported storage type: {storage_type!r}")
 
-    raw_base = cfg.get("base") or os.environ.get("IWIKI_BASE_DIR", "")
+    raw_base = cfg.get("base") or env.get("IWIKI_BASE_DIR", "")
     wiki_base = str(raw_base).strip()
     if not wiki_base:
         raise BaseError(
