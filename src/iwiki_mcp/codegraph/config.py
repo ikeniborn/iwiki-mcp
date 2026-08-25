@@ -200,31 +200,41 @@ class CodeGraphConfig:
         return cls(**dict(raw))
 
 
-def _environment_overrides() -> dict[str, Any]:
+def _environment_overrides(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    environment = os.environ if environ is None else environ
     overrides: dict[str, Any] = {}
-    if "IWIKI_CODE_GRAPH_ENABLED" in os.environ:
-        raw = os.environ["IWIKI_CODE_GRAPH_ENABLED"]
+    if "IWIKI_CODE_GRAPH_ENABLED" in environment:
+        raw = environment["IWIKI_CODE_GRAPH_ENABLED"]
         if raw not in ("true", "false"):
             raise CodeGraphConfigError("IWIKI_CODE_GRAPH_ENABLED must be true or false")
         overrides["enabled"] = raw == "true"
-    if "IWIKI_CODE_GRAPH_MAX_FILE_BYTES" in os.environ:
+    if "IWIKI_CODE_GRAPH_MAX_FILE_BYTES" in environment:
         try:
-            overrides["max_file_bytes"] = int(os.environ["IWIKI_CODE_GRAPH_MAX_FILE_BYTES"])
+            overrides["max_file_bytes"] = int(
+                environment["IWIKI_CODE_GRAPH_MAX_FILE_BYTES"]
+            )
         except ValueError as exc:
             raise CodeGraphConfigError(
                 "IWIKI_CODE_GRAPH_MAX_FILE_BYTES must be an integer"
             ) from exc
-    if "IWIKI_CODE_GRAPH_MAX_FILES" in os.environ:
+    if "IWIKI_CODE_GRAPH_MAX_FILES" in environment:
         try:
-            overrides["max_total_files"] = int(os.environ["IWIKI_CODE_GRAPH_MAX_FILES"])
+            overrides["max_total_files"] = int(
+                environment["IWIKI_CODE_GRAPH_MAX_FILES"]
+            )
         except ValueError as exc:
             raise CodeGraphConfigError("IWIKI_CODE_GRAPH_MAX_FILES must be an integer") from exc
-    if "IWIKI_CODE_GRAPH_AUTO_REBUILD" in os.environ:
-        overrides["auto_rebuild"] = os.environ["IWIKI_CODE_GRAPH_AUTO_REBUILD"]
+    if "IWIKI_CODE_GRAPH_AUTO_REBUILD" in environment:
+        overrides["auto_rebuild"] = environment["IWIKI_CODE_GRAPH_AUTO_REBUILD"]
     return overrides
 
 
-def load_code_graph_config(project_dir: str) -> CodeGraphConfig:
+def load_code_graph_config(
+    project_dir: str,
+    environ: Mapping[str, str] | None = None,
+) -> CodeGraphConfig:
     """Load project configuration, then apply the supported environment overrides."""
     try:
         project_config = base.load_project_config(project_dir)
@@ -242,5 +252,5 @@ def load_code_graph_config(project_dir: str) -> CodeGraphConfig:
     if not isinstance(raw, Mapping):
         raise CodeGraphConfigError("code_graph must be a table")
     configured = dict(raw)
-    configured.update(_environment_overrides())
+    configured.update(_environment_overrides(environ))
     return CodeGraphConfig.from_mapping(configured)

@@ -302,6 +302,7 @@ class CodeGraphRuntime:
         *,
         adapter_factories: Mapping[str, AdapterFactory] | None = None,
         resolver_version: str = _DEFAULT_RESOLVER_VERSION,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         self.binding = binding
         self.config: CodeGraphConfig | None = None
@@ -323,7 +324,10 @@ class CodeGraphRuntime:
         if binding.primary is None:
             return
         try:
-            self.config = load_code_graph_config(binding.project_dir)
+            self.config = load_code_graph_config(
+                binding.project_dir,
+                environ=environ,
+            )
         except CodeGraphConfigError:
             self._configuration_error = True
             return

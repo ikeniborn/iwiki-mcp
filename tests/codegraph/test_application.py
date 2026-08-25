@@ -259,7 +259,11 @@ def test_invalid_target_fails_before_index_or_publisher_selection(
             calls.append("index")
             return {"state": "ready"}
 
-    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
     monkeypatch.setattr(
         application,
         "publisher_for",
@@ -640,9 +644,11 @@ def test_code_runtime_lets_runtime_own_the_single_config_load(
     )
     calls = []
 
+    environment = {"IWIKI_CODE_GRAPH_ENABLED": "true"}
+
     class Runtime:
-        def __init__(self, actual_source, *, adapter_factories):
-            calls.append((actual_source, adapter_factories))
+        def __init__(self, actual_source, *, adapter_factories, environ=None):
+            calls.append((actual_source, adapter_factories, environ))
             self.config = CodeGraphConfig(publish_mode="mcp")
             self._indexer = None
 
@@ -653,10 +659,11 @@ def test_code_runtime_lets_runtime_own_the_single_config_load(
         lambda _project: pytest.fail("application loaded config separately"),
     )
 
-    runtime = application.code_runtime(source)
+    runtime = application.code_runtime(source, environ=environment)
 
     assert runtime.config.publish_mode == "mcp"
     assert len(calls) == 1
+    assert calls[0][2] is environment
 
 
 @pytest.mark.parametrize("failure_stage", ["batch", "finalize"])
@@ -783,7 +790,11 @@ def test_non_ready_index_never_selects_or_publishes_target(
             calls.append(("index", force, languages))
             return {"state": "failed", "revision": None}
 
-    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
     monkeypatch.setattr(
         application,
         "publisher_for",
@@ -800,14 +811,10 @@ def test_non_ready_index_never_selects_or_publishes_target(
     assert not outcome.ready
 
 
-def test_failed_sqlite_rebuild_preserves_prior_revision_without_export(
+def test_failed_sqlite_index_does_not_export_or_select_publisher(
     tmp_path, monkeypatch
 ):
-    """Runtime recovery coverage proves the active revision remains readable."""
-    prior = application.CodeGraphPublishOutcome(
-        publish_mode="sqlite",
-        index={"state": "ready", "revision": _LOCAL_REVISION},
-    )
+    """Recovery preservation is covered by test_cancellation_before_publication."""
     calls = []
 
     class Runtime:
@@ -820,7 +827,11 @@ def test_failed_sqlite_rebuild_preserves_prior_revision_without_export(
         def export_snapshot(self):
             pytest.fail("failed SQLite rebuild must not export a snapshot")
 
-    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
     monkeypatch.setattr(
         application,
         "publisher_for",
@@ -831,12 +842,11 @@ def test_failed_sqlite_rebuild_preserves_prior_revision_without_export(
 
     outcome = application.index_and_publish(_git_binding(tmp_path))
 
-    assert prior.ready
-    assert prior.snapshot_revision == _LOCAL_REVISION
     assert calls == [("index", False, None)]
     assert outcome.index == {"state": "failed", "code": "rebuild_failed"}
     assert outcome.publication == {}
     assert not outcome.ready
+    assert outcome.snapshot_revision is None
 
 
 def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
@@ -849,7 +859,11 @@ def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
         def export_snapshot(self):
             raise AssertionError("SQLite must not export a snapshot")
 
-    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
 
     outcome = application.index_and_publish(_git_binding(tmp_path))
 
@@ -876,7 +890,13 @@ def test_ready_external_index_publishes_through_selected_target(
             return {"state": "ready", "revision": _LOCAL_REVISION}
 
     runtime = Runtime()
-    monkeypatch.setattr(application, "code_runtime", lambda _source: runtime)
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: (
+            calls.append(("runtime", environ)) or runtime
+        ),
+    )
     monkeypatch.setattr(
         application,
         "publisher_for",
@@ -895,6 +915,7 @@ def test_ready_external_index_publishes_through_selected_target(
     )
 
     assert calls == [
+        ("runtime", environment),
         ("index", True, ["python"]),
         ("publisher", "git", "mcp", environment),
     ]

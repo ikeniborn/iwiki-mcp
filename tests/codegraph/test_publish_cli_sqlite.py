@@ -10,7 +10,7 @@ from iwiki_mcp.codegraph import application
 from .synthetic_wiki import create_sqlite_project
 
 
-def _run_publish(project):
+def _run_publish(project, *, environ=None):
     stdout = StringIO()
     stderr = StringIO()
 
@@ -18,7 +18,7 @@ def _run_publish(project):
         ["code", "publish", "--project", str(project), "--json"],
         stdout=stdout,
         stderr=stderr,
-        environ={},
+        environ={} if environ is None else environ,
     )
 
     return code, stdout.getvalue(), stderr.getvalue()
@@ -26,6 +26,8 @@ def _run_publish(project):
 
 def test_code_publish_cli_reuses_local_sqlite_snapshot(tmp_path, monkeypatch):
     project = create_sqlite_project(tmp_path)
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_ENABLED", "false")
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MAX_FILE_BYTES", "process-sentinel")
     wiki_markdown = (tmp_path / "wiki" / "docs" / "architecture.md")
     before = wiki_markdown.read_bytes()
     monkeypatch.setattr(
@@ -51,9 +53,31 @@ def test_code_publish_cli_reuses_local_sqlite_snapshot(tmp_path, monkeypatch):
     assert wiki_markdown.read_bytes() == before
 
     binding = base.resolve_storage_binding(str(project), environ={})
-    runtime = application.code_runtime(application.source_context(binding))
+    runtime = application.code_runtime(
+        application.source_context(binding),
+        environ={},
+    )
     status = runtime.status()
     results = runtime.search("Service")
 
     assert status["fresh"] is True
     assert results["results"]
+
+
+def test_code_publish_cli_honors_explicit_override_over_process_environment(
+    tmp_path, monkeypatch
+):
+    project = create_sqlite_project(tmp_path)
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_ENABLED", "true")
+
+    code, stdout, stderr = _run_publish(
+        project,
+        environ={"IWIKI_CODE_GRAPH_ENABLED": "false"},
+    )
+    result = json.loads(stdout)
+
+    assert code == 1
+    assert result["state"] == "failed"
+    assert result["publish_mode"] == "sqlite"
+    assert result["error"] == "index_failed"
+    assert stderr == ""

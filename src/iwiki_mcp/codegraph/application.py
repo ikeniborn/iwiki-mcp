@@ -222,6 +222,8 @@ def code_graph_adapter_factories(
 
 def code_runtime(
     source: CodeGraphSourceContext,
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> codegraph_runtime.CodeGraphRuntime:
     runtime_holder: list[codegraph_runtime.CodeGraphRuntime] = []
 
@@ -234,6 +236,7 @@ def code_runtime(
             source.primary,
             config_getter=current_config,
         ),
+        environ=environ,
     )
     runtime_holder.append(runtime)
     if runtime._indexer is not None and source.wiki_base is not None:
@@ -368,7 +371,10 @@ def index_and_publish(
     redact_failures: bool = False,
 ) -> CodeGraphPublishOutcome:
     started = time.monotonic()
-    runtime = code_runtime(source_context(binding))
+    runtime = code_runtime(
+        source_context(binding),
+        environ=environ,
+    )
     if redact_failures and getattr(runtime, "_configuration_error", False):
         raise codegraph_config.CodeGraphConfigError(
             "code graph configuration is invalid"

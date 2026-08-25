@@ -97,7 +97,11 @@ def _run_post_resolution_failure(
         def index(self, *, force=False, languages=None):
             raise failure
 
-    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
     code = admin.run(
         argv,
         stdout=stdout,
@@ -553,7 +557,11 @@ def test_publish_project_redacted_failure_has_no_raw_exception_chain(
         def index(self, *, force=False, languages=None):
             raise RuntimeError(secret)
 
-    monkeypatch.setattr(application, "code_runtime", lambda _source: Runtime())
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
 
     with pytest.raises(application.CodeGraphPublishError) as caught:
         application.publish_project(str(tmp_path), environ={})
