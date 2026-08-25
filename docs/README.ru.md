@@ -577,6 +577,75 @@ checkout, учётные данные или сформированные изд
 Первая публикация в пустой домен — обычная сессия: status сообщает `missing_snapshot`,
 пока первый `finalize` не завершится успешно.
 
+### Плановая публикация оператором
+
+Запускайте publisher на машине, где находится checkout. Для каждого корректного
+ровно-одного `publish_mode` (`sqlite`, `postgres` или `mcp`) используется одна команда:
+
+```bash
+iwiki-mcp code publish --project <checkout> [--json]
+```
+
+`sqlite` публикует в local target/cache `<project>/.iwiki/code-<domain>.sqlite3`;
+`postgres` использует существующую publisher abstraction с настроенным прямым
+PostgreSQL binding, без raw SQL; `mcp` использует тот же publication protocol через
+local stdio либо remote Streamable HTTP. Local и remote HTTP publication эквивалентны:
+выбирайте цель, заданную единственным `publish_mode`, и не придумывайте fallback.
+PostgreSQL source cache остаётся локальным по пути
+`<project>/.iwiki/code-<domain>.sqlite3`, исключается через `.git/info/exclude` и не
+является fallback target.
+
+| Output | Значение | Exit status |
+| --- | --- | --- |
+| Text | Результат публикации для человека | `0`, когда snapshot ready |
+| `--json` | Компактный machine-readable результат | `1` runtime/publication failure; `2` usage/configuration failure |
+
+Text stderr и compact JSON редактируют secrets и operational location data: не выводятся
+password, token, URL, DSN или checkout path. `postgres` читает `IWIKI_DB_PASSWORD`; `mcp`
+читает `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` из защищённого runtime
+environment.
+
+Настраивайте scheduling вне этого репозитория. Protected environment file принадлежит
+платформе; он передаёт нужные variables, а в unit нет их значений:
+
+```ini
+[Unit]
+Description=Publish iwiki code graph
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/project
+EnvironmentFile=/etc/iwiki/codegraph-publisher.env
+ExecStart=/usr/local/bin/iwiki-mcp code publish --project /srv/project --json
+```
+
+```ini
+[Unit]
+Description=Schedule iwiki code graph publication
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Для любого CI provider сделайте protected secret variables доступными окружению job и
+запустите ту же команду; документация намеренно не добавляет provider workflow file:
+
+```bash
+export IWIKI_DB_PASSWORD
+export IWIKI_CODE_GRAPH_MCP_URL
+export IWIKI_CODE_GRAPH_MCP_TOKEN
+iwiki-mcp code publish --project <checkout> --json
+```
+
+Перед `wiki_code_search` или `wiki_code_context` проверьте, что `wiki_code_status`
+сообщает `fresh == true`. Когда нужна только Markdown-семантика wiki, отдельно
+используйте `wiki_search`. Unified wiki/code search остаётся будущей возможностью и не
+реализован.
+
 ### Профили снапшота SQLite и неопределённость коммита
 
 Локальный кэш SQLite имеет ровно два принимаемых профиля схемы v2. Legacy-профиль

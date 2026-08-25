@@ -1,4 +1,5 @@
 import dataclasses
+import subprocess
 from importlib.metadata import requires, version
 from pathlib import Path
 
@@ -76,3 +77,48 @@ def test_docs_describe_hosted_domain_authority_contract():
     normalized_russian = " ".join(russian.split())
     assert "down migration отсутствует" in normalized_russian
     assert "management authority нельзя делегировать" in normalized_russian
+
+
+def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
+    english = Path("README.md").read_text(encoding="utf-8")
+    russian = Path("docs/README.ru.md").read_text(encoding="utf-8")
+    architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
+
+    required = (
+        "iwiki-mcp code publish --project",
+        "--json",
+        "publish_mode",
+        "sqlite",
+        "postgres",
+        "mcp",
+        "IWIKI_DB_PASSWORD",
+        "IWIKI_CODE_GRAPH_MCP_URL",
+        "IWIKI_CODE_GRAPH_MCP_TOKEN",
+        "<project>/.iwiki/code-<domain>.sqlite3",
+    )
+    for text in (english, russian, architecture):
+        assert all(term in text for term in required)
+
+    for text in (english, russian):
+        assert all(
+            term in text
+            for term in (
+                "[Unit]",
+                "[Service]",
+                "[Timer]",
+                "EnvironmentFile",
+                "OnCalendar",
+                "iwiki-mcp code publish --project <checkout> --json",
+            )
+        )
+
+    tracked_paths = set(
+        Path(path)
+        for path in subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+    )
+    prohibited = {
+        Path("deploy/iwiki-codegraph-publisher.service"),
+        Path("deploy/iwiki-codegraph-publisher.timer"),
+        Path(".github/workflows/codegraph-publisher.yml"),
+    }
+    assert not tracked_paths & prohibited
