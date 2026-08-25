@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 593c8d20435c7af2
+  plan_hash: 7c576ee7333cdaa9
   last_run: 2026-08-26
   phases:
     structure: { status: passed }
@@ -35,7 +35,10 @@ chain:
 - Registration requires a separate HUMAN CHECKPOINT after evidence exists. Plan approval does not approve registration.
 - The unified request remains read-only. Mutation spies must observe zero Wiki writes, code indexing, publication, schema changes, or alternate-backend calls.
 - Existing `wiki_search`, `wiki_code_search`, and `wiki_code_context` schemas and payloads remain unchanged.
-- Each repository commit receives one patch version bump in `pyproject.toml`, starting from plan version `0.7.183`.
+- Each repository commit receives one patch version bump and keeps the established
+  version quartet identical: `pyproject.toml`, `src/iwiki_mcp/__init__.py`, the
+  `test_code_graph_benchmark_package_version` expectation in `tests/test_package.py`,
+  and the editable package entry in `uv.lock`. The corrected plan version is `0.7.184`.
 
 ## Requirement coverage
 
@@ -75,6 +78,9 @@ eval-only candidate
 - Create: `eval/unified_search/candidate.py`
 - Create: `tests/eval/test_unified_search_candidate.py`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Write failing response-assembly tests**
 
@@ -177,10 +183,10 @@ Expected: all selected tests pass; public registry still excludes the candidate.
 
 - [ ] **Step 4: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.184`.
+Set all four version metadata locations to `0.7.185`.
 
 ```bash
-git add eval/unified_search/__init__.py eval/unified_search/candidate.py tests/eval/test_unified_search_candidate.py pyproject.toml
+git add eval/unified_search/__init__.py eval/unified_search/candidate.py tests/eval/test_unified_search_candidate.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "test(search): add unregistered unified candidate"
 ```
 
@@ -193,6 +199,9 @@ git commit -m "test(search): add unregistered unified candidate"
 - Create: `eval/unified_search/agent.py`
 - Create: `tests/eval/test_unified_search_agent.py`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Define the exact scenario catalog**
 
@@ -261,10 +270,10 @@ Expected: all selected tests pass.
 
 - [ ] **Step 5: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.185`.
+Set all four version metadata locations to `0.7.186`.
 
 ```bash
-git add eval/unified_search/fixtures.py eval/unified_search/agent.py tests/eval/test_unified_search_agent.py pyproject.toml
+git add eval/unified_search/fixtures.py eval/unified_search/agent.py tests/eval/test_unified_search_agent.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "test(search): add unified workflow harness"
 ```
 
@@ -279,6 +288,9 @@ git commit -m "test(search): add unified workflow harness"
 - Create: `tests/eval/test_unified_search_runner.py`
 - Create: `tests/eval/test_unified_search_report.py`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Write failing raw-parity and decision tests**
 
@@ -364,10 +376,10 @@ Expected: all selected tests pass; tool list omits `wiki_unified_search`.
 
 - [ ] **Step 6: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.186`.
+Set all four version metadata locations to `0.7.187`.
 
 ```bash
-git add eval/unified_search/runner.py eval/unified_search/report.py eval/unified_search/__main__.py tests/eval/test_unified_search_runner.py tests/eval/test_unified_search_report.py pyproject.toml
+git add eval/unified_search/runner.py eval/unified_search/report.py eval/unified_search/__main__.py tests/eval/test_unified_search_runner.py tests/eval/test_unified_search_report.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "test(search): add unified comparison gate"
 ```
 
@@ -379,6 +391,9 @@ git commit -m "test(search): add unified comparison gate"
 - Create: `docs/superpowers/evidence/wiki-unified-search-evaluation.json`
 - Create: `docs/superpowers/evidence/wiki-unified-search-evaluation.md`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Verify the clean deterministic evaluation surface**
 
@@ -411,10 +426,10 @@ matches.
 
 - [ ] **Step 4: Bump version and commit evidence**
 
-Set `pyproject.toml` version to `0.7.187`.
+Set all four version metadata locations to `0.7.188`.
 
 ```bash
-git add docs/superpowers/evidence/wiki-unified-search-evaluation.json docs/superpowers/evidence/wiki-unified-search-evaluation.md pyproject.toml
+git add docs/superpowers/evidence/wiki-unified-search-evaluation.json docs/superpowers/evidence/wiki-unified-search-evaluation.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "docs(eval): record unified search evidence"
 ```
 
@@ -439,6 +454,9 @@ and run count, and report links. Ask the user to accept recorded `implement` or
 - Modify: `docs/README.ru.md`
 - Modify: `docs/architecture.md`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 - Wiki update: existing bound page describing daily agent search workflow
 
 - [ ] **Step 1: Document the retained specialized workflow**
@@ -459,12 +477,12 @@ PostgreSQL.
 
 - [ ] **Step 4: Bump version, verify, and commit**
 
-Set `pyproject.toml` version to `0.7.188`.
+Set all four version metadata locations to `0.7.189`.
 
 ```bash
 uv run pytest -q tests/test_package.py tests/codegraph/test_server_tools.py tests/eval
 uv run pytest -q
-git add README.md docs/README.ru.md docs/architecture.md pyproject.toml
+git add README.md docs/README.ru.md docs/architecture.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "docs(search): retain specialized wiki code workflow"
 ```
 
@@ -480,10 +498,14 @@ Then continue directly to Task 9 result reconciliation, skipping Tasks 5–8.
 **Files:**
 - Modify: `src/iwiki_mcp/server.py`
 - Create: `src/iwiki_mcp/unified_search.py`
+- Modify: `eval/unified_search/candidate.py`
 - Create: `tests/test_unified_search.py`
 - Modify: `tests/test_server_search.py`
 - Modify: `tests/codegraph/test_server_tools.py`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Capture specialized-handler behavior before refactoring**
 
@@ -539,10 +561,10 @@ Expected: all selected tests pass; specialized payloads unchanged.
 
 - [ ] **Step 6: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.188`.
+Set all four version metadata locations to `0.7.189`.
 
 ```bash
-git add src/iwiki_mcp/server.py src/iwiki_mcp/unified_search.py eval/unified_search/candidate.py tests/test_unified_search.py tests/test_server_search.py tests/codegraph/test_server_tools.py tests/eval/test_unified_search_candidate.py pyproject.toml
+git add src/iwiki_mcp/server.py src/iwiki_mcp/unified_search.py eval/unified_search/candidate.py tests/test_unified_search.py tests/test_server_search.py tests/codegraph/test_server_tools.py tests/eval/test_unified_search_candidate.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "refactor(search): share wiki code read primitives"
 ```
 
@@ -557,6 +579,8 @@ git commit -m "refactor(search): share wiki code read primitives"
 - Modify: `tests/test_package.py`
 - Modify: `tests/test_mcp_smoke.py`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Write failing exact-schema tests**
 
@@ -597,10 +621,10 @@ unchanged.
 
 - [ ] **Step 5: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.189`.
+Set all four version metadata locations to `0.7.190`.
 
 ```bash
-git add src/iwiki_mcp/server.py tests/test_unified_search.py tests/codegraph/test_server_tools.py tests/test_package.py tests/test_mcp_smoke.py pyproject.toml
+git add src/iwiki_mcp/server.py tests/test_unified_search.py tests/codegraph/test_server_tools.py tests/test_package.py tests/test_mcp_smoke.py pyproject.toml src/iwiki_mcp/__init__.py uv.lock
 git commit -m "feat(search): add unified search tool"
 ```
 
@@ -616,6 +640,9 @@ git commit -m "feat(search): add unified search tool"
 - Modify: `tests/postgres/test_http.py`
 - Modify: `tests/postgres/test_tool_matrix.py`
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `tests/test_package.py`
+- Modify: `uv.lock`
 
 - [ ] **Step 1: Write failing combined-authorization tests**
 
@@ -654,10 +681,10 @@ calls preserve backend-specific states without fallback.
 
 - [ ] **Step 6: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.190`.
+Set all four version metadata locations to `0.7.191`.
 
 ```bash
-git add src/iwiki_mcp/http.py tests/test_unified_search.py tests/codegraph/test_runtime.py tests/postgres/test_code_graph_reader.py tests/postgres/test_http.py tests/postgres/test_tool_matrix.py pyproject.toml
+git add src/iwiki_mcp/http.py tests/test_unified_search.py tests/codegraph/test_runtime.py tests/postgres/test_code_graph_reader.py tests/postgres/test_http.py tests/postgres/test_tool_matrix.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "feat(http): authorize unified search reads"
 ```
 
@@ -673,6 +700,8 @@ git commit -m "feat(http): authorize unified search reads"
 - Modify: `tests/test_package.py`
 - Modify: `tests/test_resources.py` only if `resources.py` changes
 - Modify: `pyproject.toml`
+- Modify: `src/iwiki_mcp/__init__.py`
+- Modify: `uv.lock`
 - Wiki update: existing tool-surface and daily-workflow pages in bound `iwiki-mcp` domain
 
 - [ ] **Step 1: Document request, response, and selection boundary**
@@ -704,10 +733,10 @@ Expected: docs tests pass; all three docs contain contract/state guidance.
 
 - [ ] **Step 5: Bump version and commit**
 
-Set `pyproject.toml` version to `0.7.191`.
+Set all four version metadata locations to `0.7.192`.
 
 ```bash
-git add README.md docs/README.ru.md docs/architecture.md src/iwiki_mcp/resources.py tests/test_package.py tests/test_resources.py pyproject.toml
+git add README.md docs/README.ru.md docs/architecture.md src/iwiki_mcp/resources.py tests/test_package.py tests/test_resources.py pyproject.toml src/iwiki_mcp/__init__.py uv.lock
 git commit -m "docs(search): document unified wiki code search"
 ```
 
