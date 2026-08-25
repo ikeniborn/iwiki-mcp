@@ -84,41 +84,97 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
     russian = Path("docs/README.ru.md").read_text(encoding="utf-8")
     architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
 
-    required = (
-        "iwiki-mcp code publish --project",
-        "--json",
-        "publish_mode",
-        "sqlite",
-        "postgres",
-        "mcp",
-        "IWIKI_DB_PASSWORD",
-        "IWIKI_CODE_GRAPH_MCP_URL",
-        "IWIKI_CODE_GRAPH_MCP_TOKEN",
-        "<project>/.iwiki/code-<domain>.sqlite3",
-    )
+    command = "iwiki-mcp code publish --project <checkout> [--json]"
     for text in (english, russian, architecture):
-        assert all(term in text for term in required)
+        assert command in text
+        assert "<project>/.iwiki/code-<domain>.sqlite3" in text
+        assert ".git/info/exclude" in text
+        assert "IWIKI_DB_PASSWORD" in text
+        assert "IWIKI_CODE_GRAPH_MCP_URL" in text
+        assert "IWIKI_CODE_GRAPH_MCP_TOKEN" in text
+        assert "wiki_code_status" in text
+        assert "fresh == true" in text
+        assert "wiki_code_search" in text
+        assert "wiki_code_context" in text
+        assert "wiki_search" in text
 
-    for text in (english, russian):
-        assert all(
-            term in text
-            for term in (
-                "[Unit]",
-                "[Service]",
-                "[Timer]",
-                "EnvironmentFile",
-                "OnCalendar",
-                "iwiki-mcp code publish --project <checkout> --json",
-            )
+    normalized_english = " ".join(english.split())
+    normalized_russian = " ".join(russian.split())
+    normalized_architecture = " ".join(architecture.split())
+
+    assert all(
+        term in normalized_english
+        for term in (
+            "exactly-one `publish_mode`",
+            "do not improvise fallback",
+            "`0` when ready",
+            "`1` runtime/publication failure",
+            "`2` usage/configuration failure",
+            "no password, token, URL, DSN, or checkout path",
+            "existing publisher abstraction",
+            "local stdio",
+            "remote Streamable HTTP",
+            "not implemented",
         )
-
-    tracked_paths = set(
-        Path(path)
-        for path in subprocess.check_output(["git", "ls-files"], text=True).splitlines()
     )
-    prohibited = {
-        Path("deploy/iwiki-codegraph-publisher.service"),
-        Path("deploy/iwiki-codegraph-publisher.timer"),
-        Path(".github/workflows/codegraph-publisher.yml"),
-    }
-    assert not tracked_paths & prohibited
+    assert all(
+        term in normalized_russian
+        for term in (
+            "ровно-одного `publish_mode`",
+            "не придумывайте fallback",
+            "`0`, когда snapshot ready",
+            "`1` runtime/publication failure",
+            "`2` usage/configuration failure",
+            "password, token, URL, DSN или checkout path",
+            "publisher abstraction",
+            "local stdio либо remote Streamable HTTP",
+            "не реализован",
+        )
+    )
+    assert all(
+        term in normalized_architecture
+        for term in (
+            "`publish_mode` selects exactly one",
+            "no adapter fallback",
+            "`0` for ready, `1` for runtime/publication failure, and `2` for usage/configuration",
+            "redact password, token, URL, DSN, and paths",
+            "publisher abstraction",
+            "local stdio or remote HTTP",
+            "wiki/code search is future capability, not an implemented interface",
+        )
+    )
+
+    systemd_contract = (
+        "[Unit]",
+        "Description=Publish iwiki code graph",
+        "[Service]",
+        "Type=oneshot",
+        "WorkingDirectory=/srv/project",
+        "EnvironmentFile=/etc/iwiki/codegraph-publisher.env",
+        "ExecStart=/usr/local/bin/iwiki-mcp code publish --project /srv/project --json",
+        "Description=Schedule iwiki code graph publication",
+        "[Timer]",
+        "OnCalendar=hourly",
+        "Persistent=true",
+        "[Install]",
+        "WantedBy=timers.target",
+        "export IWIKI_DB_PASSWORD",
+        "export IWIKI_CODE_GRAPH_MCP_URL",
+        "export IWIKI_CODE_GRAPH_MCP_TOKEN",
+        "iwiki-mcp code publish --project <checkout> --json",
+    )
+    for text in (english, russian):
+        assert all(term in text for term in systemd_contract)
+
+    tracked_artifacts = frozenset(
+        path
+        for path in (
+            Path(value)
+            for value in subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+        )
+        if path.suffix in {".service", ".timer"}
+        or path.parts[:2] == (".github", "workflows")
+    )
+    # Baseline from f1e5eb0; keep known pre-existing deployment files explicit.
+    allowed_preexisting_artifacts = frozenset()
+    assert tracked_artifacts == allowed_preexisting_artifacts
