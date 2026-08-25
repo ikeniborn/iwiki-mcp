@@ -589,24 +589,35 @@ iwiki-mcp code publish --project <checkout> [--json]
 `sqlite` публикует в local target/cache `<project>/.iwiki/code-<domain>.sqlite3`;
 `postgres` использует существующую publisher abstraction с настроенным прямым
 PostgreSQL binding, без raw SQL; `mcp` использует тот же publication protocol через
-local stdio либо remote Streamable HTTP. Local и remote HTTP publication эквивалентны:
-выбирайте цель, заданную единственным `publish_mode`, и не придумывайте fallback.
+local или remote Streamable HTTP endpoint, заданный `IWIKI_CODE_GRAPH_MCP_URL` и token.
+Local endpoint — это HTTP server на той же машине, никогда не stdio. Local и remote
+HTTP publication эквивалентны: выбирайте цель, заданную единственным `publish_mode`, и
+не придумывайте fallback.
 PostgreSQL source cache остаётся локальным по пути
 `<project>/.iwiki/code-<domain>.sqlite3`, исключается через `.git/info/exclude` и не
 является fallback target.
 
 | Output | Значение | Exit status |
 | --- | --- | --- |
-| Text | Результат публикации для человека | `0`, когда snapshot ready |
-| `--json` | Компактный machine-readable результат | `1` runtime/publication failure; `2` usage/configuration failure |
+| Text | Human-readable output format | Оба формата завершаются по outcome |
+| `--json` | Compact machine-readable output format | Оба формата завершаются по outcome |
+
+Text и `--json` выбирают только output format. Оба формата завершаются с `0`, когда
+snapshot ready, с `1` при runtime/publication failure или с `2` при
+usage/configuration failure.
 
 Text stderr и compact JSON редактируют secrets и operational location data: не выводятся
 password, token, URL, DSN или checkout path. `postgres` читает `IWIKI_DB_PASSWORD`; `mcp`
 читает `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` из защищённого runtime
-environment.
+environment. Для `postgres` также требуются `IWIKI_EMBED_MODEL` и
+`IWIKI_EMBED_DIMENSIONS`; `IWIKI_RERANK_MODEL` optional, когда он настроен.
 
-Настраивайте scheduling вне этого репозитория. Protected environment file принадлежит
-платформе; он передаёт нужные variables, а в unit нет их значений:
+Настраивайте scheduling вне этого репозитория. Сохраните service как
+`/etc/systemd/system/iwiki-codegraph-publisher.service`, timer как
+`/etc/systemd/system/iwiki-codegraph-publisher.timer`. Protected environment file
+должен быть root-owned mode `0600`; он передаёт `IWIKI_DB_PASSWORD`,
+`IWIKI_EMBED_MODEL`, `IWIKI_EMBED_DIMENSIONS` и optional `IWIKI_RERANK_MODEL` без
+значений в unit. Dedicated account `iwiki` должен иметь доступ к checkout.
 
 ```ini
 [Unit]
@@ -614,6 +625,7 @@ Description=Publish iwiki code graph
 
 [Service]
 Type=oneshot
+User=iwiki
 WorkingDirectory=/srv/project
 EnvironmentFile=/etc/iwiki/codegraph-publisher.env
 ExecStart=/usr/local/bin/iwiki-mcp code publish --project /srv/project --json
@@ -626,6 +638,7 @@ Description=Schedule iwiki code graph publication
 [Timer]
 OnCalendar=hourly
 Persistent=true
+Unit=iwiki-codegraph-publisher.service
 
 [Install]
 WantedBy=timers.target
@@ -636,6 +649,8 @@ WantedBy=timers.target
 
 ```bash
 export IWIKI_DB_PASSWORD
+export IWIKI_EMBED_MODEL
+export IWIKI_EMBED_DIMENSIONS
 export IWIKI_CODE_GRAPH_MCP_URL
 export IWIKI_CODE_GRAPH_MCP_TOKEN
 iwiki-mcp code publish --project <checkout> --json

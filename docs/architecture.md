@@ -160,16 +160,20 @@ selected by `.iwiki.toml`). The source cache for PostgreSQL publishing is local 
 `<project>/.iwiki/code-<domain>.sqlite3` and is excluded through `.git/info/exclude`;
 the SQLite target/cache has the same project-local location. `publish_mode` selects
 exactly one `sqlite`, direct `postgres`, or `mcp` target. PostgreSQL uses the publisher
-abstraction rather than raw SQL. MCP publication can address local stdio or remote HTTP;
-those targets are equivalent, and no adapter fallback is allowed.
+abstraction rather than raw SQL. MCP publication uses a local or remote Streamable HTTP
+endpoint configured by `IWIKI_CODE_GRAPH_MCP_URL` and its token; local means an HTTP
+server on the publisher's machine, never stdio. Those targets are equivalent, and no
+adapter fallback is allowed.
 
-The mode-specific environment boundary admits `IWIKI_DB_PASSWORD` for `postgres` and
-`IWIKI_CODE_GRAPH_MCP_URL` plus `IWIKI_CODE_GRAPH_MCP_TOKEN` for `mcp`. Configuration
-and invocation enforce checkout-root safety; diagnostics redact password, token, URL,
-DSN, and paths in text stderr and compact `--json`. Publication activates a complete
-snapshot atomically, so reads see either old or new graph, never staging rows. CLI exits
-`0` for ready, `1` for runtime/publication failure, and `2` for usage/configuration
-failure.
+The mode-specific environment boundary admits `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`,
+and `IWIKI_EMBED_DIMENSIONS` for `postgres`, plus optional `IWIKI_RERANK_MODEL` when
+configured; `mcp` uses `IWIKI_CODE_GRAPH_MCP_URL` and
+`IWIKI_CODE_GRAPH_MCP_TOKEN`. Configuration and invocation enforce checkout-root safety;
+diagnostics redact password, token, URL, DSN, and paths in text stderr and compact
+`--json`. Text and compact `--json` are output formats: either format exits `0` for a
+ready snapshot, `1` for runtime/publication failure, or `2` for usage/configuration
+failure. Publication activates a complete snapshot atomically, so reads see either old
+or new graph, never staging rows.
 
 Operators run or schedule the CLI only on a machine holding checkout. Before
 `wiki_code_search` or `wiki_code_context`, they verify `wiki_code_status` reports

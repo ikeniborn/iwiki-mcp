@@ -580,24 +580,34 @@ iwiki-mcp code publish --project <checkout> [--json]
 
 `sqlite` publishes to local target/cache at `<project>/.iwiki/code-<domain>.sqlite3`;
 `postgres` uses existing publisher abstraction with configured direct PostgreSQL binding,
-never raw SQL; and `mcp` uses same publication protocol through local stdio or remote
-Streamable HTTP. Local and remote HTTP publication are equivalent targets: choose one
-configured by single `publish_mode`; do not improvise fallback. PostgreSQL source cache
+never raw SQL; and `mcp` uses same publication protocol through a local or remote
+Streamable HTTP endpoint configured by `IWIKI_CODE_GRAPH_MCP_URL` and its token. A local
+endpoint is an HTTP server on same machine, never stdio. Local and remote HTTP
+publication are equivalent targets: choose one configured by single `publish_mode`; do
+not improvise fallback. PostgreSQL source cache
 remains local at `<project>/.iwiki/code-<domain>.sqlite3`, is excluded through
 `.git/info/exclude`, and is not fallback target.
 
 | Output | Meaning | Exit status |
 | --- | --- | --- |
-| Text | Human-readable publication result | `0` when ready |
-| `--json` | Compact machine-readable result | `1` runtime/publication failure; `2` usage/configuration failure |
+| Text | Human-readable output format | Either format exits by outcome |
+| `--json` | Compact machine-readable output format | Either format exits by outcome |
+
+Text and `--json` choose only output format. Either format exits `0` when ready, `1`
+for runtime/publication failure, or `2` for usage/configuration failure.
 
 Both text stderr and compact JSON redact secrets and operational location data: no
 password, token, URL, DSN, or checkout path is emitted. `postgres` reads
-`IWIKI_DB_PASSWORD`; `mcp` reads `IWIKI_CODE_GRAPH_MCP_URL` and
+`IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional
+`IWIKI_RERANK_MODEL` when configured); `mcp` reads `IWIKI_CODE_GRAPH_MCP_URL` and
 `IWIKI_CODE_GRAPH_MCP_TOKEN` from protected runtime environment.
 
-Install scheduling outside this repository. Keep protected environment file owned by
-platform; it supplies required variables and contains no values in unit:
+Install scheduling outside this repository. Save the service as
+`/etc/systemd/system/iwiki-codegraph-publisher.service` and the timer as
+`/etc/systemd/system/iwiki-codegraph-publisher.timer`. Keep the protected environment
+file root-owned mode `0600`; it supplies `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and
+`IWIKI_EMBED_DIMENSIONS` (plus optional `IWIKI_RERANK_MODEL`) without embedding values
+in the unit. The dedicated `iwiki` account needs access to the checkout.
 
 ```ini
 [Unit]
@@ -605,6 +615,7 @@ Description=Publish iwiki code graph
 
 [Service]
 Type=oneshot
+User=iwiki
 WorkingDirectory=/srv/project
 EnvironmentFile=/etc/iwiki/codegraph-publisher.env
 ExecStart=/usr/local/bin/iwiki-mcp code publish --project /srv/project --json
@@ -617,6 +628,7 @@ Description=Schedule iwiki code graph publication
 [Timer]
 OnCalendar=hourly
 Persistent=true
+Unit=iwiki-codegraph-publisher.service
 
 [Install]
 WantedBy=timers.target
@@ -627,6 +639,8 @@ run identical command; this documentation intentionally adds no provider workflo
 
 ```bash
 export IWIKI_DB_PASSWORD
+export IWIKI_EMBED_MODEL
+export IWIKI_EMBED_DIMENSIONS
 export IWIKI_CODE_GRAPH_MCP_URL
 export IWIKI_CODE_GRAPH_MCP_TOKEN
 iwiki-mcp code publish --project <checkout> --json

@@ -90,6 +90,8 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         assert "<project>/.iwiki/code-<domain>.sqlite3" in text
         assert ".git/info/exclude" in text
         assert "IWIKI_DB_PASSWORD" in text
+        assert "IWIKI_EMBED_MODEL" in text
+        assert "IWIKI_EMBED_DIMENSIONS" in text
         assert "IWIKI_CODE_GRAPH_MCP_URL" in text
         assert "IWIKI_CODE_GRAPH_MCP_TOKEN" in text
         assert "wiki_code_status" in text
@@ -108,11 +110,10 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "exactly-one `publish_mode`",
             "do not improvise fallback",
             "`0` when ready",
-            "`1` runtime/publication failure",
-            "`2` usage/configuration failure",
+            "`1` for runtime/publication failure",
+            "`2` for usage/configuration failure",
             "no password, token, URL, DSN, or checkout path",
             "existing publisher abstraction",
-            "local stdio",
             "remote Streamable HTTP",
             "not implemented",
         )
@@ -123,11 +124,10 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "ровно-одного `publish_mode`",
             "не придумывайте fallback",
             "`0`, когда snapshot ready",
-            "`1` runtime/publication failure",
-            "`2` usage/configuration failure",
+            "`1` при runtime/publication failure",
+            "`2` при usage/configuration failure",
             "password, token, URL, DSN или checkout path",
             "publisher abstraction",
-            "local stdio либо remote Streamable HTTP",
             "не реализован",
         )
     )
@@ -136,10 +136,11 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         for term in (
             "`publish_mode` selects exactly one",
             "no adapter fallback",
-            "`0` for ready, `1` for runtime/publication failure, and `2` for usage/configuration",
+            "`0` for a ready snapshot, `1` for runtime/publication failure, "
+            "or `2` for usage/configuration",
             "redact password, token, URL, DSN, and paths",
             "publisher abstraction",
-            "local stdio or remote HTTP",
+            "local or remote Streamable HTTP",
             "wiki/code search is future capability, not an implemented interface",
         )
     )
@@ -149,6 +150,7 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         "Description=Publish iwiki code graph",
         "[Service]",
         "Type=oneshot",
+        "User=iwiki",
         "WorkingDirectory=/srv/project",
         "EnvironmentFile=/etc/iwiki/codegraph-publisher.env",
         "ExecStart=/usr/local/bin/iwiki-mcp code publish --project /srv/project --json",
@@ -156,9 +158,12 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         "[Timer]",
         "OnCalendar=hourly",
         "Persistent=true",
+        "Unit=iwiki-codegraph-publisher.service",
         "[Install]",
         "WantedBy=timers.target",
         "export IWIKI_DB_PASSWORD",
+        "export IWIKI_EMBED_MODEL",
+        "export IWIKI_EMBED_DIMENSIONS",
         "export IWIKI_CODE_GRAPH_MCP_URL",
         "export IWIKI_CODE_GRAPH_MCP_TOKEN",
         "iwiki-mcp code publish --project <checkout> --json",
@@ -195,6 +200,13 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "`sqlite` publishes to",
             "`postgres` uses existing publisher abstraction",
             "`mcp` uses same publication protocol",
+            "local or remote Streamable HTTP endpoint",
+            "Text and `--json` choose only output format",
+            "Either format exits `0`",
+            "/etc/systemd/system/iwiki-codegraph-publisher.service",
+            "/etc/systemd/system/iwiki-codegraph-publisher.timer",
+            "root-owned mode `0600`",
+            "access to the checkout",
         )
     )
     assert all(
@@ -203,6 +215,13 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "`sqlite` публикует в",
             "`postgres` использует существующую publisher abstraction",
             "`mcp` использует тот же publication protocol",
+            "local или remote Streamable HTTP endpoint",
+            "Text и `--json` выбирают только output format",
+            "Оба формата завершаются с `0`",
+            "/etc/systemd/system/iwiki-codegraph-publisher.service",
+            "/etc/systemd/system/iwiki-codegraph-publisher.timer",
+            "root-owned mode `0600`",
+            "доступ к checkout",
         )
     )
     assert all(
@@ -212,9 +231,20 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
             "direct `postgres`",
             "`mcp` target",
             "PostgreSQL uses the publisher abstraction",
-            "MCP publication can address local stdio or remote HTTP",
+            "MCP publication uses a local or remote Streamable HTTP endpoint",
+            "Text and compact `--json` are output formats",
+            "either format exits `0`",
         )
     )
+    for section in (
+        normalized_english_publisher,
+        normalized_russian_publisher,
+        normalized_architecture_publisher,
+    ):
+        assert "local stdio" not in section.lower()
+    assert "never stdio" in normalized_english_publisher.lower()
+    assert "никогда не stdio" in normalized_russian_publisher.lower()
+    assert "never stdio" in normalized_architecture_publisher.lower()
 
     tracked_artifacts = frozenset(
         path
