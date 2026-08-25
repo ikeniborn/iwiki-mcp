@@ -62,7 +62,9 @@ def seed_code_lint(seed_runtime, monkeypatch):
         server.base, "resolve_binding", lambda: seed_runtime.binding
     )
     monkeypatch.setattr(
-        server, "_code_runtime", lambda _binding: seed_runtime.runtime
+        server._codegraph_application,
+        "code_runtime",
+        lambda _source: seed_runtime.runtime,
     )
     return seed_runtime, page
 
@@ -104,7 +106,11 @@ def test_unavailable_code_graph_does_not_block_ordinary_lint(
     )
     missing = seed_runtime.with_state("missing", auto_rebuild="off")
     monkeypatch.setattr(server.base, "resolve_binding", lambda: missing.binding)
-    monkeypatch.setattr(server, "_code_runtime", lambda _binding: missing.runtime)
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "code_runtime",
+        lambda _source: missing.runtime,
+    )
 
     report = server.wiki_lint("project")["reports"]["project"]
 
