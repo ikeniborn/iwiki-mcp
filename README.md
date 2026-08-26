@@ -654,7 +654,10 @@ iwiki-mcp code publish --project <checkout> --json
 
 Before `wiki_code_search` or `wiki_code_context`, verify `wiki_code_status` reports
 `fresh == true`. Use Markdown `wiki_search` separately when only wiki semantics are
-needed. Unified wiki/code search remains future work and is not implemented.
+needed. The supported daily sequence is `wiki_search → wiki_code_search → wiki_code_context`.
+Unified wiki/code search is future work and not implemented. `wiki_unified_search` remains intentionally unregistered because
+quality evidence returned `do_not_implement`; see the [evaluation report](docs/superpowers/evidence/wiki-unified-search-evaluation.md)
+and [machine-readable evidence](docs/superpowers/evidence/wiki-unified-search-evaluation.json).
 
 ### SQLite snapshot profiles and commit uncertainty
 
