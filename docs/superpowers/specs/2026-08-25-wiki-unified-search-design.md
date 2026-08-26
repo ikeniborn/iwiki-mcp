@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: d282d70b4b47dee9
+  spec_hash: 5d72c47542b224d6
   last_run: 2026-08-26
   phases:
     structure: { status: passed }
@@ -25,18 +25,21 @@ service over the existing Wiki and code primitives, not a new retrieval or ranki
 engine. It keeps Wiki results, code results, confirmed Wiki associations, and bounded
 code context in separate response blocks and never compares their scores.
 
-The production tool is registered only after an unregistered prototype proves both a
-coordination gain and an end-to-end workflow-quality gain. Raw Wiki and code retrieval
-must remain a strict non-regression against an ideally executed specialized baseline.
-If workflow-quality evidence does not justify the additional public contract, the
-outcome is `do not implement` and no new MCP tool is registered.
+The production tool is registered only after an unregistered prototype proves raw
+parity and a statistically supported end-to-end workflow-quality gain. Raw Wiki and
+code retrieval must remain a strict non-regression against an ideally executed
+specialized baseline. Client-visible tool calls are reported as secondary evidence but
+do not authorize or block registration. If quality evidence does not justify the
+additional public contract, the outcome is `do not implement` and no new MCP tool is
+registered.
 
 ## User Tasks
 
 - **T-001 — Necessity decision:** determine with evidence whether the unified tool adds
   material value or merely duplicates the existing specialized workflow.
-- **T-002 — Coordination and quality:** require both fewer client-visible MCP calls and
-  better end-to-end agent workflow correctness; call reduction alone is insufficient.
+- **T-002 — Quality-first coordination:** require statistically higher aggregate agent
+  workflow correctness and per-scenario non-inferiority; report client-visible MCP calls
+  as secondary evidence only.
 - **T-003 — Search controls:** expose the full union of read-search filters from
   `wiki_search` and `wiki_code_search`, while excluding Wiki write intent.
 - **T-004 — Automatic context:** expand depth-one context for at most the first three
@@ -57,6 +60,8 @@ outcome is `do not implement` and no new MCP tool is registered.
 - Preserve local SQLite, PostgreSQL, and hosted MCP behavior where their existing
   source-availability contracts overlap.
 - Produce an evidence-backed `implement` or `do not implement` decision.
+- Prevent provider transport noise or stochastic workflow failures from leaving a
+  completed comparison indefinitely blocked.
 
 ## Non-Goals
 
@@ -264,16 +269,43 @@ records the model identifier, prompts, run count, tool traces, outputs, and scor
 
 Metrics are:
 
-- client-visible MCP call count;
 - task completion correctness against expected facts;
 - incorrect or missing seed selection;
 - omitted required context calls;
 - incorrect claims under missing, stale, or revision-changed graph state; and
-- loss of required Wiki or code facts.
+- loss of required Wiki or code facts; and
+- client-visible MCP call count as a secondary, non-gating metric.
 
-The candidate passes the workflow gate only when it completes more scenarios correctly,
-uses fewer client-visible calls for meaning-plus-code tasks, and regresses no individual
-scenario. A smaller call count without higher workflow correctness fails the gate.
+The candidate passes the workflow gate only when aggregate correctness is statistically
+higher and every scenario is statistically non-inferior. Lower call count without that
+quality evidence does not affect the decision.
+
+### Quality-first paired protocol
+
+The runner collects exactly 20 transport-valid baseline/candidate pairs for each of the
+17 fixed scenarios. Both arms in a pair receive the same model, prompt, fixture facts,
+scope, rubric, and round budget. Their execution order alternates by attempt number to
+limit provider drift. A `failed_transport` result in either arm excludes the whole pair
+from scoring and triggers another paired attempt. Every other agent-loop failure,
+including response-shape, tool-envelope, argument, cycle, maximum-round, tool-output,
+and final-JSON failures, remains in the pair and scores as incorrect.
+
+Each scenario allows at most 30 paired attempts. Failure to collect 20 transport-valid
+pairs within that cap terminates as `do_not_implement` because stable positive evidence
+was not established. It does not leave the completed experiment in `blocked`.
+
+For each scored pair, correctness difference is candidate success minus baseline
+success and therefore belongs to `{-1, 0, 1}`. A deterministic paired bootstrap uses
+50,000 resamples and fixed seed `20260826`. The one-sided 95% lower confidence bound is
+computed separately for each scenario and for the equally weighted aggregate of all
+340 scored pairs. The quality gate requires:
+
+- every per-scenario lower bound to be greater than `-0.15`; and
+- the aggregate lower bound to be greater than `0`.
+
+Raw parity remains a deterministic hard gate. Tool-call means and their paired
+difference are reported for scored pairs, while excluded-attempt calls and reasons are
+reported separately. Neither call count nor wall-clock latency is a registration gate.
 
 ### Scenario set
 
@@ -293,13 +325,18 @@ The fixed scenario set includes:
 
 ### Registration decision
 
-Both raw parity and workflow quality must pass. The evidence-backed decision is then
-presented at a HUMAN CHECKPOINT:
+Both raw parity and the quality-first workflow gate must pass. The evidence-backed
+decision is then presented at a HUMAN CHECKPOINT:
 
 - `implement` authorizes production module creation, FastMCP registration, hosted
   authorization wiring, public documentation, and registry tests; or
 - `do not implement` leaves the existing specialized surface unchanged and records why
   the additional public contract was rejected.
+
+Missing configuration or a provider that cannot start any tool-calling attempt returns
+`blocked` before sampling. Once sampling starts, every bounded terminal result is either
+`implement` or `do_not_implement`; invalid workflow behavior is quality evidence, and an
+exhausted transport-attempt cap is conservative negative evidence.
 
 ## Requirements
 
@@ -323,8 +360,9 @@ presented at a HUMAN CHECKPOINT:
 - **R-008 — Authorization and backend isolation (T-005, T-007):** require primary
   code-read authority plus requested Wiki-domain grants and never fall back between
   backends. **Acceptance:** AC-008.
-- **R-009 — Coordination plus workflow quality (T-001, T-002):** require fewer calls,
-  higher workflow correctness, raw parity, and no per-scenario regression.
+- **R-009 — Quality-first workflow decision (T-001, T-002):** require raw parity,
+  statistically higher aggregate workflow correctness, and per-scenario statistical
+  non-inferiority; report calls as secondary evidence.
   **Acceptance:** AC-009.
 - **R-010 — Existing contract preservation (T-005, T-006):** specialized tool schemas,
   responses, tests, and standalone benchmark gates remain unchanged.
@@ -353,8 +391,10 @@ presented at a HUMAN CHECKPOINT:
 - **AC-008:** hosted tests reject missing primary read authority, unauthorized requested
   domains, `iwiki_id`, and singular `domain`; authorized mixed reads succeed without
   backend fallback.
-- **AC-009:** the recorded comparison has raw parity, fewer client-visible calls, higher
-  aggregate workflow correctness, and no scenario regression.
+- **AC-009:** the recorded comparison contains 20 transport-valid pairs for every
+  scenario within 30 attempts, passes raw parity, has an aggregate one-sided 95% paired
+  bootstrap lower bound above zero, and has every per-scenario lower bound above
+  `-0.15`; tool-call metrics are present but non-gating.
 - **AC-010:** failed evaluation leaves the real MCP registry and public docs without the
   tool; passed evaluation still requires explicit registration approval.
 - **AC-011:** focused specialized-tool tests, package/tool registry tests, standalone
@@ -374,15 +414,21 @@ The plan must map requirements to focused tests in the existing test layout:
 - the existing full suite through `uv run pytest -q`.
 
 The comparative report is a versioned evidence artifact. It names the selected decision,
-scenario outcomes, raw parity result, workflow metrics, tool traces, registration state,
-and any blocker. Tests that do not require an external agent remain deterministic. Agent
-workflow runs record their exact environment instead of being presented as deterministic
-unit tests.
+all paired attempts, excluded-pair reasons, scenario success rates and confidence bounds,
+aggregate confidence bounds, raw parity, workflow failures, secondary tool-call metrics,
+tool traces, registration state, and any preflight blocker. Tests that do not require an
+external agent remain deterministic. Agent workflow runs record their exact environment
+instead of being presented as deterministic unit tests.
 
 ## Risks and Mitigations
 
-- **Agent-evaluation variance:** record exact prompts, model, runs, traces, and per-case
-  scores; do not infer quality from one favorable example.
+- **Agent-evaluation variance:** use 20 paired samples per scenario, deterministic paired
+  bootstrap bounds, alternating arm order, and exact prompts, model, attempts, traces,
+  and per-case scores; do not infer quality from one favorable example.
+- **Provider transport variance:** discard and retry the entire affected pair, cap each
+  scenario at 30 attempts, and treat cap exhaustion as conservative `do_not_implement`.
+- **Invalid agent behavior hidden as missing evidence:** count every non-transport
+  workflow failure as incorrect instead of blocking the completed experiment.
 - **Public API duplication:** registration requires workflow-quality evidence; otherwise
   stop at `do not implement`.
 - **Search/context activation race:** require matching revisions and fail soft only the
@@ -419,9 +465,11 @@ with the retained specialized composition and the evidence-backed rationale.
 The design is complete when the comparative evidence yields one of two observable
 outcomes:
 
-- **Implement:** raw parity passes, workflow correctness improves without scenario
-  regression, client-visible calls decrease, registration is explicitly approved, the
-  production contract and documentation match this design, and all required checks pass.
-- **Do not implement:** evidence fails to prove material workflow value, no public tool or
-  unused production module remains, the specialized workflow stays unchanged, and the
-  decision and evidence are documented.
+- **Implement:** raw parity passes, all scenarios meet the paired non-inferiority margin,
+  aggregate correctness has a positive one-sided 95% lower bound, registration is
+  explicitly approved, the production contract and documentation match this design,
+  and all required checks pass.
+- **Do not implement:** the bounded experiment fails raw parity, exhausts its transport
+  attempt cap, fails aggregate superiority, or fails any scenario non-inferiority bound;
+  no public tool or unused production module remains, the specialized workflow stays
+  unchanged, and the decision and evidence are documented.

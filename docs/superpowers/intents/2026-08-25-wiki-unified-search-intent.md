@@ -1,7 +1,7 @@
 ---
 review:
-  intent_hash: f3956868a7f363e9
-  last_run: 2026-08-25
+  intent_hash: 011f4b049ee269a0
+  last_run: 2026-08-26
   phases:
     structure: { status: passed }
     completeness: { status: passed }
@@ -22,19 +22,20 @@ workflow:
 
 Determine with comparative evidence whether a public `wiki_unified_search` tool adds
 material value beyond the existing `wiki_search` -> `wiki_code_search` ->
-`wiki_code_context` workflow. Implement the new tool only if it reduces coordination
-cost for common meaning-plus-code questions without duplicating the specialized tools,
-weakening result quality, or hiding freshness and ranking boundaries. If the evidence
-does not justify another public tool, retain the current surface and record that decision.
+`wiki_code_context` workflow. Implement the new tool only if it demonstrates
+statistically higher aggregate workflow correctness and per-scenario non-inferiority
+without duplicating the specialized tools or hiding freshness and ranking boundaries.
+Record coordination cost as secondary evidence. If quality evidence does not justify
+another public tool, retain the current surface and record that decision.
 
 ## Desired Outcomes
 
 - A representative evaluation compares the current specialized-tool workflow with the
   candidate unified workflow and produces an explicit, evidence-backed `implement` or
   `do not implement` decision.
-- An accepted unified contract reduces tool calls for common meaning-plus-code queries
-  while preserving the completeness and relevance available from the same bounded
-  specialized calls.
+- An accepted unified contract improves aggregate correctness for common
+  meaning-plus-code queries while remaining statistically non-inferior for every fixed
+  scenario; tool-call count remains secondary evidence.
 - When code data is stale, missing, or unavailable, the unified workflow still returns
   Wiki results and explicitly reports the degraded code or association state.
 - Existing `wiki_search`, `wiki_code_search`, and `wiki_code_context` remain available
@@ -48,8 +49,8 @@ does not justify another public tool, retain the current surface and record that
 - Existing Wiki and code search/context schemas, results, ranking rules, and focused
   regression suites do not degrade.
 - Existing standalone-tool latency remains within its current benchmark gates; the
-  evaluation records candidate end-to-end latency and tool-call count against the
-  equivalent specialized baseline.
+  comparative decision records client-visible tool-call count as a secondary metric and
+  excludes provider wall-clock latency from its registration gate.
 - A code-graph failure or stale snapshot blocks zero valid Wiki results.
 - The candidate never loses a bounded baseline result merely because Markdown scores
   and code ranks use different scales.
@@ -61,7 +62,8 @@ does not justify another public tool, retain the current surface and record that
 - Interacts with: `server.py`, Markdown retrieval and reranking, code-graph search and
   bounded context, SQLite and PostgreSQL readers, hosted MCP authorization, agent
   workflows, code-to-Wiki associations, publication freshness, and evaluation fixtures.
-- Priority trade-off: trust first, then workflow simplicity, then speed and cost.
+- Priority trade-off: workflow quality and trust first, then workflow simplicity, then
+  client-visible tool-call count; provider latency is not a registration metric.
 
 ## Constraints
 
@@ -108,9 +110,10 @@ does not justify another public tool, retain the current surface and record that
 
 ## Stop Rules
 
-- Halt if: comparative evaluation shows no material coordination or quality benefit, or
-  the candidate can work only by violating a hard constraint.
-- Escalate if: result completeness, latency, backend parity, or freshness behavior
+- Halt if: comparative evaluation fails to establish aggregate quality improvement or
+  per-scenario non-inferiority, or the candidate can work only by violating a hard
+  constraint.
+- Escalate if: result completeness, backend parity, or freshness behavior
   creates an unresolved trade-off that changes the proposed public contract.
 - Done when: comparative evaluation records an evidence-backed `implement` or
   `do not implement` decision; for `implement`, the approved contract passes real
