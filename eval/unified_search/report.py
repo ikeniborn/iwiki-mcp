@@ -46,7 +46,43 @@ def render_markdown(evidence: dict[str, Any]) -> str:
              "| Case | Backend | Passed |", "| --- | --- | --- |"]
     for row in sorted(value.get("raw_parity", []), key=lambda item: item.get("case_id", "")):
         lines.append(f"| {row.get('case_id', '')} | {row.get('backend', '')} | {row.get('passed', False)} |")
-    lines.extend(["", "## Evaluation", "", "```json", json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False), "```", ""])
+    sampling = value.get("sampling", {})
+    attempt_counts = value.get("attempt_counts", {})
+    included = attempt_counts.get("included_pairs", 0)
+    excluded = attempt_counts.get("excluded_pairs", 0)
+    quality = value.get("quality", {})
+    calls = value.get("tool_calls", {})
+    excluded_calls = calls.get("excluded_attempt_calls", {})
+    per_case = value.get("aggregates", {}).get("per_case", {})
+    preflight = value.get("preflight", {})
+    protocol = value.get("protocol", {})
+    gates = value.get("gates", {})
+    lines.extend(["", "## Preflight", "", f"- Preflight: {preflight.get('status', 'not_run')} (available={preflight.get('available', False)})", "",
+                  "## Protocol", "", f"- Protocol required pairs: {protocol.get('required_pairs', 0)}",
+                  f"- Protocol max attempts: {protocol.get('max_attempts', 0)}", f"- Protocol case IDs: {json.dumps(protocol.get('expected_case_ids', []), ensure_ascii=False)}", "",
+                  "## Decision gates", "", f"```json\n{json.dumps(gates, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False)}\n```", "",
+                  "## Sampling", "", f"- Required pairs: {sampling.get('required_pairs', 0)}",
+                  f"- Max attempts: {sampling.get('max_attempts', 0)}", f"- Total attempts: {attempt_counts.get('total_attempts', 0)}",
+                  f"- Included pairs: {included}", f"- Excluded pairs: {excluded}",
+                  f"- Exclusion reasons: {json.dumps(attempt_counts.get('exclusion_reasons', {}), sort_keys=True, ensure_ascii=False)}", f"- Complete: {sampling.get('complete', False)}",
+                  f"- Attempt cap exhausted: {sampling.get('attempt_cap_exhausted', False)}", "",
+                  "## Quality", "", f"- Aggregate lower bound: {quality.get('aggregate_lower_bound', 0.0)}",
+                  f"- Scenario lower bounds: {json.dumps(quality.get('scenario_lower_bounds', {}), sort_keys=True, ensure_ascii=False, allow_nan=False)}",
+                  f"- Non-inferiority margin: {quality.get('non_inferiority_margin', 0.0)}", f"- Bootstrap samples: {quality.get('bootstrap_samples', 0)}",
+                  f"- Bootstrap seed: {quality.get('bootstrap_seed', 0)}", "",
+                  "## Scenario success rates", ""])
+    for case_id, rates in sorted(per_case.items()):
+        lines.append(f"- {case_id}: candidate {rates.get('candidate_success_rate', 0.0)}; baseline {rates.get('baseline_success_rate', 0.0)}; bound {quality.get('scenario_lower_bounds', {}).get(case_id, 0.0)}")
+    lines.extend(["", "## Per-case attempts", ""])
+    for case_id, counts in sorted(attempt_counts.get("per_case", {}).items()):
+        lines.append(f"- {case_id}: total {counts.get('total_attempts', 0)}; included {counts.get('included_pairs', 0)}; excluded {counts.get('excluded_pairs', 0)}; reasons {json.dumps(counts.get('exclusion_reasons', {}), sort_keys=True, ensure_ascii=False)}")
+    lines.extend(["",
+                  "## Failure counts", "", f"```json\n{json.dumps(value.get('workflow_failure_counts', {}), sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False)}\n```", "",
+                  "## Secondary tool calls", "", f"- Included-pair candidate mean: {calls.get('included_pair_candidate_mean', 0.0)}",
+                  f"- Included-pair baseline mean: {calls.get('included_pair_baseline_mean', 0.0)}", f"- Included-pair mean difference: {calls.get('included_pair_mean_difference', 0.0)}",
+                  f"- Excluded-attempt calls: {json.dumps(excluded_calls, sort_keys=True, ensure_ascii=False, allow_nan=False)}", "",
+                  "## Registry state", "", f"- Public registry contains tool: {value.get('public_registry_contains_tool', False)}", "",
+                  "## Evaluation", "", "```json", json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False), "```", ""])
     return "\n".join(lines)
 
 
