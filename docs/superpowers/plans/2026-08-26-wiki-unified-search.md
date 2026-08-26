@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 7c576ee7333cdaa9
+  plan_hash: ade355c4e8c6112f
   last_run: 2026-08-26
   phases:
     structure: { status: passed }
@@ -17,9 +17,9 @@ chain:
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Decide with recorded comparative evidence whether one `wiki_unified_search` call materially improves agent workflow quality; register the public tool only after both strict gates pass and a human approves registration.
+**Goal:** Decide with bounded paired evidence whether `wiki_unified_search` materially improves agent workflow correctness; register the public tool only after raw parity, aggregate superiority, per-scenario non-inferiority, and human approval.
 
-**Architecture:** Build an eval-only callback composition first, using the existing Wiki search, code search, and code context results without touching the FastMCP registry. Compare it with the ideal specialized workflow under deterministic raw-parity fixtures and repeated model-driven tasks. A failed gate ends in a documented `do_not_implement` result. A passed and human-approved gate permits a small production orchestrator over shared server primitives, combined hosted authorization, public schema registration, and documentation.
+**Architecture:** Keep the delivered eval-only callback composition unregistered and compare it with the specialized workflow through 20 transport-valid paired runs for every fixed scenario. Transport failures retry the whole pair; all other workflow failures score incorrect. Deterministic paired bootstrap bounds make correctness the registration gate, while tool-call count remains secondary evidence. A failed bounded gate ends in documented `do_not_implement`; a passed and human-approved gate permits the existing conditional production path.
 
 **Tech Stack:** Python 3.10+, FastMCP, httpx OpenAI-compatible chat completions, existing SQLite/PostgreSQL code-graph readers, pytest/pytest-asyncio, standard-library dataclasses/JSON/hashlib, uv.
 
@@ -30,21 +30,25 @@ chain:
 - The evaluation candidate stays under `eval/unified_search/`; it never imports or mutates the module-level FastMCP registry.
 - Candidate and baseline consume the same captured specialized responses. No independent retrieval, reranking, score fusion, or global ordering is added.
 - Raw parity is exact for Wiki, code, associations, and context. Degradation metadata may only describe the same source state.
-- Workflow success requires all four conditions: raw parity passes; candidate completes more scenarios correctly in aggregate; no individual scenario regresses; meaning-plus-code tasks use fewer client-visible calls.
-- Missing credentials, unavailable model, malformed model output, or incomplete scenario execution produces `blocked`, never `implement`.
+- Workflow success requires raw parity, an aggregate one-sided 95% paired-bootstrap lower bound above zero, and every scenario lower bound above `-0.15`.
+- Client-visible tool calls are recorded as secondary evidence. Call count and provider wall-clock latency do not authorize or block registration.
+- A `failed_transport` arm excludes and retries its whole pair. Every other agent-loop failure scores incorrect. Sampling stops after 20 included pairs or 30 attempts per scenario.
+- Missing configuration or a provider that cannot start tool calling produces preflight `blocked`. Every bounded sampling outcome is `implement` or `do_not_implement`.
 - Registration requires a separate HUMAN CHECKPOINT after evidence exists. Plan approval does not approve registration.
 - The unified request remains read-only. Mutation spies must observe zero Wiki writes, code indexing, publication, schema changes, or alternate-backend calls.
 - Existing `wiki_search`, `wiki_code_search`, and `wiki_code_context` schemas and payloads remain unchanged.
 - Each repository commit receives one patch version bump and keeps the established
   version quartet identical: `pyproject.toml`, `src/iwiki_mcp/__init__.py`, the
   `test_code_graph_benchmark_package_version` expectation in `tests/test_package.py`,
-  and the editable package entry in `uv.lock`. The corrected plan version is `0.7.184`.
+  and the editable package entry in `uv.lock`. Delivered foundation versions are
+  `0.7.185`–`0.7.187`; approved intent/spec revision is `0.7.188`; this revised plan is
+  `0.7.189`; active implementation starts at `0.7.190`.
 
 ## Requirement coverage
 
 | Spec requirement | Plan task | Verification evidence |
 | --- | --- | --- |
-| R-001 evidence before registration | 1–4 | eval-only import/registry assertion, versioned decision report, checkpoint |
+| R-001 evidence before registration | 1–4 | eval-only import/registry assertion, bounded paired report, checkpoint |
 | R-002 shared primitives | 5 | specialized and unified handler spy tests over identical private primitives |
 | R-003 full read-search filter union | 6 | exact generated FastMCP input-schema assertion |
 | R-004 separate result blocks | 1, 6 | pure assembly and public handler response tests |
@@ -52,7 +56,7 @@ chain:
 | R-006 revision coherence | 1, 7 | mismatch fixture preserves search blocks and clears dependent blocks |
 | R-007 independent fail-soft branches | 1, 7 | full degradation-table parameterization |
 | R-008 authorization/backend isolation | 7 | hosted grants, forbidden fields, backend-call spies |
-| R-009 coordination plus workflow quality | 2–4 | repeated comparative metrics and strict decision function |
+| R-009 quality-first workflow decision | 2–4 | paired attempts, bootstrap bounds, bounded decision function |
 | R-010 existing contract preservation | 5, 6, 9 | specialized schema/payload snapshots and full suite |
 | R-011 read-only behavior | 1, 3, 7, 9 | mutation/storage spies and unchanged snapshot revisions |
 
@@ -61,8 +65,9 @@ chain:
 ```text
 eval-only candidate
   -> deterministic raw parity
-  -> repeated agent workflow comparison
-  -> strict decision report
+  -> 20 transport-valid pairs per scenario (30-attempt cap)
+  -> paired correctness bounds; tool calls reported secondarily
+  -> bounded decision report
      -> do_not_implement: document retained specialized workflow; no production files
      -> implement: HUMAN CHECKPOINT
         -> approved: production primitives, registration, auth, docs
@@ -232,8 +237,9 @@ def test_agent_arms_share_prompt_model_and_rubric(fake_chat):
 ```
 
 Also cover unknown tool name, repeated tool call, max-round exhaustion, malformed JSON,
-transport error, and secret sentinel redaction. All yield a scored failed/blocked run;
-none yields an implementation decision.
+transport error, and secret sentinel redaction. The harness records exact statuses and
+never decides registration; Task 3 excludes transport-failed pairs and scores every
+other failed status as incorrect.
 
 Run:
 
@@ -277,85 +283,179 @@ git add eval/unified_search/fixtures.py eval/unified_search/agent.py tests/eval/
 git commit -m "test(search): add unified workflow harness"
 ```
 
-## Task 3: Implement comparison, strict decision, reports, and CLI
+## Task 3: Revise comparison to paired quality gates
 
 **Closes:** R-001, R-009, R-011; AC-001, AC-009, AC-010, AC-012.
 
 **Files:**
-- Create: `eval/unified_search/runner.py`
-- Create: `eval/unified_search/report.py`
-- Create: `eval/unified_search/__main__.py`
-- Create: `tests/eval/test_unified_search_runner.py`
-- Create: `tests/eval/test_unified_search_report.py`
+- Modify: `eval/unified_search/runner.py`
+- Modify: `eval/unified_search/report.py`
+- Modify: `eval/unified_search/__main__.py`
+- Modify: `tests/eval/test_unified_search_runner.py`
+- Modify: `tests/eval/test_unified_search_report.py`
 - Modify: `pyproject.toml`
 - Modify: `src/iwiki_mcp/__init__.py`
 - Modify: `tests/test_package.py`
 - Modify: `uv.lock`
 
-- [ ] **Step 1: Write failing raw-parity and decision tests**
+- [ ] **Step 1: Write failing paired-scheduler tests**
 
-Parameterize all storage/transport-shaped fixtures. Compare exact source blocks with the
-ideal specialized assembly. Exercise each decision condition independently.
+Replace the old non-OK-blocks-evidence test with exact pair semantics. Use scripted
+`AgentRun` values so no external model is required.
 
-```python
-@pytest.mark.parametrize("backend", ["sqlite", "postgres", "hosted"])
-def test_raw_parity_uses_exact_specialized_blocks(backend):
-    report = compare_raw_case(case_for_backend(backend))
-    assert report.wiki_equal
-    assert report.code_equal
-    assert report.context_equal
-    assert report.associations_equal
-
-
-def test_decision_requires_every_gate():
-    assert decide(raw_parity=True, higher_correctness=True,
-                  no_regressions=True, fewer_calls=True) == "implement"
-    assert decide(raw_parity=True, higher_correctness=False,
-                  no_regressions=True, fewer_calls=True) == "do_not_implement"
-```
-
-Add cases proving incomplete/blocked runs return `blocked`, not `do_not_implement` or
-`implement`.
-
-- [ ] **Step 2: Implement aggregate scoring and decision rules**
-
-Run each scenario in both arms for an explicit `--runs` count of at least three. Report
-per-scenario correctness, missing/extra facts, graph-state correctness, seed mistakes,
-omitted context calls, stale/missing/revision claim errors, client-visible calls, and
-required-fact loss. Aggregate correctness is successful runs divided by total expected
-runs, not best-of-N.
-
-`implement` requires:
+First make the existing `_agent_run` helper mirror production success semantics:
 
 ```python
-raw_parity_passed = all(case.passed for case in raw_cases)
-higher_correctness = candidate.correct_runs > baseline.correct_runs
-no_regressions = all(c.successes >= b.successes for b, c in paired_cases)
-fewer_calls = candidate.mean_calls_for_coordinated < baseline.mean_calls_for_coordinated
+success = status == "ok" and graph_state == case.expected_graph_state and not missing
+return AgentRun(
+    arm, case.id, "test", "env", "prompt", "schema", trace,
+    {"fact_ids": list(case.expected_fact_ids), "graph_state": graph_state},
+    case.expected_fact_ids, case.expected_graph_state, tuple(missing), (),
+    graph_state == case.expected_graph_state, success, status, 2,
+    [] if messages is None else messages, tool_names,
+)
 ```
 
-- [ ] **Step 3: Implement sanitized deterministic reports**
+```python
+def test_transport_failure_retries_whole_pair(monkeypatch):
+    scripted = iter([
+        _agent_run(case, arm="baseline", status="failed_transport"),
+        _agent_run(case, arm="candidate", status="ok"),
+        _agent_run(case, arm="candidate", status="ok"),
+        _agent_run(case, arm="baseline", status="ok"),
+    ])
+    monkeypatch.setattr(runner, "run_agent_case", lambda *args, **kwargs: next(scripted))
+    result = runner.run_workflow([case], runs=1, model="fixture",
+                                 post_factory=lambda *_: object())
+    assert result["attempts"][0]["included"] is False
+    assert result["attempts"][1]["included"] is True
+    assert [row["arm"] for row in result["attempts"][1]["rows"]] == ["candidate", "baseline"]
 
-Write JSON and Markdown through atomic temp-file replacement. Reports contain decision,
-gate booleans, blocker, environment hashes, run count, case matrix, aggregate metrics,
-bounded tool traces, and explicit `public_registry_contains_tool: false`. Sort keys and
-case IDs for reproducible diffs. Apply the repository report sanitizer to prompts,
-headers, URLs, filesystem paths, exception strings, and credential-like keys.
 
-- [ ] **Step 4: Implement CLI validation**
+def test_non_transport_failures_are_included_as_incorrect(monkeypatch):
+    monkeypatch.setattr(runner, "run_agent_case",
+                        lambda case, arm, *args, **kwargs:
+                        _agent_run(case, arm=arm, status="failed_max_rounds"))
+    result = runner.run_workflow([case], runs=1, model="fixture",
+                                 post_factory=lambda *_: object())
+    assert result["attempts"][0]["included"] is True
+    assert all(row["success"] is False for row in result["run_results"])
+```
 
-CLI arguments:
+Also prove: 20 included pairs are collected per scenario; attempts stop at 30; arm order
+alternates; one-arm transport failure excludes both rows; an exhausted cap is recorded
+without `blocked`; seed spies and bounded traces still work.
+
+Run:
+
+```bash
+uv run pytest -q tests/eval/test_unified_search_runner.py
+```
+
+Expected: new tests fail against the three-run flat scheduler.
+
+- [ ] **Step 2: Write failing paired-bootstrap and decision tests**
+
+Define deterministic tests around a pure helper and the final decision surface:
+
+```python
+def _complete_evidence(*, aggregate_lower_bound=0.01,
+                       scenario_lower_bounds=None,
+                       candidate_mean_calls=2.0,
+                       baseline_mean_calls=3.0):
+    bounds = {case.id: 0.0 for case in FIXED_CASES}
+    bounds.update(scenario_lower_bounds or {})
+    return {
+        "model": "test",
+        "transport_configured": True,
+        "public_registry_contains_tool": False,
+        "raw_parity": [{"passed": True}],
+        "sampling": {
+            "required_pairs": 20,
+            "max_attempts": 30,
+            "complete": True,
+            "attempt_cap_exhausted": False,
+        },
+        "quality": {
+            "aggregate_lower_bound": aggregate_lower_bound,
+            "scenario_lower_bounds": bounds,
+            "non_inferiority_margin": 0.15,
+        },
+        "tool_calls": {
+            "candidate_mean": candidate_mean_calls,
+            "baseline_mean": baseline_mean_calls,
+        },
+    }
+
+
+def test_paired_lower_bound_is_deterministic():
+    differences = [1] * 12 + [0] * 8
+    first = paired_lower_bound(differences, samples=50_000, seed=20260826)
+    assert first == paired_lower_bound(differences, samples=50_000, seed=20260826)
+    assert first > 0
+
+
+def test_quality_gate_ignores_call_count():
+    evidence = _complete_evidence(aggregate_lower_bound=0.01,
+                                  scenario_lower_bounds={case.id: -0.14 for case in FIXED_CASES},
+                                  candidate_mean_calls=9.0, baseline_mean_calls=2.0)
+    assert decide(evidence)["decision"] == "implement"
+
+
+def test_any_scenario_below_margin_is_do_not_implement():
+    evidence = _complete_evidence(aggregate_lower_bound=0.01,
+                                  scenario_lower_bounds={"wiki-only": -0.151})
+    assert decide(evidence)["decision"] == "do_not_implement"
+```
+
+Add boundary tests for equality at `-0.15` and `0`, raw-parity failure, registry already
+containing the tool, attempt-cap exhaustion, missing config preflight, and provider
+tool-calling preflight failure. Only the two preflight cases return `blocked`.
+
+- [ ] **Step 3: Implement the minimum paired scheduler and statistics**
+
+Keep constants private and fixed:
+
+```python
+REQUIRED_PAIRS = 20
+MAX_ATTEMPTS = 30
+NON_INFERIORITY_MARGIN = 0.15
+BOOTSTRAP_SAMPLES = 50_000
+BOOTSTRAP_SEED = 20260826
+```
+
+For each sorted case, run both arms for every attempt even when the first arm has a
+transport failure. Alternate order between `("baseline", "candidate")` and
+`("candidate", "baseline")`. Store every sanitized attempt. Include neither row when
+either status is `failed_transport`; otherwise include both rows and score each existing
+`success` boolean. Stop after 20 included pairs or 30 attempts.
+
+Implement `paired_lower_bound(differences, *, samples, seed)` with a local
+`random.Random` instance, paired resampling with replacement, sorted bootstrap means,
+and the 5th-percentile value. Derive stable per-scenario RNG seeds from the fixed seed
+plus case ID; use the fixed seed for the aggregate 340-pair vector. Report per-scenario
+and aggregate lower bounds, success rates, included/excluded counts, workflow-failure
+counts, and secondary included-pair tool-call means.
+
+- [ ] **Step 4: Revise reports and CLI contract**
+
+Keep atomic sanitized JSON/Markdown writes. Add attempt totals, exclusions,
+per-scenario bounds, aggregate bound, margin, bootstrap sample count/seed, workflow
+failure counts, and secondary calls. Remove old `correct_run_count`,
+`per_scenario_success`, `coordinated_call_mean`, and `malformed` decision gates.
+
+CLI remains:
 
 ```text
 --output-dir PATH
---runs INTEGER>=3
+--runs 20
 --model MODEL
 ```
 
-Model defaults to existing `IWIKI_CHAT_MODEL`; endpoint/key use existing config.
-Credential-free deterministic raw parity still runs, but missing live-model config makes
-the final decision `blocked` and process exit `2`. Gate failure writes reports and exits
-`1`; `implement` writes reports and exits `0`. No outcome changes registry state.
+Set the default and only accepted `--runs` value to `20`. An explicit `--model` remains
+sufficient; `IWIKI_CHAT_MODEL` is only its optional default. Missing endpoint/key/model
+or tool-incompatible preflight exits `2`; bounded `do_not_implement` exits `1`;
+`implement` exits `0`. No outcome changes the real registry.
 
 Run:
 
@@ -364,7 +464,7 @@ uv run python -m eval.unified_search --help
 uv run pytest -q tests/eval/test_unified_search_runner.py tests/eval/test_unified_search_report.py
 ```
 
-Expected: help lists exactly the three arguments; selected tests pass.
+Expected: help documents the fixed 20-pair protocol; selected tests pass.
 
 - [ ] **Step 5: Verify no public registration or mutation**
 
@@ -376,11 +476,11 @@ Expected: all selected tests pass; tool list omits `wiki_unified_search`.
 
 - [ ] **Step 6: Bump version and commit**
 
-Set all four version metadata locations to `0.7.187`.
+Set all four version metadata locations to `0.7.190`.
 
 ```bash
 git add eval/unified_search/runner.py eval/unified_search/report.py eval/unified_search/__main__.py tests/eval/test_unified_search_runner.py tests/eval/test_unified_search_report.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
-git commit -m "test(search): add unified comparison gate"
+git commit -m "test(search): add paired unified quality gate"
 ```
 
 ## Task 4: Run the comparison and stop at the registration checkpoint
@@ -406,27 +506,29 @@ Expected: all selected tests pass.
 - [ ] **Step 2: Run the repeated workflow comparison**
 
 ```bash
-uv run python -m eval.unified_search --output-dir docs/superpowers/evidence --runs 3
+uv run python -m eval.unified_search --output-dir docs/superpowers/evidence --runs 20 --model ollama-qwen3-5-cloud
 ```
 
-Expected: both evidence files exist. Exit `0` means all gates recommend `implement`; exit
-`1` means completed evidence recommends `do_not_implement`; exit `2` means evidence is
-blocked and no registration decision exists.
+Expected: both evidence files exist. Exit `0` means raw parity, aggregate superiority,
+and all 17 non-inferiority bounds pass. Exit `1` means bounded evidence recommends
+`do_not_implement`. Exit `2` is permitted only before sampling for missing configuration
+or unsupported tool calling; repair preflight and rerun without changing decision rules.
 
 - [ ] **Step 3: Inspect evidence invariants**
 
 ```bash
 uv run python -m json.tool docs/superpowers/evidence/wiki-unified-search-evaluation.json >/dev/null
-rg -n 'decision|raw_parity|higher_correctness|no_regressions|fewer_calls|public_registry_contains_tool' docs/superpowers/evidence/wiki-unified-search-evaluation.md
+rg -n 'decision|raw_parity|aggregate_lower_bound|scenario_lower_bounds|included_pairs|excluded_pairs|workflow_failure_counts|tool_calls|public_registry_contains_tool' docs/superpowers/evidence/wiki-unified-search-evaluation.md
 rg -n 'Authorization|Bearer |api[_-]?key|password|postgres(ql)?://|/home/' docs/superpowers/evidence/wiki-unified-search-evaluation.json docs/superpowers/evidence/wiki-unified-search-evaluation.md
 ```
 
-Expected: JSON parses; every gate and registry state appears; secret/path scan returns no
-matches.
+Expected: JSON parses; every scenario has 20 included pairs or an explicit attempt-cap
+failure; confidence bounds, secondary calls, workflow failures, and registry state
+appear; secret/path scan returns no matches.
 
 - [ ] **Step 4: Bump version and commit evidence**
 
-Set all four version metadata locations to `0.7.188`.
+Set all four version metadata locations to `0.7.191`.
 
 ```bash
 git add docs/superpowers/evidence/wiki-unified-search-evaluation.json docs/superpowers/evidence/wiki-unified-search-evaluation.md pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
@@ -435,12 +537,13 @@ git commit -m "docs(eval): record unified search evidence"
 
 - [ ] **Step 5: HUMAN CHECKPOINT — present the recorded outcome**
 
-Stop execution. Present gate values, per-scenario regressions, call-count change, model
-and run count, and report links. Ask the user to accept recorded `implement` or
-`do_not_implement` outcome.
+Stop execution. Present raw parity, aggregate lower bound, all per-scenario lower bounds,
+included/excluded attempt counts, workflow failures, secondary call-count change, model,
+and report links. Ask the user to accept recorded `implement` or `do_not_implement`
+outcome.
 
-- `blocked`: repair only the evidence mechanism or environment, rerun Task 4, and remain
-  at this checkpoint.
+- preflight `blocked`: repair only configuration or provider tool-calling availability,
+  rerun Task 4, and remain at this checkpoint.
 - `do_not_implement`, or user rejection of `implement`: execute Task 4A only.
 - `implement` plus explicit user approval: execute Tasks 5–9. Do not create production
   module, registration, auth, or public docs before that approval.
@@ -477,7 +580,7 @@ PostgreSQL.
 
 - [ ] **Step 4: Bump version, verify, and commit**
 
-Set all four version metadata locations to `0.7.189`.
+Set all four version metadata locations to `0.7.192`.
 
 ```bash
 uv run pytest -q tests/test_package.py tests/codegraph/test_server_tools.py tests/eval
@@ -561,7 +664,7 @@ Expected: all selected tests pass; specialized payloads unchanged.
 
 - [ ] **Step 6: Bump version and commit**
 
-Set all four version metadata locations to `0.7.189`.
+Set all four version metadata locations to `0.7.192`.
 
 ```bash
 git add src/iwiki_mcp/server.py src/iwiki_mcp/unified_search.py eval/unified_search/candidate.py tests/test_unified_search.py tests/test_server_search.py tests/codegraph/test_server_tools.py tests/eval/test_unified_search_candidate.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
@@ -621,7 +724,7 @@ unchanged.
 
 - [ ] **Step 5: Bump version and commit**
 
-Set all four version metadata locations to `0.7.190`.
+Set all four version metadata locations to `0.7.193`.
 
 ```bash
 git add src/iwiki_mcp/server.py tests/test_unified_search.py tests/codegraph/test_server_tools.py tests/test_package.py tests/test_mcp_smoke.py pyproject.toml src/iwiki_mcp/__init__.py uv.lock
@@ -681,7 +784,7 @@ calls preserve backend-specific states without fallback.
 
 - [ ] **Step 6: Bump version and commit**
 
-Set all four version metadata locations to `0.7.191`.
+Set all four version metadata locations to `0.7.194`.
 
 ```bash
 git add src/iwiki_mcp/http.py tests/test_unified_search.py tests/codegraph/test_runtime.py tests/postgres/test_code_graph_reader.py tests/postgres/test_http.py tests/postgres/test_tool_matrix.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
@@ -733,7 +836,7 @@ Expected: docs tests pass; all three docs contain contract/state guidance.
 
 - [ ] **Step 5: Bump version and commit**
 
-Set all four version metadata locations to `0.7.192`.
+Set all four version metadata locations to `0.7.195`.
 
 ```bash
 git add README.md docs/README.ru.md docs/architecture.md src/iwiki_mcp/resources.py tests/test_package.py tests/test_resources.py pyproject.toml src/iwiki_mcp/__init__.py uv.lock
@@ -784,10 +887,12 @@ Expected: full suite passes, console help exits `0`, and diff check has no outpu
 
 ```bash
 uv run python -m json.tool docs/superpowers/evidence/wiki-unified-search-evaluation.json >/dev/null
+rg -n 'aggregate_lower_bound|scenario_lower_bounds|included_pairs|excluded_pairs|workflow_failure_counts|tool_calls' docs/superpowers/evidence/wiki-unified-search-evaluation.json docs/superpowers/evidence/wiki-unified-search-evaluation.md
 rg -n 'Authorization|Bearer |api[_-]?key|password|postgres(ql)?://|/home/' docs/superpowers/evidence/wiki-unified-search-evaluation.json docs/superpowers/evidence/wiki-unified-search-evaluation.md
 ```
 
-Expected: JSON parses and secret/path scan returns no matches.
+Expected: JSON parses, quality-first statistics and attempt evidence exist, and the
+secret/path scan returns no matches.
 
 - [ ] **Step 4: Refresh code graph when production Python symbols changed**
 
