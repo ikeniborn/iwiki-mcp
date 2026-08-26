@@ -9,6 +9,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: ade355c4e8c6112f
+  last_run: 2026-08-26
+  reviewed: true
+  docs_checked: true
 chain:
   intent: docs/superpowers/intents/2026-08-25-wiki-unified-search-intent.md
   spec: docs/superpowers/specs/2026-08-25-wiki-unified-search-design.md
