@@ -24,7 +24,7 @@ def test_package_metadata_rejects_mcp_v2():
 
 
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.191"
+    assert iwiki_mcp.__version__ == "0.7.192"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
@@ -77,6 +77,40 @@ def test_docs_describe_hosted_domain_authority_contract():
     normalized_russian = " ".join(russian.split())
     assert "down migration отсутствует" in normalized_russian
     assert "management authority нельзя делегировать" in normalized_russian
+
+
+def test_docs_retain_separate_wiki_and_code_search_workflow():
+    documents = (
+        (
+            Path("README.md"),
+            "`wiki_unified_search` remains intentionally unregistered",
+            "docs/superpowers/evidence/",
+        ),
+        (
+            Path("docs/README.ru.md"),
+            "`wiki_unified_search` намеренно не зарегистрирован",
+            "superpowers/evidence/",
+        ),
+        (
+            Path("docs/architecture.md"),
+            "`wiki_unified_search` remains intentionally unregistered",
+            "superpowers/evidence/",
+        ),
+    )
+
+    for path, status, evidence_prefix in documents:
+        text = path.read_text(encoding="utf-8")
+        assert status in text
+        assert "do_not_implement" in text
+        assert "wiki_search → wiki_code_search → wiki_code_context" in text
+        assert text.count("wiki_unified_search") == 1
+        for filename in (
+            "wiki-unified-search-evaluation.md",
+            "wiki-unified-search-evaluation.json",
+        ):
+            href = f"{evidence_prefix}{filename}"
+            assert f"]({href})" in text
+            assert (path.parent / href).is_file()
 
 
 def test_postgres_tool_matrix_includes_section_mutations():

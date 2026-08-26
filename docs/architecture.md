@@ -178,8 +178,12 @@ or new graph, never staging rows.
 
 Operators run or schedule the CLI only on a machine holding checkout. Before
 `wiki_code_search` or `wiki_code_context`, they verify `wiki_code_status` reports
-`fresh == true`; Markdown-only semantics continue to use separate `wiki_search`. Unified
-wiki/code search is future capability, not an implemented interface.
+`fresh == true`; Markdown-only semantics continue to use separate `wiki_search`. The
+supported daily sequence is `wiki_search → wiki_code_search → wiki_code_context`.
+Unified wiki/code search is future capability, not an implemented interface.
+`wiki_unified_search` remains intentionally unregistered because quality evidence
+returned `do_not_implement`; see the [evaluation report](superpowers/evidence/wiki-unified-search-evaluation.md)
+and [machine-readable evidence](superpowers/evidence/wiki-unified-search-evaluation.json).
 
 ### Shared ECMAScript core
 

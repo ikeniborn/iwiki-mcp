@@ -662,8 +662,8 @@ iwiki-mcp code publish --project <checkout> --json
 
 Перед `wiki_code_search` или `wiki_code_context` проверьте, что `wiki_code_status`
 сообщает `fresh == true`. Когда нужна только Markdown-семантика wiki, отдельно
-используйте `wiki_search`. Unified wiki/code search остаётся будущей возможностью и не
-реализован.
+используйте `wiki_search`. Поддерживаемая ежедневная последовательность: `wiki_search → wiki_code_search → wiki_code_context`. Unified wiki/code search остаётся будущей возможностью и не реализован. `wiki_unified_search` намеренно не зарегистрирован, поскольку quality evidence вернул `do_not_implement`; см. [отчёт оценки](superpowers/evidence/wiki-unified-search-evaluation.md)
+и [машинно-читаемые данные](superpowers/evidence/wiki-unified-search-evaluation.json).
 
 ### Профили снапшота SQLite и неопределённость коммита
 
