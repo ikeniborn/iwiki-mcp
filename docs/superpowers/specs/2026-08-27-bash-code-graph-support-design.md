@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 50525da0c67684f7
+  spec_hash: 57ce971eb4ea8053
   last_run: 2026-08-27
   phases:
     structure: { status: passed }
@@ -242,7 +242,9 @@ and publication contracts remain unchanged.
 
 **Acceptance:** existing golden and mixed-language regression tests pass unchanged; a
 build with Bash neither configured nor one-shot-selected has the same rows as the
-pre-Bash factory set; the complete test suite and lint checks pass.
+pre-Bash factory set; the complete test suite passes. Repository-wide lint is run as a
+diagnostic. Every changed Python path must pass lint; any remaining diagnostic must be
+confined to a path byte-identical to the diff base and recorded as pre-existing evidence.
 
 ### R7 — Query and context compatibility
 
@@ -271,7 +273,9 @@ The implementation is accepted only after all of these checks succeed:
 3. The sentinel fixture proves indexing does not execute Bash syntax.
 4. Existing Python, TypeScript, and JavaScript golden/baseline tests remain unchanged and
    pass.
-5. `uv run pytest -q` and `uv run flake8 src tests` exit successfully.
+5. `uv run pytest -q` exits successfully. `uv run flake8 src tests` is inspected in
+   full, every changed Python path passes flake8, and any non-zero repository-wide result
+   is accepted only when all reported paths are unchanged from the diff base.
 
 ## 9. Documentation and versioning
 

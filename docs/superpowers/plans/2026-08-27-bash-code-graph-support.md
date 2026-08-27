@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 08721ca6ae940077
+  plan_hash: bd151b75428cffda
   last_run: 2026-08-27
   phases:
     structure: { status: passed }
@@ -79,6 +79,23 @@ review:
       fix: "Synchronize pyproject.toml, iwiki_mcp.__version__, and the package-version regression at 0.7.194 and run both package-version tests."
       verdict: fixed
       verdict_at: 2026-08-27
+    - id: F-008
+      phase: verifiability
+      severity: CRITICAL
+      section: "Task 5: Document Bash configuration, graph semantics, and limits"
+      section_hash: 999bf13f00636202
+      fragment: "uv run flake8 src tests"
+      text: "The plan required zero exit from repository-wide flake8 although unchanged origin/master tests/eval paths already fail that command."
+      fix: "Keep the full diagnostic, require changed-path flake8 success, and prove every remaining diagnostic path is byte-identical to origin/master."
+      verdict: fixed
+      verdict_at: 2026-08-27
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: bd151b75428cffda
+  last_run: 2026-08-27
+  reviewed: true
+  docs_checked: true
 chain:
   intent: docs/superpowers/intents/2026-08-26-bash-code-graph-support-intent.md
   spec: docs/superpowers/specs/2026-08-27-bash-code-graph-support-design.md
@@ -840,14 +857,18 @@ Run each command independently:
 uv run pytest tests/codegraph/test_bash_adapter.py tests/codegraph/test_resolver.py tests/codegraph/test_config_location_models.py tests/codegraph/test_context.py tests/codegraph/test_mixed_language_indexing.py -q
 uv run pytest -q
 uv run flake8 src tests
+uv run flake8 src/iwiki_mcp/__init__.py src/iwiki_mcp/codegraph/application.py src/iwiki_mcp/codegraph/config.py src/iwiki_mcp/codegraph/context.py src/iwiki_mcp/codegraph/languages/bash.py src/iwiki_mcp/codegraph/resolver.py tests/codegraph/test_bash_adapter.py tests/codegraph/test_config_location_models.py tests/codegraph/test_context.py tests/codegraph/test_mixed_language_indexing.py tests/codegraph/test_resolver.py tests/codegraph/test_server_tools.py tests/fixtures/codegraph/mixed_python_bash/service.py tests/test_package.py
+git diff --exit-code origin/master -- tests/eval
 uv run iwiki-mcp --help
 git diff --check
 git diff --check origin/master...HEAD
 ```
 
-Expected: every command exits `0`; full test count has zero failures; flake8 produces no
-diagnostics; CLI help prints usage; both working-tree and committed diff checks report no
-whitespace errors.
+Expected: focused and full pytest exit `0`, and the full test count has zero failures.
+Repository-wide flake8 is inspected in full; its only accepted non-zero result is the
+known `tests/eval/*` baseline, which must remain byte-identical to `origin/master`.
+Flake8 over every changed Python path exits `0`; CLI help prints usage; both working-tree
+and committed diff checks report no whitespace errors.
 
 - [ ] **Step 5: Parent update of bound iwiki documentation**
 
@@ -962,10 +983,12 @@ to change.
 ## Verification evidence expected
 
 Result reconciliation must map every task to its changed paths and successful focused
-command. It must also contain successful full pytest, flake8, CLI-help, diff-check, and
-iwiki-lint evidence; immutable baseline status; sentinel absence; config-disabled `.sh`
-absence; mixed Python row equality; Bash search/context results; and version/lockfile
-evidence. These are expected outputs, not claims about current implementation state.
+command. It must also contain successful full pytest, changed-path flake8, CLI-help,
+diff-check, and iwiki-lint evidence; the inspected repository-wide flake8 diagnostic and
+proof that every reported `tests/eval/*` path is unchanged from `origin/master`;
+immutable baseline status; sentinel absence; config-disabled `.sh` absence; mixed Python
+row equality; Bash search/context results; and version/lockfile evidence. These are
+expected outputs, not claims about current implementation state.
 
 ## Remaining user decisions
 
