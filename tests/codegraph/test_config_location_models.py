@@ -552,9 +552,11 @@ def test_models_are_frozen():
 
 def test_tree_sitter_packages_are_available():
     import tree_sitter
+    import tree_sitter_bash
     import tree_sitter_language_pack
 
     assert tree_sitter is not None
+    assert tree_sitter_bash is not None
     assert tree_sitter_language_pack is not None
 
 
