@@ -365,9 +365,9 @@ creation, physical wiki deletion, and automatic embedding-model/dimension migrat
 ## Python code graph MVP
 
 The optional code graph is a separate, local SQLite cache for the project bound to
-the primary wiki domain. It indexes Python, TypeScript/TSX, and/or JavaScript source,
-depending on the configured `languages`, and does not change `wiki_search` or the
-Markdown/vector wiki indexes. The cache paths are derived from the wiki base and
+the primary wiki domain. It indexes Python, TypeScript/TSX, JavaScript, and/or Bash
+source, depending on the configured `languages`, and does not change `wiki_search` or
+the Markdown/vector wiki indexes. The cache paths are derived from the wiki base and
 primary domain:
 
 ```text
@@ -378,14 +378,15 @@ primary domain:
 <IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.metadata.json
 ```
 
-Configure it in the bound project's `.iwiki.toml`. All values are optional; these
-are the defaults. `languages` accepts `python`, `typescript`, and/or `javascript`.
-`exclude` entries must be safe relative paths.
+Configure it in the bound project's `.iwiki.toml`. All values are optional;
+`languages` accepts `python`, `typescript`, `javascript`, and/or `bash`. The default
+is `languages = ["python"]`; this example persistently opts in to every supported
+language, including Bash. `exclude` entries must be safe relative paths.
 
 ```toml
 [code_graph]
 enabled = true
-languages = ["python", "typescript", "javascript"]
+languages = ["python", "typescript", "javascript", "bash"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
 max_full_rebuild_seconds = 10
@@ -401,6 +402,11 @@ unset; set it higher on large repositories so a full build is not cut short by t
 query-time budget. `typescript_type_boost` (default `false`) opts into an isolated,
 best-effort TypeScript Compiler API subprocess for type resolution; its absence or failure
 never blocks indexing — the Tree-sitter baseline always runs.
+
+Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
+or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
+If both are omitted, the Python-only default remains in effect and no Bash files are
+scanned.
 
 The supported environment overrides are `IWIKI_CODE_GRAPH_ENABLED`,
 `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES`, and
@@ -472,6 +478,21 @@ A named import (`import { Base } from './base'`) still resolves INHERITS across 
 One known limitation: a local binding or parameter that shadows an imported name still
 expands to the import when a call target is built, because the resolver does not track
 real lexical scope; fixing that is out of this MVP's scope.
+
+### Bash support
+
+Bash discovery considers only files whose case-insensitive suffix is `.sh`; it does
+not discover `.bash` files or extensionless files selected only by a shebang. Both
+`name() { ...; }` and `function name { ...; }` declarations become function symbols.
+Literal command names become `CALLS` relations, but resolve only when exactly one
+function with that name exists in the same file. External commands remain unresolved,
+and dynamic command names are omitted.
+
+`source` and `.` commands are parsed syntactically but are never followed: they emit no
+`IMPORTS` relations and never enable cross-file resolution. Parsing never invokes a
+shell, `source`, `eval`, expansions, or substitutions; graph metadata stores neither
+source bodies nor command arguments. `wiki_code_context` accepts `sh:` entity IDs, and
+source remains excluded by default.
 
 ### Distributed code graph publication
 

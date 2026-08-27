@@ -365,9 +365,9 @@ extension, физическое удаление wiki и автоматичес�
 ## Python code graph MVP
 
 Опциональный code graph — отдельный локальный SQLite-кэш проекта, привязанного к
-primary wiki-домену. Он индексирует Python, TypeScript/TSX и/или JavaScript-исходники,
-в зависимости от настроенных `languages`, и не меняет `wiki_search` или Markdown/vector
-индексы wiki. Пути кэша выводятся из wiki-base и primary domain:
+primary wiki-домену. Он индексирует Python, TypeScript/TSX, JavaScript и/или Bash-
+исходники в зависимости от настроенных `languages` и не меняет `wiki_search` или
+Markdown/vector индексы wiki. Пути кэша выводятся из wiki-base и primary domain:
 
 ```text
 <IWIKI_BASE_DIR>/.iwiki/code-<primary-domain>.sqlite3
@@ -378,13 +378,14 @@ primary wiki-домену. Он индексирует Python, TypeScript/TSX и
 ```
 
 Настройте его в `.iwiki.toml` привязанного проекта. Все значения необязательны;
-ниже приведены defaults. `languages` принимает `python`, `typescript` и/или
-`javascript`; значения `exclude` должны быть безопасными относительными путями.
+`languages` принимает `python`, `typescript`, `javascript` и/или `bash`. Default —
+`languages = ["python"]`; этот пример постоянно включает все поддерживаемые языки,
+включая Bash. Значения `exclude` должны быть безопасными относительными путями.
 
 ```toml
 [code_graph]
 enabled = true
-languages = ["python", "typescript", "javascript"]
+languages = ["python", "typescript", "javascript", "bash"]
 auto_rebuild = "bounded"
 max_rebuild_seconds = 10
 max_full_rebuild_seconds = 10
@@ -401,6 +402,11 @@ exclude = []
 `typescript_type_boost` (по умолчанию `false`) включает изолированный,
 best-effort-подпроцесс TypeScript Compiler API для резолвинга типов; его отсутствие
 или сбой никогда не блокирует индексацию — Tree-sitter baseline всегда выполняется.
+
+Bash включается только явно. Либо добавьте `bash` в постоянную настройку
+`code_graph.languages`, как выше, либо запросите одноразовый rebuild через
+`wiki_code_index(languages=["bash"])`. Если не выбран ни один способ, остаётся
+Python-only default и Bash-файлы не сканируются.
 
 Поддерживаемые environment overrides: `IWIKI_CODE_GRAPH_ENABLED`,
 `IWIKI_CODE_GRAPH_MAX_FILE_BYTES`, `IWIKI_CODE_GRAPH_MAX_FILES` и
@@ -475,6 +481,22 @@ module-qualified имени в импортирующем файле и оста
 shadow-ят имя импорта, всё равно разворачиваются в импорт при построении цели вызова,
 потому что резолвер не отслеживает реальную лексическую область видимости;
 исправление этого выходит за рамки MVP.
+
+### Поддержка Bash
+
+При discovery Bash рассматриваются только файлы с case-insensitive суффиксом `.sh`;
+файлы `.bash` и extensionless-файлы, выбранные только по shebang, не обнаруживаются.
+Обе формы объявления, `name() { ...; }` и `function name { ...; }`, становятся
+function symbols. Литеральные имена команд становятся relations `CALLS`, но резолвятся
+только если в том же файле существует ровно одна функция с таким именем. External
+commands остаются unresolved, а dynamic command names пропускаются.
+
+Команды `source` и `.` синтаксически парсятся, но никогда не выполняются и не
+переходят к целевому файлу: они не создают relations `IMPORTS` и никогда не включают
+cross-file resolution. Парсинг никогда не вызывает shell, `source`, `eval`, expansions
+или substitutions; graph metadata не хранит source bodies и command arguments.
+`wiki_code_context` принимает entity IDs с префиксом `sh:`, а source по умолчанию
+остаётся исключённым.
 
 ### Распределённая публикация code graph
 
