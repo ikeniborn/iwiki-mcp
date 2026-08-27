@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -11,13 +12,14 @@ from ..models import (
     ParsedFile,
     ResolutionResult,
     SymbolRecord,
+    ReferenceRecord,
     compact_casefold,
     file_id,
     module_id,
     symbol_id,
     token_key,
 )
-from ..resolver import declaration_relations
+from ..resolver import declaration_relations, resolve_references, sort_relations
 
 
 def _relative_path(path: str) -> str:
@@ -40,6 +42,26 @@ def _module_name(path: str) -> str:
     parts = list(PurePosixPath(path).parts)
     parts[-1] = parts[-1][:-3]
     return ".".join(parts)
+
+
+def _literal_command_name(command):
+    """Return a static command word and its syntax node, if one is present."""
+    command_name = command.child_by_field_name("name")
+    if command_name is None:
+        command_name = next(
+            (child for child in command.named_children
+             if child.type == "command_name"),
+            None,
+        )
+    if command_name is None or len(command_name.named_children) != 1:
+        return None
+    word = command_name.named_children[0]
+    if word.type != "word" or word.named_children:
+        return None
+    text = word.text.decode("utf-8", "replace")
+    if not text or text != text.strip():
+        return None
+    return text, command_name
 
 
 class BashAdapter:
@@ -154,13 +176,14 @@ class BashAdapter:
         for _node, _name, qualified_name in declarations:
             counts[qualified_name] = counts.get(qualified_name, 0) + 1
         symbols = []
+        symbols_by_range = {}
         for node, name, qualified_name in declarations:
             normalized_signature = (
                 "" if counts[qualified_name] == 1
                 else f"occurrence:{node.start_byte}"
             )
             own_source = source[node.start_byte:node.end_byte]
-            symbols.append(SymbolRecord(
+            symbol = SymbolRecord(
                 symbol_id=symbol_id(
                     self.language,
                     self.prefix,
@@ -185,19 +208,92 @@ class BashAdapter:
                 metadata_json=json.dumps(
                     {"module": module}, sort_keys=True, separators=(",", ":")
                 ),
-            ))
+            )
+            symbols.append(symbol)
+            symbols_by_range[(node.start_byte, node.end_byte)] = symbol
         symbols.sort(key=lambda item: (item.start_byte, item.qualified_name, item.symbol_id))
+        references = []
+
+        def walk_commands(node, owner=None):
+            stack = [(node, owner)]
+            while stack:
+                current, current_owner = stack.pop()
+                if current.type == "function_definition":
+                    current_owner = symbols_by_range.get(
+                        (current.start_byte, current.end_byte), current_owner
+                    )
+                if current.type == "command":
+                    yield current, current_owner
+                stack.extend(
+                    (child, current_owner)
+                    for child in reversed(current.named_children)
+                )
+
+        for command, owner in walk_commands(root):
+            if self._intersects_error(command, error_ranges):
+                continue
+            literal = _literal_command_name(command)
+            if literal is None:
+                continue
+            name, command_name = literal
+            if name in {"source", "."}:
+                continue
+            references.append(ReferenceRecord(
+                source_symbol_id=owner.symbol_id if owner else None,
+                source_file_id=file.file_id,
+                source_module_id=None if owner else file.module_id,
+                relation_type="CALLS",
+                target_reference=name,
+                source_line=command_name.start_point[0] + 1,
+                source_byte=command_name.start_byte,
+                source_end_line=command_name.end_point[0] + 1,
+                source_end_byte=command_name.end_byte,
+            ))
+        references.sort(key=lambda item: (
+            item.source_byte if item.source_byte is not None else -1,
+            item.source_end_byte if item.source_end_byte is not None else -1,
+            item.target_reference or "",
+        ))
         return ParsedFile(
             file=file,
             symbols=tuple(symbols),
-            references=(),
+            references=tuple(references),
             warnings=("parse_error",) if error_ranges or root.has_error else (),
         )
 
     def resolve_references(self, parsed: ParsedFile, project_index: Any) -> ResolutionResult:
+        local_names = {symbol.local_name for symbol in parsed.symbols}
+        module = parsed.file.module_qualified_name
+        references = tuple(
+            replace(
+                reference,
+                target_reference=(
+                    f"{module}.{reference.target_reference}"
+                    if module and reference.target_reference in local_names
+                    else reference.target_reference
+                ),
+                resolution_scope=(
+                    "file" if module and reference.target_reference in local_names
+                    else reference.resolution_scope
+                ),
+                resolution_hint=(
+                    reference.resolution_hint if reference.target_reference in local_names
+                    else "unresolved"
+                ),
+            )
+            for reference in parsed.references
+        )
         return ResolutionResult(
-            relations=declaration_relations(
-                self.language, self.prefix, parsed.file.repository_id, parsed
+            relations=sort_relations(
+                declaration_relations(
+                    self.language, self.prefix, parsed.file.repository_id, parsed
+                ) + resolve_references(
+                    self.language,
+                    self.prefix,
+                    parsed.file.repository_id,
+                    references,
+                    project_index,
+                )
             ),
             warnings=(),
         )

@@ -154,6 +154,28 @@ def test_javascript_import_resolves_into_a_typescript_module():
     assert relations[0].target_module_id == typescript_file.module_id
 
 
+def test_bash_references_only_match_bash_symbols():
+    bash_file = _language_file_record(
+        language="bash", prefix="sh", path="bin/run.sh",
+        module_qualified_name="bin.run",
+    )
+    python_file = _language_file_record(
+        language="python", prefix="py", path="bin/run.py",
+        module_qualified_name="bin.run",
+    )
+    index = SymbolIndex.from_parsed_files((
+        _empty_parsed(bash_file), _empty_parsed(python_file),
+    ))
+    reference = _module_reference(
+        source_file_id=bash_file.file_id, target_reference="bin.run",
+    )
+
+    relations = resolve_references("bash", "sh", "domain", (reference,), index)
+
+    assert relations[0].resolution_state == "resolved"
+    assert relations[0].target_module_id == bash_file.module_id
+
+
 def test_unknown_language_is_not_filtered():
     other_file = _language_file_record(
         language="ruby", prefix="rb", path="src/thing.rb",
