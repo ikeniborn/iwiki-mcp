@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 2efe7e4f0136d082
+  plan_hash: 08721ca6ae940077
   last_run: 2026-08-27
   phases:
     structure: { status: passed }
@@ -13,7 +13,7 @@ review:
       phase: coverage
       severity: WARNING
       section: "Requirement coverage"
-      section_hash: 32cd4e24e1cead21
+      section_hash: 8c67560da194d907
       fragment: "R4 — Mixed-language isolation"
       text: "R4 was only implicit in the R1-R7 range instead of mapped to a named task and proof."
       fix: "Add an explicit R1-R7 coverage matrix with implementing tasks and expected evidence."
@@ -23,7 +23,7 @@ review:
       phase: verifiability
       severity: WARNING
       section: "Task 1: Parse .sh files and extract function declarations"
-      section_hash: 09ee1cda21f51778
+      section_hash: 230cf7c4117cce10
       fragment: "Implement the minimal declaration-only BashAdapter"
       text: "Several file-writing steps relied on a later test and lacked their own explicit expected output."
       fix: "Add a measurable Expected result to every checkbox step."
@@ -67,6 +67,16 @@ review:
       fragment: "rg -n \"bash|\\.sh|same-file|source|sh:\""
       text: "One broad rg match could not prove all seven required documentation commitments or forbidden claims."
       fix: "Use per-document fixed-term checks plus an explicit seven-row required/forbidden checklist with zero omissions."
+      verdict: fixed
+      verdict_at: 2026-08-27
+    - id: F-007
+      phase: coverage
+      severity: CRITICAL
+      section: "Task 1: Parse .sh files and extract function declarations"
+      section_hash: 230cf7c4117cce10
+      fragment: "project version becomes `0.7.194`"
+      text: "The plan changed distribution metadata but omitted the module __version__ and its exact regression, causing the full suite to fail."
+      fix: "Synchronize pyproject.toml, iwiki_mcp.__version__, and the package-version regression at 0.7.194 and run both package-version tests."
       verdict: fixed
       verdict_at: 2026-08-27
 chain:
@@ -172,6 +182,8 @@ and unchanged existing adapters).
 - Create: `src/iwiki_mcp/codegraph/languages/bash.py`
 - Create: `tests/codegraph/test_bash_adapter.py`
 - Modify: `tests/codegraph/test_config_location_models.py:551-559`
+- Modify: `src/iwiki_mcp/__init__.py:1-3`
+- Modify: `tests/test_package.py:10-30`
 - Modify: `pyproject.toml:1-25`
 - Modify: `uv.lock`
 
@@ -237,7 +249,9 @@ Expected: collection fails with
 
 - [ ] **Step 3: Add the approved parser dependency and patch version**
 
-Edit `pyproject.toml` so the project version becomes `0.7.194` and dependencies include:
+Edit `pyproject.toml` and `src/iwiki_mcp/__init__.py` so both distribution and module
+versions become `0.7.194`. Update the exact package-version regression in
+`tests/test_package.py` to the same value. Add this dependency to `pyproject.toml`:
 
 ```toml
 "tree-sitter-bash>=0.25.1",
@@ -258,7 +272,9 @@ assert tree_sitter_bash is not None
 ```
 
 Expected: dependency manifest, lockfile, package-availability test, and project patch
-version all describe the same installed `tree-sitter-bash` release family.
+version all describe the same installed `tree-sitter-bash` release family. Run
+`uv run pytest -q tests/test_package.py::test_package_version_matches_distribution_metadata tests/test_package.py::test_code_graph_benchmark_package_version`; both tests must pass
+and prove module, distribution, and regression metadata all equal `0.7.194`.
 
 - [ ] **Step 4: Implement the minimal declaration-only `BashAdapter`**
 
@@ -339,7 +355,7 @@ Python adapter module stays green. Do not change any baseline fixture.
 Review requirement coverage and changed-file scope, then run:
 
 ```bash
-git add pyproject.toml uv.lock src/iwiki_mcp/codegraph/languages/bash.py tests/codegraph/test_bash_adapter.py tests/codegraph/test_config_location_models.py
+git add pyproject.toml uv.lock src/iwiki_mcp/__init__.py src/iwiki_mcp/codegraph/languages/bash.py tests/codegraph/test_bash_adapter.py tests/codegraph/test_config_location_models.py tests/test_package.py
 git commit -m "feat(codegraph): add Bash declaration adapter"
 ```
 
