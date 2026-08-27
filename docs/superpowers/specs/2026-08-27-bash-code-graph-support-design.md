@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 82eda40113687183
+  spec_hash: 50525da0c67684f7
   last_run: 2026-08-27
   phases:
     structure: { status: passed }
@@ -19,15 +19,17 @@ chain:
 
 ## 1. Goal and scope
 
-Add an explicitly configured Bash language adapter to the existing code graph. The
-adapter covers shell-only repositories and `.sh` components in mixed repositories while
+Add an explicitly selected Bash language adapter to the existing code graph. The adapter
+covers shell-only repositories and `.sh` components in mixed repositories while
 preserving the current graph schema and the output of the Python, TypeScript, and
 JavaScript adapters.
 
 The supported source set is exactly files whose case-insensitive suffix is `.sh`.
 Files ending in `.bash` and extensionless files, including files selected only by a
-shebang, are outside this design. Bash remains opt-in through
-`code_graph.languages`; the default language list remains `("python",)`.
+shebang, are outside this design. Bash remains opt-in through persistent
+`code_graph.languages` configuration or an explicit one-shot
+`wiki_code_index(languages=["bash"])` request. The default language list remains
+`("python",)`.
 
 The adapter parses source bytes with Tree-sitter. It never starts a shell, executes a
 script, follows a `source` command, evaluates `eval`, expands a variable, runs a command
@@ -61,9 +63,11 @@ version, and its adapter version is `bash-adapter-v1`.
 
 Add `bash` to `codegraph.config.KNOWN_LANGUAGES` and to the invalid-language error
 message. No environment variable, new configuration field, or default-language change is
-introduced. Existing discovery and indexer routing use the factory's `.sh` extension;
-the `LanguageAdapter`, `AdapterFactory`, snapshot, publication, and database schemas do
-not change.
+introduced. Existing one-shot `wiki_code_index(languages=...)` routing may select any
+known language, so explicitly passing `languages=["bash"]` is the transient opt-in form;
+omitting `languages` continues to use persistent configuration. Existing discovery and
+indexer routing use the factory's `.sh` extension; the `LanguageAdapter`,
+`AdapterFactory`, snapshot, publication, and database schemas do not change.
 
 ### 2.3 Resolver and context integration
 
@@ -171,11 +175,14 @@ but source is not stored in graph records or metadata.
 **User task:** index projects implemented through Bash scripts and Bash components in
 mixed repositories without scanning Bash by default.
 
-**Requirement:** `bash` is a valid configured language and claims only `.sh` files.
+**Requirement:** `bash` is a valid persistently configured or explicitly one-shot-selected
+language and claims only `.sh` files.
 
 **Acceptance:** a Bash-only fixture configured with `languages = ("bash",)` produces
-only `language = "bash"` file rows; the same fixture configured without Bash produces no
-`.sh` rows; `.bash` and extensionless fixture files are excluded.
+only `language = "bash"` file rows; `wiki_code_index(languages=["bash"])` passes Bash as
+the explicit one-shot selection; the same fixture with neither persistent nor one-shot
+Bash selection produces no `.sh` rows; `.bash` and extensionless fixture files are
+excluded.
 
 ### R2 — Bash functions are searchable
 
@@ -234,8 +241,8 @@ command arguments.
 and publication contracts remain unchanged.
 
 **Acceptance:** existing golden and mixed-language regression tests pass unchanged; a
-build with Bash unconfigured has the same rows as the pre-Bash factory set; the complete
-test suite and lint checks pass.
+build with Bash neither configured nor one-shot-selected has the same rows as the
+pre-Bash factory set; the complete test suite and lint checks pass.
 
 ### R7 — Query and context compatibility
 
@@ -269,10 +276,10 @@ The implementation is accepted only after all of these checks succeed:
 ## 9. Documentation and versioning
 
 Update `README.md` and `docs/README.ru.md` when implementation lands. They must list
-`bash`, show explicit opt-in, describe `.sh` scope, same-file-only call resolution,
-unresolved external commands, ignored source imports, and the static-only security
-boundary. Update the bound iwiki code-graph configuration and extraction documentation
-before result reconciliation.
+`bash`, show both persistent and one-shot explicit opt-in, describe `.sh` scope,
+same-file-only call resolution, unresolved external commands, ignored source imports,
+and the static-only security boundary. Update the bound iwiki code-graph configuration
+and extraction documentation before result reconciliation.
 
 Bump the project patch version and regenerate `uv.lock` through the normal dependency
 workflow. The version and lockfile changes are part of this feature, not a separate

@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 5d17449c17b876f8
+  plan_hash: 2efe7e4f0136d082
   last_run: 2026-08-27
   phases:
     structure: { status: passed }
@@ -13,7 +13,7 @@ review:
       phase: coverage
       severity: WARNING
       section: "Requirement coverage"
-      section_hash: ba5e5e985e24b9a0
+      section_hash: 32cd4e24e1cead21
       fragment: "R4 — Mixed-language isolation"
       text: "R4 was only implicit in the R1-R7 range instead of mapped to a named task and proof."
       fix: "Add an explicit R1-R7 coverage matrix with implementing tasks and expected evidence."
@@ -33,7 +33,7 @@ review:
       phase: dependencies
       severity: WARNING
       section: "Task 4: Prove Bash-only, mixed-language, query, context, and safety behavior"
-      section_hash: b16743489a48b92a
+      section_hash: 8a6fbed1cf5e1c8d
       fragment: "Run the new integration tests"
       text: "The plan expected new integration tests to fail after Tasks 1-3 had already supplied production behavior."
       fix: "Expect the integration tests to pass and treat a failure as product or helper evidence."
@@ -43,10 +43,30 @@ review:
       phase: verifiability
       severity: WARNING
       section: "Task 4: Prove Bash-only, mixed-language, query, context, and safety behavior"
-      section_hash: e38f20dc9bc41ba2
+      section_hash: 8a6fbed1cf5e1c8d
       fragment: "Write the non-execution sentinel test"
       text: "R5 named source and command-argument inspection without executable assertions over parsed and serialized records."
       fix: "Add source-body and command-argument markers with explicit negative assertions for ParsedFile data and every serialized graph table."
+      verdict: fixed
+      verdict_at: 2026-08-27
+    - id: F-005
+      phase: coverage
+      severity: CRITICAL
+      section: "Task 4: Prove Bash-only, mixed-language, query, context, and safety behavior"
+      section_hash: 8a6fbed1cf5e1c8d
+      fragment: "Build the mixed fixture once with `(\"python\",)`"
+      text: "The explicit Python selection did not prove the automatic default when neither Bash opt-in path is used."
+      fix: "Add a production CodeGraphConfig() path over the Bash fixture and assert a Python-only header with no .sh rows."
+      verdict: fixed
+      verdict_at: 2026-08-27
+    - id: F-006
+      phase: verifiability
+      severity: WARNING
+      section: "Task 5: Document Bash configuration, graph semantics, and limits"
+      section_hash: f6779267c176381e
+      fragment: "rg -n \"bash|\\.sh|same-file|source|sh:\""
+      text: "One broad rg match could not prove all seven required documentation commitments or forbidden claims."
+      fix: "Use per-document fixed-term checks plus an explicit seven-row required/forbidden checklist with zero omissions."
       verdict: fixed
       verdict_at: 2026-08-27
 chain:
@@ -58,9 +78,9 @@ chain:
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add opt-in `.sh` indexing with Bash file/function entities and conservative
-same-file `CALLS` relations, without executing shell source or changing existing-language
-records.
+**Goal:** Add explicitly selected `.sh` indexing with Bash file/function entities and
+conservative same-file `CALLS` relations, without executing shell source or changing
+existing-language records.
 
 **Architecture:** A focused `BashAdapter` parses raw bytes with the packaged
 `tree-sitter-bash` grammar and emits existing graph record types. Existing configuration,
@@ -82,6 +102,8 @@ flake8, SQLite code-graph snapshots.
 - Only a unique same-file function candidate resolves. Duplicate names are ambiguous;
   cross-file, external, and dynamic targets do not resolve.
 - No schema, publication protocol, default language, or environment-variable change.
+- Bash selection is explicit through persistent `code_graph.languages` or a one-shot
+  `wiki_code_index(languages=["bash"])`; omitting both never scans Bash.
 - Existing Python, TypeScript, and JavaScript golden/baseline files are immutable proof.
 - Subagents edit only files assigned to their task. Parent alone updates iwiki, stages,
   commits, pushes, and opens the pull request.
@@ -131,7 +153,7 @@ later review hashes and requires the affected reviews to run again.
 
 | Spec requirement | Implementing tasks | Expected proof |
 | --- | --- | --- |
-| R1 — Explicit `.sh` discovery | Tasks 3, 4, 5 | Config/factory tests; Bash-only and Python-only fixture paths; docs |
+| R1 — Explicit `.sh` discovery | Tasks 3, 4, 5 | Persistent and one-shot selection tests; Bash-only and Python-only fixture paths; docs |
 | R2 — Bash functions are searchable | Tasks 1, 4 | Adapter ranges/IDs and filtered production search |
 | R3 — Conservative call evidence | Tasks 2, 4, 5 | Resolved, ambiguous, unresolved, dynamic, and source-command cases |
 | R4 — Mixed-language isolation | Task 4 | Python row equality, prefix isolation, no cross-language target |
@@ -503,6 +525,10 @@ def test_unknown_language_message_lists_bash():
     assert "python, typescript, javascript, bash" in str(excinfo.value)
 ```
 
+Add a server-handler assertion that `wiki_code_index(languages=["bash"])` forwards
+`["bash"]` as the explicit one-shot selection, while an omitted `languages` argument
+continues to use the persistent/default configuration path.
+
 Add an application-factory assertion to
 `tests/codegraph/test_config_location_models.py`:
 
@@ -523,8 +549,9 @@ request = validate_context_request(["sh:symbol:" + "a" * 64])
 assert request.seeds == ("sh:symbol:" + "a" * 64,)
 ```
 
-Expected: focused tests explicitly pin accepted config, production factory identity, and
-canonical `sh:symbol` validation before production registration changes.
+Expected: focused tests explicitly pin persistent and one-shot selection, unchanged
+defaults, production factory identity, and canonical `sh:symbol` validation before
+production registration changes.
 
 - [ ] **Step 2: Run focused wiring tests and verify rejection**
 
@@ -559,16 +586,17 @@ _CANONICAL_ENTITY_ID = re.compile(
 
 Update the nearby synchronization comment to list `"sh"`.
 
-Expected: Bash appears in the shared configured-language set, production factory map,
+Expected: Bash appears in the shared known-language set, production factory map,
 fingerprint version inputs, and context ID validator while the Python-only default stays
-unchanged.
+unchanged and one-shot selection follows the existing known-language handler contract.
 
 - [ ] **Step 4: Run all wiring tests**
 
 Run: `uv run pytest tests/codegraph/test_config_location_models.py tests/codegraph/test_context.py tests/codegraph/test_server_tools.py tests/codegraph/test_runtime.py -q`
 
-Expected: exit `0`; default config remains Python-only, Bash filters/seeds are accepted
-only where configured, and existing language cases remain green.
+Expected: exit `0`; default config remains Python-only, explicit persistent and one-shot
+Bash selections plus Bash filters/seeds are accepted, and existing language cases remain
+green.
 
 - [ ] **Step 5: Parent review and checkpoint commit**
 
@@ -646,6 +674,14 @@ Filter file rows by `language == "python"`, and symbol/relation rows by `py:` pr
 assert those lists are byte-for-byte equal. In the Python-only build, explicitly assert
 that no file path ends with `.sh`. Assert all Bash IDs use `sh:` and the shared name does
 not resolve across language families.
+
+Extend `_build_indexer` so its `languages` argument may be omitted. When omitted, build
+the production indexer with `CodeGraphConfig()` rather than supplying a language tuple.
+Build `bash_basic` through this no-argument path and assert the snapshot header uses only
+the Python default and no file row ends with `.sh`. Keep the explicit `("python",)` mixed
+comparison above as separate existing-language compatibility evidence. This test proves
+the automatic path with neither persistent Bash configuration nor a one-shot language
+override, not merely another explicit language selection.
 
 Build and search with `languages=["bash"]`; assert results exist and every entity ID
 starts with `sh:`. Seed `CodeGraphContext` with the Bash module ID at depth `2`; assert
@@ -730,8 +766,8 @@ Expected: one commit containing only Task 4 paths.
 
 ### Task 5: Document Bash configuration, graph semantics, and limits
 
-**Closes:** R1 (explicit configuration), R3 (same-file-only calls), R5 (static-only and
-source-free graph), R7 (search/context usage).
+**Closes:** R1 (explicit persistent or one-shot selection), R3 (same-file-only calls),
+R5 (static-only and source-free graph), R7 (search/context usage).
 
 **Files:**
 - Modify: `README.md:370-455`
@@ -742,7 +778,8 @@ source-free graph), R7 (search/context usage).
 In `README.md`, add `bash` to the accepted language list and example, then add a Bash
 subsection stating exactly:
 
-- only `.sh` is discovered and Bash must be listed explicitly;
+- only `.sh` is discovered; Bash must be listed in persistent configuration or an
+  explicit one-shot `wiki_code_index` request;
 - both Bash function declaration forms become function symbols;
 - literal commands become `CALLS`; only a unique same-file function resolves;
 - external commands remain unresolved; dynamic command names are omitted;
@@ -763,10 +800,21 @@ the English source, with no semantic drift.
 
 - [ ] **Step 3: Verify documentation consistency**
 
-Run: `rg -n "bash|\.sh|same-file|source|sh:" README.md docs/README.ru.md`
+Run these fixed-term checks for both documents:
 
-Expected: both files mention all seven contract points; neither claims `.bash`, shebang-only,
-cross-file resolution, `IMPORTS`, or shell execution support.
+```bash
+for doc in README.md docs/README.ru.md; do rg -n 'code_graph\.languages|wiki_code_index' "$doc"; rg -n '\.sh' "$doc"; rg -n 'CALLS' "$doc"; rg -n 'source|IMPORTS' "$doc"; rg -n 'shell|оболоч' "$doc"; rg -n 'wiki_code_context|sh:' "$doc"; done
+```
+
+Then compare each matched Bash subsection against the seven-row checklist from Steps 1
+and 2: persistent plus one-shot opt-in, `.sh`-only scope, both declaration forms,
+same-file-only `CALLS`, unresolved external plus omitted dynamic commands, no source
+imports, and static/source-free context behavior. Record zero missing rows and zero claims
+of `.bash` or shebang-only discovery, cross-file resolution, emitted `IMPORTS`, or shell
+execution.
+
+Expected: every fixed-term command exits `0`; checklist review records all seven required
+rows and no forbidden claim in either language.
 
 - [ ] **Step 4: Run focused and full verification**
 
@@ -886,7 +934,8 @@ to change.
 
 ## Problems closed
 
-- Shell-only repositories become searchable when Bash is explicitly enabled (R1, R2).
+- Shell-only repositories become searchable when Bash is explicitly selected through
+  persistent configuration or a one-shot indexing request (R1, R2).
 - Mixed repositories expose Python and Bash without identifier or resolution collisions
   (R4, R6).
 - Literal same-file calls are visible while duplicate, external, dynamic, and cross-file

@@ -1,7 +1,7 @@
 ---
 review:
-  intent_hash: f665ad0ec60cbb9f
-  last_run: 2026-08-26
+  intent_hash: a4dbe4195cc1accc
+  last_run: 2026-08-27
   phases:
     structure: { status: passed }
     completeness: { status: passed }
@@ -27,9 +27,9 @@ the graph cannot currently represent code implemented in Bash scripts.
 
 ## Desired Outcomes
 
-- A project that explicitly enables Bash discovers supported Bash source files and
-  exposes their file and function records through code-graph search and context
-  queries.
+- A project that explicitly enables Bash through persistent configuration or a one-shot
+  indexing request discovers supported Bash source files and exposes their file and
+  function records through code-graph search and context queries.
 - Statically provable Bash function calls are represented as graph references;
   ambiguous dynamic calls remain unresolved rather than guessed.
 - A mixed Python-and-Bash project indexes both languages in one graph without losing
@@ -39,7 +39,8 @@ the graph cannot currently represent code implemented in Bash scripts.
 
 - Existing Python, TypeScript, and JavaScript code-graph tests continue to pass with
   byte-stable records for unchanged fixtures.
-- A project that does not configure Bash does not discover or parse Bash files.
+- A project that neither configures nor explicitly requests Bash does not discover or
+  parse Bash files.
 - Indexing never executes project source, including Bash scripts or their referenced
   files.
 
@@ -55,7 +56,9 @@ the graph cannot currently represent code implemented in Bash scripts.
 ### Steering (behavioral guidance)
 
 - Prefer conservative, deterministic extraction over speculative Bash resolution.
-- Keep Bash isolated behind explicit `code_graph.languages` configuration.
+- Keep Bash isolated behind explicit opt-in: persistent `code_graph.languages`
+  configuration or a one-shot `wiki_code_index(languages=["bash"])` request. Defaults
+  never include Bash.
 - Match the existing adapter protocol and graph record contracts where Bash syntax
   permits it.
 
@@ -85,6 +88,7 @@ the graph cannot currently represent code implemented in Bash scripts.
   extract the promised evidence, or existing-language regressions remain.
 - Escalate if: a required Bash construct has several equally plausible graph meanings
   or needs a public-contract, schema, or security-boundary change.
-- Done when: an explicitly enabled Bash fixture exposes file/function records and
-  syntax-proven call evidence through search and context; a mixed-language fixture
-  preserves both languages; and the full test suite passes without executing source.
+- Done when: a persistently configured or explicitly one-shot-selected Bash fixture
+  exposes file/function records and syntax-proven call evidence through search and
+  context; a mixed-language fixture preserves both languages; defaults exclude Bash;
+  and the full test suite passes without executing source.
