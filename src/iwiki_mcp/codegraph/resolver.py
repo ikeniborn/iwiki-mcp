@@ -101,6 +101,7 @@ LANGUAGE_FAMILIES = {
     "python": frozenset({"python"}),
     "typescript": frozenset({"typescript", "javascript"}),
     "javascript": frozenset({"javascript", "typescript"}),
+    "bash": frozenset({"bash"}),
 }
 
 

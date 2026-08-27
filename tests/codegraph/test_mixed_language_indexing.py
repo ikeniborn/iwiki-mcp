@@ -1,12 +1,15 @@
 """End-to-end: one graph covers both Python and TypeScript sources."""
 from __future__ import annotations
 
+from dataclasses import asdict
+import json
 from pathlib import Path
 
 from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph import context as context_module
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.indexer import CodeGraphIndexer
+from iwiki_mcp.codegraph.languages.bash import BashAdapter
 from iwiki_mcp.codegraph.linking import WikiSelectorResolver
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.query import CodeGraphQuery, validate_search_request
@@ -19,7 +22,7 @@ def _build_indexer(
     cache_base: Path,
     project_dir: Path,
     *,
-    languages: tuple[str, ...],
+    languages: tuple[str, ...] | None = None,
     adapter_factories=None,
     exclude: tuple[str, ...] = (),
 ) -> CodeGraphIndexer:
@@ -33,7 +36,11 @@ def _build_indexer(
     root for the per-language adapter factories.
     """
     (cache_base / _DOMAIN).mkdir(parents=True)
-    config = CodeGraphConfig(languages=languages, exclude=exclude)
+    config = (
+        CodeGraphConfig(exclude=exclude)
+        if languages is None
+        else CodeGraphConfig(languages=languages, exclude=exclude)
+    )
     paths = CodeGraphLocationResolver(
         str(cache_base), _DOMAIN, str(project_dir)
     ).resolve(ensure_excluded=False)
@@ -477,3 +484,176 @@ def test_typescript_files_respect_exclude_patterns(tmp_path):
         "ShouldNeverBeIndexed" in row["qualified_name"]
         for row in built.tables["symbols"]
     )
+
+
+def test_bash_only_factory_build_indexes_only_sh_files(tmp_path):
+    indexer = _build_indexer(
+        tmp_path / "cache", FIXTURES / "bash_basic", languages=("bash",)
+    )
+
+    rows = indexer.build_rows()
+
+    assert rows.header.languages == ("bash",)
+    assert {
+        row["path"] for row in rows.tables["files"]
+    } == {"main.sh", "lib.sh"}
+    assert {row["language"] for row in rows.tables["files"]} == {"bash"}
+    assert {
+        row["local_name"] for row in rows.tables["symbols"]
+    } == {"helper", "run", "library_only"}
+
+
+def test_omitted_languages_stays_python_only_and_explicit_python_is_compatible(tmp_path):
+    project_dir = FIXTURES / "bash_basic"
+    omitted = _build_indexer(tmp_path / "omitted", project_dir)
+    explicit = _build_indexer(
+        tmp_path / "explicit", project_dir, languages=("python",)
+    )
+
+    omitted_rows = omitted.build_rows()
+    explicit_rows = explicit.build_rows()
+
+    assert omitted_rows.header.languages == ("python",)
+    assert explicit_rows.header.languages == ("python",)
+    assert not omitted_rows.tables["files"]
+    assert not explicit_rows.tables["files"]
+    assert not omitted_rows.tables["symbols"]
+    assert not explicit_rows.tables["symbols"]
+    assert not omitted_rows.tables["relations"]
+    assert not explicit_rows.tables["relations"]
+
+
+def test_bash_does_not_change_python_rows_or_resolve_across_languages(tmp_path):
+    project_dir = FIXTURES / "mixed_python_bash"
+    python_indexer = _build_indexer(
+        tmp_path / "python", project_dir, languages=("python",)
+    )
+    mixed_indexer = _build_indexer(
+        tmp_path / "mixed", project_dir, languages=("python", "bash")
+    )
+
+    python_tables = python_indexer.build_rows().tables
+    mixed_tables = mixed_indexer.build_rows().tables
+    for table, key in (
+        ("files", "language"),
+        ("symbols", "symbol_id"),
+        ("relations", "relation_id"),
+    ):
+        def is_python_row(row):
+            if table == "files":
+                return row[key] == "python"
+            return row[key].startswith("py:")
+
+        python_rows = [row for row in python_tables[table] if is_python_row(row)]
+        mixed_rows = [row for row in mixed_tables[table] if is_python_row(row)]
+        assert json.dumps(python_rows, sort_keys=True) == json.dumps(
+            mixed_rows, sort_keys=True
+        )
+    assert all(
+        row["file_id"].startswith("sh:") for row in mixed_tables["files"]
+        if row["language"] == "bash"
+    )
+    assert all(
+        row["symbol_id"].startswith("sh:") for row in mixed_tables["symbols"]
+        if row["file_id"].startswith("sh:")
+    )
+    bash_calls = [
+        row for row in mixed_tables["relations"]
+        if row["relation_id"].startswith("sh:") and row["relation_type"] == "CALLS"
+    ]
+    assert bash_calls
+    assert all(
+        row["target_symbol_id"] is None
+        or row["target_symbol_id"].startswith("sh:")
+        for row in bash_calls
+    )
+    bash_shared_name_id = next(
+        row["symbol_id"]
+        for row in mixed_tables["symbols"]
+        if row["local_name"] == "shared_name"
+        and row["symbol_id"].startswith("sh:")
+    )
+    bash_run_id = next(
+        row["symbol_id"]
+        for row in mixed_tables["symbols"]
+        if row["local_name"] == "run" and row["symbol_id"].startswith("sh:")
+    )
+    run_shared_name_calls = [
+        row for row in bash_calls
+        if row["source_symbol_id"] == bash_run_id
+        and row["target_symbol_id"] == bash_shared_name_id
+    ]
+    assert len(run_shared_name_calls) == 1
+    assert run_shared_name_calls[0]["resolution_state"] == "resolved"
+
+
+def test_bash_factory_search_and_context_return_bash_entities(tmp_path):
+    indexer = _build_indexer(
+        tmp_path / "cache", FIXTURES / "bash_basic", languages=("bash",)
+    )
+    assert indexer.build(force=True)["state"] == "ready"
+    with indexer.store.read_lease() as connection:
+        results = CodeGraphQuery(_DOMAIN).search(
+            connection,
+            validate_search_request("run", configured_languages=("bash",)),
+        )
+        module_id = next(
+            row["module_id"] for row in indexer.build_rows().tables["files"]
+            if row["path"] == "main.sh"
+        )
+        result = context_module.CodeGraphContext(_DOMAIN, None, 1_000_000).context(
+            connection, context_module.validate_context_request([module_id], depth=2)
+        )
+
+    assert results and all(item.entity_id.startswith("sh:") for item in results)
+    assert {row["relation_type"] for row in result["relations"]} >= {
+        "DECLARES", "CALLS"
+    }
+    assert all("source" not in row for row in result["files"])
+
+
+def test_bash_static_indexing_never_persists_source_or_command_arguments(tmp_path):
+    sentinel = tmp_path / "must-not-exist"
+    source_body_marker = "BASH_SOURCE_BODY_DO_NOT_PERSIST"
+    command_argument_marker = "BASH_PRINTF_ARGUMENT_DO_NOT_PERSIST"
+    source = (
+        f"safe() {{ source {source_body_marker}; touch {str(sentinel)}; "
+        f"printf '%s' {command_argument_marker}; eval \"$(danger)\"; }}\n"
+    ).encode()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "dangerous.sh").write_bytes(source)
+    indexer = _build_indexer(tmp_path / "cache", project_dir, languages=("bash",))
+
+    tables = indexer.build_rows().tables
+    assert not sentinel.exists()
+    parsed = BashAdapter(_DOMAIN, (), parser_version="test-parser").parse_file(
+        source, "dangerous.sh"
+    )
+    assert not sentinel.exists()
+    parsed_serialized = json.dumps(
+        {
+            "file": asdict(parsed.file),
+            "symbols": [asdict(item) for item in parsed.symbols],
+            "references": [asdict(item) for item in parsed.references],
+            "warnings": parsed.warnings,
+        },
+        sort_keys=True,
+    )
+    table_serialized = {
+        name: json.dumps(rows, sort_keys=True)
+        for name, rows in tables.items()
+    }
+
+    for serialized in (parsed_serialized, *table_serialized.values()):
+        assert str(sentinel) not in serialized
+        assert source_body_marker not in serialized
+        assert command_argument_marker not in serialized
+    assert "safe()" not in parsed_serialized
+    assert "$(danger)" not in parsed_serialized
+    calls = [
+        row["target_reference"] for row in tables["relations"]
+        if row["relation_type"] == "CALLS"
+    ]
+    assert {"touch", "printf"} <= set(calls)
+    assert {"touch", "printf", "eval", "danger"} == set(calls)

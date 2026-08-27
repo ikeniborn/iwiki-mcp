@@ -19,7 +19,7 @@ class CodeGraphConfigError(RuntimeError):
     """Raised when code graph configuration is invalid."""
 
 
-KNOWN_LANGUAGES = frozenset({"python", "typescript", "javascript"})
+KNOWN_LANGUAGES = frozenset({"python", "typescript", "javascript", "bash"})
 
 _FIELDS = {
     "enabled",
@@ -98,7 +98,7 @@ def _languages(value: Any) -> tuple[str, ...]:
         for item in result
     ):
         raise CodeGraphConfigError(
-            "code_graph.languages supports only python, typescript, javascript"
+            "code_graph.languages supports only python, typescript, javascript, bash"
         )
     return result
 

@@ -21,9 +21,9 @@ _MAX_FILES = 20
 _MAX_SOURCE_BYTES = 200_000
 # Prefix alternation must stay in sync with the language prefixes the
 # codegraph.application.code_graph_adapter_factories registers
-# ("py", "ts", "js").
+# ("py", "ts", "js", "sh").
 _CANONICAL_ENTITY_ID = re.compile(
-    r"(?:py|ts|js):(?:file|module|symbol):[0-9a-f]{64}\Z"
+    r"(?:py|ts|js|sh):(?:file|module|symbol):[0-9a-f]{64}\Z"
 )
 
 

@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from dataclasses import replace
+from importlib.metadata import version
 import sqlite3
 
 import pytest
 
 from iwiki_mcp import server
+from iwiki_mcp.codegraph import application as application_module
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph.languages.bash import BashAdapter
 from iwiki_mcp.codegraph.models import CodeGraphError
 from iwiki_mcp.codegraph.query import CodeGraphQueryError
 
@@ -68,6 +71,24 @@ class _FakeRuntime:
             "max_files": max_files,
             "max_source_bytes": max_source_bytes,
         }
+
+
+def test_bash_adapter_factory_matches_bash_adapter_contract():
+    factory = application_module.code_graph_adapter_factories("domain")["bash"]
+
+    assert factory.extensions == (".sh",)
+    assert factory.adapter_version == "bash-adapter-v1"
+    assert factory.parser_version == f"tree-sitter-bash:{version('tree-sitter-bash')}"
+    assert f"tree-sitter:{version('tree-sitter')}" in factory.grammar_version
+    assert (
+        f"tree-sitter-bash:{version('tree-sitter-bash')}"
+        in factory.grammar_version
+    )
+    assert "tree-sitter-language-pack" not in factory.grammar_version
+    bound = factory.bind(("run.sh",))
+    assert bound.adapter.language == "bash"
+    assert isinstance(bound.adapter, BashAdapter)
+    assert bound.adapter._parser is None
 
 
 def test_code_handlers_use_the_bound_primary(seed_binding, monkeypatch):
@@ -261,6 +282,12 @@ def test_index_handler_accepts_every_known_language(seed_binding, monkeypatch):
     ] == ["python", "typescript"]
     assert "error" not in server.wiki_code_index(languages=["typescript"])
     assert calls[-1] == (seed_binding, {"force": False, "languages": ["typescript"]})
+
+    assert server.wiki_code_index(languages=["bash"])["languages"] == ["bash"]
+    assert calls[-1] == (seed_binding, {"force": False, "languages": ["bash"]})
+
+    assert server.wiki_code_index()["languages"] is None
+    assert calls[-1] == (seed_binding, {"force": False, "languages": None})
 
 
 @pytest.mark.parametrize(

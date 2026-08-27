@@ -1,0 +1,2 @@
+helper() { :; }
+run() { helper; }

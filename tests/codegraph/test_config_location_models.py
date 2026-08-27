@@ -552,9 +552,11 @@ def test_models_are_frozen():
 
 def test_tree_sitter_packages_are_available():
     import tree_sitter
+    import tree_sitter_bash
     import tree_sitter_language_pack
 
     assert tree_sitter is not None
+    assert tree_sitter_bash is not None
     assert tree_sitter_language_pack is not None
 
 
@@ -573,10 +575,17 @@ def test_languages_accepts_javascript():
     assert config.languages == ("python", "javascript")
 
 
+def test_languages_accepts_bash():
+    config = CodeGraphConfig.from_mapping({"languages": ["python", "bash"]})
+    assert config.languages == ("python", "bash")
+
+
 def test_languages_rejects_unknown_language_message_lists_javascript():
     with pytest.raises(CodeGraphConfigError) as excinfo:
         CodeGraphConfig.from_mapping({"languages": ["ruby"]})
-    assert "python, typescript, javascript" in str(excinfo.value)
+    assert str(excinfo.value) == (
+        "code_graph.languages supports only python, typescript, javascript, bash"
+    )
 
 
 def test_typescript_type_boost_defaults_false():

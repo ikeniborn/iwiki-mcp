@@ -18,7 +18,7 @@ from . import config as codegraph_config
 from . import indexer as codegraph_indexer
 from . import linking
 from . import runtime as codegraph_runtime
-from .languages import javascript, python, typescript
+from .languages import bash, javascript, python, typescript
 from .mcp_adapter import (
     CodeGraphAdapterError,
     McpSnapshotPublisher,
@@ -144,6 +144,9 @@ _PYTHON_PARSER_VERSION = (
 _TYPESCRIPT_PARSER_VERSION = (
     "tree-sitter-typescript:" + _distribution_version("tree-sitter-typescript")
 )
+_BASH_PARSER_VERSION = (
+    "tree-sitter-bash:" + _distribution_version("tree-sitter-bash")
+)
 
 
 def code_graph_adapter_factories(
@@ -178,6 +181,13 @@ def code_graph_adapter_factories(
             repository_id,
             source_paths,
             parser_version=_TYPESCRIPT_PARSER_VERSION,
+        )
+
+    def create_bash_adapter(source_paths):
+        return bash.BashAdapter(
+            repository_id,
+            source_paths,
+            parser_version=_BASH_PARSER_VERSION,
         )
 
     return {
@@ -216,6 +226,16 @@ def code_graph_adapter_factories(
                 _TYPESCRIPT_PARSER_VERSION,
             )),
             adapter_version="javascript-adapter-v1",
+        ),
+        "bash": codegraph_indexer.AdapterFactory(
+            create=create_bash_adapter,
+            extensions=(".sh",),
+            parser_version=_BASH_PARSER_VERSION,
+            grammar_version=";".join((
+                "tree-sitter:" + _distribution_version("tree-sitter"),
+                _BASH_PARSER_VERSION,
+            )),
+            adapter_version="bash-adapter-v1",
         ),
     }
 
