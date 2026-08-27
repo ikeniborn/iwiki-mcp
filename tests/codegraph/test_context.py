@@ -57,6 +57,11 @@ def test_javascript_and_typescript_seeds_are_accepted():
     assert len(request.seeds) == 2
 
 
+def test_bash_symbol_seed_is_accepted():
+    request = validate_context_request(["sh:symbol:" + "a" * 64])
+    assert request.seeds == ("sh:symbol:" + "a" * 64,)
+
+
 def test_unregistered_language_prefix_is_still_rejected():
     with pytest.raises(CodeGraphContextError):
         validate_context_request(["rb:symbol:" + "a" * 64])
