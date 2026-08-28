@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+from dataclasses import replace
 import logging
 import sys
 import traceback
@@ -10,7 +11,7 @@ import urllib3
 import iwiki_mcp.telegram_bot.main as main_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.config import BotConfig, TelegramProxyConfig
-from iwiki_mcp.telegram_bot.inference import InferenceError
+from iwiki_mcp.telegram_bot.inference import InferenceClient, InferenceError
 from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiError
 from iwiki_mcp.telegram_bot.proxy import ProxyResponse
 from iwiki_mcp.telegram_bot.runtime import Backoff, Heartbeat
@@ -350,6 +351,104 @@ async def test_non_retryable_startup_failure_does_not_sleep(
     if isinstance(failure, RemoteIwikiError):
         assert events.count("remote_probe") == 1
         assert events.count("remote_close") == 1
+
+
+@pytest.mark.asyncio
+async def test_unsupported_inference_protocol_is_not_retried(monkeypatch):
+    events = []
+
+    class Proxy:
+        async def close(self):
+            events.append("proxy_close")
+
+    class RecordingInference(InferenceClient):
+        async def close(self):
+            events.append("inference_close")
+            await super().close()
+
+    async def unexpected_sleep(delay):
+        raise AssertionError("unsupported protocols must not be retried")
+
+    monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
+    monkeypatch.setattr(main_module, "InferenceClient", RecordingInference)
+
+    config = replace(_config(), llm_base_url="provider-without-scheme")
+    with pytest.raises(InferenceError) as captured:
+        await main_module.run_bot(
+            config,
+            sleep=unexpected_sleep,
+            heartbeat=RecordingHeartbeat(),
+        )
+
+    assert captured.value.retryable is False
+    assert events == ["inference_close", "proxy_close"]
+
+
+class UnknownStartupFailure(BaseException):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    (
+        asyncio.CancelledError("startup-cancellation-marker"),
+        UnknownStartupFailure("unknown-startup-marker"),
+    ),
+    ids=("cancellation", "unknown-base-exception"),
+)
+async def test_run_bot_cleanup_preserves_startup_base_exception(
+    monkeypatch, failure
+):
+    events = []
+
+    class Proxy:
+        async def close(self):
+            events.append("proxy_close")
+            raise RuntimeError("proxy-cleanup-marker")
+
+    class Inference:
+        async def probe(self):
+            events.append("inference_probe")
+
+        async def close(self):
+            events.append("inference_close")
+            raise RuntimeError("inference-cleanup-marker")
+
+    class Remote:
+        async def list_domains(self):
+            events.append("remote_probe")
+            raise failure
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        try:
+            yield Remote()
+        finally:
+            events.append("remote_close")
+            raise RuntimeError("remote-cleanup-marker")
+
+    monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
+    monkeypatch.setattr(main_module, "InferenceClient", lambda *args: Inference())
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+
+    with pytest.raises(type(failure)) as captured:
+        await main_module.run_bot(_config(), heartbeat=RecordingHeartbeat())
+
+    assert captured.value is failure
+    assert events == [
+        "inference_probe",
+        "remote_probe",
+        "remote_close",
+        "inference_close",
+        "proxy_close",
+    ]
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert "cleanup-marker" not in rendered
 
 
 @pytest.mark.asyncio

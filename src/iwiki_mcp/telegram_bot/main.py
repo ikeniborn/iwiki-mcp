@@ -116,6 +116,9 @@ async def run_bot(
                     "elapsed_ms": int((clock() - started) * 1000),
                 },
             )
+        except BaseException:
+            startup_exc_info = sys.exc_info()
+            raise
         finally:
             if not startup_ready:
                 await _close_dependencies(

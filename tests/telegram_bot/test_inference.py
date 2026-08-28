@@ -103,6 +103,24 @@ async def test_probe_http_status_retryability(status, retryable):
 
 
 @pytest.mark.asyncio
+async def test_probe_unsupported_protocol_is_not_retryable():
+    client = InferenceClient(
+        "provider-without-scheme",
+        "key",
+        "chat-model",
+        "audio-model",
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is False
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_answer_posts_only_question_and_selected_context():
     seen = {}
 

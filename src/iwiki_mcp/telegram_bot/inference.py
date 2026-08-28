@@ -28,9 +28,18 @@ class InferenceError(RuntimeError):
         self.retryable = retryable
 
 
-def _retryable_status(error: httpx.HTTPStatusError) -> bool:
-    status = error.response.status_code
-    return status == 429 or 500 <= status < 600
+def _retryable_http_error(error: httpx.HTTPError) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status == 429 or 500 <= status < 600
+    return isinstance(
+        error,
+        (
+            httpx.NetworkError,
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+        ),
+    )
 
 
 class InferenceClient:
@@ -62,11 +71,9 @@ class InferenceClient:
             )
             response.raise_for_status()
             payload = response.json()
-        except httpx.HTTPStatusError as error:
-            retryable = _retryable_status(error)
-        except httpx.TransportError:
-            retryable = True
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError as error:
+            retryable = _retryable_http_error(error)
+        except ValueError:
             retryable = False
         if retryable is not None:
             raise InferenceError(
@@ -174,11 +181,9 @@ class InferenceClient:
             )
             response.raise_for_status()
             payload = response.json()
-        except httpx.HTTPStatusError as error:
-            retryable = _retryable_status(error)
-        except httpx.TransportError:
-            retryable = True
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError as error:
+            retryable = _retryable_http_error(error)
+        except ValueError:
             retryable = False
         if retryable is not None:
             raise InferenceError(

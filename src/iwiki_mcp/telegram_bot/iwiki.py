@@ -9,6 +9,11 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+try:
+    from builtins import BaseExceptionGroup
+except ImportError:
+    from exceptiongroup import BaseExceptionGroup
+
 
 class RemoteIwikiError(RuntimeError):
     """A sanitized remote iwiki failure."""
@@ -22,9 +27,22 @@ ToolCaller = Callable[[str, dict[str, object]], Awaitable[object]]
 _SAFE_REMOTE_ERROR_CODES = frozenset({"conflict", "section_conflict"})
 
 
-def _retryable_status(error: httpx.HTTPStatusError) -> bool:
-    status = error.response.status_code
-    return status == 429 or 500 <= status < 600
+def _retryable_http_failure(error: BaseException) -> bool:
+    if isinstance(error, BaseExceptionGroup):
+        return bool(error.exceptions) and all(
+            _retryable_http_failure(child) for child in error.exceptions
+        )
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status == 429 or 500 <= status < 600
+    return isinstance(
+        error,
+        (
+            httpx.NetworkError,
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+        ),
+    )
 
 
 def _direct_httpx_client(headers=None, timeout=None, auth=None):
@@ -70,12 +88,8 @@ class RemoteIwikiClient:
             payload = _decode_result(await self._call_tool(name, arguments))
         except RemoteIwikiError:
             raise
-        except httpx.HTTPStatusError as error:
-            retryable = _retryable_status(error)
-        except httpx.TransportError:
-            retryable = True
-        except Exception:
-            retryable = False
+        except Exception as error:
+            retryable = _retryable_http_failure(error)
         if retryable is not None:
             raise RemoteIwikiError(
                 "remote_call_failed", retryable=retryable
@@ -194,18 +208,10 @@ async def open_remote_iwiki(
                 yield RemoteIwikiClient(call_tool)
     except RemoteIwikiError:
         raise
-    except httpx.HTTPStatusError as error:
+    except Exception as error:
         if started:
             raise
-        retryable = _retryable_status(error)
-    except httpx.TransportError:
-        if started:
-            raise
-        retryable = True
-    except Exception:
-        if started:
-            raise
-        retryable = False
+        retryable = _retryable_http_failure(error)
     if retryable is not None:
         raise RemoteIwikiError(
             "remote_call_failed", retryable=retryable

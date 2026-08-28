@@ -1,9 +1,15 @@
 from contextlib import asynccontextmanager
+import asyncio
 import traceback
 from types import SimpleNamespace
 
 import httpx
 import pytest
+
+try:
+    from builtins import BaseExceptionGroup, ExceptionGroup
+except ImportError:
+    from exceptiongroup import BaseExceptionGroup, ExceptionGroup
 
 import iwiki_mcp.telegram_bot.iwiki as iwiki_module
 from iwiki_mcp.telegram_bot.iwiki import (
@@ -21,6 +27,14 @@ def assert_sanitized_error(captured, marker):
     assert marker not in formatted
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None
+
+
+def status_error(status):
+    request = httpx.Request("GET", "https://remote-url-marker.example/mcp")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(
+        "remote-status-marker", request=request, response=response
+    )
 
 
 @pytest.mark.asyncio
@@ -317,3 +331,79 @@ async def test_remote_startup_http_status_retryability(
             pass
 
     assert captured.value.retryable is retryable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "retryable"),
+    (
+        (
+            ExceptionGroup(
+                "transient-group-marker",
+                (
+                    ExceptionGroup(
+                        "nested-group-marker",
+                        (httpx.ConnectError("connect-marker"),),
+                    ),
+                    httpx.ReadTimeout("timeout-marker"),
+                    status_error(503),
+                ),
+            ),
+            True,
+        ),
+        (
+            ExceptionGroup(
+                "mixed-group-marker",
+                (
+                    httpx.ConnectError("connect-marker"),
+                    httpx.UnsupportedProtocol("unsupported-marker"),
+                ),
+            ),
+            False,
+        ),
+    ),
+)
+async def test_remote_startup_exception_group_retryability(
+    monkeypatch, failure, retryable
+):
+    @asynccontextmanager
+    async def failing_stream(url, **kwargs):
+        raise failure
+        yield
+
+    monkeypatch.setattr(iwiki_module, "streamablehttp_client", failing_stream)
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        async with open_remote_iwiki(
+            "https://wiki.example/mcp", "iwiki-token"
+        ):
+            pass
+
+    assert captured.value.retryable is retryable
+    formatted = "".join(
+        traceback.format_exception(captured.type, captured.value, captured.tb)
+    )
+    assert "marker" not in formatted
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_remote_startup_cancellation_group_is_not_converted(monkeypatch):
+    cancellation = asyncio.CancelledError("cancellation-marker")
+    failure = BaseExceptionGroup("cancellation-group-marker", (cancellation,))
+
+    @asynccontextmanager
+    async def failing_stream(url, **kwargs):
+        raise failure
+        yield
+
+    monkeypatch.setattr(iwiki_module, "streamablehttp_client", failing_stream)
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        async with open_remote_iwiki(
+            "https://wiki.example/mcp", "iwiki-token"
+        ):
+            pass
+
+    assert captured.value is failure
