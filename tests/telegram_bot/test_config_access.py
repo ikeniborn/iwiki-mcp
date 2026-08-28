@@ -55,10 +55,17 @@ def test_config_loads_allowlist_and_defaults(monkeypatch):
             None,
         ),
         ("https://192.0.2.10:8443", "https://192.0.2.10:8443", None),
+        ("https://dead.beef:8443", "https://dead.beef:8443", None),
         (
             "https://user%40team:p%3Ass@proxy.example:9443",
             "https://proxy.example:9443",
             "Basic dXNlckB0ZWFtOnA6c3M=",
+        ),
+        (
+            "https://%D1%8E%D0%B7%D0%B5%D1%80:"
+            "%D0%BF%D0%B0%D1%80%D0%BE%D0%BB%D1%8C@proxy.example:9443",
+            "https://proxy.example:9443",
+            "Basic 0Y7Qt9C10YA60L/QsNGA0L7Qu9GM",
         ),
         (
             "https://user:@proxy.example:9443",
@@ -103,6 +110,12 @@ def test_config_accepts_strict_https_proxy(
         "https://proxy_name.example:8443",
         f"https://{'a' * 64}.example:8443",
         f"https://{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 63}:8443",
+        "https://2130706433:8443",
+        "https://017700000001:8443",
+        "https://0x7f000001:8443",
+        "https://127.1:8443",
+        "https://127.000.000.001:8443",
+        "https://0x7f.0.0x0.1:8443",
         "https://user:password@extra@proxy.example:8443",
         "https://user@proxy.example:8443",
         "https://:password@proxy.example:8443",

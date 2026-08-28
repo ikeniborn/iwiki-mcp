@@ -17,6 +17,14 @@ class TelegramProxyConfig:
     authorization: str | None = field(default=None, repr=False)
 
 
+def _numeric_proxy_label(label: str) -> bool:
+    return label.isdecimal() or (
+        len(label) > 2
+        and label[:2].lower() == "0x"
+        and all(character in "0123456789abcdefABCDEF" for character in label[2:])
+    )
+
+
 def _valid_proxy_hostname(hostname: str) -> bool:
     if "%" in hostname:
         return False
@@ -26,6 +34,8 @@ def _valid_proxy_hostname(hostname: str) -> bool:
         if not hostname.isascii() or len(hostname) > 253:
             return False
         labels = hostname.split(".")
+        if all(_numeric_proxy_label(label) for label in labels):
+            return False
         return all(
             0 < len(label) <= 63
             and not label.startswith("-")
