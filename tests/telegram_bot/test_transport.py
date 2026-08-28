@@ -1,13 +1,42 @@
 import pytest
 from contextlib import asynccontextmanager
+import json
+import traceback
+
+import urllib3
 
 import iwiki_mcp.telegram_bot.main as main_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
-from iwiki_mcp.telegram_bot.config import BotConfig
+from iwiki_mcp.telegram_bot.config import BotConfig, TelegramProxyConfig
 from iwiki_mcp.telegram_bot.inference import InferenceError
 from iwiki_mcp.telegram_bot.main import main
 from iwiki_mcp.telegram_bot.models import BotReply, WritePreview
-from iwiki_mcp.telegram_bot.transport import TelegramTransport
+from iwiki_mcp.telegram_bot.proxy import ProxyResponse
+from iwiki_mcp.telegram_bot.transport import TelegramError, TelegramTransport
+
+
+class RecordingHttp:
+    def __init__(self, post_results=(), get_results=()):
+        self.post_results = list(post_results)
+        self.get_results = list(get_results)
+        self.calls = []
+
+    async def post_json(self, url, payload):
+        self.calls.append(("POST", url, payload))
+        result = self.post_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def get_bytes(self, url):
+        self.calls.append(("GET", url))
+        result = self.get_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def close(self):
+        self.calls.append(("CLOSE",))
 
 
 class FakeConversation:
@@ -58,6 +87,7 @@ class FakeTransport(TelegramTransport):
             "telegram-token",
             AccessPolicy(frozenset({1001})),
             conversation,
+            RecordingHttp(),
         )
         self.api_calls = []
 
@@ -189,6 +219,208 @@ async def test_poll_once_advances_offset(transport):
     assert transport.conversation.calls == [("expire_state",)]
 
 
+@pytest.mark.asyncio
+async def test_all_telegram_request_classes_use_injected_adapter_and_fixed_origins():
+    token = "fixed-token"
+    callback_update = {
+        "update_id": 40,
+        "callback_query": {
+            "id": "callback-1",
+            "from": {"id": 1001},
+            "message": {"chat": {"id": 9}},
+            "data": "domain:team",
+        },
+    }
+    voice_update = {
+        "update_id": 41,
+        "message": {
+            "from": {"id": 1001},
+            "chat": {"id": 9},
+            "voice": {"file_id": "voice-file"},
+        },
+    }
+    http = RecordingHttp(
+        post_results=(
+            ProxyResponse(
+                200,
+                json.dumps(
+                    {"ok": True, "result": [callback_update, voice_update]}
+                ).encode(),
+            ),
+            ProxyResponse(200, b'{"ok":true,"result":{}}'),
+            ProxyResponse(200, b'{"ok":true,"result":{}}'),
+            ProxyResponse(
+                200,
+                json.dumps(
+                    {"ok": True, "result": {"file_path": "voice/file.ogg"}}
+                ).encode(),
+            ),
+            ProxyResponse(200, b'{"ok":true,"result":{}}'),
+        ),
+        get_results=(ProxyResponse(200, b"audio"),),
+    )
+    conversation = FakeConversation()
+    transport = TelegramTransport(
+        token,
+        AccessPolicy(frozenset({1001})),
+        conversation,
+        http,
+    )
+
+    assert await transport.poll_once(None) == 42
+
+    assert http.calls == [
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/getUpdates",
+            {"timeout": 30},
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+            {"callback_query_id": "callback-1"},
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            {"chat_id": 9, "text": "Selected domain: team"},
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/getFile",
+            {"file_id": "voice-file"},
+        ),
+        (
+            "GET",
+            f"https://api.telegram.org/file/bot{token}/voice/file.ogg",
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            {"chat_id": 9, "text": "Voice answer"},
+        ),
+    ]
+    assert all("api.telegram.org" in call[1] for call in http.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    (
+        ProxyResponse(503, b"upstream response marker"),
+        ProxyResponse(200, b"not-json response marker"),
+        ProxyResponse(200, b'{"ok":false,"description":"response marker"}'),
+    ),
+)
+async def test_api_rejects_non_2xx_malformed_and_non_ok_responses(response):
+    http = RecordingHttp(post_results=(response,))
+    transport = TelegramTransport(
+        "telegram-token",
+        AccessPolicy(frozenset({1001})),
+        FakeConversation(),
+        http,
+    )
+
+    with pytest.raises(TelegramError, match="^telegram_request_failed$"):
+        await transport.poll_once(None)
+
+
+@pytest.mark.asyncio
+async def test_file_download_rejects_non_2xx_response():
+    http = RecordingHttp(
+        post_results=(
+            ProxyResponse(
+                200,
+                b'{"ok":true,"result":{"file_path":"voice/file.ogg"}}',
+            ),
+        ),
+        get_results=(ProxyResponse(302, b"redirect marker"),),
+    )
+    transport = TelegramTransport(
+        "telegram-token",
+        AccessPolicy(frozenset({1001})),
+        FakeConversation(),
+        http,
+    )
+
+    with pytest.raises(TelegramError, match="^telegram_file_failed$"):
+        await transport._download_voice("voice-file")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", (urllib3.exceptions.HTTPError, OSError, UnicodeError))
+async def test_api_low_level_failures_are_sanitized_without_traceback_leaks(failure):
+    marker = "token-proxy-response-secret-marker"
+    http = RecordingHttp(post_results=(failure(marker),))
+    transport = TelegramTransport(
+        marker,
+        AccessPolicy(frozenset({1001})),
+        FakeConversation(),
+        http,
+    )
+
+    with pytest.raises(TelegramError) as exc_info:
+        await transport.poll_once(None)
+
+    formatted = "".join(
+        traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
+    )
+    assert str(exc_info.value) == "telegram_request_failed"
+    assert marker not in str(exc_info.value)
+    assert marker not in repr(exc_info.value)
+    assert marker not in formatted
+
+
+@pytest.mark.asyncio
+async def test_file_low_level_failure_is_sanitized_without_traceback_leaks():
+    marker = "file-token-proxy-response-secret-marker"
+    http = RecordingHttp(
+        post_results=(
+            ProxyResponse(
+                200,
+                b'{"ok":true,"result":{"file_path":"voice/file.ogg"}}',
+            ),
+        ),
+        get_results=(urllib3.exceptions.ProtocolError(marker),),
+    )
+    transport = TelegramTransport(
+        marker,
+        AccessPolicy(frozenset({1001})),
+        FakeConversation(),
+        http,
+    )
+
+    with pytest.raises(TelegramError) as exc_info:
+        await transport._download_voice("voice-file")
+
+    formatted = "".join(
+        traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
+    )
+    assert str(exc_info.value) == "telegram_file_failed"
+    assert marker not in str(exc_info.value)
+    assert marker not in repr(exc_info.value)
+    assert marker not in formatted
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_send_message_failure_is_not_retried():
+    http = RecordingHttp(
+        post_results=(urllib3.exceptions.ProtocolError("ambiguous send"),)
+    )
+    transport = TelegramTransport(
+        "telegram-token",
+        AccessPolicy(frozenset({1001})),
+        FakeConversation(),
+        http,
+    )
+
+    with pytest.raises(TelegramError, match="^telegram_request_failed$"):
+        await transport._send(9, BotReply("One send only"))
+
+    assert len(http.calls) == 1
+    assert http.calls[0][1].endswith("/sendMessage")
+
+
 def test_help_does_not_load_configuration(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["iwiki-telegram-bot", "--help"])
 
@@ -208,6 +440,10 @@ def test_help_does_not_load_configuration(monkeypatch, capsys):
 async def test_runner_stops_before_remote_when_inference_probe_fails(monkeypatch):
     events = []
 
+    class TelegramHttp:
+        async def close(self):
+            events.append("telegram_close")
+
     class FailingInference:
         def __init__(self, *arguments):
             pass
@@ -224,6 +460,11 @@ async def test_runner_stops_before_remote_when_inference_probe_fails(monkeypatch
 
     monkeypatch.setattr(main_module, "InferenceClient", FailingInference)
     monkeypatch.setattr(main_module, "open_remote_iwiki", unexpected_remote)
+    monkeypatch.setattr(
+        main_module,
+        "build_proxy_client",
+        lambda config: TelegramHttp(),
+    )
     config = BotConfig(
         "telegram-token",
         "https://wiki.example/mcp",
@@ -234,12 +475,13 @@ async def test_runner_stops_before_remote_when_inference_probe_fails(monkeypatch
         "chat-model",
         "audio-model",
         300,
+        TelegramProxyConfig("https://proxy.example:8443"),
     )
 
     with pytest.raises(InferenceError, match="configured_model_unavailable"):
         await main_module.run_bot(config)
 
-    assert events == ["probe", "close"]
+    assert events == ["probe", "close", "telegram_close"]
 
 
 @pytest.mark.asyncio
@@ -277,6 +519,7 @@ async def test_runner_probes_remote_scope_before_polling(monkeypatch):
         "chat-model",
         "audio-model",
         300,
+        TelegramProxyConfig("https://proxy.example:8443"),
     )
 
     with pytest.raises(RuntimeError, match="no_remote_domains"):
