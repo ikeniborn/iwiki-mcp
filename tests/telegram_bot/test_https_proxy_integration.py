@@ -7,6 +7,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 
 import pytest
 import urllib3
@@ -30,7 +31,12 @@ def _openssl(*args):
     )
 
 
-def _certificate_authority(directory: Path):
+def _certificate_authority(
+    directory: Path,
+    *,
+    proxy_subject="127.0.0.1",
+    proxy_san="IP:127.0.0.1",
+):
     if shutil.which("openssl") is None:
         pytest.skip("OpenSSL executable unavailable for TLS integration")
     ca_key = directory / "ca.key"
@@ -93,7 +99,7 @@ def _certificate_authority(directory: Path):
         )
         return certificate, key
 
-    proxy = issue("proxy", "127.0.0.1", "IP:127.0.0.1")
+    proxy = issue("proxy", proxy_subject, proxy_san)
     telegram = issue("telegram", "api.telegram.org", "DNS:api.telegram.org")
     return ca_cert, proxy, telegram
 
@@ -150,12 +156,38 @@ class _TlsOverTls:
 
 
 class _HttpsConnectProxy:
-    def __init__(self, proxy_certificate, telegram_certificate):
+    def __init__(
+        self,
+        proxy_certificate,
+        telegram_certificate,
+        *,
+        token=TOKEN,
+        updates=None,
+        audio=b"deterministic-audio",
+        voice_path="voice/file_1.ogg",
+        proxy_authorization=None,
+        poll_delay=0.0,
+    ):
+        self.token = token
         self.connect_targets = []
         self.observed = []
         self.errors = []
+        self.sent_payloads = []
+        self.proxy_authorizations = []
+        self.request_count = 0
+        self.enabled = True
+        self.poll_delay = poll_delay
+        self.audio = audio
+        self.voice_path = voice_path
+        self.proxy_authorization = proxy_authorization
+        self._updates = list(updates if updates is not None else self._default_updates())
+        self._lock = threading.Lock()
         self._stopping = threading.Event()
-        self._active = None
+        self._poll_release = threading.Event()
+        self._poll_release.set()
+        self._poll_waiting = threading.Event()
+        self._active = set()
+        self._connections = []
         self._listener = socket.socket()
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.bind(("127.0.0.1", 0))
@@ -168,6 +200,27 @@ class _HttpsConnectProxy:
         self._telegram_context.load_cert_chain(*map(str, telegram_certificate))
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
+
+    @staticmethod
+    def _default_updates():
+        return [
+            {
+                "update_id": 10,
+                "message": {
+                    "from": {"id": 1001},
+                    "chat": {"id": 9},
+                    "text": "question",
+                },
+            },
+            {
+                "update_id": 11,
+                "message": {
+                    "from": {"id": 1001},
+                    "chat": {"id": 9},
+                    "voice": {"file_id": "voice-1"},
+                },
+            },
+        ]
 
     @staticmethod
     def _read_headers(stream, initial=b""):
@@ -186,7 +239,7 @@ class _HttpsConnectProxy:
         length = int(headers.get("content-length", "0"))
         while len(buffer) < length:
             buffer += stream.recv(65536)
-        return lines[0], buffer[:length], buffer[length:]
+        return lines[0], headers, buffer[:length], buffer[length:]
 
     @staticmethod
     def _response(payload, *, content_type="application/json"):
@@ -198,50 +251,77 @@ class _HttpsConnectProxy:
             + payload
         )
 
-    def _payload(self, method, path):
-        if path == f"/bot{TOKEN}/getUpdates":
+    def _payload(self, method, path, body):
+        if path == f"/bot{self.token}/getUpdates":
+            if not self._poll_release.is_set():
+                self._poll_waiting.set()
+                self._poll_release.wait()
+            if self.poll_delay:
+                time.sleep(self.poll_delay)
+            with self._lock:
+                updates = self._updates
+                self._updates = []
             return json.dumps(
-                {
-                    "ok": True,
-                    "result": [
-                        {
-                            "update_id": 10,
-                            "message": {
-                                "from": {"id": 1001},
-                                "chat": {"id": 9},
-                                "text": "question",
-                            },
-                        },
-                        {
-                            "update_id": 11,
-                            "message": {
-                                "from": {"id": 1001},
-                                "chat": {"id": 9},
-                                "voice": {"file_id": "voice-1"},
-                            },
-                        },
-                    ],
-                },
+                {"ok": True, "result": updates},
                 separators=(",", ":"),
             ).encode()
-        if path == f"/bot{TOKEN}/getFile":
-            return b'{"ok":true,"result":{"file_path":"voice/file_1.ogg"}}'
-        if path == f"/file/bot{TOKEN}/voice/file_1.ogg":
-            return b"deterministic-audio"
-        if path == f"/bot{TOKEN}/sendMessage":
+        if path == f"/bot{self.token}/getFile":
+            return json.dumps(
+                {"ok": True, "result": {"file_path": self.voice_path}},
+                separators=(",", ":"),
+            ).encode()
+        if path == f"/file/bot{self.token}/{self.voice_path}":
+            return self.audio
+        if path in {
+            f"/bot{self.token}/sendMessage",
+            f"/bot{self.token}/answerCallbackQuery",
+        }:
+            if body:
+                self.sent_payloads.append(json.loads(body))
             return b'{"ok":true,"result":{}}'
         raise AssertionError(f"unexpected tunneled request {method} {path}")
 
     def _serve(self):
+        self._listener.settimeout(0.2)
+        while not self._stopping.is_set():
+            try:
+                raw, _address = self._listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not self.enabled:
+                raw.close()
+                continue
+            thread = threading.Thread(
+                target=self._serve_connection, args=(raw,), daemon=True
+            )
+            self._connections.append(thread)
+            thread.start()
+
+    def _serve_connection(self, raw):
+        with self._lock:
+            self._active.add(raw)
         try:
-            raw, _address = self._listener.accept()
-            self._active = raw
             with self._proxy_context.wrap_socket(raw, server_side=True) as outer:
-                self._active = outer
-                first_line, _body, remainder = self._read_headers(outer)
+                with self._lock:
+                    self._active.discard(raw)
+                    self._active.add(outer)
+                first_line, headers, _body, remainder = self._read_headers(outer)
                 method, target, _version = first_line.split(" ")
-                if method != "CONNECT" or target != "api.telegram.org:443":
-                    outer.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                authorization = headers.get("proxy-authorization")
+                self.proxy_authorizations.append(authorization)
+                if (
+                    method != "CONNECT"
+                    or target != "api.telegram.org:443"
+                    or (
+                        self.proxy_authorization is not None
+                        and authorization != self.proxy_authorization
+                    )
+                ):
+                    outer.sendall(
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+                    )
                     return
                 self.connect_targets.append(target)
                 outer.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -251,11 +331,15 @@ class _HttpsConnectProxy:
                 inner = _TlsOverTls(outer, self._telegram_context)
                 inner.handshake()
                 buffered = b""
-                while not self._stopping.is_set():
-                    first_line, _body, buffered = self._read_headers(inner, buffered)
+                while not self._stopping.is_set() and self.enabled:
+                    first_line, _headers, body, buffered = self._read_headers(
+                        inner, buffered
+                    )
                     method, path, _version = first_line.split(" ")
-                    self.observed.append((method, path))
-                    payload = self._payload(method, path)
+                    with self._lock:
+                        self.observed.append((method, path))
+                        self.request_count += 1
+                    payload = self._payload(method, path, body)
                     content_type = (
                         "application/octet-stream"
                         if method == "GET"
@@ -263,28 +347,73 @@ class _HttpsConnectProxy:
                     )
                     inner.sendall(self._response(payload, content_type=content_type))
         except (EOFError, OSError, ssl.SSLError):
-            if not self._stopping.is_set():
+            if not self._stopping.is_set() and self.enabled:
                 self.errors.append("proxy_transport_failed")
         except Exception as exc:
             self.errors.append(f"{type(exc).__name__}: {exc}")
+        finally:
+            with self._lock:
+                self._active.discard(raw)
+                self._active = {
+                    connection
+                    for connection in self._active
+                    if connection.fileno() != -1
+                }
+
+    def disable(self):
+        self.enabled = False
+        with self._lock:
+            active = tuple(self._active)
+        for connection in active:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+    def enable(self):
+        self.enabled = True
+
+    def pause_polling(self):
+        self._poll_waiting.clear()
+        self._poll_release.clear()
+
+    def wait_until_polling(self, timeout=5):
+        return self._poll_waiting.wait(timeout)
+
+    def resume_polling(self):
+        self._poll_release.set()
+
+    def enqueue_updates(self, *updates):
+        with self._lock:
+            self._updates.extend(updates)
 
     def stop(self):
         self._stopping.set()
+        self._poll_release.set()
         try:
             self._listener.close()
         except OSError:
             pass
-        if self._active is not None:
+        with self._lock:
+            active = tuple(self._active)
+        for connection in active:
             try:
-                self._active.shutdown(socket.SHUT_RDWR)
+                connection.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
             try:
-                self._active.close()
+                connection.close()
             except OSError:
                 pass
         self._thread.join(timeout=5)
         assert not self._thread.is_alive()
+        for connection in self._connections:
+            connection.join(timeout=5)
+            assert not connection.is_alive()
 
 
 class _Conversation:

@@ -31,8 +31,16 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        body = self.rfile.read(length)
         authorization = self._authorization()
+        self.server.requests.append(
+            {
+                "path": self.path,
+                "authorization": authorization,
+                "marker": self.headers.get("X-Acceptance-Marker"),
+                "body": body,
+            }
+        )
         if authorization != self.server.valid_authorization:
             body = b"upstream rejected authorization"
             self.send_response(401)
@@ -54,10 +62,11 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"first\n")
         self.wfile.flush()
-        self.server.first_chunk_sent.set()
-        self.server.finish_stream.wait(10)
+        self.server.stream_started.set()
+        self.server.release_stream.wait()
         self.wfile.write(b"second\n")
         self.wfile.flush()
+        self.server.stream_completed.set()
 
 
 @pytest.fixture
@@ -68,9 +77,11 @@ def running_nginx(tmp_path, docker_command, acceptance_image):
     )
     ingress_port = _unused_port()
     upstream.authorizations = []
+    upstream.requests = []
     upstream.valid_authorization = "Bearer ingress-marker"
-    upstream.first_chunk_sent = threading.Event()
-    upstream.finish_stream = threading.Event()
+    upstream.stream_started = threading.Event()
+    upstream.release_stream = threading.Event()
+    upstream.stream_completed = threading.Event()
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
 
@@ -151,7 +162,7 @@ http {
             pytest.fail(f"nginx test container did not listen: {logs.stderr[-300:]}")
         yield name, ingress_port, upstream
     finally:
-        upstream.finish_stream.set()
+        upstream.release_stream.set()
         subprocess.run(
             [*docker_command, "rm", "-f", name],
             capture_output=True,
@@ -206,9 +217,7 @@ def test_body_limit_accepts_exactly_16_mib_and_rejects_larger(running_nginx):
     assert over_status == 413
 
 
-def test_streaming_arrives_before_upstream_completion_and_access_log_is_off(
-    running_nginx, docker_command
-):
+def test_streaming_arrives_before_upstream_completion(running_nginx):
     name, port, upstream = running_nginx
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
@@ -216,15 +225,48 @@ def test_streaming_arrives_before_upstream_completion_and_access_log_is_off(
         response = connection.getresponse()
         first = response.read(len(b"first\n"))
         assert response.status == 200
-        assert upstream.first_chunk_sent.is_set()
-        assert not upstream.finish_stream.is_set()
+        assert upstream.stream_started.wait(1)
+        assert not upstream.stream_completed.is_set()
         assert first == b"first\n"
-        upstream.finish_stream.set()
+        upstream.release_stream.set()
         assert response.read() == b"second\n"
+        assert upstream.stream_completed.wait(1)
     finally:
-        upstream.finish_stream.set()
+        upstream.release_stream.set()
         connection.close()
 
+
+def test_access_log_omits_marker_sent_through_request(
+    running_nginx, docker_command
+):
+    name, port, upstream = running_nginx
+    marker = f"nginx-access-{uuid.uuid4().hex}"
+    upstream.valid_authorization = f"Bearer {marker}"
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        body = marker.encode("ascii")
+        connection.request(
+            "POST",
+            f"/mcp/{marker}",
+            body=body,
+            headers={
+                "Authorization": f"Bearer {marker}",
+                "X-Acceptance-Marker": marker,
+                "Content-Type": "application/octet-stream",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 204
+        response.read()
+    finally:
+        connection.close()
+
+    assert upstream.requests[-1] == {
+        "path": f"/mcp/{marker}",
+        "authorization": f"Bearer {marker}",
+        "marker": marker,
+        "body": marker.encode("ascii"),
+    }
     logs = subprocess.run(
         [*docker_command, "logs", name],
         capture_output=True,
@@ -232,7 +274,43 @@ def test_streaming_arrives_before_upstream_completion_and_access_log_is_off(
         check=True,
         timeout=10,
     )
-    assert "ingress-marker" not in logs.stdout + logs.stderr
+    assert marker not in logs.stdout + logs.stderr
+
+
+@pytest.mark.postgres_integration
+def test_actual_mcp_auth_rejection_matches_direct_upstream(full_stack):
+    import httpx
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "auth-proof", "version": "1"},
+        },
+    }
+    cases = (
+        {"Host": "acceptance.invalid"},
+        {
+            "Host": "acceptance.invalid",
+            "Authorization": f"Bearer invalid-{uuid.uuid4().hex}",
+        },
+    )
+    with httpx.Client(timeout=10) as client:
+        for headers in cases:
+            direct = client.post(
+                "http://127.0.0.1:8765/mcp", headers=headers, json=payload
+            )
+            ingress = client.post(
+                "http://127.0.0.1:8766/mcp", headers=headers, json=payload
+            )
+            assert ingress.status_code == direct.status_code == 401
+            assert ingress.content == direct.content
+            assert ingress.headers.get("www-authenticate") == direct.headers.get(
+                "www-authenticate"
+            )
 
 
 def test_production_nginx_source_disables_buffering_and_access_logs():

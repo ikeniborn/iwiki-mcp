@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 from pathlib import Path
 import secrets
 import subprocess
 import time
-import uuid
 
 import pytest
 
@@ -19,6 +17,7 @@ def _request(client, token, payload, session_id=None):
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
+        "Host": "acceptance.invalid",
     }
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
@@ -89,23 +88,8 @@ def test_application_compose_has_no_database_service_or_proxy_fallback():
     assert "no_proxy" not in compose
 
 
-def test_health_boundary_and_repository_artifacts_do_not_persist_dynamic_markers(
-    tmp_path, capsys
-):
-    markers = {
-        name: f"{name}-{secrets.token_urlsafe(24)}"
-        for name in (
-            "credential",
-            "proxy-origin",
-            "update",
-            "reply",
-            "filename",
-            "audio",
-            "transcription",
-            "preview",
-            "provider-error",
-        )
-    }
+def test_health_failure_output_is_sanitized_and_static_fixtures_are_clean(capsys):
+    marker = f"provider-error-{secrets.token_urlsafe(24)}"
     spec = importlib.util.spec_from_file_location(
         "acceptance_healthcheck", REPOSITORY / "deploy/healthcheck.py"
     )
@@ -114,14 +98,13 @@ def test_health_boundary_and_repository_artifacts_do_not_persist_dynamic_markers
     spec.loader.exec_module(healthcheck)
 
     def fail_with_marker(**_kwargs):
-        raise RuntimeError(markers["provider-error"])
+        raise RuntimeError(marker)
 
     assert healthcheck.children_running(
         healthcheck.REQUIRED_CHILDREN, run=fail_with_marker
     ) is False
     captured = capsys.readouterr()
-    assert all(marker not in captured.out + captured.err for marker in markers.values())
-    assert list(tmp_path.rglob("*")) == []
+    assert marker not in captured.out + captured.err
     for relative in (
         "compose.yaml",
         "Dockerfile",
@@ -131,7 +114,7 @@ def test_health_boundary_and_repository_artifacts_do_not_persist_dynamic_markers
         "tests/deployment/fixtures/server.toml",
     ):
         content = (REPOSITORY / relative).read_text(encoding="utf-8")
-        assert all(marker not in content for marker in markers.values())
+        assert marker not in content
 
 
 @pytest.mark.asyncio
@@ -182,186 +165,142 @@ async def test_recreated_bot_service_has_no_confirmation_or_selection_state(tmp_
     assert list(tmp_path.iterdir()) == []
 
 
-def test_image_history_contains_no_dynamic_privacy_marker(
-    docker_command, acceptance_image
-):
-    marker = f"image-history-{secrets.token_urlsafe(24)}"
-    history = subprocess.run(
-        [*docker_command, "history", "--no-trunc", acceptance_image],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=20,
-    )
-    assert marker not in history.stdout + history.stderr
+def _eventually(predicate, timeout=15):
+    deadline = time.monotonic() + timeout
+    value = None
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    return value
 
 
-def test_supervisor_restarts_each_child_and_terms_process_tree_within_60_seconds(
-    tmp_path, docker_command, acceptance_image
-):
-    config = tmp_path / "supervisord.conf"
-    programs = []
-    for child in ("iwiki-mcp", "nginx", "telegram-bot"):
-        programs.append(
-            f"""[program:{child}]
-command=/bin/sh -c "while true; do sleep 1; done"
-autorestart=unexpected
-startsecs=0
-stopasgroup=true
-killasgroup=true
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/stderr
-stderr_logfile_maxbytes=0
-"""
-        )
-    config.write_text(
-        """[supervisord]
-nodaemon=true
-logfile=/dev/null
-pidfile=/run/supervisord.pid
-[unix_http_server]
-file=/run/supervisor.sock
-chmod=0600
-[supervisorctl]
-serverurl=unix:///run/supervisor.sock
-[rpcinterface:supervisor]
-supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
-"""
-        + "\n".join(programs),
-        encoding="utf-8",
-    )
-    name = f"iwiki-supervisor-acceptance-{uuid.uuid4().hex[:10]}"
-
-    def status():
-        result = subprocess.run(
-            [
-                *docker_command,
-                "exec",
-                name,
-                "supervisorctl",
-                "-c",
-                "/tmp/supervisord.conf",
-                "status",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-        rows = {}
-        for line in result.stdout.splitlines():
-            fields = line.split()
-            if len(fields) >= 4 and fields[1] == "RUNNING":
-                rows[fields[0]] = int(fields[3].rstrip(","))
-        return rows
-
-    try:
-        subprocess.run(
-            [
-                *docker_command,
-                "run",
-                "-d",
-                "--name",
-                name,
-                "--tmpfs",
-                "/run:uid=10001,gid=10001,mode=0750",
-                "--tmpfs",
-                "/tmp:uid=10001,gid=10001,mode=1770",
-                "-v",
-                f"{config}:/tmp/supervisord.conf:ro",
-                "--entrypoint",
-                "/usr/bin/supervisord",
-                acceptance_image,
-                "-c",
-                "/tmp/supervisord.conf",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
-        )
-        deadline = time.monotonic() + 15
-        children = {}
-        while time.monotonic() < deadline:
-            children = status()
-            if set(children) == {"iwiki-mcp", "nginx", "telegram-bot"}:
-                break
-            time.sleep(0.1)
-        assert set(children) == {"iwiki-mcp", "nginx", "telegram-bot"}
-
-        for child in sorted(children):
-            previous_pid = status()[child]
-            subprocess.run(
-                [
-                    *docker_command,
-                    "exec",
-                    name,
-                    "/bin/sh",
-                    "-c",
-                    f"kill -KILL {previous_pid}",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=10,
-            )
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                current = status().get(child)
-                if current is not None and current != previous_pid:
-                    break
-                time.sleep(0.1)
-            assert current is not None and current != previous_pid
-
-        started = time.monotonic()
-        subprocess.run(
-            [*docker_command, "stop", "--signal", "TERM", "-t", "60", name],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=65,
-        )
-        assert time.monotonic() - started <= 60
-        running = subprocess.run(
-            [
-                *docker_command,
-                "inspect",
-                name,
-                "--format",
-                "{{.State.Running}}",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        )
-        assert running.stdout.strip() == "false"
-    finally:
-        subprocess.run(
-            [*docker_command, "rm", "-f", name],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
+def _callback_data(payload, prefix):
+    keyboard = payload.get("reply_markup", {}).get("inline_keyboard", [])
+    for row in keyboard:
+        for button in row:
+            data = button.get("callback_data", "")
+            if data.startswith(prefix):
+                return data
+    return None
 
 
 @pytest.mark.postgres_integration
-def test_external_postgres_hosted_write_replay_and_conflicts(
-    hosted_runtime, store_factory, clean_postgres, monkeypatch
-):
+def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_stack):
+    expected = {"iwiki-mcp", "nginx", "telegram-bot"}
+    children = full_stack.supervisor_status()
+    assert set(children) == expected
+    assert {item["state"] for item in children.values()} == {"RUNNING"}
+    assert full_stack.health_status() == "healthy"
+
+    for child in sorted(expected):
+        previous_pid = full_stack.supervisor_status()[child]["pid"]
+        subprocess.run(
+            [
+                *full_stack.docker,
+                "exec",
+                full_stack.name,
+                "/bin/sh",
+                "-c",
+                f"kill -KILL -{previous_pid}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+
+        def restarted():
+            current = full_stack.supervisor_status().get(child, {})
+            return (
+                current
+                if current.get("state") == "RUNNING"
+                and current.get("pid") != previous_pid
+                else None
+            )
+
+        assert _eventually(restarted, timeout=20)
+        assert _eventually(
+            lambda: full_stack.health_probe().returncode == 0, timeout=30
+        ), {
+            "child": child,
+            "probe": full_stack.health_probe().stdout,
+            "children": full_stack.supervisor_status(),
+        }
+
+    container_id = full_stack.container_id()
+    full_stack.telegram.pause_polling()
+    assert full_stack.telegram.wait_until_polling()
+    time.sleep(3)
+    request_count = full_stack.telegram.request_count
+    stale = full_stack.health_probe()
+    assert stale.returncode == 1
+    assert stale.stdout == "telegram_heartbeat_stale\n", {
+        "children": full_stack.supervisor_status(),
+        "errors": full_stack.telegram.errors,
+    }
+    assert full_stack.telegram.request_count == request_count
+    assert full_stack.container_id() == container_id
+    full_stack.telegram.resume_polling()
+    assert _eventually(
+        lambda: full_stack.telegram.request_count > request_count, timeout=20
+    )
+
+    request_count = full_stack.telegram.request_count
+    full_stack.telegram.disable()
+    time.sleep(3)
+    logs = subprocess.run(
+        [*full_stack.docker, "logs", full_stack.name],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert "telegram poll retry" in logs.stdout + logs.stderr
+    full_stack.telegram.enable()
+    assert _eventually(
+        lambda: full_stack.telegram.request_count > request_count, timeout=20
+    )
+    assert _eventually(
+        lambda: full_stack.health_status() == "healthy", timeout=20
+    )
+    assert full_stack.container_id() == container_id
+
+    started = time.monotonic()
+    subprocess.run(
+        [
+            *full_stack.docker,
+            "stop",
+            "--signal",
+            "TERM",
+            "-t",
+            "60",
+            full_stack.name,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=65,
+    )
+    assert time.monotonic() - started <= 60
+    top = subprocess.run(
+        [*full_stack.docker, "top", full_stack.name],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert top.returncode != 0
+
+
+@pytest.mark.postgres_integration
+def test_hosted_mcp_matrix_write_replay_and_conflicts(full_stack):
+    import httpx
     import psycopg
-    from iwiki_mcp import server
-    from starlette.testclient import TestClient
 
-    store = store_factory()
-    monkeypatch.setattr(server, "_postgres_store_for_binding", lambda _binding: store)
-    runtime = hosted_runtime.runtime
-    token = hosted_runtime.token
-    markdown = "# Acceptance\n\n## Body\nfirst version\n"
-
-    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+    token = full_stack.markers["iwiki_token"]
+    with httpx.Client(base_url="http://127.0.0.1:8766", timeout=20) as client:
         initialized = _initialize(client, token)
         assert initialized.status_code == 200
         session_id = initialized.headers["mcp-session-id"]
@@ -371,7 +310,11 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             session_id,
         ).status_code == 202
+        status = _tool(client, token, session_id, "wiki_status", {})
+        assert status["storage"] == "postgres"
+        assert status["domains"] == ["docs"]
 
+        markdown = "# Acceptance\n\n## Body\nfirst version\n"
         created = _tool(
             client,
             token,
@@ -379,12 +322,12 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             "wiki_write_page",
             {
                 "domain": "docs",
-                "slug": "acceptance/write-once",
+                "slug": "write-once",
                 "markdown": markdown,
                 "source": "acceptance-test",
             },
         )
-        assert created["revision"] == 1
+        assert created.get("revision") == 1, created
         replay = _tool(
             client,
             token,
@@ -392,7 +335,7 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             "wiki_write_page",
             {
                 "domain": "docs",
-                "slug": "acceptance/write-once",
+                "slug": "write-once",
                 "markdown": markdown,
                 "source": "acceptance-test",
             },
@@ -403,7 +346,7 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             token,
             session_id,
             "wiki_read_page",
-            {"domain": "docs", "slug": "acceptance/write-once"},
+            {"domain": "docs", "slug": "concept/write-once"},
         )
         section = _tool(
             client,
@@ -412,13 +355,10 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             "wiki_read_page",
             {
                 "domain": "docs",
-                "slug": "acceptance/write-once",
+                "slug": "concept/write-once",
                 "heading": "Body",
             },
         )
-        assert page["revision"] == 1
-        assert isinstance(section["section_hash"], str)
-
         revision_conflict = _tool(
             client,
             token,
@@ -426,7 +366,7 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             "wiki_update_page",
             {
                 "domain": "docs",
-                "slug": "acceptance/write-once",
+                "slug": "concept/write-once",
                 "heading": "Body",
                 "new_body": "second version",
                 "expected_revision": 0,
@@ -441,7 +381,7 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
             "wiki_update_page",
             {
                 "domain": "docs",
-                "slug": "acceptance/write-once",
+                "slug": "concept/write-once",
                 "heading": "Body",
                 "new_body": "second version",
                 "expected_revision": page["revision"],
@@ -450,34 +390,376 @@ def test_external_postgres_hosted_write_replay_and_conflicts(
         )
         assert hash_conflict["error"] == "section_conflict"
 
-    with psycopg.connect(clean_postgres) as connection:
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text="/domains")
+    domains = full_stack.wait_for_sent(
+        sent, lambda payload: _callback_data(payload, "domain:") is not None
+    )
+    assert _callback_data(domains, "domain:") == "domain:docs"
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_callback("domain:docs")
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == "Selected domain: docs",
+    )
+
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(
+        text="/create confirmed: deterministic request"
+    )
+    preview = full_stack.wait_for_sent(
+        sent, lambda payload: _callback_data(payload, "confirm:") is not None
+    )
+    confirmation = _callback_data(preview, "confirm:")
+    assert confirmation
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_callback(confirmation)
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == "Page change saved.",
+    )
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_callback(confirmation)
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == "Confirmation is invalid.",
+    )
+
+    with psycopg.connect(full_stack.endpoint.dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM iwiki.pages p JOIN iwiki.domains d "
                 "ON d.iwiki_id = p.iwiki_id AND d.domain_id = p.domain_id "
                 "WHERE p.iwiki_id = 'wiki-a' AND d.slug = 'docs' "
-                "AND p.slug = 'acceptance/write-once'"
+                "AND p.slug = 'concept/write-once'"
             )
             assert cursor.fetchone()[0] == 1
+            cursor.execute(
+                "SELECT count(*) FROM iwiki.pages p JOIN iwiki.domains d "
+                "ON d.iwiki_id = p.iwiki_id AND d.domain_id = p.domain_id "
+                "WHERE p.iwiki_id = 'wiki-a' AND d.slug = 'docs' "
+                "AND p.slug = 'concept/confirmed'"
+            )
+            assert cursor.fetchone()[0] == 1
+    compose = (REPOSITORY / "compose.yaml").read_text(encoding="utf-8").lower()
+    assert "postgres:" not in compose
 
 
 @pytest.mark.postgres_integration
-def test_disposable_postgres_custom_loopback_endpoint_is_external_to_compose():
-    raw_dsn = os.environ.get("IWIKI_TEST_POSTGRES_LOOPBACK_DSN", "").strip()
-    if not raw_dsn:
-        pytest.skip("IWIKI_TEST_POSTGRES_LOOPBACK_DSN is not set")
+def test_hosted_mcp_rejects_unprovisioned_runtime_principal(
+    postgres_endpoint, hosted_startup_probe
+):
     import psycopg
-    from psycopg.conninfo import conninfo_to_dict
+    from psycopg import sql
 
-    values = conninfo_to_dict(raw_dsn)
-    if values.get("host") not in {"127.0.0.1", "localhost", "::1"}:
-        pytest.skip("IWIKI_TEST_POSTGRES_LOOPBACK_DSN is not loopback-hosted")
-    if int(values.get("port", 5432)) == 5432:
-        pytest.skip("IWIKI_TEST_POSTGRES_LOOPBACK_DSN does not use a custom port")
-    with psycopg.connect(raw_dsn, connect_timeout=10) as connection:
+    from iwiki_mcp.postgres.auth import AuthStore
+    from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
+
+    run_migrations(
+        MigrationSettings(
+            dsn=postgres_endpoint.dsn,
+            embed_model="acceptance-embedding",
+            embed_dimensions=3,
+            statement_timeout_ms=30_000,
+            lock_timeout_ms=5_000,
+        )
+    )
+    auth = AuthStore(postgres_endpoint.dsn)
+    auth.create_wiki("wiki-a", "wiki-a")
+    auth.create_domain("wiki-a", "docs")
+    role, password = postgres_endpoint.create_role("unprovisioned")
+    with psycopg.connect(postgres_endpoint.dsn) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            assert cursor.fetchone() == (1,)
-    assert "postgres:" not in (REPOSITORY / "compose.yaml").read_text(
-        encoding="utf-8"
-    ).lower()
+            identifier = sql.Identifier(role)
+            cursor.execute(
+                sql.SQL("GRANT USAGE ON SCHEMA iwiki TO {}").format(identifier)
+            )
+            cursor.execute(
+                sql.SQL("GRANT SELECT ON iwiki.schema_migrations TO {}").format(
+                    identifier
+                )
+            )
+        connection.commit()
+
+    result = hosted_startup_probe(role, password)
+
+    assert result["exit_code"] != 0
+    assert "hosted principal" in result["logs"]
+    assert password not in result["logs"]
+
+
+@pytest.mark.postgres_integration
+def test_hosted_mcp_rejects_incompatible_schema(
+    postgres_endpoint, hosted_startup_probe
+):
+    from iwiki_mcp.postgres import migrations
+
+    migrations.run_migrations(
+        migrations.MigrationSettings(
+            dsn=postgres_endpoint.dsn,
+            embed_model="acceptance-embedding",
+            embed_dimensions=3,
+            statement_timeout_ms=30_000,
+            lock_timeout_ms=5_000,
+        ),
+        migrations=migrations.MIGRATIONS[:4],
+    )
+    role = postgres_endpoint.values["user"]
+    password = postgres_endpoint.values.get("password", "")
+
+    result = hosted_startup_probe(role, password)
+
+    assert result["exit_code"] != 0
+    assert "schema version 5 is required" in result["logs"]
+    assert password not in result["logs"]
+
+
+@pytest.mark.postgres_integration
+def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack):
+    import httpx
+
+    token = full_stack.markers["iwiki_token"]
+    with httpx.Client(base_url="http://127.0.0.1:8766", timeout=30) as client:
+        initialized = _initialize(client, token)
+        assert initialized.status_code == 200
+        session_id = initialized.headers["mcp-session-id"]
+        assert _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id,
+        ).status_code == 202
+        seeded = _tool(
+            client,
+            token,
+            session_id,
+            "wiki_write_page",
+            {
+                "domain": "docs",
+                "slug": "privacy-context",
+                "markdown": "# Context\n\n## Body\nacceptance context\n",
+                "source": "acceptance-test",
+            },
+        )
+        assert seeded.get("revision") == 1, seeded
+
+        oversized = full_stack.markers["update"].encode() + b"x" * (
+            16 * 1024 * 1024 + 1
+        )
+        response = client.post(
+            "/mcp",
+            headers={"Host": "acceptance.invalid"},
+            content=oversized,
+        )
+        assert response.status_code == 413
+
+        invalid = client.post(
+            "/mcp",
+            headers={
+                "Host": "acceptance.invalid",
+                "Authorization": f"Bearer {full_stack.markers['provider_error']}",
+            },
+            json={"jsonrpc": "2.0", "id": 9, "method": "initialize"},
+        )
+        assert invalid.status_code == 401
+
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text="/domains")
+    domains = full_stack.wait_for_sent(
+        sent, lambda payload: _callback_data(payload, "domain:") is not None
+    )
+    assert _callback_data(domains, "domain:") == "domain:docs"
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_callback("domain:docs")
+    assert full_stack.wait_for_sent(
+        sent, lambda payload: payload.get("text") == "Selected domain: docs"
+    )
+
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text=full_stack.markers["update"])
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == full_stack.markers["reply"],
+    )
+    assert any(
+        full_stack.markers["update"].encode() in body
+        for method, path, body in full_stack.inference.requests
+        if method == "POST" and path == "/v1/chat/completions"
+    )
+
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(voice=True)
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == full_stack.markers["reply"],
+    )
+    transcription_requests = [
+        body
+        for method, path, body in full_stack.inference.requests
+        if method == "POST" and path == "/v1/audio/transcriptions"
+    ]
+    assert any(
+        full_stack.markers["filename"].encode() in body
+        and full_stack.markers["audio"].encode() in body
+        for body in transcription_requests
+    )
+    assert any(
+        full_stack.markers["transcription"].encode() in body
+        for method, path, body in full_stack.inference.requests
+        if method == "POST" and path != "/v1/audio/transcriptions"
+    )
+
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(
+        text=f"/create privacy-preview: {full_stack.markers['update']}"
+    )
+    preview = full_stack.wait_for_sent(
+        sent, lambda payload: _callback_data(payload, "confirm:") is not None
+    )
+    confirmation = _callback_data(preview, "confirm:")
+    assert confirmation
+    assert full_stack.markers["preview"] in preview["text"]
+
+    full_stack.inference.server.fail_paths.add("/v1/chat/completions")
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text=f"failure {full_stack.markers['update']}")
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text")
+        == "Inference service is unavailable.",
+    )
+    full_stack.inference.server.fail_paths.remove("/v1/chat/completions")
+
+    full_stack.inference.server.fail_paths.add("/v1/audio/transcriptions")
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(voice=True)
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text")
+        == "Voice transcription is unavailable.",
+    )
+    full_stack.inference.server.fail_paths.remove("/v1/audio/transcriptions")
+
+    supervisor = [
+        *full_stack.docker,
+        "exec",
+        full_stack.name,
+        "supervisorctl",
+        "-c",
+        "/etc/supervisor/supervisord.conf",
+    ]
+    subprocess.run(
+        [*supervisor, "stop", "iwiki-mcp"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    subprocess.run(
+        [*supervisor, "start", "iwiki-mcp"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text="/domains")
+    assert full_stack.wait_for_sent(
+        sent, lambda payload: payload.get("text") == "Wiki service is unavailable."
+    )
+
+    full_stack.telegram.disable()
+    time.sleep(3)
+    full_stack.telegram.enable()
+    request_count = full_stack.telegram.request_count
+    assert _eventually(
+        lambda: full_stack.telegram.request_count > request_count, timeout=20
+    )
+
+    logs = subprocess.run(
+        [*full_stack.docker, "logs", full_stack.name],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    combined_logs = logs.stdout + logs.stderr
+    runtime_scan = subprocess.run(
+        [
+            *full_stack.docker,
+            "exec",
+            full_stack.name,
+            "/app/.venv/bin/python",
+            "-c",
+            (
+                "import pathlib,sys; markers=[bytes.fromhex(x) for x in sys.argv[1:]]; "
+                "paths=[p for root in ('/run','/tmp') for p in pathlib.Path(root).rglob('*') "
+                "if p.is_file()]+[pathlib.Path(p) for p in "
+                "('/etc/iwiki/server.toml','/etc/nginx/nginx.conf',"
+                "'/etc/ssl/certs/iwiki-acceptance-ca.pem')]; "
+                "bad=[str(p) for p in paths if any(m in p.read_bytes() "
+                "for m in markers)]; print('\\n'.join(bad))"
+            ),
+            *[value.encode().hex() for value in full_stack.markers.values()],
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert runtime_scan.stdout == "\n"
+
+    credentials = {
+        "telegram_token",
+        "iwiki_token",
+        "llm_key",
+        "proxy_user",
+        "proxy_password",
+        "proxy_origin",
+        "database_password",
+    }
+    content_markers = set(full_stack.markers) - credentials
+    runtime_env = full_stack.runtime_env.read_text(encoding="utf-8")
+    for name in credentials:
+        assert full_stack.markers[name] in runtime_env
+    for name in content_markers:
+        assert full_stack.markers[name] not in runtime_env
+    for path in (
+        full_stack.server_config,
+        full_stack.nginx_config,
+        full_stack.ca_cert,
+    ):
+        content = path.read_bytes()
+        assert all(value.encode() not in content for value in full_stack.markers.values())
+
+    history = subprocess.run(
+        [*full_stack.docker, "history", "--no-trunc", full_stack.image],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    ).stdout
+    for marker in full_stack.markers.values():
+        assert marker not in combined_logs
+        assert marker not in history
+
+    original_id = full_stack.container_id()
+    subprocess.run(
+        [*full_stack.docker, "restart", "-t", "60", full_stack.name],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=65,
+    )
+    assert _eventually(lambda: full_stack.health_probe().returncode == 0, timeout=45)
+    assert full_stack.container_id() == original_id
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_callback(confirmation)
+    assert full_stack.wait_for_sent(
+        sent, lambda payload: payload.get("text") == "Confirmation is invalid."
+    )
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text=full_stack.markers["update"])
+    assert full_stack.wait_for_sent(
+        sent, lambda payload: payload.get("text") == "Select a domain first."
+    )
