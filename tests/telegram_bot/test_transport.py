@@ -554,7 +554,7 @@ async def test_runner_cancellation_completes_inference_and_proxy_cleanup(monkeyp
         def __init__(self, *arguments):
             pass
 
-        async def poll_forever(self):
+        async def poll_forever(self, **kwargs):
             polling.set()
             await anyio.sleep_forever()
 

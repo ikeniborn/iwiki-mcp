@@ -1,14 +1,23 @@
 """Minimal Telegram Bot API long-polling transport."""
 
+from collections.abc import Awaitable, Callable
 import json
+import logging
 from pathlib import Path
+import random
+import time
 from typing import Any
 
+import anyio
 import urllib3
 
 from .access import AccessPolicy
 from .models import BotReply, WritePreview
 from .proxy import TelegramHttpClient
+from .runtime import Backoff, Heartbeat
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TelegramError(RuntimeError):
@@ -230,7 +239,33 @@ class TelegramTransport:
                 next_offset = update_id + 1
         return next_offset
 
-    async def poll_forever(self) -> None:
+    async def poll_forever(
+        self,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+        random_value: Callable[[], float] = random.random,
+        heartbeat: Heartbeat,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         offset = None
+        backoff = Backoff()
         while True:
-            offset = await self.poll_once(offset)
+            started = clock()
+            try:
+                next_offset = await self.poll_once(offset)
+            except TelegramError:
+                delay = backoff.next_delay(random_value())
+                LOGGER.warning(
+                    "telegram poll retry",
+                    extra={
+                        "operation": "poll",
+                        "outcome": "retry",
+                        "delay_seconds": float(delay),
+                        "elapsed_ms": int((clock() - started) * 1000),
+                    },
+                )
+                await sleep(delay)
+                continue
+            offset = next_offset
+            backoff.reset()
+            heartbeat.touch()

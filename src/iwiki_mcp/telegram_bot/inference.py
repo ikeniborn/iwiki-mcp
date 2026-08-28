@@ -38,7 +38,7 @@ class InferenceClient:
         self._chat_model = chat_model
         self._transcription_model = transcription_model
         self._owns_http = http is None
-        self._http = http or httpx.AsyncClient(timeout=60)
+        self._http = http or httpx.AsyncClient(timeout=60, trust_env=False)
 
     async def close(self) -> None:
         if self._owns_http:

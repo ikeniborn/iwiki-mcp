@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import json
 from typing import Any
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -14,6 +15,16 @@ class RemoteIwikiError(RuntimeError):
 
 
 ToolCaller = Callable[[str, dict[str, object]], Awaitable[object]]
+
+
+def _direct_httpx_client(headers=None, timeout=None, auth=None):
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout,
+        auth=auth,
+        follow_redirects=True,
+        trust_env=False,
+    )
 
 
 def _decode_result(result: object) -> dict[str, object]:
@@ -135,13 +146,28 @@ async def open_remote_iwiki(
     url: str, token: str
 ) -> AsyncIterator[RemoteIwikiClient]:
     headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(
-        url, headers=headers, timeout=30, sse_read_timeout=300
-    ) as (read_stream, write_stream, _session_id):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+    started = False
+    try:
+        async with streamablehttp_client(
+            url,
+            headers=headers,
+            timeout=30,
+            sse_read_timeout=300,
+            httpx_client_factory=_direct_httpx_client,
+        ) as (read_stream, write_stream, _session_id):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
 
-            async def call_tool(name: str, arguments: dict[str, object]) -> Any:
-                return await session.call_tool(name, arguments=arguments)
+                async def call_tool(
+                    name: str, arguments: dict[str, object]
+                ) -> Any:
+                    return await session.call_tool(name, arguments=arguments)
 
-            yield RemoteIwikiClient(call_tool)
+                started = True
+                yield RemoteIwikiClient(call_tool)
+    except RemoteIwikiError:
+        raise
+    except Exception:
+        if started:
+            raise
+        raise RemoteIwikiError("remote_call_failed") from None

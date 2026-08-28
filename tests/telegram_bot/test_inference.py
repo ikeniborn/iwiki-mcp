@@ -4,6 +4,7 @@ import logging
 import httpx
 import pytest
 
+import iwiki_mcp.telegram_bot.inference as inference_module
 from iwiki_mcp.telegram_bot.inference import InferenceClient, InferenceError
 
 
@@ -197,3 +198,42 @@ async def test_close_closes_internally_owned_http_client():
     await client.close()
 
     assert client._http.is_closed is True
+
+
+def test_internal_http_client_ignores_environment_proxies(monkeypatch):
+    seen = {}
+
+    class RecordingAsyncClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setenv("HTTP_PROXY", "http://environment-proxy-marker:8000")
+    monkeypatch.setenv("HTTPS_PROXY", "http://environment-proxy-marker:8001")
+    monkeypatch.setenv("ALL_PROXY", "socks5://environment-proxy-marker:1080")
+    monkeypatch.setenv("NO_PROXY", "models.example")
+    monkeypatch.setattr(inference_module.httpx, "AsyncClient", RecordingAsyncClient)
+
+    InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model"
+    )
+
+    assert seen == {"timeout": 60, "trust_env": False}
+
+
+def test_injected_http_client_is_used_without_constructing_another(monkeypatch):
+    injected = object()
+
+    def unexpected_client(**kwargs):
+        raise AssertionError("an injected client must be used")
+
+    monkeypatch.setattr(inference_module.httpx, "AsyncClient", unexpected_client)
+
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        injected,
+    )
+
+    assert client._http is injected

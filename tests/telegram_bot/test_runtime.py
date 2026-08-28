@@ -1,0 +1,267 @@
+from contextlib import asynccontextmanager
+import logging
+
+import pytest
+
+import iwiki_mcp.telegram_bot.main as main_module
+from iwiki_mcp.telegram_bot.access import AccessPolicy
+from iwiki_mcp.telegram_bot.config import BotConfig, TelegramProxyConfig
+from iwiki_mcp.telegram_bot.inference import InferenceError
+from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiError
+from iwiki_mcp.telegram_bot.runtime import Backoff, Heartbeat
+from iwiki_mcp.telegram_bot.transport import TelegramError, TelegramTransport
+
+
+class NullHttp:
+    async def post_json(self, url, payload):
+        raise AssertionError("poll_once is replaced in this test")
+
+    async def get_bytes(self, url):
+        raise AssertionError("voice download is not expected")
+
+    async def close(self):
+        pass
+
+
+class NullConversation:
+    def expire_state(self):
+        pass
+
+
+class RecordingHeartbeat:
+    def __init__(self):
+        self.touches = 0
+
+    def touch(self):
+        self.touches += 1
+
+
+def test_backoff_caps_and_resets():
+    backoff = Backoff(initial=1, maximum=8, jitter_ratio=0.25)
+
+    assert [backoff.next_delay(0.0) for _ in range(5)] == [
+        0.75,
+        1.5,
+        3.0,
+        6.0,
+        6.0,
+    ]
+    backoff.reset()
+    assert backoff.next_delay(1.0) == 1.25
+
+
+def test_heartbeat_writes_only_timestamp(tmp_path):
+    path = tmp_path / "heartbeat"
+
+    Heartbeat(path, clock=lambda: 123.5).touch()
+
+    assert path.read_bytes() == b"123.500000\n"
+
+
+@pytest.mark.asyncio
+async def test_polling_retries_safely_without_advancing_failed_offset(caplog):
+    markers = (
+        "bot-token-marker",
+        "https://proxy-user-marker:proxy-password-marker@proxy-marker:8443",
+        "update-text-marker",
+        "transcription-marker",
+        "filename-marker.ogg",
+        "provider-response-marker",
+    )
+    transport = TelegramTransport(
+        markers[0],
+        AccessPolicy(frozenset({1001})),
+        NullConversation(),
+        NullHttp(),
+    )
+    offsets = []
+    outcomes = iter(
+        (
+            TelegramError(" ".join(markers)),
+            TelegramError("second failure " + " ".join(markers)),
+            17,
+            TelegramError("after success " + " ".join(markers)),
+            RuntimeError("stop polling"),
+        )
+    )
+
+    async def poll_once(offset):
+        offsets.append(offset)
+        outcome = next(outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    random_values = iter((0.0, 1.0, 0.0))
+    heartbeat = RecordingHeartbeat()
+    transport.poll_once = poll_once
+
+    with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.transport"):
+        with pytest.raises(RuntimeError, match="stop polling"):
+            await transport.poll_forever(
+                sleep=sleep,
+                random_value=lambda: next(random_values),
+                heartbeat=heartbeat,
+                clock=lambda: 10.0,
+            )
+
+    assert sleeps == pytest.approx([0.8, 2.4, 0.8])
+    assert offsets == [None, None, None, 17, 17]
+    assert heartbeat.touches == 1
+    assert len(caplog.records) == 3
+    for record in caplog.records:
+        assert record.operation == "poll"
+        assert record.outcome == "retry"
+        assert isinstance(record.delay_seconds, float)
+        assert isinstance(record.elapsed_ms, int)
+        rendered = record.getMessage() + repr(record.__dict__)
+        assert all(marker not in rendered for marker in markers)
+
+
+def _config() -> BotConfig:
+    return BotConfig(
+        "bot-token-marker",
+        "https://wiki-marker.example/mcp",
+        "iwiki-token-marker",
+        frozenset({1001}),
+        "https://provider-marker.example/v1",
+        "provider-key-marker",
+        "chat-model",
+        "transcription-marker",
+        300,
+        TelegramProxyConfig(
+            "https://proxy-marker.example:8443",
+            "Basic proxy-user-password-marker",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secrets(
+    monkeypatch, caplog
+):
+    events = []
+    proxies = []
+    inferences = []
+    remotes = []
+
+    class Proxy:
+        def __init__(self, attempt):
+            self.attempt = attempt
+            self.closed = False
+
+        async def close(self):
+            events.append(f"proxy_{self.attempt}_close")
+            self.closed = True
+
+    def build_proxy(config):
+        proxy = Proxy(len(proxies) + 1)
+        proxies.append(proxy)
+        events.append(f"proxy_{proxy.attempt}_create")
+        return proxy
+
+    class Inference:
+        def __init__(self, *arguments):
+            self.attempt = len(inferences) + 1
+            self.closed = False
+            inferences.append(self)
+            events.append(f"inference_{self.attempt}_create")
+
+        async def probe(self):
+            events.append(f"inference_{self.attempt}_probe")
+            if self.attempt == 1:
+                try:
+                    raise ValueError("provider-response-marker")
+                except ValueError as exc:
+                    raise InferenceError("inference_failed") from exc
+
+        async def close(self):
+            events.append(f"inference_{self.attempt}_close")
+            self.closed = True
+
+    class Remote:
+        def __init__(self, attempt):
+            self.attempt = attempt
+            self.closed = False
+
+        async def list_domains(self):
+            events.append(f"remote_{self.attempt}_probe")
+            if self.attempt == 1:
+                raise RemoteIwikiError("remote_call_failed")
+            return ["team"]
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        remote = Remote(len(remotes) + 1)
+        remotes.append(remote)
+        events.append(f"remote_{remote.attempt}_enter")
+        try:
+            yield remote
+        finally:
+            events.append(f"remote_{remote.attempt}_close")
+            remote.closed = True
+
+    class StoppingTransport:
+        def __init__(self, *arguments):
+            events.append("transport_create")
+
+        async def poll_forever(self, **kwargs):
+            events.append("poll")
+            raise RuntimeError("stop after startup")
+
+    sleeps = []
+
+    async def sleep(delay):
+        assert all(proxy.closed for proxy in proxies)
+        assert all(inference.closed for inference in inferences)
+        assert all(remote.closed for remote in remotes)
+        sleeps.append(delay)
+        events.append("sleep")
+
+    monkeypatch.setattr(main_module, "build_proxy_client", build_proxy)
+    monkeypatch.setattr(main_module, "InferenceClient", Inference)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+    monkeypatch.setattr(main_module, "TelegramTransport", StoppingTransport)
+
+    random_values = iter((0.0, 1.0))
+    with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.main"):
+        with pytest.raises(RuntimeError, match="stop after startup"):
+            await main_module.run_bot(
+                _config(),
+                sleep=sleep,
+                random_value=lambda: next(random_values),
+                heartbeat=RecordingHeartbeat(),
+                clock=lambda: 10.0,
+            )
+
+    assert sleeps == pytest.approx([0.8, 2.4])
+    assert len(proxies) == len(inferences) == 3
+    assert len(remotes) == 2
+    assert all(proxy.closed for proxy in proxies)
+    assert all(inference.closed for inference in inferences)
+    assert all(remote.closed for remote in remotes)
+    assert events.index("inference_1_close") < events.index("sleep")
+    assert events.index("remote_1_close") < events.index("sleep", events.index("sleep") + 1)
+    assert len(caplog.records) == 2
+    markers = (
+        "bot-token-marker",
+        "iwiki-token-marker",
+        "proxy-marker",
+        "proxy-user-password-marker",
+        "update-text-marker",
+        "transcription-marker",
+        "filename-marker",
+        "provider-response-marker",
+    )
+    for record in caplog.records:
+        assert record.operation == "startup"
+        assert record.outcome == "retry"
+        assert isinstance(record.delay_seconds, float)
+        assert isinstance(record.elapsed_ms, int)
+        rendered = record.getMessage() + repr(record.__dict__)
+        assert all(marker not in rendered for marker in markers)
