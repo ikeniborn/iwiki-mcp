@@ -1,3 +1,4 @@
+import anyio
 import pytest
 import urllib3
 
@@ -113,6 +114,18 @@ async def test_close_clears_manager():
     client = TelegramProxyClient(manager)
 
     await client.close()
+
+    assert manager.clear_count == 1
+
+
+@pytest.mark.asyncio
+async def test_close_clears_manager_from_cancelled_scope():
+    manager = RecordingManager([])
+    client = TelegramProxyClient(manager)
+
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await client.close()
 
     assert manager.clear_count == 1
 

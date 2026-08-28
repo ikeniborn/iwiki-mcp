@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import json
 import traceback
 
+import anyio
 import urllib3
 
 import iwiki_mcp.telegram_bot.main as main_module
@@ -11,7 +12,7 @@ from iwiki_mcp.telegram_bot.config import BotConfig, TelegramProxyConfig
 from iwiki_mcp.telegram_bot.inference import InferenceError
 from iwiki_mcp.telegram_bot.main import main
 from iwiki_mcp.telegram_bot.models import BotReply, WritePreview
-from iwiki_mcp.telegram_bot.proxy import ProxyResponse
+from iwiki_mcp.telegram_bot.proxy import ProxyResponse, TelegramProxyClient
 from iwiki_mcp.telegram_bot.transport import TelegramError, TelegramTransport
 
 
@@ -526,3 +527,71 @@ async def test_runner_probes_remote_scope_before_polling(monkeypatch):
         await main_module.run_bot(config)
 
     assert events == ["inference_probe", "remote_probe", "inference_close"]
+
+
+@pytest.mark.asyncio
+async def test_runner_cancellation_completes_inference_and_proxy_cleanup(monkeypatch):
+    events = []
+    polling = anyio.Event()
+
+    class CancellableInference:
+        def __init__(self, *arguments):
+            pass
+
+        async def probe(self):
+            pass
+
+        async def close(self):
+            events.append("inference_close_started")
+            await anyio.sleep(0)
+            events.append("inference_close_finished")
+
+    class ReadyRemote:
+        async def list_domains(self):
+            return ["team"]
+
+    class BlockingTransport:
+        def __init__(self, *arguments):
+            pass
+
+        async def poll_forever(self):
+            polling.set()
+            await anyio.sleep_forever()
+
+    class RecordingManager:
+        def __init__(self):
+            self.clear_count = 0
+
+        def clear(self):
+            self.clear_count += 1
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        yield ReadyRemote()
+
+    manager = RecordingManager()
+    proxy = TelegramProxyClient(manager)
+    monkeypatch.setattr(main_module, "InferenceClient", CancellableInference)
+    monkeypatch.setattr(main_module, "TelegramTransport", BlockingTransport)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+    monkeypatch.setattr(main_module, "build_proxy_client", lambda config: proxy)
+    config = BotConfig(
+        "telegram-token",
+        "https://wiki.example/mcp",
+        "iwiki-token",
+        frozenset({1001}),
+        "https://models.example/v1",
+        "llm-key",
+        "chat-model",
+        "audio-model",
+        300,
+        TelegramProxyConfig("https://proxy.example:8443"),
+    )
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(main_module.run_bot, config)
+        await polling.wait()
+        tasks.cancel_scope.cancel()
+
+    assert events == ["inference_close_started", "inference_close_finished"]
+    assert manager.clear_count == 1

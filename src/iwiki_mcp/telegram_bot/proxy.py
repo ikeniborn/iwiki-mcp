@@ -71,7 +71,8 @@ class TelegramProxyClient:
         return await anyio.to_thread.run_sync(self._request, "GET", url)
 
     async def close(self) -> None:
-        await anyio.to_thread.run_sync(self._manager.clear)
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(self._manager.clear)
 
 
 def build_proxy_client(config: TelegramProxyConfig) -> TelegramProxyClient:

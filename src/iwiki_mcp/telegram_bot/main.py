@@ -43,9 +43,11 @@ async def run_bot(config: BotConfig) -> None:
                 )
                 await transport.poll_forever()
         finally:
-            await inference.close()
+            with anyio.CancelScope(shield=True):
+                await inference.close()
     finally:
-        await telegram_http.close()
+        with anyio.CancelScope(shield=True):
+            await telegram_http.close()
 
 
 def main() -> None:
