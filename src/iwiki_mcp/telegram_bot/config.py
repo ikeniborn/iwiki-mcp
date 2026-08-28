@@ -1,9 +1,10 @@
 """Environment-only configuration for the Telegram bot service."""
 
 import base64
+import ipaddress
 import os
 from dataclasses import dataclass, field
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote_to_bytes, urlsplit
 
 
 class BotConfigError(RuntimeError):
@@ -16,10 +17,51 @@ class TelegramProxyConfig:
     authorization: str | None = field(default=None, repr=False)
 
 
+def _valid_proxy_hostname(hostname: str) -> bool:
+    if "%" in hostname:
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        if not hostname.isascii() or len(hostname) > 253:
+            return False
+        labels = hostname.split(".")
+        return all(
+            0 < len(label) <= 63
+            and not label.startswith("-")
+            and not label.endswith("-")
+            and all(character.isalnum() or character == "-" for character in label)
+            for label in labels
+        )
+    return True
+
+
+def _decode_proxy_userinfo(value: str) -> str:
+    hexadecimal = frozenset("0123456789abcdefABCDEF")
+    for index, character in enumerate(value):
+        if character == "%" and (
+            index + 2 >= len(value)
+            or value[index + 1] not in hexadecimal
+            or value[index + 2] not in hexadecimal
+        ):
+            raise BotConfigError("invalid IWIKI_BOT_TELEGRAM_PROXY_URL") from None
+    try:
+        return unquote_to_bytes(value).decode("utf-8", errors="strict")
+    except UnicodeError:
+        raise BotConfigError("invalid IWIKI_BOT_TELEGRAM_PROXY_URL") from None
+
+
 def _parse_telegram_proxy(value: str) -> TelegramProxyConfig:
     error = "invalid IWIKI_BOT_TELEGRAM_PROXY_URL"
     if not value.startswith("https://"):
         raise BotConfigError(error)
+    if any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in value
+    ):
+        raise BotConfigError(error) from None
+    if value.count("@") > 1:
+        raise BotConfigError(error) from None
 
     try:
         parsed = urlsplit(value)
@@ -31,6 +73,7 @@ def _parse_telegram_proxy(value: str) -> TelegramProxyConfig:
     if (
         parsed.scheme != "https"
         or hostname is None
+        or not _valid_proxy_hostname(hostname)
         or port is None
         or parsed.path not in ("", "/")
         or parsed.query
@@ -39,13 +82,18 @@ def _parse_telegram_proxy(value: str) -> TelegramProxyConfig:
         raise BotConfigError(error)
 
     authorization = None
-    if parsed.username is not None:
-        try:
-            username = unquote(parsed.username)
-            password = unquote(parsed.password or "")
-            credentials = f"{username}:{password}".encode("utf-8")
-        except UnicodeError:
+    if "@" in parsed.netloc:
+        encoded_userinfo = parsed.netloc.split("@", 1)[0]
+        if ":" not in encoded_userinfo:
             raise BotConfigError(error) from None
+        encoded_username, encoded_password = encoded_userinfo.split(":", 1)
+        if not encoded_username:
+            raise BotConfigError(error) from None
+        username = _decode_proxy_userinfo(encoded_username)
+        password = _decode_proxy_userinfo(encoded_password)
+        if ":" in username:
+            raise BotConfigError(error) from None
+        credentials = f"{username}:{password}".encode("utf-8")
         authorization = "Basic " + base64.b64encode(credentials).decode("ascii")
 
     origin_host = f"[{hostname}]" if ":" in hostname else hostname

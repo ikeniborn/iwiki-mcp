@@ -54,10 +54,16 @@ def test_config_loads_allowlist_and_defaults(monkeypatch):
             "https://[2001:db8::1]:8443",
             None,
         ),
+        ("https://192.0.2.10:8443", "https://192.0.2.10:8443", None),
         (
             "https://user%40team:p%3Ass@proxy.example:9443",
             "https://proxy.example:9443",
             "Basic dXNlckB0ZWFtOnA6c3M=",
+        ),
+        (
+            "https://user:@proxy.example:9443",
+            "https://proxy.example:9443",
+            "Basic dXNlcjo=",
         ),
     ),
 )
@@ -84,7 +90,27 @@ def test_config_accepts_strict_https_proxy(
         "https://proxy.example:65536",
         "https://:8443",
         " https://proxy.example:8443",
+        "https://proxy .example:8443",
+        "https://proxy.example:\t8443",
+        "https://proxy.example:8443\n",
+        "https://proxy.example:8443\r",
         "https://[2001:db8::1:8443",
+        "https://proxy%2Eexample:8443",
+        "https://proxy..example:8443",
+        "https://-proxy.example:8443",
+        "https://proxy-.example:8443",
+        "https://pröxy.example:8443",
+        "https://proxy_name.example:8443",
+        f"https://{'a' * 64}.example:8443",
+        f"https://{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 63}:8443",
+        "https://user:password@extra@proxy.example:8443",
+        "https://user@proxy.example:8443",
+        "https://:password@proxy.example:8443",
+        "https://user%:password@proxy.example:8443",
+        "https://user:pass%G0@proxy.example:8443",
+        "https://user%FF:password@proxy.example:8443",
+        "https://user:pass%FF@proxy.example:8443",
+        "https://user%3Ateam:password@proxy.example:8443",
         "https://proxy.example:8443/path",
         "https://proxy.example:8443?mode=tunnel",
         "https://proxy.example:8443#credentials",
@@ -112,6 +138,14 @@ def test_config_repr_redacts_credentials(monkeypatch):
     assert "iwiki-token" not in representation
     assert "llm-key" not in representation
     assert "proxy-password" not in representation
+
+
+def test_telegram_proxy_repr_redacts_origin_and_authorization(monkeypatch):
+    configure(monkeypatch)
+
+    representation = repr(BotConfig.load().telegram_proxy)
+
+    assert representation == "TelegramProxyConfig()"
 
 
 def test_config_rejects_non_positive_confirmation_ttl(monkeypatch):
@@ -150,6 +184,40 @@ def test_config_parse_errors_do_not_leak_values_in_tracebacks(
         traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
     )
     assert str(exc_info.value) == f"invalid {error_name}"
+    assert marker not in formatted
+
+
+@pytest.mark.parametrize(
+    ("value", "marker"),
+    (
+        (
+            "https://[urlsplit-secret-marker:8443",
+            "urlsplit-secret-marker",
+        ),
+        (
+            "https://user%proxy-secret-marker:password@proxy.example:8443",
+            "proxy-secret-marker",
+        ),
+        (
+            "https://user:pass%FFcredential-secret-marker@proxy.example:8443",
+            "credential-secret-marker",
+        ),
+    ),
+)
+def test_invalid_proxy_tracebacks_do_not_leak_raw_values(
+    monkeypatch, value, marker
+):
+    configure(monkeypatch)
+    monkeypatch.setenv("IWIKI_BOT_TELEGRAM_PROXY_URL", value)
+
+    with pytest.raises(BotConfigError) as exc_info:
+        BotConfig.load()
+
+    formatted = "".join(
+        traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
+    )
+    assert str(exc_info.value) == "invalid IWIKI_BOT_TELEGRAM_PROXY_URL"
+    assert value not in formatted
     assert marker not in formatted
 
 
