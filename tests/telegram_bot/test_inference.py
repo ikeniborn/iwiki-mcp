@@ -1,11 +1,21 @@
 import json
 import logging
+import traceback
 
 import httpx
 import pytest
 
 import iwiki_mcp.telegram_bot.inference as inference_module
 from iwiki_mcp.telegram_bot.inference import InferenceClient, InferenceError
+
+
+def assert_sanitized_error(captured, marker):
+    formatted = "".join(
+        traceback.format_exception(captured.type, captured.value, captured.tb)
+    )
+    assert marker not in formatted
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
 
 
 @pytest.mark.asyncio
@@ -41,9 +51,54 @@ async def test_probe_rejects_missing_chat_model():
         "https://models.example/v1", "key", "chat-model", "audio-model", http
     )
 
-    with pytest.raises(InferenceError, match="configured_model_unavailable"):
+    with pytest.raises(InferenceError, match="configured_model_unavailable") as captured:
         await client.probe()
 
+    assert captured.value.retryable is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_transport_failure_has_no_private_exception_chain():
+    marker = "probe-provider-url-key-marker"
+
+    class FailingHttp:
+        async def get(self, *args, **kwargs):
+            raise httpx.ConnectError(marker)
+
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        FailingHttp(),
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is True
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    ((401, False), (403, False), (429, True), (500, True)),
+)
+async def test_probe_http_status_retryability(status, retryable):
+    def handler(request):
+        return httpx.Response(status, text="provider-response-marker")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is retryable
     await http.aclose()
 
 
@@ -171,6 +226,48 @@ async def test_http_failure_is_sanitized():
     assert str(captured.value) == "inference_failed"
     assert "secret" not in str(captured.value)
     await http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ("post", "json", "schema"))
+async def test_completion_failures_have_no_private_exception_chain(failure_stage):
+    marker = f"{failure_stage}-provider-response-marker"
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            if failure_stage == "json":
+                raise ValueError(marker)
+            if failure_stage == "schema":
+                class InvalidPayload(dict):
+                    def __getitem__(self, key):
+                        raise KeyError(marker)
+
+                return InvalidPayload()
+            return {}
+
+    class FailingHttp:
+        async def post(self, *args, **kwargs):
+            if failure_stage == "post":
+                raise httpx.ConnectError(marker)
+            return Response()
+
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        FailingHttp(),
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.answer("Question", "Context")
+
+    if failure_stage in {"json", "schema"}:
+        assert captured.value.retryable is False
+    assert_sanitized_error(captured, marker)
 
 
 @pytest.mark.asyncio

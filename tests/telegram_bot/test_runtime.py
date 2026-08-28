@@ -1,5 +1,8 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
+import sys
+import traceback
 
 import pytest
 import urllib3
@@ -58,6 +61,14 @@ def test_backoff_caps_and_resets():
     ]
     backoff.reset()
     assert backoff.next_delay(1.0) == 1.25
+
+
+def test_backoff_remains_capped_after_1025_failures():
+    backoff = Backoff(initial=1.0, maximum=8.0, jitter_ratio=0.25)
+
+    delays = [backoff.next_delay(0.5) for _ in range(1026)]
+
+    assert delays[-2:] == [8.0, 8.0]
 
 
 def test_heartbeat_writes_only_timestamp(tmp_path):
@@ -187,7 +198,9 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
                 try:
                     raise ValueError("provider-response-marker")
                 except ValueError as exc:
-                    raise InferenceError("inference_failed") from exc
+                    raise InferenceError(
+                        "inference_failed", retryable=True
+                    ) from exc
 
         async def close(self):
             events.append(f"inference_{self.attempt}_close")
@@ -201,7 +214,7 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
         async def list_domains(self):
             events.append(f"remote_{self.attempt}_probe")
             if self.attempt == 1:
-                raise RemoteIwikiError("remote_call_failed")
+                raise RemoteIwikiError("remote_call_failed", retryable=True)
             return ["team"]
 
     @asynccontextmanager
@@ -274,3 +287,144 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
         assert isinstance(record.elapsed_ms, int)
         rendered = record.getMessage() + repr(record.__dict__)
         assert all(marker not in rendered for marker in markers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_type", "code"),
+    (
+        (InferenceError, "inference_failed"),
+        (RemoteIwikiError, "invalid_remote_response"),
+    ),
+)
+async def test_non_retryable_startup_failure_does_not_sleep(
+    monkeypatch, failure_type, code
+):
+    events = []
+    failure = failure_type(code, retryable=False)
+
+    class Proxy:
+        async def close(self):
+            events.append("proxy_close")
+
+    class Inference:
+        async def probe(self):
+            events.append("inference_probe")
+            if isinstance(failure, InferenceError):
+                raise failure
+
+        async def close(self):
+            events.append("inference_close")
+
+    class Remote:
+        async def list_domains(self):
+            events.append("remote_probe")
+            raise failure
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        events.append("remote_enter")
+        try:
+            yield Remote()
+        finally:
+            events.append("remote_close")
+
+    async def unexpected_sleep(delay):
+        raise AssertionError("fatal startup errors must not sleep")
+
+    monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
+    monkeypatch.setattr(main_module, "InferenceClient", lambda *args: Inference())
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+
+    with pytest.raises(failure_type) as captured:
+        await main_module.run_bot(
+            _config(),
+            sleep=unexpected_sleep,
+            heartbeat=RecordingHeartbeat(),
+        )
+
+    assert captured.value is failure
+    assert events.count("inference_probe") == 1
+    assert events.count("proxy_close") == 1
+    assert events.count("inference_close") == 1
+    if isinstance(failure, RemoteIwikiError):
+        assert events.count("remote_probe") == 1
+        assert events.count("remote_close") == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_attempts_all_resources_and_surfaces_sanitized_failure():
+    events = []
+
+    class RemoteContext:
+        async def __aexit__(self, *exc_info):
+            events.append("remote_close")
+            raise RuntimeError("remote-cleanup-marker")
+
+    class Inference:
+        async def close(self):
+            events.append("inference_close")
+            raise RuntimeError("inference-cleanup-marker")
+
+    class Proxy:
+        async def close(self):
+            events.append("proxy_close")
+            raise RuntimeError("proxy-cleanup-marker")
+
+    with pytest.raises(RuntimeError) as captured:
+        await main_module._close_dependencies(
+            RemoteContext(),
+            True,
+            Inference(),
+            Proxy(),
+            (None, None, None),
+        )
+
+    assert str(captured.value) == "dependency_cleanup_failed"
+    assert events == ["remote_close", "inference_close", "proxy_close"]
+    rendered = "".join(
+        traceback.format_exception(
+            type(captured.value), captured.value, captured.value.__traceback__
+        )
+    )
+    assert "cleanup-marker" not in rendered
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_does_not_replace_cancellation():
+    events = []
+
+    class RemoteContext:
+        async def __aexit__(self, *exc_info):
+            events.append("remote_close")
+            raise RuntimeError("remote-cleanup-marker")
+
+    class Inference:
+        async def close(self):
+            events.append("inference_close")
+            raise RuntimeError("inference-cleanup-marker")
+
+    class Proxy:
+        async def close(self):
+            events.append("proxy_close")
+            raise RuntimeError("proxy-cleanup-marker")
+
+    cancellation = asyncio.CancelledError("original-cancellation")
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        try:
+            raise cancellation
+        except asyncio.CancelledError:
+            await main_module._close_dependencies(
+                RemoteContext(),
+                True,
+                Inference(),
+                Proxy(),
+                sys.exc_info(),
+            )
+            raise
+
+    assert captured.value is cancellation
+    assert events == ["remote_close", "inference_close", "proxy_close"]

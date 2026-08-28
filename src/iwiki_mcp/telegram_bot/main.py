@@ -21,16 +21,14 @@ from .transport import TelegramTransport
 
 
 LOGGER = logging.getLogger(__name__)
-_NON_RETRYABLE_INFERENCE_ERRORS = frozenset({"configured_model_unavailable"})
-_NON_RETRYABLE_REMOTE_ERRORS = frozenset(
-    {"no_remote_domains", "unauthorized", "forbidden"}
-)
+
+
+class DependencyCleanupError(RuntimeError):
+    """A sanitized dependency cleanup failure."""
 
 
 def _retryable_startup_error(error: Exception) -> bool:
-    if isinstance(error, InferenceError):
-        return str(error) not in _NON_RETRYABLE_INFERENCE_ERRORS
-    return str(error) not in _NON_RETRYABLE_REMOTE_ERRORS
+    return bool(error.retryable)
 
 
 async def _close_dependencies(
@@ -40,17 +38,30 @@ async def _close_dependencies(
     telegram_http,
     exc_info,
 ) -> None:
+    failures = []
     with anyio.CancelScope(shield=True):
-        try:
-            if remote_entered:
-                await remote_context.__aexit__(*exc_info)
-        finally:
+        if remote_entered:
             try:
-                if inference is not None:
-                    await inference.close()
-            finally:
-                if telegram_http is not None:
-                    await telegram_http.close()
+                await remote_context.__aexit__(*exc_info)
+            except BaseException as error:
+                failures.append(error)
+        if inference is not None:
+            try:
+                await inference.close()
+            except BaseException as error:
+                failures.append(error)
+        if telegram_http is not None:
+            try:
+                await telegram_http.close()
+            except BaseException as error:
+                failures.append(error)
+    if not failures or exc_info[0] is not None:
+        return
+    cancelled_class = anyio.get_cancelled_exc_class()
+    for failure in failures:
+        if isinstance(failure, (cancelled_class, KeyboardInterrupt, SystemExit)):
+            raise failure
+    raise DependencyCleanupError("dependency_cleanup_failed") from None
 
 
 async def run_bot(

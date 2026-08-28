@@ -13,7 +13,11 @@ class Backoff:
     _attempt: int = 0
 
     def next_delay(self, random_value: float) -> float:
-        base = min(self.maximum, self.initial * (2 ** self._attempt))
+        base = self.initial
+        remaining = self._attempt
+        while remaining > 0 and base < self.maximum:
+            base = min(self.maximum, base * 2)
+            remaining -= 1
         self._attempt += 1
         return base * (
             1 - self.jitter_ratio + 2 * self.jitter_ratio * random_value

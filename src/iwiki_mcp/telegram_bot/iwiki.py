@@ -13,8 +13,18 @@ from mcp.client.streamable_http import streamablehttp_client
 class RemoteIwikiError(RuntimeError):
     """A sanitized remote iwiki failure."""
 
+    def __init__(self, code: str, *, retryable: bool = False) -> None:
+        super().__init__(code)
+        self.retryable = retryable
+
 
 ToolCaller = Callable[[str, dict[str, object]], Awaitable[object]]
+_SAFE_REMOTE_ERROR_CODES = frozenset({"conflict", "section_conflict"})
+
+
+def _retryable_status(error: httpx.HTTPStatusError) -> bool:
+    status = error.response.status_code
+    return status == 429 or 500 <= status < 600
 
 
 def _direct_httpx_client(headers=None, timeout=None, auth=None):
@@ -38,10 +48,13 @@ def _decode_result(result: object) -> dict[str, object]:
     text = getattr(content[0], "text", None)
     if not isinstance(text, str):
         raise RemoteIwikiError("invalid_remote_response")
+    invalid_json = False
     try:
         payload = json.loads(text)
-    except (TypeError, ValueError) as exc:
-        raise RemoteIwikiError("invalid_remote_response") from exc
+    except (TypeError, ValueError):
+        invalid_json = True
+    if invalid_json:
+        raise RemoteIwikiError("invalid_remote_response") from None
     if not isinstance(payload, dict):
         raise RemoteIwikiError("invalid_remote_response")
     return payload
@@ -52,15 +65,28 @@ class RemoteIwikiClient:
         self._call_tool = call_tool
 
     async def _call(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        retryable = None
         try:
             payload = _decode_result(await self._call_tool(name, arguments))
         except RemoteIwikiError:
             raise
-        except Exception as exc:
-            raise RemoteIwikiError("remote_call_failed") from exc
+        except httpx.HTTPStatusError as error:
+            retryable = _retryable_status(error)
+        except httpx.TransportError:
+            retryable = True
+        except Exception:
+            retryable = False
+        if retryable is not None:
+            raise RemoteIwikiError(
+                "remote_call_failed", retryable=retryable
+            ) from None
         error = payload.get("error")
         if error:
-            code = error if isinstance(error, str) else "remote_call_failed"
+            code = (
+                error
+                if isinstance(error, str) and error in _SAFE_REMOTE_ERROR_CODES
+                else "remote_call_failed"
+            )
             raise RemoteIwikiError(code)
         return payload
 
@@ -147,6 +173,7 @@ async def open_remote_iwiki(
 ) -> AsyncIterator[RemoteIwikiClient]:
     headers = {"Authorization": f"Bearer {token}"}
     started = False
+    retryable = None
     try:
         async with streamablehttp_client(
             url,
@@ -167,7 +194,19 @@ async def open_remote_iwiki(
                 yield RemoteIwikiClient(call_tool)
     except RemoteIwikiError:
         raise
+    except httpx.HTTPStatusError as error:
+        if started:
+            raise
+        retryable = _retryable_status(error)
+    except httpx.TransportError:
+        if started:
+            raise
+        retryable = True
     except Exception:
         if started:
             raise
-        raise RemoteIwikiError("remote_call_failed") from None
+        retryable = False
+    if retryable is not None:
+        raise RemoteIwikiError(
+            "remote_call_failed", retryable=retryable
+        ) from None

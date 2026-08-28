@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import traceback
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,6 +12,15 @@ from iwiki_mcp.telegram_bot.iwiki import (
     _direct_httpx_client,
     open_remote_iwiki,
 )
+
+
+def assert_sanitized_error(captured, marker):
+    formatted = "".join(
+        traceback.format_exception(captured.type, captured.value, captured.tb)
+    )
+    assert marker not in formatted
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
 
 
 @pytest.mark.asyncio
@@ -27,8 +37,10 @@ async def test_list_domains_rejects_empty_remote_scope():
     async def call_tool(name, arguments):
         return {"domains": []}
 
-    with pytest.raises(RemoteIwikiError, match="no_remote_domains"):
+    with pytest.raises(RemoteIwikiError, match="no_remote_domains") as captured:
         await RemoteIwikiClient(call_tool).list_domains()
+
+    assert captured.value.retryable is False
 
 
 @pytest.mark.asyncio
@@ -140,6 +152,46 @@ async def test_remote_error_is_sanitized():
     assert "secret" not in str(captured.value)
 
 
+@pytest.mark.asyncio
+async def test_unknown_remote_error_code_is_sanitized():
+    marker = "remote-error-code-payload-marker"
+
+    async def call_tool(name, arguments):
+        return {"error": marker}
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        await RemoteIwikiClient(call_tool).list_domains()
+
+    assert str(captured.value) == "remote_call_failed"
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
+async def test_remote_runtime_failure_has_no_private_exception_chain():
+    marker = "runtime-remote-url-token-marker"
+
+    async def call_tool(name, arguments):
+        raise RuntimeError(marker)
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        await RemoteIwikiClient(call_tool).list_domains()
+
+    assert_sanitized_error(captured, marker)
+
+
+def test_remote_decode_failure_has_no_private_exception_chain():
+    marker = "decode-remote-response-marker"
+    result = SimpleNamespace(
+        isError=False,
+        content=[SimpleNamespace(text=marker)],
+    )
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        iwiki_module._decode_result(result)
+
+    assert_sanitized_error(captured, marker)
+
+
 def test_direct_http_factory_ignores_environment_proxies(monkeypatch):
     seen = {}
 
@@ -231,4 +283,37 @@ async def test_remote_connection_failure_is_sanitized_before_startup_retry(
         traceback.format_exception(captured.type, captured.value, captured.tb)
     )
     assert str(captured.value) == "remote_call_failed"
+    assert captured.value.retryable is True
     assert marker not in formatted
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    ((401, False), (403, False), (429, True), (500, True)),
+)
+async def test_remote_startup_http_status_retryability(
+    monkeypatch, status, retryable
+):
+    request = httpx.Request("GET", "https://remote-url-marker.example/mcp")
+    response = httpx.Response(status, request=request)
+    failure = httpx.HTTPStatusError(
+        "remote-status-marker", request=request, response=response
+    )
+
+    @asynccontextmanager
+    async def failing_stream(url, **kwargs):
+        raise failure
+        yield
+
+    monkeypatch.setattr(iwiki_module, "streamablehttp_client", failing_stream)
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        async with open_remote_iwiki(
+            "https://wiki.example/mcp", "iwiki-token"
+        ):
+            pass
+
+    assert captured.value.retryable is retryable
