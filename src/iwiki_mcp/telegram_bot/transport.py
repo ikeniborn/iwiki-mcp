@@ -221,7 +221,7 @@ class TelegramTransport:
             reply = BotReply("Invalid action.")
         await self._send(chat_id, reply)
 
-    async def poll_once(self, offset: int | None) -> int | None:
+    async def _fetch_updates(self, offset: int | None) -> list[object]:
         self._conversation.expire_state()
         arguments: dict[str, object] = {"timeout": 30}
         if offset is not None:
@@ -229,6 +229,11 @@ class TelegramTransport:
         updates = await self._api("getUpdates", arguments)
         if not isinstance(updates, list):
             raise TelegramError("telegram_request_failed")
+        return updates
+
+    async def _dispatch_updates(
+        self, updates: list[object], offset: int | None
+    ) -> int | None:
         next_offset = offset
         for update in updates:
             if not isinstance(update, dict):
@@ -238,6 +243,10 @@ class TelegramTransport:
             if isinstance(update_id, int):
                 next_offset = update_id + 1
         return next_offset
+
+    async def poll_once(self, offset: int | None) -> int | None:
+        updates = await self._fetch_updates(offset)
+        return await self._dispatch_updates(updates, offset)
 
     async def poll_forever(
         self,
@@ -252,7 +261,7 @@ class TelegramTransport:
         while True:
             started = clock()
             try:
-                next_offset = await self.poll_once(offset)
+                updates = await self._fetch_updates(offset)
             except TelegramError:
                 delay = backoff.next_delay(random_value())
                 LOGGER.warning(
@@ -266,6 +275,6 @@ class TelegramTransport:
                 )
                 await sleep(delay)
                 continue
-            offset = next_offset
             backoff.reset()
             heartbeat.touch()
+            offset = await self._dispatch_updates(updates, offset)

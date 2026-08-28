@@ -2,19 +2,29 @@ from contextlib import asynccontextmanager
 import logging
 
 import pytest
+import urllib3
 
 import iwiki_mcp.telegram_bot.main as main_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.config import BotConfig, TelegramProxyConfig
 from iwiki_mcp.telegram_bot.inference import InferenceError
 from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiError
+from iwiki_mcp.telegram_bot.proxy import ProxyResponse
 from iwiki_mcp.telegram_bot.runtime import Backoff, Heartbeat
-from iwiki_mcp.telegram_bot.transport import TelegramError, TelegramTransport
+from iwiki_mcp.telegram_bot.transport import TelegramTransport
 
 
-class NullHttp:
+class SequencedHttp:
+    def __init__(self, outcomes):
+        self._outcomes = iter(outcomes)
+        self.calls = []
+
     async def post_json(self, url, payload):
-        raise AssertionError("poll_once is replaced in this test")
+        self.calls.append((url, payload))
+        outcome = next(self._outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
     async def get_bytes(self, url):
         raise AssertionError("voice download is not expected")
@@ -68,29 +78,23 @@ async def test_polling_retries_safely_without_advancing_failed_offset(caplog):
         "filename-marker.ogg",
         "provider-response-marker",
     )
+    http = SequencedHttp(
+        (
+            urllib3.exceptions.ProtocolError(" ".join(markers)),
+            urllib3.exceptions.ProtocolError("second " + " ".join(markers)),
+            ProxyResponse(
+                200, b'{"ok":true,"result":[{"update_id":16}]}'
+            ),
+            urllib3.exceptions.ProtocolError("after success " + " ".join(markers)),
+            RuntimeError("stop polling"),
+        )
+    )
     transport = TelegramTransport(
         markers[0],
         AccessPolicy(frozenset({1001})),
         NullConversation(),
-        NullHttp(),
+        http,
     )
-    offsets = []
-    outcomes = iter(
-        (
-            TelegramError(" ".join(markers)),
-            TelegramError("second failure " + " ".join(markers)),
-            17,
-            TelegramError("after success " + " ".join(markers)),
-            RuntimeError("stop polling"),
-        )
-    )
-
-    async def poll_once(offset):
-        offsets.append(offset)
-        outcome = next(outcomes)
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return outcome
 
     sleeps = []
 
@@ -99,7 +103,6 @@ async def test_polling_retries_safely_without_advancing_failed_offset(caplog):
 
     random_values = iter((0.0, 1.0, 0.0))
     heartbeat = RecordingHeartbeat()
-    transport.poll_once = poll_once
 
     with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.transport"):
         with pytest.raises(RuntimeError, match="stop polling"):
@@ -111,7 +114,13 @@ async def test_polling_retries_safely_without_advancing_failed_offset(caplog):
             )
 
     assert sleeps == pytest.approx([0.8, 2.4, 0.8])
-    assert offsets == [None, None, None, 17, 17]
+    assert [call[1].get("offset") for call in http.calls] == [
+        None,
+        None,
+        None,
+        17,
+        17,
+    ]
     assert heartbeat.touches == 1
     assert len(caplog.records) == 3
     for record in caplog.records:

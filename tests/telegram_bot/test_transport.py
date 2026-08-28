@@ -422,6 +422,88 @@ async def test_ambiguous_send_message_failure_is_not_retried():
     assert http.calls[0][1].endswith("/sendMessage")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("update", "state_changing_method"),
+    (
+        (
+            {
+                "update_id": 41,
+                "message": {
+                    "from": {"id": 1001},
+                    "chat": {"id": 9},
+                    "text": "question",
+                },
+            },
+            "sendMessage",
+        ),
+        (
+            {
+                "update_id": 41,
+                "callback_query": {
+                    "id": "callback-1",
+                    "from": {"id": 1001},
+                    "message": {"chat": {"id": 9}},
+                    "data": "domain:team",
+                },
+            },
+            "answerCallbackQuery",
+        ),
+    ),
+)
+async def test_polling_does_not_repeat_ambiguous_state_changing_call(
+    update, state_changing_method
+):
+    fetched = ProxyResponse(
+        200,
+        json.dumps({"ok": True, "result": [update]}).encode(),
+    )
+    http = RecordingHttp(
+        post_results=(
+            fetched,
+            urllib3.exceptions.ProtocolError("ambiguous state change"),
+            fetched,
+            urllib3.exceptions.ProtocolError("ambiguous state change"),
+        )
+    )
+    transport = TelegramTransport(
+        "telegram-token",
+        AccessPolicy(frozenset({1001})),
+        FakeConversation(),
+        http,
+    )
+    sleeps = []
+
+    class RepeatedDispatch(RuntimeError):
+        pass
+
+    async def sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) == 2:
+            raise RepeatedDispatch
+
+    class Heartbeat:
+        touches = 0
+
+        def touch(self):
+            self.touches += 1
+
+    heartbeat = Heartbeat()
+    with pytest.raises(TelegramError, match="^telegram_request_failed$"):
+        await transport.poll_forever(
+            sleep=sleep,
+            random_value=lambda: 0.5,
+            heartbeat=heartbeat,
+        )
+
+    assert [call[1].rsplit("/", 1)[-1] for call in http.calls] == [
+        "getUpdates",
+        state_changing_method,
+    ]
+    assert sleeps == []
+    assert heartbeat.touches == 1
+
+
 def test_help_does_not_load_configuration(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["iwiki-telegram-bot", "--help"])
 
