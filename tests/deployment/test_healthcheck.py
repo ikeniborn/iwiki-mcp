@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -25,13 +26,24 @@ HEALTHY_STATUS = "\n".join(
 ENVIRONMENT = {"IWIKI_INGRESS_HEALTH_HOST": "192.168.68.123"}
 
 
+class FakeResponse:
+    def __init__(self, status):
+        self.status = status
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class FakeConnection:
-    def __init__(self, host, port, *, status=401, error=None):
+    def __init__(self, host, port, timeout=None, *, status=401, error=None):
         self.host = host
         self.port = port
+        self.timeout = timeout
         self.status = status
         self.error = error
         self.requests = []
+        self.responses = []
         self.closed = False
 
     def request(self, *args, **kwargs):
@@ -40,7 +52,9 @@ class FakeConnection:
             raise self.error
 
     def getresponse(self):
-        return SimpleNamespace(status=self.status)
+        response = FakeResponse(self.status)
+        self.responses.append(response)
+        return response
 
     def close(self):
         self.closed = True
@@ -82,8 +96,8 @@ def run_main(
         process_calls.append((args, kwargs))
         return process_result or completed_status()
 
-    def connection_factory(host, port):
-        connection = FakeConnection(host, port, status=next(statuses))
+    def connection_factory(host, port, timeout):
+        connection = FakeConnection(host, port, timeout, status=next(statuses))
         http_connections.append(connection)
         return connection
 
@@ -127,6 +141,7 @@ def test_all_local_checks_healthy(capsys):
                 "capture_output": True,
                 "text": True,
                 "check": False,
+                "timeout": 2.0,
             },
         )
     ]
@@ -134,11 +149,13 @@ def test_all_local_checks_healthy(capsys):
         ("127.0.0.1", 8765),
         ("192.168.68.123", 8766),
     ]
+    assert [item.timeout for item in connections] == [2.0, 2.0]
     assert [item.requests for item in connections] == [
         [(('GET', '/mcp'), {})],
         [(('GET', '/mcp'), {})],
     ]
     assert all(item.closed for item in connections)
+    assert all(item.responses[0].closed for item in connections)
     assert paths == ["/run/iwiki-telegram-bot.heartbeat"]
 
 
@@ -202,6 +219,30 @@ def test_process_failure_uses_only_stable_code(capsys):
     assert marker not in captured.out + captured.err
 
 
+def test_process_timeout_uses_stable_code_without_later_checks(capsys):
+    marker = "process-timeout-sensitive-marker"
+    calls = []
+
+    def timing_out_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise subprocess.TimeoutExpired([marker], kwargs["timeout"])
+
+    exit_code = healthcheck.main(
+        run=timing_out_run,
+        connection_factory=lambda *args: pytest.fail("HTTP check must not run"),
+        path_factory=lambda value: pytest.fail("heartbeat check must not run"),
+        clock=lambda: 100.0,
+        environ=ENVIRONMENT,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == "child_not_running\n"
+    assert captured.err == ""
+    assert calls[0][1]["timeout"] == 2.0
+    assert marker not in captured.out + captured.err
+
+
 @pytest.mark.parametrize("boundary", ["process", "http", "file", "clock"])
 def test_injected_boundary_exceptions_never_escape_or_print(capsys, boundary):
     marker = f"{boundary}-unexpected-sensitive-marker"
@@ -215,7 +256,7 @@ def test_injected_boundary_exceptions_never_escape_or_print(capsys, boundary):
         )
     elif boundary == "http":
         result = healthcheck.local_http_ok(
-            "127.0.0.1", 8765, "/mcp", lambda host, port: fail()
+            "127.0.0.1", 8765, "/mcp", lambda host, port, timeout: fail()
         )
     elif boundary == "file":
         result = healthcheck.check_heartbeat(
@@ -235,13 +276,15 @@ def test_injected_boundary_exceptions_never_escape_or_print(capsys, boundary):
 def test_http_check_accepts_only_expected_unauthenticated_statuses(healthy_status):
     connections = []
 
-    def factory(host, port):
-        connection = FakeConnection(host, port, status=healthy_status)
+    def factory(host, port, timeout):
+        connection = FakeConnection(host, port, timeout, status=healthy_status)
         connections.append(connection)
         return connection
 
     assert healthcheck.local_http_ok("127.0.0.1", 8765, "/mcp", factory)
+    assert connections[0].timeout == 2.0
     assert connections[0].requests == [(('GET', '/mcp'), {})]
+    assert connections[0].responses[0].closed is True
     assert connections[0].closed is True
 
 
@@ -251,7 +294,9 @@ def test_http_check_rejects_other_statuses(unhealthy_status):
         "127.0.0.1",
         8765,
         "/mcp",
-        lambda host, port: FakeConnection(host, port, status=unhealthy_status),
+        lambda host, port, timeout: FakeConnection(
+            host, port, timeout, status=unhealthy_status
+        ),
     )
 
 
@@ -260,7 +305,7 @@ def test_http_check_sends_no_credentials_and_hides_connection_failure(capsys):
     connection = FakeConnection("127.0.0.1", 8765, error=OSError(marker))
 
     assert not healthcheck.local_http_ok(
-        "127.0.0.1", 8765, "/mcp", lambda host, port: connection
+        "127.0.0.1", 8765, "/mcp", lambda host, port, timeout: connection
     )
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -268,6 +313,57 @@ def test_http_check_sends_no_credentials_and_hides_connection_failure(capsys):
     assert marker not in captured.out + captured.err
     assert connection.requests == [(('GET', '/mcp'), {})]
     assert connection.closed is True
+
+
+def test_http_timeout_is_bounded_and_hides_failure(capsys):
+    marker = "http-timeout-sensitive-marker"
+    connections = []
+
+    def factory(host, port, timeout):
+        connection = FakeConnection(
+            host, port, timeout, error=TimeoutError(marker)
+        )
+        connections.append(connection)
+        return connection
+
+    assert not healthcheck.local_http_ok("127.0.0.1", 8765, "/mcp", factory)
+    captured = capsys.readouterr()
+
+    assert len(connections) == 1
+    assert connections[0].timeout == 2.0
+    assert connections[0].closed is True
+    assert captured.out == ""
+    assert captured.err == ""
+    assert marker not in captured.out + captured.err
+
+
+def test_mcp_http_timeout_uses_stable_code_without_later_checks(capsys):
+    marker = "mcp-timeout-sensitive-marker"
+    connections = []
+
+    def factory(host, port, timeout):
+        connection = FakeConnection(
+            host, port, timeout, error=TimeoutError(marker)
+        )
+        connections.append(connection)
+        return connection
+
+    exit_code = healthcheck.main(
+        run=lambda **kwargs: completed_status(),
+        connection_factory=factory,
+        path_factory=lambda value: pytest.fail("heartbeat check must not run"),
+        clock=lambda: 100.0,
+        environ=ENVIRONMENT,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == "mcp_unavailable\n"
+    assert captured.err == ""
+    assert len(connections) == 1
+    assert connections[0].timeout == 2.0
+    assert connections[0].closed is True
+    assert marker not in captured.out + captured.err
 
 
 def test_mcp_failure_precedes_nginx_and_heartbeat(capsys):
@@ -348,3 +444,51 @@ def test_environment_overrides_ingress_port_and_heartbeat_age(capsys):
     assert captured.out == ""
     assert captured.err == ""
     assert connections[1].port == 9876
+
+
+@pytest.mark.parametrize(
+    "maximum_age",
+    ["nan", "inf", "+inf", "-inf", "0", "-0.0", "-1", "age-sensitive-marker"],
+)
+def test_invalid_heartbeat_maximum_age_uses_stable_code(capsys, maximum_age):
+    environment = {
+        "IWIKI_INGRESS_HEALTH_HOST": "192.168.68.123",
+        "IWIKI_BOT_HEARTBEAT_MAX_AGE_SECONDS": maximum_age,
+    }
+
+    exit_code, captured, _, connections, paths = run_main(
+        capsys,
+        heartbeat_content="-1000000.0",
+        clock=lambda: 100.0,
+        environment=environment,
+    )
+
+    assert exit_code == 1
+    assert captured.out == "telegram_heartbeat_stale\n"
+    assert captured.err == ""
+    assert "sensitive-marker" not in captured.out + captured.err
+    assert len(connections) == 2
+    assert paths == []
+
+
+@pytest.mark.parametrize(
+    "port", ["0", "-1", "65536", "port-sensitive-marker"]
+)
+def test_invalid_ingress_health_port_uses_stable_code(capsys, port):
+    environment = {
+        "IWIKI_INGRESS_HEALTH_HOST": "192.168.68.123",
+        "IWIKI_INGRESS_HEALTH_PORT": port,
+    }
+
+    exit_code, captured, _, connections, paths = run_main(
+        capsys,
+        http_statuses=(401,),
+        environment=environment,
+    )
+
+    assert exit_code == 1
+    assert captured.out == "nginx_unavailable\n"
+    assert captured.err == ""
+    assert "sensitive-marker" not in captured.out + captured.err
+    assert len(connections) == 1
+    assert paths == []
