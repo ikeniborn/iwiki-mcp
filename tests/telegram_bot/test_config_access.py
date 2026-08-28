@@ -1,3 +1,5 @@
+import traceback
+
 import pytest
 
 from iwiki_mcp.telegram_bot.access import AccessPolicy
@@ -46,6 +48,12 @@ def test_config_loads_allowlist_and_defaults(monkeypatch):
     ("value", "origin", "authorization"),
     (
         ("https://proxy.example:8443", "https://proxy.example:8443", None),
+        ("https://proxy.example:8443/", "https://proxy.example:8443", None),
+        (
+            "https://[2001:db8::1]:8443",
+            "https://[2001:db8::1]:8443",
+            None,
+        ),
         (
             "https://user%40team:p%3Ass@proxy.example:9443",
             "https://proxy.example:9443",
@@ -72,6 +80,11 @@ def test_config_accepts_strict_https_proxy(
         "HTTPS://proxy.example:8443",
         "socks5://proxy.example:1080",
         "https://proxy.example",
+        "https://proxy.example:not-a-port",
+        "https://proxy.example:65536",
+        "https://:8443",
+        " https://proxy.example:8443",
+        "https://[2001:db8::1:8443",
         "https://proxy.example:8443/path",
         "https://proxy.example:8443?mode=tunnel",
         "https://proxy.example:8443#credentials",
@@ -107,6 +120,37 @@ def test_config_rejects_non_positive_confirmation_ttl(monkeypatch):
 
     with pytest.raises(BotConfigError, match="IWIKI_BOT_CONFIRMATION_TTL_SECONDS"):
         BotConfig.load()
+
+
+@pytest.mark.parametrize(
+    ("name", "marker", "error_name"),
+    (
+        (
+            "IWIKI_BOT_ALLOWED_TELEGRAM_IDS",
+            "allowlist-secret-marker",
+            "IWIKI_BOT_ALLOWED_TELEGRAM_IDS",
+        ),
+        (
+            "IWIKI_BOT_CONFIRMATION_TTL_SECONDS",
+            "ttl-secret-marker",
+            "IWIKI_BOT_CONFIRMATION_TTL_SECONDS",
+        ),
+    ),
+)
+def test_config_parse_errors_do_not_leak_values_in_tracebacks(
+    monkeypatch, name, marker, error_name
+):
+    configure(monkeypatch)
+    monkeypatch.setenv(name, marker)
+
+    with pytest.raises(BotConfigError) as exc_info:
+        BotConfig.load()
+
+    formatted = "".join(
+        traceback.format_exception(exc_info.type, exc_info.value, exc_info.tb)
+    )
+    assert str(exc_info.value) == f"invalid {error_name}"
+    assert marker not in formatted
 
 
 def test_config_rejects_non_positive_telegram_id(monkeypatch):

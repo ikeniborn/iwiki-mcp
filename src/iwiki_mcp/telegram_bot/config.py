@@ -100,14 +100,14 @@ class BotConfig:
                 int(value.strip())
                 for value in required["IWIKI_BOT_ALLOWED_TELEGRAM_IDS"].split(",")
             )
-        except ValueError as exc:
-            raise BotConfigError("invalid IWIKI_BOT_ALLOWED_TELEGRAM_IDS") from exc
+        except ValueError:
+            raise BotConfigError("invalid IWIKI_BOT_ALLOWED_TELEGRAM_IDS") from None
 
         ttl_name = "IWIKI_BOT_CONFIRMATION_TTL_SECONDS"
         try:
             ttl = int(os.environ.get(ttl_name, "300"))
-        except ValueError as exc:
-            raise BotConfigError(f"invalid {ttl_name}") from exc
+        except ValueError:
+            raise BotConfigError(f"invalid {ttl_name}") from None
         if not allowed or any(telegram_id <= 0 for telegram_id in allowed):
             raise BotConfigError("invalid IWIKI_BOT_ALLOWED_TELEGRAM_IDS")
         if ttl <= 0:
