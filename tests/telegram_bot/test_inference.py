@@ -121,6 +121,31 @@ async def test_probe_unsupported_protocol_is_not_retryable():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("probe", "post"))
+async def test_invalid_url_is_sanitized_and_not_retryable(operation):
+    marker = "invalid-port-marker"
+    client = InferenceClient(
+        f"https://provider.example:{marker}/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+    )
+
+    try:
+        with pytest.raises(InferenceError) as captured:
+            if operation == "probe":
+                await client.probe()
+            else:
+                await client.answer("Question", "Context")
+    finally:
+        await client.close()
+
+    assert str(captured.value) == "inference_failed"
+    assert captured.value.retryable is False
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
 async def test_answer_posts_only_question_and_selected_context():
     seen = {}
 

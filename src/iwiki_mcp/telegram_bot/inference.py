@@ -73,7 +73,7 @@ class InferenceClient:
             payload = response.json()
         except httpx.HTTPError as error:
             retryable = _retryable_http_error(error)
-        except ValueError:
+        except (httpx.InvalidURL, ValueError):
             retryable = False
         if retryable is not None:
             raise InferenceError(
@@ -183,7 +183,7 @@ class InferenceClient:
             payload = response.json()
         except httpx.HTTPError as error:
             retryable = _retryable_http_error(error)
-        except ValueError:
+        except (httpx.InvalidURL, ValueError):
             retryable = False
         if retryable is not None:
             raise InferenceError(

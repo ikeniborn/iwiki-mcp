@@ -354,7 +354,15 @@ async def test_non_retryable_startup_failure_does_not_sleep(
 
 
 @pytest.mark.asyncio
-async def test_unsupported_inference_protocol_is_not_retried(monkeypatch):
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "provider-without-scheme",
+        "https://provider.example:invalid-port-marker/v1",
+    ),
+    ids=("unsupported-protocol", "invalid-url"),
+)
+async def test_invalid_inference_url_is_not_retried(monkeypatch, base_url):
     events = []
 
     class Proxy:
@@ -367,12 +375,12 @@ async def test_unsupported_inference_protocol_is_not_retried(monkeypatch):
             await super().close()
 
     async def unexpected_sleep(delay):
-        raise AssertionError("unsupported protocols must not be retried")
+        raise AssertionError("invalid inference URLs must not be retried")
 
     monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
     monkeypatch.setattr(main_module, "InferenceClient", RecordingInference)
 
-    config = replace(_config(), llm_base_url="provider-without-scheme")
+    config = replace(_config(), llm_base_url=base_url)
     with pytest.raises(InferenceError) as captured:
         await main_module.run_bot(
             config,
