@@ -13,6 +13,59 @@ import pytest
 REPOSITORY = Path(__file__).parents[2]
 
 
+def test_postgres_topology_contract_rejects_generic_default_loopback():
+    from tests.deployment.conftest import postgres_topology_skip_reason
+
+    assert postgres_topology_skip_reason(
+        "IWIKI_TEST_POSTGRES_DSN", {"host": "127.0.0.1", "port": "5432"}
+    ) == (
+        "IWIKI_TEST_POSTGRES_DSN must use a non-loopback host or a custom port"
+    )
+    assert postgres_topology_skip_reason(
+        "IWIKI_TEST_POSTGRES_DSN", {"host": "127.0.0.1", "port": "5544"}
+    ) is None
+    assert postgres_topology_skip_reason(
+        "IWIKI_TEST_POSTGRES_DSN", {"host": "172.18.0.2", "port": "5432"}
+    ) is None
+
+
+def test_dynamic_prebuild_private_files_are_excluded_from_disposable_image(
+    tmp_path, docker_command, compose_command
+):
+    from tests.deployment.conftest import build_disposable_privacy_proof
+
+    marker = f"prebuild-private-{secrets.token_urlsafe(24)}"
+    excluded = {
+        ".env",
+        "runtime.env",
+        "server.toml",
+        "nginx.conf",
+        "acceptance.key",
+        "acceptance.pem",
+    }
+    for name in excluded:
+        (tmp_path / name).write_text(marker, encoding="utf-8")
+    assert all(
+        marker in (tmp_path / name).read_text(encoding="utf-8")
+        for name in excluded
+    )
+
+    proof = build_disposable_privacy_proof(
+        tmp_path, docker_command, compose_command, marker
+    )
+
+    assert proof["public_file"] == b"public acceptance artifact\n"
+    assert excluded.isdisjoint(proof["filesystem_paths"])
+    assert marker not in proof["build_output"]
+    assert marker not in proof["history"]
+    assert marker.encode() not in proof["filesystem_bytes"]
+    assert proof["mounts"] == []
+    assert proof["container_removed"] is True
+    assert proof["image_removed"] is True
+    assert proof["context_cleaned"] is True
+    assert list(tmp_path.iterdir()) == []
+
+
 def _request(client, token, payload, session_id=None):
     headers = {
         "Accept": "application/json, text/event-stream",
@@ -247,8 +300,11 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
         lambda: full_stack.telegram.request_count > request_count, timeout=20
     )
 
-    request_count = full_stack.telegram.request_count
     full_stack.telegram.disable()
+    assert full_stack.telegram.wait_until_disabled_quiescent()
+    request_count = full_stack.telegram.request_count
+    time.sleep(0.25)
+    assert full_stack.telegram.request_count == request_count
     time.sleep(3)
     logs = subprocess.run(
         [*full_stack.docker, "logs", full_stack.name],
@@ -258,10 +314,12 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
         timeout=10,
     )
     assert "telegram poll retry" in logs.stdout + logs.stderr
-    full_stack.telegram.enable()
-    assert _eventually(
-        lambda: full_stack.telegram.request_count > request_count, timeout=20
+    generation = full_stack.telegram.enable()
+    assert full_stack.telegram.wait_for_get_updates_generation(
+        generation, timeout=20
     )
+    assert full_stack.telegram.served_get_updates_generation == generation
+    assert full_stack.telegram.request_count > request_count
     assert _eventually(
         lambda: full_stack.health_status() == "healthy", timeout=20
     )
@@ -518,6 +576,35 @@ def test_hosted_mcp_rejects_incompatible_schema(
 def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack):
     import httpx
 
+    assert full_stack.inference.base_url.startswith("https://")
+    mounts = json.loads(
+        subprocess.run(
+            [
+                *full_stack.docker,
+                "inspect",
+                full_stack.name,
+                "--format",
+                "{{json .Mounts}}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout
+    )
+    assert any(
+        mount["Source"] == str(full_stack.combined_ca)
+        and mount["Destination"] == "/etc/ssl/certs/ca-certificates.crt"
+        and mount["RW"] is False
+        for mount in mounts
+    )
+    assert any(
+        mount["Source"] == str(full_stack.combined_ca)
+        and mount["Destination"] == full_stack.httpx_ca_path
+        and mount["RW"] is False
+        for mount in mounts
+    )
+
     token = full_stack.markers["iwiki_token"]
     with httpx.Client(base_url="http://127.0.0.1:8766", timeout=30) as client:
         initialized = _initialize(client, token)
@@ -582,9 +669,10 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         lambda payload: payload.get("text") == full_stack.markers["reply"],
     )
     assert any(
-        full_stack.markers["update"].encode() in body
-        for method, path, body in full_stack.inference.requests
-        if method == "POST" and path == "/v1/chat/completions"
+        full_stack.markers["update"].encode() in request["body"]
+        for request in full_stack.inference.requests
+        if request["method"] == "POST"
+        and request["path"] == "/v1/chat/completions"
     )
 
     sent = len(full_stack.telegram.sent_payloads)
@@ -594,9 +682,10 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         lambda payload: payload.get("text") == full_stack.markers["reply"],
     )
     transcription_requests = [
-        body
-        for method, path, body in full_stack.inference.requests
-        if method == "POST" and path == "/v1/audio/transcriptions"
+        request["body"]
+        for request in full_stack.inference.requests
+        if request["method"] == "POST"
+        and request["path"] == "/v1/audio/transcriptions"
     ]
     assert any(
         full_stack.markers["filename"].encode() in body
@@ -605,8 +694,28 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
     )
     assert any(
         full_stack.markers["transcription"].encode() in body
-        for method, path, body in full_stack.inference.requests
-        if method == "POST" and path != "/v1/audio/transcriptions"
+        for request in full_stack.inference.requests
+        if request["method"] == "POST"
+        and request["path"] != "/v1/audio/transcriptions"
+        for body in (request["body"],)
+    )
+    required_inference_paths = {
+        "/v1/models",
+        "/v1/embeddings",
+        "/v1/chat/completions",
+        "/v1/audio/transcriptions",
+    }
+    exercised = {
+        request["path"]
+        for request in full_stack.inference.requests
+        if request["path"] in required_inference_paths
+    }
+    assert exercised == required_inference_paths
+    assert all(
+        request["authorization"]
+        == f"Bearer {full_stack.markers['llm_key']}"
+        for request in full_stack.inference.requests
+        if request["path"] in required_inference_paths
     )
 
     sent = len(full_stack.telegram.sent_payloads)
@@ -669,12 +778,13 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
     )
 
     full_stack.telegram.disable()
-    time.sleep(3)
-    full_stack.telegram.enable()
+    assert full_stack.telegram.wait_until_disabled_quiescent()
     request_count = full_stack.telegram.request_count
-    assert _eventually(
-        lambda: full_stack.telegram.request_count > request_count, timeout=20
+    generation = full_stack.telegram.enable()
+    assert full_stack.telegram.wait_for_get_updates_generation(
+        generation, timeout=20
     )
+    assert full_stack.telegram.request_count > request_count
 
     logs = subprocess.run(
         [*full_stack.docker, "logs", full_stack.name],
@@ -696,7 +806,7 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
                 "paths=[p for root in ('/run','/tmp') for p in pathlib.Path(root).rglob('*') "
                 "if p.is_file()]+[pathlib.Path(p) for p in "
                 "('/etc/iwiki/server.toml','/etc/nginx/nginx.conf',"
-                "'/etc/ssl/certs/iwiki-acceptance-ca.pem')]; "
+                "'/etc/ssl/certs/ca-certificates.crt')]; "
                 "bad=[str(p) for p in paths if any(m in p.read_bytes() "
                 "for m in markers)]; print('\\n'.join(bad))"
             ),
@@ -728,6 +838,7 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         full_stack.server_config,
         full_stack.nginx_config,
         full_stack.ca_cert,
+        full_stack.combined_ca,
     ):
         content = path.read_bytes()
         assert all(value.encode() not in content for value in full_stack.markers.values())

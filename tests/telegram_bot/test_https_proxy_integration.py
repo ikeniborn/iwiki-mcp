@@ -31,6 +31,49 @@ def _openssl(*args):
     )
 
 
+def _issue_server_certificate(
+    directory, ca_cert, ca_key, name, subject, san
+):
+    key = directory / f"{name}.key"
+    request = directory / f"{name}.csr"
+    certificate = directory / f"{name}.pem"
+    extensions = directory / f"{name}.ext"
+    extensions.write_text(
+        f"subjectAltName={san}\nextendedKeyUsage=serverAuth\n",
+        encoding="ascii",
+    )
+    _openssl(
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        str(key),
+        "-out",
+        str(request),
+        "-subj",
+        f"/CN={subject}",
+    )
+    _openssl(
+        "x509",
+        "-req",
+        "-in",
+        str(request),
+        "-CA",
+        str(ca_cert),
+        "-CAkey",
+        str(ca_key),
+        "-CAcreateserial",
+        "-out",
+        str(certificate),
+        "-days",
+        "1",
+        "-extfile",
+        str(extensions),
+    )
+    return certificate, key
+
+
 def _certificate_authority(
     directory: Path,
     *,
@@ -59,48 +102,17 @@ def _certificate_authority(
         "basicConstraints=critical,CA:TRUE",
     )
 
-    def issue(name, subject, san):
-        key = directory / f"{name}.key"
-        request = directory / f"{name}.csr"
-        certificate = directory / f"{name}.pem"
-        extensions = directory / f"{name}.ext"
-        extensions.write_text(
-            f"subjectAltName={san}\nextendedKeyUsage=serverAuth\n",
-            encoding="ascii",
-        )
-        _openssl(
-            "req",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(key),
-            "-out",
-            str(request),
-            "-subj",
-            f"/CN={subject}",
-        )
-        _openssl(
-            "x509",
-            "-req",
-            "-in",
-            str(request),
-            "-CA",
-            str(ca_cert),
-            "-CAkey",
-            str(ca_key),
-            "-CAcreateserial",
-            "-out",
-            str(certificate),
-            "-days",
-            "1",
-            "-extfile",
-            str(extensions),
-        )
-        return certificate, key
-
-    proxy = issue("proxy", proxy_subject, proxy_san)
-    telegram = issue("telegram", "api.telegram.org", "DNS:api.telegram.org")
+    proxy = _issue_server_certificate(
+        directory, ca_cert, ca_key, "proxy", proxy_subject, proxy_san
+    )
+    telegram = _issue_server_certificate(
+        directory,
+        ca_cert,
+        ca_key,
+        "telegram",
+        "api.telegram.org",
+        "DNS:api.telegram.org",
+    )
     return ca_cert, proxy, telegram
 
 
@@ -186,6 +198,11 @@ class _HttpsConnectProxy:
         self._poll_release = threading.Event()
         self._poll_release.set()
         self._poll_waiting = threading.Event()
+        self._disabled_quiescent = threading.Event()
+        self._disabled_quiescent.set()
+        self._get_updates_served = threading.Event()
+        self._generation = 0
+        self._served_get_updates_generation = None
         self._active = set()
         self._connections = []
         self._listener = socket.socket()
@@ -290,9 +307,11 @@ class _HttpsConnectProxy:
                 continue
             except OSError:
                 break
-            if not self.enabled:
-                raw.close()
-                continue
+            with self._lock:
+                if not self.enabled:
+                    raw.close()
+                    continue
+                self._active.add(raw)
             thread = threading.Thread(
                 target=self._serve_connection, args=(raw,), daemon=True
             )
@@ -300,8 +319,6 @@ class _HttpsConnectProxy:
             thread.start()
 
     def _serve_connection(self, raw):
-        with self._lock:
-            self._active.add(raw)
         try:
             with self._proxy_context.wrap_socket(raw, server_side=True) as outer:
                 with self._lock:
@@ -337,6 +354,8 @@ class _HttpsConnectProxy:
                     )
                     method, path, _version = first_line.split(" ")
                     with self._lock:
+                        request_generation = self._generation
+                        request_started_enabled = self.enabled
                         self.observed.append((method, path))
                         self.request_count += 1
                     payload = self._payload(method, path, body)
@@ -346,6 +365,17 @@ class _HttpsConnectProxy:
                         else "application/json"
                     )
                     inner.sendall(self._response(payload, content_type=content_type))
+                    if path == f"/bot{self.token}/getUpdates":
+                        with self._lock:
+                            if (
+                                request_started_enabled
+                                and self.enabled
+                                and request_generation == self._generation
+                            ):
+                                self._served_get_updates_generation = (
+                                    request_generation
+                                )
+                                self._get_updates_served.set()
         except (EOFError, OSError, ssl.SSLError):
             if not self._stopping.is_set() and self.enabled:
                 self.errors.append("proxy_transport_failed")
@@ -359,11 +389,16 @@ class _HttpsConnectProxy:
                     for connection in self._active
                     if connection.fileno() != -1
                 }
+                if not self.enabled and not self._active:
+                    self._disabled_quiescent.set()
 
     def disable(self):
-        self.enabled = False
         with self._lock:
+            self.enabled = False
+            self._disabled_quiescent.clear()
             active = tuple(self._active)
+            if not active:
+                self._disabled_quiescent.set()
         for connection in active:
             try:
                 connection.shutdown(socket.SHUT_RDWR)
@@ -374,8 +409,27 @@ class _HttpsConnectProxy:
             except OSError:
                 pass
 
+    def wait_until_disabled_quiescent(self, timeout=5):
+        return self._disabled_quiescent.wait(timeout)
+
     def enable(self):
-        self.enabled = True
+        with self._lock:
+            self._generation += 1
+            self._served_get_updates_generation = None
+            self._get_updates_served.clear()
+            self.enabled = True
+            return self._generation
+
+    def wait_for_get_updates_generation(self, generation, timeout=5):
+        if not self._get_updates_served.wait(timeout):
+            return False
+        with self._lock:
+            return self._served_get_updates_generation == generation
+
+    @property
+    def served_get_updates_generation(self):
+        with self._lock:
+            return self._served_get_updates_generation
 
     def pause_polling(self):
         self._poll_waiting.clear()

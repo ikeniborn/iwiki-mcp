@@ -3,13 +3,16 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
+import tarfile
 import threading
 import time
 import uuid
@@ -131,6 +134,7 @@ from tests.postgres.conftest import (  # noqa: E402,F401
 from tests.telegram_bot.test_https_proxy_integration import (  # noqa: E402
     _certificate_authority,
     _HttpsConnectProxy,
+    _issue_server_certificate,
 )
 
 
@@ -149,7 +153,14 @@ class _InferenceHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        self.server.requests.append(("GET", self.path, b""))
+        self.server.requests.append(
+            {
+                "method": "GET",
+                "path": self.path,
+                "body": b"",
+                "authorization": self.headers.get("Authorization"),
+            }
+        )
         if self.path == "/v1/models":
             self._send(200, {"data": [{"id": self.server.chat_model}]})
         else:
@@ -158,7 +169,14 @@ class _InferenceHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
-        self.server.requests.append(("POST", self.path, body))
+        self.server.requests.append(
+            {
+                "method": "POST",
+                "path": self.path,
+                "body": body,
+                "authorization": self.headers.get("Authorization"),
+            }
+        )
         if self.path in self.server.fail_paths:
             self._send(500, {"error": self.server.provider_error})
         elif self.path == "/v1/embeddings":
@@ -190,10 +208,16 @@ class _InferenceHandler(BaseHTTPRequestHandler):
 
 
 class FakeInferenceServer:
-    def __init__(self, markers):
+    def __init__(self, markers, certificate, hostname):
         self.server = ThreadingHTTPServer(
             ("127.0.0.1", _free_port()), _InferenceHandler
         )
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(*map(str, certificate))
+        self.server.socket = context.wrap_socket(
+            self.server.socket, server_side=True
+        )
+        self.hostname = hostname
         self.server.chat_model = "acceptance-chat"
         self.server.reply = markers["reply"]
         self.server.preview = f"## Body\n{markers['preview']}"
@@ -205,7 +229,7 @@ class FakeInferenceServer:
 
     @property
     def base_url(self):
-        return f"http://127.0.0.1:{self.server.server_port}/v1"
+        return f"https://{self.hostname}:{self.server.server_port}/v1"
 
     @property
     def requests(self):
@@ -219,6 +243,194 @@ class FakeInferenceServer:
         self.server.server_close()
         self.thread.join(timeout=5)
         assert not self.thread.is_alive()
+
+
+def _write_combined_ca_bundle(image, docker, ca_cert, destination):
+    system_ca = subprocess.run(
+        [
+            *docker,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/bin/cat",
+            image,
+            "/etc/ssl/certs/ca-certificates.crt",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=30,
+    ).stdout
+    destination.write_bytes(system_ca.rstrip() + b"\n" + ca_cert.read_bytes())
+    destination.chmod(0o644)
+
+
+def _image_httpx_ca_path(image, docker):
+    return subprocess.run(
+        [
+            *docker,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/app/.venv/bin/python",
+            image,
+            "-c",
+            "import certifi; print(certifi.where())",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout.strip()
+
+
+def build_disposable_privacy_proof(directory, docker, compose, marker):
+    tag = f"iwiki-privacy-proof:{uuid.uuid4().hex[:12]}"
+    container = f"iwiki-privacy-proof-{uuid.uuid4().hex[:12]}"
+    (directory / ".dockerignore").write_text(
+        (REPOSITORY / ".dockerignore").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (directory / "Dockerfile").write_text(
+        "FROM scratch\nCOPY . /proof/\nCMD [\"/proof/public.txt\"]\n",
+        encoding="utf-8",
+    )
+    (directory / "public.txt").write_text(
+        "public acceptance artifact\n", encoding="utf-8"
+    )
+    (directory / "compose.yaml").write_text(
+        "services:\n"
+        "  proof:\n"
+        "    build:\n"
+        "      context: .\n"
+        f"    image: {tag}\n",
+        encoding="utf-8",
+    )
+    proof = {}
+    try:
+        build = subprocess.run(
+            [
+                *compose,
+                "--project-name",
+                f"iwikiprivacy{uuid.uuid4().hex[:8]}",
+                "-f",
+                str(directory / "compose.yaml"),
+                "build",
+                "--no-cache",
+                "proof",
+            ],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
+        )
+        subprocess.run(
+            [*docker, "create", "--name", container, tag],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        exported = subprocess.run(
+            [*docker, "export", container],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        ).stdout
+        filesystem = bytearray()
+        public_file = None
+        paths = set()
+        with tarfile.open(fileobj=io.BytesIO(exported), mode="r:") as archive:
+            for member in archive.getmembers():
+                if not member.isfile():
+                    continue
+                paths.add(Path(member.name).name)
+                extracted = archive.extractfile(member)
+                assert extracted is not None
+                content = extracted.read()
+                filesystem.extend(content)
+                if member.name.rstrip("/") == "proof/public.txt":
+                    public_file = content
+        history = subprocess.run(
+            [*docker, "history", "--no-trunc", tag],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        mounts = json.loads(
+            subprocess.run(
+                [
+                    *docker,
+                    "inspect",
+                    container,
+                    "--format",
+                    "{{json .Mounts}}",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            ).stdout
+        )
+        proof.update(
+            {
+                "public_file": public_file,
+                "filesystem_paths": paths,
+                "filesystem_bytes": bytes(filesystem),
+                "build_output": build.stdout + build.stderr,
+                "history": history.stdout + history.stderr,
+                "mounts": mounts,
+            }
+        )
+        assert marker in "".join(
+            path.read_text(encoding="utf-8")
+            for path in directory.iterdir()
+            if path.name in {
+                ".env",
+                "runtime.env",
+                "server.toml",
+                "nginx.conf",
+                "acceptance.key",
+                "acceptance.pem",
+            }
+        )
+    finally:
+        subprocess.run(
+            [*docker, "rm", "-f", container],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        subprocess.run(
+            [*docker, "image", "rm", "-f", tag],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        for path in directory.iterdir():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        proof["context_cleaned"] = not any(directory.iterdir())
+    proof["container_removed"] = subprocess.run(
+        [*docker, "inspect", container],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    ).returncode != 0
+    proof["image_removed"] = subprocess.run(
+        [*docker, "image", "inspect", tag],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    ).returncode != 0
+    return proof
 
 
 @dataclass
@@ -265,6 +477,22 @@ class DisposablePostgresEndpoint:
         self.roles.clear()
 
 
+def postgres_topology_skip_reason(env_name, values):
+    host = values.get("host", "")
+    if not host or host.startswith("/"):
+        return f"{env_name} has no container-reachable TCP host"
+    port = int(values.get("port", 5432))
+    loopback = host in {"localhost", "::1"} or host.startswith("127.")
+    if env_name == "IWIKI_TEST_POSTGRES_LOOPBACK_DSN":
+        if not loopback:
+            return f"{env_name} is not loopback-hosted"
+        if port == 5432:
+            return f"{env_name} does not use a custom port"
+    elif loopback and port == 5432:
+        return f"{env_name} must use a non-loopback host or a custom port"
+    return None
+
+
 @pytest.fixture(
     params=("IWIKI_TEST_POSTGRES_DSN", "IWIKI_TEST_POSTGRES_LOOPBACK_DSN")
 )
@@ -283,15 +511,9 @@ def postgres_endpoint(request):
         values = conninfo_to_dict(dsn)
     except (ValueError, psycopg.ProgrammingError) as exc:
         pytest.fail(f"{env_name} is not a disposable test DSN: {type(exc).__name__}")
-    host = values.get("host", "")
-    if not host or host.startswith("/"):
-        pytest.skip(f"{env_name} has no container-reachable TCP host")
-    port = int(values.get("port", 5432))
-    if env_name.endswith("LOOPBACK_DSN"):
-        if host not in {"127.0.0.1", "localhost", "::1"}:
-            pytest.skip(f"{env_name} is not loopback-hosted")
-        if port == 5432:
-            pytest.skip(f"{env_name} does not use a custom port")
+    topology_reason = postgres_topology_skip_reason(env_name, values)
+    if topology_reason:
+        pytest.skip(topology_reason)
     try:
         with psycopg.connect(dsn, connect_timeout=10, autocommit=True) as connection:
             with connection.cursor() as cursor:
@@ -392,12 +614,31 @@ class FullStackHarness:
             "password": password,
         }
         self.runtime_dsn = make_conninfo(**runtime_values)
-        self.inference = FakeInferenceServer(self.markers)
+        self.inference_hostname = "inference.acceptance.invalid"
         self.ca_cert, proxy_cert, telegram_cert = _certificate_authority(
             directory,
             proxy_subject=self.markers["proxy_origin"],
             proxy_san=f"DNS:{self.markers['proxy_origin']}",
         )
+        inference_certificate = _issue_server_certificate(
+            directory,
+            self.ca_cert,
+            directory / "ca.key",
+            "inference",
+            self.inference_hostname,
+            f"DNS:{self.inference_hostname}",
+        )
+        self.inference = FakeInferenceServer(
+            self.markers, inference_certificate, self.inference_hostname
+        )
+        self.combined_ca = directory / "ca-certificates.crt"
+        _write_combined_ca_bundle(
+            self.image,
+            self.docker,
+            self.ca_cert,
+            self.combined_ca,
+        )
+        self.httpx_ca_path = _image_httpx_ca_path(self.image, self.docker)
         proxy_credentials = (
             f"{self.markers['proxy_user']}:{self.markers['proxy_password']}"
         )
@@ -495,7 +736,6 @@ http {
             "IWIKI_BOT_TRANSCRIPTION_MODEL": "acceptance-transcription",
             "IWIKI_BOT_CONFIRMATION_TTL_SECONDS": "30",
             "IWIKI_BOT_TELEGRAM_PROXY_URL": self.proxy_url,
-            "SSL_CERT_FILE": "/etc/ssl/certs/iwiki-acceptance-ca.pem",
         }
         self.runtime_env.write_text(
             "".join(f"{name}={value}\n" for name, value in values.items()),
@@ -524,6 +764,8 @@ http {
                 "host",
                 "--add-host",
                 f"{self.markers['proxy_origin']}:127.0.0.1",
+                "--add-host",
+                f"{self.inference_hostname}:127.0.0.1",
                 "--restart",
                 "unless-stopped",
                 "--read-only",
@@ -546,7 +788,9 @@ http {
                 "-v",
                 f"{self.nginx_config}:/etc/nginx/nginx.conf:ro",
                 "-v",
-                f"{self.ca_cert}:/etc/ssl/certs/iwiki-acceptance-ca.pem:ro",
+                f"{self.combined_ca}:/etc/ssl/certs/ca-certificates.crt:ro",
+                "-v",
+                f"{self.combined_ca}:{self.httpx_ca_path}:ro",
                 "--health-cmd",
                 "/app/.venv/bin/python /app/deploy/healthcheck.py",
                 "--health-interval",
@@ -670,9 +914,20 @@ http {
         return _wait_until(observed, timeout=timeout)
 
     def safe_diagnostics(self):
+        logs = subprocess.run(
+            [*self.docker, "logs", self.name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        sanitized = logs.stdout + logs.stderr
+        for marker in self.markers.values():
+            sanitized = sanitized.replace(marker, "<redacted>")
         return {
             "health": self.health_status(),
             "children": self.supervisor_status(),
+            "logs": sanitized[-2000:],
         }
 
     def stop(self):
@@ -689,6 +944,9 @@ http {
             check=False,
             timeout=30,
         )
+        for path in self.directory.iterdir():
+            if path.is_file():
+                path.unlink()
 
 
 @pytest.fixture
@@ -710,7 +968,24 @@ def hosted_startup_probe(
         name: f"{name}-{secrets.token_urlsafe(18)}"
         for name in ("reply", "preview", "transcription", "provider_error")
     }
-    inference = FakeInferenceServer(markers)
+    inference_hostname = "inference-startup.acceptance.invalid"
+    ca_cert, _proxy_certificate, _telegram_certificate = (
+        _certificate_authority(tmp_path)
+    )
+    inference_certificate = _issue_server_certificate(
+        tmp_path,
+        ca_cert,
+        tmp_path / "ca.key",
+        "inference",
+        inference_hostname,
+        f"DNS:{inference_hostname}",
+    )
+    combined_ca = tmp_path / "ca-certificates.crt"
+    _write_combined_ca_bundle(image, docker_command, ca_cert, combined_ca)
+    httpx_ca_path = _image_httpx_ca_path(image, docker_command)
+    inference = FakeInferenceServer(
+        markers, inference_certificate, inference_hostname
+    )
     inference.start()
     created = []
 
@@ -748,6 +1023,8 @@ def hosted_startup_probe(
                 name,
                 "--network",
                 "host",
+                "--add-host",
+                f"{inference_hostname}:127.0.0.1",
                 "--read-only",
                 "--user",
                 "10001:10001",
@@ -773,6 +1050,10 @@ def hosted_startup_probe(
                 "IWIKI_RERANK_MODEL=",
                 "-v",
                 f"{config}:/etc/iwiki/server.toml:ro",
+                "-v",
+                f"{combined_ca}:/etc/ssl/certs/ca-certificates.crt:ro",
+                "-v",
+                f"{combined_ca}:{httpx_ca_path}:ro",
                 "--entrypoint",
                 "/app/.venv/bin/iwiki-mcp",
                 image,
@@ -829,3 +1110,6 @@ def hosted_startup_probe(
                 timeout=30,
             )
         inference.stop()
+        for path in tmp_path.iterdir():
+            if path.is_file():
+                path.unlink()
