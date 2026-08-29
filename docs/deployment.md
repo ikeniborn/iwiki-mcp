@@ -160,10 +160,36 @@ iwiki-mcp base list --config /opt/iwiki-mcp/admin-server.toml --json
 )
 ```
 
-Complete base/domain/token provisioning through
-[PostgreSQL provisioning and least privilege](../README.md#postgresql-provisioning-and-least-privilege).
-After the PostgreSQL login, base, and domains exist, register the exact runtime role and
-verify its shape with the supported admin commands:
+With the same secret-safe boundary, create the base and domains only after the migration
+trigger succeeds. See [PostgreSQL provisioning and least
+privilege](../README.md#postgresql-provisioning-and-least-privilege) for background; do
+not follow its later token step until this runbook has registered and inspected the exact
+runtime principal.
+
+```bash
+(
+set -e
+read -r -s -p 'PostgreSQL schema-owner password: ' IWIKI_DB_PASSWORD
+printf '\n'
+export IWIKI_DB_PASSWORD
+export IWIKI_EMBED_MODEL='replace-with-exact-embedding-model-id'
+export IWIKI_EMBED_DIMENSIONS='replace-with-exact-embedding-dimensions'
+export IWIKI_RERANK_MODEL='replace-with-exact-rerank-model-id-or-empty'
+iwiki-mcp base create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id
+iwiki-mcp domain create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --domain replace-with-domain
+)
+```
+
+Next, ensure the PostgreSQL runtime login named `replace-with-runtime-role` exists. This
+is an out-of-band database/platform operation: iwiki does not create the login or accept
+its password. Keep its password and runtime configuration separate from the schema-owner
+configuration. The schema-owner configuration and credential are never mounted into the
+application container.
+
+Only after that login, base, and domains exist, register the exact runtime role, inspect
+it, and issue tokens in this order. Both example tokens request only the domain already
+covered by the principal grant; the bootstrap token's `--can-create-domain` does not
+remove the `--hosted-principal` requirement.
 
 ```bash
 (
@@ -176,6 +202,8 @@ export IWIKI_EMBED_DIMENSIONS='replace-with-exact-embedding-dimensions'
 export IWIKI_RERANK_MODEL='replace-with-exact-rerank-model-id-or-empty'
 iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --principal replace-with-runtime-role --iwiki replace-with-iwiki-id --read-domain replace-with-domain --write-domain replace-with-domain --runtime hosted --json
 iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal replace-with-runtime-role --json
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --owner replace-with-deploy-owner --hosted-principal replace-with-runtime-role --read-domain replace-with-domain --write-domain replace-with-domain
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --owner replace-with-bootstrap-owner --hosted-principal replace-with-runtime-role --read-domain replace-with-domain --write-domain replace-with-domain --can-create-domain
 )
 ```
 

@@ -208,8 +208,6 @@ iwiki-mcp base show --iwiki team-wiki
 iwiki-mcp base disable --iwiki team-wiki
 iwiki-mcp base enable --iwiki team-wiki
 iwiki-mcp domain create --iwiki team-wiki --domain backend
-iwiki-mcp token create --iwiki team-wiki --owner deploy --read-domain backend --write-domain backend
-iwiki-mcp token create --iwiki team-wiki --owner bootstrap --can-create-domain
 iwiki-mcp token list --iwiki team-wiki
 iwiki-mcp token set-create-domain --iwiki team-wiki --token-id <token-id> --enabled
 iwiki-mcp token set-domain-management --iwiki team-wiki --token-id <token-id> --domain backend --enabled
@@ -258,27 +256,40 @@ runtime roles are non-owner, hold no `BYPASSRLS`, run no migrations, and receive
 database or schema `CREATE`. Row-level security is enabled with ordinary
 `ENABLE ROW LEVEL SECURITY`, never `FORCE`, because the owner is administration-only.
 
-Register each runtime role and its domain grants explicitly. `principal grant` never
-creates a role and never accepts its password; create the login separately with the
-credentials your platform manages.
+First use the administration-only configuration to apply migrations and create the base
+and domains. Any non-dry-run admin command except the schema compatibility path checks
+and advances the schema before its requested operation; `base list` is the explicit
+operator migration trigger used by the deployment runbook.
 
 ```bash
-iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
-iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
-iwiki-mcp principal inspect --principal iwiki_hosted --json
+iwiki-mcp base list --config /etc/iwiki/admin-server.toml --json
+iwiki-mcp base create --config /etc/iwiki/admin-server.toml --iwiki team-wiki
+iwiki-mcp domain create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --domain backend
 ```
 
-Provision domains before enabling tokens, then issue tokens against the exact deployed
-hosted role. `token create` requires `--hosted-principal ROLE`, where `ROLE` equals the
-hosted server's `[storage].user`. It verifies that this named role is registered as
-`runtime=hosted`, is a non-owner without `BYPASSRLS`, and already covers every requested
-read and write domain before any token material is generated. Another hosted role, or a
-generic "some hosted role exists" check, is not a substitute.
+Create the PostgreSQL runtime login out of band before registering it. Its password and
+runtime configuration stay separate from the schema-owner configuration. `principal
+grant` never creates a role and never accepts its password. Register each runtime role
+and its domain grants explicitly, then inspect the exact hosted role before issuing any
+token.
 
 ```bash
-iwiki-mcp domain create --iwiki team-wiki --domain backend
-iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
-iwiki-mcp token create --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --config /etc/iwiki/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --config /etc/iwiki/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal inspect --config /etc/iwiki/admin-server.toml --principal iwiki_hosted --json
+```
+
+Only after that inspection, issue tokens against the exact deployed hosted role.
+`token create` requires `--hosted-principal ROLE`, where `ROLE` equals the hosted
+server's `[storage].user`. It verifies that this named role is registered as
+`runtime=hosted`, is a non-owner without `BYPASSRLS`, and already covers every requested
+read and write domain before any token material is generated. This also applies to a
+bootstrap token with `--can-create-domain`; another hosted role, or a generic "some
+hosted role exists" check, is not a substitute.
+
+```bash
+iwiki-mcp token create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp token create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --owner bootstrap --hosted-principal iwiki_hosted --read-domain backend --write-domain backend --can-create-domain
 iwiki-mcp serve --transport streamable-http
 ```
 
