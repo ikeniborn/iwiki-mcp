@@ -404,13 +404,16 @@ exact ID is revoked; the operator never chooses an arbitrary ID. `token list` ne
 returns plaintext token material.
 
 Only a successful revoke reaches the placeholder restore helper. The helper requires
-exactly one installed non-empty token line, never reads it into a shell variable, and
-atomically restores the literal placeholder with `root:root 0600`, file fsync, rename,
-and directory fsync. A restore failure leaves a revoked token value in the protected
-file and offers one bounded manual retry through the same helper. Do not issue another
-token until placeholder validation succeeds. Repair only an ownership, mode, or
-filesystem cause before that retry, without displaying file content; an occurrence-state
-mismatch requires stopping for the protected secret-recovery procedure.
+successful revoke state and never reads a token into a shell variable. On its first
+attempt it accepts exactly one installed non-empty token line, atomically replaces it
+with the literal placeholder, and fsyncs the file and directory. If rename became
+visible but directory fsync failed, the same helper also accepts exactly one literal
+placeholder and no token line; it reopens and fsyncs the file and directory before the
+metadata and full placeholder checks. Every other state is rejected. A failure offers
+one bounded manual retry through that same idempotent helper. Do not issue another token
+until it returns success. Repair only an ownership, mode, or filesystem cause before
+that retry, without displaying file content; an occurrence-state mismatch requires
+stopping for the protected secret-recovery procedure.
 
 ```bash
 (
@@ -468,6 +471,7 @@ printf 'token_recovery_candidate token_id=%s owner=%s status=active\n' "$TOKEN_I
 iwiki-mcp token revoke --config /opt/iwiki-mcp/admin-server.toml --token-id "$TOKEN_ID" >/dev/null
 TOKEN_REVOKED=1
 restore_runtime_placeholder() {
+    test "$TOKEN_REVOKED" -eq 1 || return $?
     sudo python3 -c '
 import os
 from pathlib import Path
@@ -486,8 +490,6 @@ if (
 ):
     raise SystemExit("runtime.env metadata mismatch")
 content = target.read_bytes()
-if b"<" in content or b">" in content:
-    raise SystemExit("runtime.env placeholder state mismatch")
 lines = content.splitlines(keepends=True)
 matches = [index for index, line in enumerate(lines) if key in line]
 if len(matches) != 1:
@@ -495,36 +497,71 @@ if len(matches) != 1:
 index = matches[0]
 stripped = lines[index].rstrip(b"\n")
 prefix = key + b"="
-if not stripped.startswith(prefix) or len(stripped) == len(prefix):
-    raise SystemExit("runtime.env installed token mismatch")
-ending = b"\n" if lines[index].endswith(b"\n") else b""
-lines[index] = placeholder + ending
-descriptor, temporary_name = tempfile.mkstemp(prefix=".runtime.env.", dir=target.parent)
-temporary = Path(temporary_name)
-try:
-    os.fchmod(descriptor, 0o600)
-    os.fchown(descriptor, 0, 0)
-    with os.fdopen(descriptor, "wb") as output:
-        descriptor = -1
-        output.write(b"".join(lines))
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(temporary, target)
+if stripped == placeholder:
+    for line_number, line in enumerate(lines):
+        if line_number != index and (b"<" in line or b">" in line):
+            raise SystemExit("runtime.env placeholder state mismatch")
+    file_descriptor = os.open(target, os.O_RDONLY)
+    try:
+        os.fsync(file_descriptor)
+    finally:
+        os.close(file_descriptor)
     directory_descriptor = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(directory_descriptor)
     finally:
         os.close(directory_descriptor)
-finally:
-    if descriptor >= 0:
-        os.close(descriptor)
+elif stripped.startswith(prefix) and len(stripped) > len(prefix):
+    if b"<" in content or b">" in content:
+        raise SystemExit("runtime.env installed token state mismatch")
+    ending = b"\n" if lines[index].endswith(b"\n") else b""
+    lines[index] = placeholder + ending
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".runtime.env.", dir=target.parent)
+    temporary = Path(temporary_name)
     try:
-        temporary.unlink()
-    except FileNotFoundError:
-        pass
-'
-    RUNTIME_METADATA="$(sudo stat --format='%U:%G %a' "$RUNTIME_ENV")"
-    test "$RUNTIME_METADATA" = 'root:root 600'
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, 0, 0)
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(b"".join(lines))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        directory_descriptor = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+else:
+    raise SystemExit("runtime.env recovery state mismatch")
+' || return $?
+    sudo chown root:root "$RUNTIME_ENV" || return $?
+    sudo chmod 0600 "$RUNTIME_ENV" || return $?
+    sudo python3 -c '
+import os
+from pathlib import Path
+
+target = Path("/opt/iwiki-mcp/runtime.env")
+file_descriptor = os.open(target, os.O_RDONLY)
+try:
+    os.fsync(file_descriptor)
+finally:
+    os.close(file_descriptor)
+directory_descriptor = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory_descriptor)
+finally:
+    os.close(directory_descriptor)
+' || return $?
+    RUNTIME_METADATA="$(sudo stat --format='%U:%G %a' "$RUNTIME_ENV")" || return $?
+    test "$RUNTIME_METADATA" = 'root:root 600' || return $?
     sudo awk '
 BEGIN {
     expected = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
@@ -545,7 +582,8 @@ index($0, "<") || index($0, ">") {
 END {
     exit !(occurrences == 1 && exact == 1 && invalid == 0)
 }
-' "$RUNTIME_ENV"
+' "$RUNTIME_ENV" || return $?
+    return 0
 }
 if ! restore_runtime_placeholder; then
     printf 'WARNING token_restore_failed owner=%s action=repair_metadata_or_filesystem_then_type_retry_once\n' "$TOKEN_OWNER" >&2
