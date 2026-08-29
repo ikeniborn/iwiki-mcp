@@ -128,8 +128,8 @@ sudo awk '
 BEGIN {
     expected = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
 }
-/^IWIKI_BOT_IWIKI_TOKEN=/ {
-    token_lines++
+/IWIKI_BOT_IWIKI_TOKEN/ {
+    occurrences++
     if ($0 == expected) {
         exact++
     } else {
@@ -142,7 +142,7 @@ index($0, "<") || index($0, ">") {
     }
 }
 END {
-    exit !(token_lines == 1 && exact == 1 && invalid == 0)
+    exit !(occurrences == 1 && exact == 1 && invalid == 0)
 }
 ' /opt/iwiki-mcp/runtime.env
 )
@@ -225,23 +225,27 @@ role, then issue the least-privilege runtime token. Choose a unique, non-secret 
 label tied to this deployment attempt. `token create` prints plaintext by contract.
 Disable shell tracing, do not use a terminal-recorded session, and capture stdout into a
 non-exported variable. Immediately before issuance, the block rechecks `root:root 0600`
-and the exact single placeholder. It then sends the token through stdin to a root Python
-process that rechecks the file, writes and fsyncs a same-directory temporary file,
-atomically renames it, and fsyncs the directory. The token never enters argv, history, or
-terminal output. Final validation requires no placeholders and exactly one non-empty
-token line. Create a bootstrap token separately only when an actual bootstrap operation
-requires one, and feed it directly to an approved secret manager through stdin; do not
-persist it in a general file.
+and the exact single placeholder, then queries the actual token list and requires zero
+active records with that exact owner. Here active means `revoked_at` is JSON `null`;
+inactive records are ignored, but the label must still be freshly generated and retained
+in the change record for recovery. The block then sends the token through stdin to a
+root Python process that rechecks the file, writes and fsyncs a same-directory temporary
+file, atomically renames it, and fsyncs the directory. The token never enters argv,
+history, or terminal output. Final validation requires no placeholders and exactly one
+non-empty token line. Create a bootstrap token separately only when an actual bootstrap
+operation requires one, and feed it directly to an approved secret manager through
+stdin; do not persist it in a general file.
 
 ```bash
 (
 set -euo pipefail
 set +x
 RUNTIME_ENV=/opt/iwiki-mcp/runtime.env
-TOKEN_OWNER='replace-with-unique-deployment-owner-label'
+TOKEN_OWNER="deploy-$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
 case "$TOKEN_OWNER" in
     ''|replace-with-*|*[!A-Za-z0-9._-]*) exit 2 ;;
 esac
+printf 'token_owner=%s status=candidate\n' "$TOKEN_OWNER"
 read -r -s -p 'PostgreSQL schema-owner password: ' IWIKI_DB_PASSWORD
 printf '\n'
 export IWIKI_DB_PASSWORD
@@ -257,7 +261,7 @@ cleanup_token() {
     trap - EXIT INT TERM HUP
     unset RUNTIME_TOKEN
     if [ "$TOKEN_ISSUANCE_STARTED" -eq 1 ] && [ "$status" -ne 0 ]; then
-        printf 'WARNING token_install_failed owner=%s recovery=list_tokens_find_owner_revoke_id_before_retry\n' "$TOKEN_OWNER" >&2
+        printf 'WARNING token_install_failed owner=%s action=run_exact_owner_recovery_block_before_retry\n' "$TOKEN_OWNER" >&2
     fi
     exit "$status"
 }
@@ -270,8 +274,8 @@ sudo awk '
 BEGIN {
     expected = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
 }
-/^IWIKI_BOT_IWIKI_TOKEN=/ {
-    token_lines++
+/IWIKI_BOT_IWIKI_TOKEN/ {
+    occurrences++
     if ($0 == expected) {
         exact++
     } else {
@@ -284,9 +288,31 @@ index($0, "<") || index($0, ">") {
     }
 }
 END {
-    exit !(token_lines == 1 && exact == 1 && invalid == 0)
+    exit !(occurrences == 1 && exact == 1 && invalid == 0)
 }
 ' "$RUNTIME_ENV"
+ACTIVE_OWNER_MATCHES="$(
+    iwiki-mcp token list --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --json |
+    TOKEN_OWNER="$TOKEN_OWNER" python3 -c '
+import json
+import os
+import sys
+
+records = json.load(sys.stdin)
+if not isinstance(records, list):
+    raise SystemExit("invalid token list")
+owner = os.environ["TOKEN_OWNER"]
+matches = [record for record in records if isinstance(record, dict) and record.get("owner") == owner and record.get("revoked_at") is None]
+print(len(matches))
+'
+)"
+case "$ACTIVE_OWNER_MATCHES" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+if [ "$ACTIVE_OWNER_MATCHES" -ne 0 ]; then
+    printf 'ERROR token_owner_not_unique owner=%s active_matches=%s action=choose_fresh_owner\n' "$TOKEN_OWNER" "$ACTIVE_OWNER_MATCHES" >&2
+    exit 1
+fi
 TOKEN_ISSUANCE_STARTED=1
 RUNTIME_TOKEN="$(iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --owner "$TOKEN_OWNER" --hosted-principal replace-with-runtime-role --read-domain replace-with-domain --write-domain replace-with-domain)"
 test -n "$RUNTIME_TOKEN"
@@ -351,19 +377,16 @@ RUNTIME_METADATA="$(sudo stat --format='%U:%G %a' "$RUNTIME_ENV")"
 test "$RUNTIME_METADATA" = 'root:root 600'
 sudo awk 'index($0, "<") || index($0, ">") {invalid=1} END{exit invalid}' /opt/iwiki-mcp/server.toml "$RUNTIME_ENV"
 sudo awk '
-/^IWIKI_BOT_IWIKI_TOKEN=/ {
-    token_lines++
-    if ($0 == "IWIKI_BOT_IWIKI_TOKEN=") {
-        invalid=1
-    }
-}
 /IWIKI_BOT_IWIKI_TOKEN/ {
-    if ($0 !~ /^IWIKI_BOT_IWIKI_TOKEN=/) {
+    occurrences++
+    if ($0 ~ /^IWIKI_BOT_IWIKI_TOKEN=.+$/) {
+        exact++
+    } else {
         invalid=1
     }
 }
 END {
-    exit !(token_lines == 1 && invalid == 0)
+    exit !(occurrences == 1 && exact == 1 && invalid == 0)
 }
 ' "$RUNTIME_ENV"
 TOKEN_ISSUANCE_STARTED=0
@@ -373,15 +396,28 @@ trap - EXIT INT TERM HUP
 ```
 
 If the stable `token_install_failed` warning appears, do not retry issuance. The token
-value remains suppressed, but a token may exist. With the same unique owner label, list
-token metadata, find the one token ID whose owner exactly matches, and revoke that ID
-before retrying. `token list` never returns plaintext token material.
+value remains suppressed, but a token may exist. Use the retained owner label with the
+recovery block below. It queries the actual token list, ignores inactive records, and
+requires exactly one active exact-owner match. Zero or multiple matches stop with a safe
+diagnostic. The matching non-secret ID, owner, and active status are printed before that
+exact ID is revoked; the operator never chooses an arbitrary ID. `token list` never
+returns plaintext token material.
+
+Only a successful revoke reaches the placeholder restore helper. The helper requires
+exactly one installed non-empty token line, never reads it into a shell variable, and
+atomically restores the literal placeholder with `root:root 0600`, file fsync, rename,
+and directory fsync. A restore failure leaves a revoked token value in the protected
+file and offers one bounded manual retry through the same helper. Do not issue another
+token until placeholder validation succeeds. Repair only an ownership, mode, or
+filesystem cause before that retry, without displaying file content; an occurrence-state
+mismatch requires stopping for the protected secret-recovery procedure.
 
 ```bash
 (
 set -euo pipefail
 set +x
-TOKEN_OWNER='replace-with-the-same-unique-deployment-owner-label'
+RUNTIME_ENV=/opt/iwiki-mcp/runtime.env
+TOKEN_OWNER='replace-with-retained-token-owner-label'
 case "$TOKEN_OWNER" in
     ''|replace-with-*|*[!A-Za-z0-9._-]*) exit 2 ;;
 esac
@@ -391,10 +427,137 @@ export IWIKI_DB_PASSWORD
 export IWIKI_EMBED_MODEL='replace-with-exact-embedding-model-id'
 export IWIKI_EMBED_DIMENSIONS='replace-with-exact-embedding-dimensions'
 export IWIKI_RERANK_MODEL='replace-with-exact-rerank-model-id-or-empty'
-iwiki-mcp token list --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --json
-read -r -p "Token ID whose owner exactly equals $TOKEN_OWNER: " TOKEN_ID
+TOKEN_REVOKED=0
+cleanup_recovery() {
+    status=$1
+    trap - EXIT INT TERM HUP
+    if [ "$TOKEN_REVOKED" -eq 1 ] && [ "$status" -ne 0 ]; then
+        printf 'WARNING token_revoked_placeholder_not_restored owner=%s action=repair_metadata_or_filesystem_then_retry_restore_before_issuance\n' "$TOKEN_OWNER" >&2
+    fi
+    exit "$status"
+}
+trap 'cleanup_recovery $?' EXIT
+trap 'cleanup_recovery 130' INT
+trap 'cleanup_recovery 143' TERM HUP
+TOKEN_ID="$(
+    iwiki-mcp token list --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --json |
+    TOKEN_OWNER="$TOKEN_OWNER" python3 -c '
+import json
+import os
+import sys
+
+records = json.load(sys.stdin)
+if not isinstance(records, list):
+    raise SystemExit("invalid token list")
+owner = os.environ["TOKEN_OWNER"]
+matches = [record for record in records if isinstance(record, dict) and record.get("owner") == owner and record.get("revoked_at") is None]
+if len(matches) != 1:
+    print(f"ERROR token_recovery_cardinality owner={owner} active_matches={len(matches)} action=stop", file=sys.stderr)
+    raise SystemExit(1)
+token_id = matches[0].get("token_id")
+if not isinstance(token_id, str) or not token_id:
+    raise SystemExit("invalid token id")
+print(token_id)
+'
+)"
 test -n "$TOKEN_ID"
-iwiki-mcp token revoke --config /opt/iwiki-mcp/admin-server.toml --token-id "$TOKEN_ID"
+case "$TOKEN_ID" in
+    *$'\n'*) exit 1 ;;
+esac
+printf 'token_recovery_candidate token_id=%s owner=%s status=active\n' "$TOKEN_ID" "$TOKEN_OWNER"
+iwiki-mcp token revoke --config /opt/iwiki-mcp/admin-server.toml --token-id "$TOKEN_ID" >/dev/null
+TOKEN_REVOKED=1
+restore_runtime_placeholder() {
+    sudo python3 -c '
+import os
+from pathlib import Path
+import stat
+import tempfile
+
+target = Path("/opt/iwiki-mcp/runtime.env")
+key = b"IWIKI_BOT_IWIKI_TOKEN"
+placeholder = key + b"=<least-privilege-iwiki-token>"
+metadata = target.lstat()
+if (
+    not stat.S_ISREG(metadata.st_mode)
+    or metadata.st_uid != 0
+    or metadata.st_gid != 0
+    or stat.S_IMODE(metadata.st_mode) != 0o600
+):
+    raise SystemExit("runtime.env metadata mismatch")
+content = target.read_bytes()
+if b"<" in content or b">" in content:
+    raise SystemExit("runtime.env placeholder state mismatch")
+lines = content.splitlines(keepends=True)
+matches = [index for index, line in enumerate(lines) if key in line]
+if len(matches) != 1:
+    raise SystemExit("runtime.env token occurrence mismatch")
+index = matches[0]
+stripped = lines[index].rstrip(b"\n")
+prefix = key + b"="
+if not stripped.startswith(prefix) or len(stripped) == len(prefix):
+    raise SystemExit("runtime.env installed token mismatch")
+ending = b"\n" if lines[index].endswith(b"\n") else b""
+lines[index] = placeholder + ending
+descriptor, temporary_name = tempfile.mkstemp(prefix=".runtime.env.", dir=target.parent)
+temporary = Path(temporary_name)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.fchown(descriptor, 0, 0)
+    with os.fdopen(descriptor, "wb") as output:
+        descriptor = -1
+        output.write(b"".join(lines))
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, target)
+    directory_descriptor = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+'
+    RUNTIME_METADATA="$(sudo stat --format='%U:%G %a' "$RUNTIME_ENV")"
+    test "$RUNTIME_METADATA" = 'root:root 600'
+    sudo awk '
+BEGIN {
+    expected = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
+}
+/IWIKI_BOT_IWIKI_TOKEN/ {
+    occurrences++
+    if ($0 == expected) {
+        exact++
+    } else {
+        invalid=1
+    }
+}
+index($0, "<") || index($0, ">") {
+    if ($0 != expected) {
+        invalid=1
+    }
+}
+END {
+    exit !(occurrences == 1 && exact == 1 && invalid == 0)
+}
+' "$RUNTIME_ENV"
+}
+if ! restore_runtime_placeholder; then
+    printf 'WARNING token_restore_failed owner=%s action=repair_metadata_or_filesystem_then_type_retry_once\n' "$TOKEN_OWNER" >&2
+    read -r -p 'Type retry to run the same restore helper once more: ' RESTORE_ACTION
+    test "$RESTORE_ACTION" = retry
+    if ! restore_runtime_placeholder; then
+        printf 'ERROR token_restore_retry_failed owner=%s action=stop_before_new_token\n' "$TOKEN_OWNER" >&2
+        exit 1
+    fi
+fi
+TOKEN_REVOKED=0
+trap - EXIT INT TERM HUP
 )
 ```
 
