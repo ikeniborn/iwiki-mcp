@@ -162,8 +162,11 @@ PostgreSQL остаётся внешней долговечной службой
 `sslmode = "verify-full"`. Этот Compose-проект и его runtime не создают PostgreSQL
 service, базу или объекты схемы и не запускают миграции. Оператор заранее применяет
 точную совместимую схему через административный/migrator path репозитория.
-Конфигурация, HTTPS proxy routing, проверка, миграция и rollback описаны в
-[deployment runbook](deployment.md).
+Конфигурация, HTTPS proxy routing, проверка на изолированном хосте, миграция, cutover и
+rollback описаны в [deployment runbook](deployment.md). Production использует host
+networking и фиксированный MCP listener `127.0.0.1:8765`, поэтому полный combined
+container нельзя параллельно проверить на том же хосте; без отдельного хоста или VM
+планируйте maintenance downtime и сохраняйте старые службы для rollback.
 
 Сервер открывает ограниченный connection pool и применяет заданные statement/lock
 timeouts. До открытия listener startup проверяет модель, её метаданные, точную версию

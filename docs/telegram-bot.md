@@ -106,6 +106,12 @@ migrations. It requires the exact compatible schema prepared out of band by the
 operator's separate administration/migrator role; that privileged credential is never
 the runtime login.
 
+Full-container pre-cutover validation runs only on a separate isolated host or VM with
+a dedicated validation bot token, database, iwiki scope, listener, and Origin. The
+fixed host-network MCP port prevents a concurrent full-container precheck on the
+production host; without isolated infrastructure, use a maintenance window and the
+[documented rollback](deployment.md#rollback-before-old-component-removal).
+
 Selected domains, Telegram updates, user identifiers, message content, prompts,
 answers, voice files, and confirmation previews stay in memory or tmpfs and do not
 survive restart. Operational logs contain stable fields such as operation, outcome,

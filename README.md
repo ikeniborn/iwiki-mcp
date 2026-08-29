@@ -163,7 +163,10 @@ and its runtime create no PostgreSQL service, database, or schema objects and ru
 migrations. An operator must provision the exact compatible schema out of band with the
 repository's administration/migrator path. Follow the
 [deployment runbook](docs/deployment.md) for configuration, HTTPS proxy routing,
-validation, migration, and rollback.
+isolated-host validation, migration, cutover, and rollback. Because production uses
+host networking with a fixed MCP listener on `127.0.0.1:8765`, a full combined-container
+precheck cannot run concurrently on that host; without an isolated host or VM, schedule
+maintenance downtime and retain the old services for rollback.
 
 The server opens a bounded connection pool and applies the configured statement and
 lock timeouts. Startup probes the model endpoint, validates model metadata, and requires
