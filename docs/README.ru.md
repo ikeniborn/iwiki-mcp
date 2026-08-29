@@ -6,9 +6,10 @@
 
 iwiki-mcp — общая wiki-служба с доменами и MCP-доступом из Codex и Claude Code.
 
-Отдельно разворачиваемый [Telegram-бот](telegram-bot.md) позволяет сотрудникам из
-allowlist выбирать домены, задавать текстовые или голосовые вопросы и подтверждать
-изменения страниц через hosted iwiki.
+Поддерживаемый контейнер запускает hosted iwiki MCP, nginx и
+[Telegram-бот](telegram-bot.md) вместе. Сотрудники из allowlist могут выбирать домены,
+задавать текстовые или голосовые вопросы и подтверждать изменения страниц. Точный
+операторский путь и миграция описаны в [deployment runbook](deployment.md).
 Поддерживаются локальная Git-синхронизируемая база или tenant-isolated PostgreSQL,
 через stdio или hosted Streamable HTTP по матрице ниже.
 
@@ -141,6 +142,26 @@ Hosted-режим не отправляет server-initiated notifications: по
 `GET /mcp` возвращает `405 Method Not Allowed` с `Allow: POST, DELETE`, не входя в MCP
 session manager. Stateful-запросы `POST` и завершение сессии через `DELETE` остаются
 доступны.
+
+### Поддерживаемый application container
+
+Production-развёртывание использует корневой `compose.yaml` как один hardened
+application service с тремя supervised-процессами: hosted MCP на
+`127.0.0.1:8765`, nginx на выбранном оператором LAN/Traefik listener и
+`iwiki-telegram-bot`. На хосте нужны ровно эти файлы:
+
+```text
+/opt/iwiki-mcp/server.toml       endpoint hosted MCP и внешнего PostgreSQL
+/opt/iwiki-mcp/nginx.conf        LAN/Traefik listener и loopback upstream
+/opt/iwiki-mcp/runtime.env       owner-only secrets и настройки бота
+```
+
+PostgreSQL остаётся внешней долговечной службой под управлением оператора. Контейнер БД
+на том же хосте обязан публиковать host-порт, например `127.0.0.1:55432`; удалённая БД
+задаёт собственные host и custom port и должна использовать
+`sslmode = "verify-full"`. Этот Compose-проект не создаёт PostgreSQL service и schema
+migrations. Конфигурация, HTTPS proxy routing, проверка, миграция и rollback описаны в
+[deployment runbook](deployment.md).
 
 Сервер открывает ограниченный connection pool и применяет заданные statement/lock
 timeouts. До открытия listener startup проверяет модель, сверяет её метаданные и

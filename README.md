@@ -8,9 +8,10 @@ iwiki-mcp is a shared wiki service split into domains and queried over MCP from 
 and Claude Code. It supports a Git-synced local base or tenant-isolated PostgreSQL,
 over stdio or hosted Streamable HTTP as described below.
 
-An optional separately deployed [Telegram bot service](docs/telegram-bot.md) lets
-allowlisted employees select domains, ask text or voice questions, and confirm page
-changes through a hosted iwiki server.
+The supported container deployment runs hosted iwiki MCP, nginx, and the
+[Telegram bot service](docs/telegram-bot.md) together. Allowlisted employees can
+select domains, ask text or voice questions, and confirm page changes. See the
+[deployment runbook](docs/deployment.md) for the operator path and migration steps.
 
 ## Install
 
@@ -141,6 +142,26 @@ Hosted mode does not emit server-initiated notifications: after Bearer authentic
 `GET /mcp` returns `405 Method Not Allowed` with `Allow: POST, DELETE` without entering
 the MCP session manager. Stateful `POST` requests and `DELETE` session termination remain
 available.
+
+### Supported application container
+
+Production deployment uses the repository `compose.yaml` as one hardened application
+service with three supervised children: hosted MCP on `127.0.0.1:8765`, nginx on the
+operator-selected LAN/Traefik listener, and `iwiki-telegram-bot`. Supply exactly these
+host-side files:
+
+```text
+/opt/iwiki-mcp/server.toml       hosted MCP and external PostgreSQL endpoint
+/opt/iwiki-mcp/nginx.conf        LAN/Traefik listener and loopback upstream
+/opt/iwiki-mcp/runtime.env       owner-only runtime secrets and bot settings
+```
+
+PostgreSQL remains an external, operator-managed durable service. A same-host database
+container must publish a host port such as `127.0.0.1:55432`; a remote database supplies
+its host and custom port and should use `sslmode = "verify-full"`. This Compose project
+creates neither a PostgreSQL service nor schema migrations. Follow the
+[deployment runbook](docs/deployment.md) for configuration, HTTPS proxy routing,
+validation, migration, and rollback.
 
 The server opens a bounded connection pool and applies the configured statement and
 lock timeouts. Startup probes the model endpoint, validates model metadata, and applies
