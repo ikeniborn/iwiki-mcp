@@ -112,6 +112,10 @@ IWIKI_BOT_HEARTBEAT_MAX_AGE_SECONDS=<heartbeat-window-seconds>
 Copy `deploy/nginx.conf.example` unchanged except for its host-specific `listen`
 address. Keep loopback upstream `127.0.0.1:8765`, explicit `Authorization` forwarding,
 disabled request/response buffering, `client_max_body_size 16m`, and `access_log off`.
+At this stage the token placeholder is intentionally unresolved. Initial validation
+requires exactly one literal `IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>` line,
+rejects a missing, duplicate, or malformed token line, and rejects every other angle-
+bracket placeholder. Final validation runs after secure token installation.
 
 ```bash
 (
@@ -119,7 +123,28 @@ set -euo pipefail
 sudoedit /opt/iwiki-mcp/server.toml
 sudoedit /opt/iwiki-mcp/nginx.conf
 sudoedit /opt/iwiki-mcp/runtime.env
-sudo awk '/<[^>]+>/{found=1} END{exit found}' /opt/iwiki-mcp/server.toml /opt/iwiki-mcp/runtime.env
+sudo awk 'index($0, "<") || index($0, ">") {invalid=1} END{exit invalid}' /opt/iwiki-mcp/server.toml
+sudo awk '
+BEGIN {
+    expected = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
+}
+/^IWIKI_BOT_IWIKI_TOKEN=/ {
+    token_lines++
+    if ($0 == expected) {
+        exact++
+    } else {
+        invalid=1
+    }
+}
+index($0, "<") || index($0, ">") {
+    if ($0 != expected) {
+        invalid=1
+    }
+}
+END {
+    exit !(token_lines == 1 && exact == 1 && invalid == 0)
+}
+' /opt/iwiki-mcp/runtime.env
 )
 ```
 
@@ -196,19 +221,27 @@ configuration. The schema-owner configuration and credential are never mounted i
 application container.
 
 Only after that login, base, and domains exist, register and inspect the exact runtime
-role, then issue the least-privilege runtime token. `token create` prints plaintext by
-contract. Disable shell tracing, do not use a terminal-recorded session, and capture its
-stdout directly into a non-exported variable. The command below sends the token through
-stdin to a root shell that atomically replaces only the placeholder in the owner-only
-`runtime.env`; it never places the token in argv, history, or terminal output. A trap
-unsets the variable on failure or interruption. Create a bootstrap token separately only
-when an actual bootstrap operation requires one, and feed it directly to an approved
-secret manager through stdin; do not persist it in a general file.
+role, then issue the least-privilege runtime token. Choose a unique, non-secret owner
+label tied to this deployment attempt. `token create` prints plaintext by contract.
+Disable shell tracing, do not use a terminal-recorded session, and capture stdout into a
+non-exported variable. Immediately before issuance, the block rechecks `root:root 0600`
+and the exact single placeholder. It then sends the token through stdin to a root Python
+process that rechecks the file, writes and fsyncs a same-directory temporary file,
+atomically renames it, and fsyncs the directory. The token never enters argv, history, or
+terminal output. Final validation requires no placeholders and exactly one non-empty
+token line. Create a bootstrap token separately only when an actual bootstrap operation
+requires one, and feed it directly to an approved secret manager through stdin; do not
+persist it in a general file.
 
 ```bash
 (
 set -euo pipefail
 set +x
+RUNTIME_ENV=/opt/iwiki-mcp/runtime.env
+TOKEN_OWNER='replace-with-unique-deployment-owner-label'
+case "$TOKEN_OWNER" in
+    ''|replace-with-*|*[!A-Za-z0-9._-]*) exit 2 ;;
+esac
 read -r -s -p 'PostgreSQL schema-owner password: ' IWIKI_DB_PASSWORD
 printf '\n'
 export IWIKI_DB_PASSWORD
@@ -218,49 +251,150 @@ export IWIKI_RERANK_MODEL='replace-with-exact-rerank-model-id-or-empty'
 iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --principal replace-with-runtime-role --iwiki replace-with-iwiki-id --read-domain replace-with-domain --write-domain replace-with-domain --runtime hosted --json
 iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal replace-with-runtime-role --json
 unset RUNTIME_TOKEN 2>/dev/null || true
+TOKEN_ISSUANCE_STARTED=0
 cleanup_token() {
     status=$1
     trap - EXIT INT TERM HUP
     unset RUNTIME_TOKEN
+    if [ "$TOKEN_ISSUANCE_STARTED" -eq 1 ] && [ "$status" -ne 0 ]; then
+        printf 'WARNING token_install_failed owner=%s recovery=list_tokens_find_owner_revoke_id_before_retry\n' "$TOKEN_OWNER" >&2
+    fi
     exit "$status"
 }
 trap 'cleanup_token $?' EXIT
 trap 'cleanup_token 130' INT
 trap 'cleanup_token 143' TERM HUP
-RUNTIME_TOKEN="$(iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --owner replace-with-deploy-owner --hosted-principal replace-with-runtime-role --read-domain replace-with-domain --write-domain replace-with-domain)"
+RUNTIME_METADATA="$(sudo stat --format='%U:%G %a' "$RUNTIME_ENV")"
+test "$RUNTIME_METADATA" = 'root:root 600'
+sudo awk '
+BEGIN {
+    expected = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
+}
+/^IWIKI_BOT_IWIKI_TOKEN=/ {
+    token_lines++
+    if ($0 == expected) {
+        exact++
+    } else {
+        invalid=1
+    }
+}
+index($0, "<") || index($0, ">") {
+    if ($0 != expected) {
+        invalid=1
+    }
+}
+END {
+    exit !(token_lines == 1 && exact == 1 && invalid == 0)
+}
+' "$RUNTIME_ENV"
+TOKEN_ISSUANCE_STARTED=1
+RUNTIME_TOKEN="$(iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --owner "$TOKEN_OWNER" --hosted-principal replace-with-runtime-role --read-domain replace-with-domain --write-domain replace-with-domain)"
 test -n "$RUNTIME_TOKEN"
 case "$RUNTIME_TOKEN" in
     *$'\n'*) exit 1 ;;
 esac
-printf '%s\n' "$RUNTIME_TOKEN" | sudo sh -c '
-set -eu
-IFS= read -r token
-target=/opt/iwiki-mcp/runtime.env
-umask 077
-temporary=$(mktemp /opt/iwiki-mcp/runtime.env.XXXXXX)
-cleanup() {
-    rm -f "$temporary"
-}
-trap cleanup EXIT
-trap "exit 130" INT
-trap "exit 143" TERM HUP
-found=0
-while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$line" = "IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>" ]; then
-        printf "IWIKI_BOT_IWIKI_TOKEN=%s\\n" "$token"
-        found=$((found + 1))
-    else
-        printf "%s\\n" "$line"
-    fi
-done < "$target" > "$temporary"
-[ "$found" -eq 1 ]
-chown root:root "$temporary"
-chmod 0600 "$temporary"
-mv "$temporary" "$target"
-trap - EXIT INT TERM HUP
+printf '%s\n' "$RUNTIME_TOKEN" | sudo python3 -c '
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+target = Path("/opt/iwiki-mcp/runtime.env")
+placeholder = b"IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>"
+payload = sys.stdin.buffer.read()
+if not payload.endswith(b"\n") or payload.count(b"\n") != 1:
+    raise SystemExit("invalid token input")
+token = payload[:-1]
+if not token or b"\r" in token:
+    raise SystemExit("invalid token input")
+metadata = target.lstat()
+if (
+    not stat.S_ISREG(metadata.st_mode)
+    or metadata.st_uid != 0
+    or metadata.st_gid != 0
+    or stat.S_IMODE(metadata.st_mode) != 0o600
+):
+    raise SystemExit("runtime.env metadata mismatch")
+lines = target.read_bytes().splitlines(keepends=True)
+matches = [index for index, line in enumerate(lines) if line.rstrip(b"\n") == placeholder]
+if len(matches) != 1:
+    raise SystemExit("runtime.env token placeholder mismatch")
+index = matches[0]
+ending = b"\n" if lines[index].endswith(b"\n") else b""
+lines[index] = b"IWIKI_BOT_IWIKI_TOKEN=" + token + ending
+descriptor, temporary_name = tempfile.mkstemp(prefix=".runtime.env.", dir=target.parent)
+temporary = Path(temporary_name)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.fchown(descriptor, 0, 0)
+    with os.fdopen(descriptor, "wb") as output:
+        descriptor = -1
+        output.write(b"".join(lines))
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, target)
+    directory_descriptor = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
 '
+RUNTIME_METADATA="$(sudo stat --format='%U:%G %a' "$RUNTIME_ENV")"
+test "$RUNTIME_METADATA" = 'root:root 600'
+sudo awk 'index($0, "<") || index($0, ">") {invalid=1} END{exit invalid}' /opt/iwiki-mcp/server.toml "$RUNTIME_ENV"
+sudo awk '
+/^IWIKI_BOT_IWIKI_TOKEN=/ {
+    token_lines++
+    if ($0 == "IWIKI_BOT_IWIKI_TOKEN=") {
+        invalid=1
+    }
+}
+/IWIKI_BOT_IWIKI_TOKEN/ {
+    if ($0 !~ /^IWIKI_BOT_IWIKI_TOKEN=/) {
+        invalid=1
+    }
+}
+END {
+    exit !(token_lines == 1 && invalid == 0)
+}
+' "$RUNTIME_ENV"
+TOKEN_ISSUANCE_STARTED=0
 unset RUNTIME_TOKEN
 trap - EXIT INT TERM HUP
+)
+```
+
+If the stable `token_install_failed` warning appears, do not retry issuance. The token
+value remains suppressed, but a token may exist. With the same unique owner label, list
+token metadata, find the one token ID whose owner exactly matches, and revoke that ID
+before retrying. `token list` never returns plaintext token material.
+
+```bash
+(
+set -euo pipefail
+set +x
+TOKEN_OWNER='replace-with-the-same-unique-deployment-owner-label'
+case "$TOKEN_OWNER" in
+    ''|replace-with-*|*[!A-Za-z0-9._-]*) exit 2 ;;
+esac
+read -r -s -p 'PostgreSQL schema-owner password: ' IWIKI_DB_PASSWORD
+printf '\n'
+export IWIKI_DB_PASSWORD
+export IWIKI_EMBED_MODEL='replace-with-exact-embedding-model-id'
+export IWIKI_EMBED_DIMENSIONS='replace-with-exact-embedding-dimensions'
+export IWIKI_RERANK_MODEL='replace-with-exact-rerank-model-id-or-empty'
+iwiki-mcp token list --config /opt/iwiki-mcp/admin-server.toml --iwiki replace-with-iwiki-id --json
+read -r -p "Token ID whose owner exactly equals $TOKEN_OWNER: " TOKEN_ID
+test -n "$TOKEN_ID"
+iwiki-mcp token revoke --config /opt/iwiki-mcp/admin-server.toml --token-id "$TOKEN_ID"
 )
 ```
 
