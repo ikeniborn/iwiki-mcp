@@ -94,6 +94,226 @@ def test_load_server_config_parses_hosted_postgres_settings(tmp_path):
     assert config.models.rerank_model == "lemonade-reranker-bge-reranker-v2-m3"
 
 
+def test_hosted_specifications_default_to_optional(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
+    config = load_server_config(
+        _write_config(tmp_path, _server_toml()), environ=_runtime_env()
+    )
+
+    assert config.specifications.mode_for("team-wiki", "payments") == "optional"
+
+
+def test_hosted_specification_exact_pair_overrides_default(tmp_path):
+    import dataclasses
+
+    from iwiki_mcp.postgres.config import load_server_config
+
+    text = """
+[specifications]
+default_mode = "optional"
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
+domain = "payments"
+mode = "strict"
+""" + _server_toml()
+
+    config = load_server_config(
+        _write_config(tmp_path, text), environ=_runtime_env()
+    )
+
+    assert config.specifications.mode_for("team-wiki", "payments") == "strict"
+    assert config.specifications.mode_for("team-wiki", "other") == "optional"
+    assert config.specifications.mode_for("other-wiki", "payments") == "optional"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.specifications.overrides[0].mode = "disabled"
+
+
+def test_hosted_specifications_accept_supported_default_modes(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
+    for mode in ("disabled", "optional", "strict"):
+        text = f'[specifications]\ndefault_mode = "{mode}"\n' + _server_toml()
+        config = load_server_config(
+            _write_config(tmp_path, text), environ=_runtime_env()
+        )
+        assert config.specifications.mode_for("team-wiki", "payments") == mode
+
+
+@pytest.mark.parametrize("second_mode", ["strict", "disabled"])
+def test_hosted_specifications_reject_duplicate_exact_pairs(tmp_path, second_mode):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    text = f"""
+[specifications]
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
+domain = "payments"
+mode = "strict"
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
+domain = "payments"
+mode = "{second_mode}"
+""" + _server_toml()
+
+    with pytest.raises(ConfigError, match="duplicate"):
+        load_server_config(_write_config(tmp_path, text), environ=_runtime_env())
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        'domain = "payments"\nmode = "strict"',
+        'iwiki_id = "team-wiki"\nmode = "strict"',
+        'iwiki_id = "team-wiki"\ndomain = "payments"',
+        'iwiki_id = ""\ndomain = "payments"\nmode = "strict"',
+        'iwiki_id = "team-wiki"\ndomain = " payments"\nmode = "strict"',
+        'iwiki_id = "team-wiki"\ndomain = "payments"\nmode = "required"',
+        (
+            'iwiki_id = "team-wiki"\ndomain = "payments"\nmode = "strict"\n'
+            'unknown = "must-not-be-shown"'
+        ),
+    ],
+)
+def test_hosted_specifications_reject_incomplete_or_invalid_overrides(
+    tmp_path, override
+):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    text = f"[specifications]\n[[specifications.overrides]]\n{override}\n" + _server_toml()
+
+    with pytest.raises(ConfigError, match="specification") as caught:
+        load_server_config(_write_config(tmp_path, text), environ=_runtime_env())
+
+    assert "must-not-be-shown" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "specifications",
+    [
+        'specifications = "invalid"\n',
+        "[specifications]\nunknown = true\n",
+        "[specifications]\ndefault_mode = true\n",
+        '[specifications]\ndefault_mode = "required"\n',
+        '[specifications]\noverrides = "invalid"\n',
+    ],
+)
+def test_hosted_specifications_reject_invalid_shapes_and_values(
+    tmp_path, specifications
+):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    with pytest.raises(ConfigError, match="specification"):
+        load_server_config(
+            _write_config(tmp_path, specifications + _server_toml()),
+            environ=_runtime_env(),
+        )
+
+
+def test_hosted_specification_error_does_not_disclose_payload(tmp_path):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    secret = "must-not-be-shown"
+    text = f'[specifications]\ndefault_mode = "{secret}"\n' + _server_toml()
+
+    with pytest.raises(ConfigError) as caught:
+        load_server_config(_write_config(tmp_path, text), environ=_runtime_env())
+
+    diagnostic = str(caught.value)
+    assert "specification" in diagnostic
+    assert secret not in diagnostic
+
+
+@pytest.mark.parametrize("default_mode", ["required", True, None])
+def test_hosted_specifications_direct_constructor_rejects_invalid_default_mode(
+    default_mode,
+):
+    from iwiki_mcp.postgres.config import ConfigError, HostedSpecificationsConfig
+
+    with pytest.raises(ConfigError, match="specification mode"):
+        HostedSpecificationsConfig(default_mode=default_mode)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"iwiki_id": "", "domain": "payments", "mode": "strict"},
+        {"iwiki_id": True, "domain": "payments", "mode": "strict"},
+        {"iwiki_id": "team-wiki", "domain": " payments", "mode": "strict"},
+        {"iwiki_id": "team-wiki", "domain": True, "mode": "strict"},
+        {"iwiki_id": "team-wiki", "domain": "payments", "mode": "required"},
+        {"iwiki_id": "team-wiki", "domain": "payments", "mode": True},
+    ],
+)
+def test_specification_override_direct_constructor_rejects_invalid_fields(values):
+    from iwiki_mcp.postgres.config import ConfigError, SpecificationOverride
+
+    with pytest.raises(ConfigError, match="specification override|specification mode"):
+        SpecificationOverride(**values)
+
+
+def test_specification_override_direct_constructor_normalizes_iwiki_id():
+    from iwiki_mcp.postgres.config import SpecificationOverride
+
+    override = SpecificationOverride(
+        iwiki_id="  team-wiki  ", domain="payments", mode="strict"
+    )
+
+    assert override.iwiki_id == "team-wiki"
+
+
+def test_hosted_specifications_direct_constructor_copies_override_list():
+    import dataclasses
+
+    from iwiki_mcp.postgres.config import (
+        HostedSpecificationsConfig,
+        SpecificationOverride,
+    )
+
+    payments = SpecificationOverride(
+        iwiki_id="team-wiki", domain="payments", mode="strict"
+    )
+    source = [payments]
+
+    config = HostedSpecificationsConfig(overrides=source)
+    source.append(
+        SpecificationOverride(
+            iwiki_id="team-wiki", domain="other", mode="disabled"
+        )
+    )
+
+    assert config.overrides == (payments,)
+    assert config.mode_for("team-wiki", "payments") == "strict"
+    assert config.mode_for("team-wiki", "other") == "optional"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        config.default_mode = "disabled"
+
+
+@pytest.mark.parametrize("overrides", [["invalid"], ({"mode": "strict"},)])
+def test_hosted_specifications_direct_constructor_rejects_non_override_entries(
+    overrides,
+):
+    from iwiki_mcp.postgres.config import ConfigError, HostedSpecificationsConfig
+
+    with pytest.raises(ConfigError, match="specification override"):
+        HostedSpecificationsConfig(overrides=overrides)
+
+
+def test_hosted_specifications_direct_constructor_rejects_duplicate_pair():
+    from iwiki_mcp.postgres.config import (
+        ConfigError,
+        HostedSpecificationsConfig,
+        SpecificationOverride,
+    )
+
+    override = SpecificationOverride(
+        iwiki_id="team-wiki", domain="payments", mode="strict"
+    )
+
+    with pytest.raises(ConfigError, match="duplicate"):
+        HostedSpecificationsConfig(overrides=[override, override])
+
+
 def test_hosted_code_graph_limits_have_safe_defaults(tmp_path):
     from iwiki_mcp.postgres.config import load_server_config
 

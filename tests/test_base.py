@@ -557,6 +557,7 @@ def test_load_project_config_initializes_missing_complete_template(tmp_path):
     text = path.read_text()
     assert "Git storage" in text
     assert "PostgreSQL storage" in text
+    assert "# [specifications]\n# mode = \"optional\"  # disabled | optional | strict" in text
     assert "[code_graph]" in text
     assert "max_total_files" in text
 

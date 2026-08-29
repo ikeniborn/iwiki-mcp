@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 def expected_revision_required() -> dict:
@@ -39,6 +40,7 @@ class GitBinding:
     write: tuple[str, ...] | str | None
     project_dir: str
     primary: str | None = None
+    specification_mode: Literal["disabled", "optional", "strict"] = "optional"
 
     def __post_init__(self) -> None:
         raw_write = self.write
@@ -80,6 +82,7 @@ class PostgresBinding:
     embed_dimensions: int
     rerank_model: str
     password: str = field(repr=False)
+    specification_mode: Literal["disabled", "optional", "strict"] = "optional"
 
     @property
     def storage(self) -> str:
