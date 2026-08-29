@@ -4633,7 +4633,9 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     binding = base.resolve_storage_binding(project_dir)
     if not _is_postgres(binding):
         return
-    _postgres_migrations.require_schema_version(binding.connection_dsn())
+    _postgres_migrations.require_schema_version(
+        binding.connection_dsn(), expected_version=6
+    )
 
 
 def main() -> None:

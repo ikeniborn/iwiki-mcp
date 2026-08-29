@@ -39,6 +39,9 @@ _PROTECTED_TABLES = (
     "code_graph_symbols",
     "code_graph_relations",
     "code_graph_wiki_links",
+    "specification_scenarios",
+    "specification_bindings",
+    "specification_evidence",
 )
 
 
@@ -152,7 +155,10 @@ def provision_runtime_grant(
                     "iwiki.code_graph_publication_sessions, "
                     "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
                     "iwiki.code_graph_files, iwiki.code_graph_symbols, "
-                    "iwiki.code_graph_relations, iwiki.code_graph_wiki_links TO {}"
+                    "iwiki.code_graph_relations, iwiki.code_graph_wiki_links, "
+                    "iwiki.specification_scenarios, "
+                    "iwiki.specification_bindings, "
+                    "iwiki.specification_evidence TO {}"
                 ).format(role)
             )
             cursor.execute(
@@ -174,7 +180,10 @@ def provision_runtime_grant(
                     "iwiki.code_graph_publication_sessions, "
                     "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
                     "iwiki.code_graph_files, iwiki.code_graph_symbols, "
-                    "iwiki.code_graph_relations, iwiki.code_graph_wiki_links TO {}"
+                    "iwiki.code_graph_relations, iwiki.code_graph_wiki_links, "
+                    "iwiki.specification_scenarios, "
+                    "iwiki.specification_bindings, "
+                    "iwiki.specification_evidence TO {}"
                 ).format(role)
             )
             cursor.execute(

@@ -155,7 +155,7 @@ def test_failed_migration_rolls_back_version_and_objects(clean_postgres):
 def test_migration_history_includes_domain_authority_and_code_graph():
     from iwiki_mcp.postgres.migrations import MIGRATIONS
 
-    assert tuple(migration.version for migration in MIGRATIONS) == (1, 2, 3, 4, 5)
+    assert tuple(migration.version for migration in MIGRATIONS) == (1, 2, 3, 4, 5, 6)
     statements = "\n".join(MIGRATIONS[3].statements)
     assert "can_create_domain" in statements
     assert "token_domain_management_grants" in statements
@@ -164,6 +164,10 @@ def test_migration_history_includes_domain_authority_and_code_graph():
     assert "code_graph_snapshots" in graph_statements
     assert "database_principal_domain_grants" in graph_statements
     assert "token_domain_management_grants_domain_idx" in statements
+    specification_statements = "\n".join(MIGRATIONS[5].statements)
+    assert "specification_scenarios" in specification_statements
+    assert "specification_bindings" in specification_statements
+    assert "specification_evidence" in specification_statements
 
 
 def test_schema_adds_separate_domain_management_authority(clean_postgres):

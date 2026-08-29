@@ -724,6 +724,192 @@ def test_postgres_backend_rechecks_tenant_and_domain_acl(auth_store):
         )
 
 
+def test_runtime_principal_specification_grants_and_cross_tenant_rls(auth_store):
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    from tests.postgres.conftest import create_runtime_role, drop_runtime_role
+
+    from iwiki_mcp.postgres.store import provision_runtime_grant
+
+    page_ids = {}
+    domain_ids = {}
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            for iwiki_id in ("wiki-a", "wiki-b"):
+                cursor.execute(
+                    "SELECT domain_id FROM iwiki.domains "
+                    "WHERE iwiki_id = %s AND slug = 'docs'",
+                    (iwiki_id,),
+                )
+                domain_ids[iwiki_id] = cursor.fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO iwiki.pages "
+                    "(iwiki_id, domain_id, slug, markdown) "
+                    "VALUES (%s, %s, 'spec', '# Spec') RETURNING page_id",
+                    (iwiki_id, domain_ids[iwiki_id]),
+                )
+                page_ids[iwiki_id] = cursor.fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO iwiki.specification_scenarios "
+                    "(iwiki_id, domain_id, scenario_id, page_id, title, heading, "
+                    "anchor, source_hash, items, page_revision) VALUES "
+                    "(%s, %s, 'stable-id', %s, 'Stable', 'Stable', 'stable', "
+                    "%s, '[]', 1)",
+                    (iwiki_id, domain_ids[iwiki_id], page_ids[iwiki_id], "a" * 64),
+                )
+
+    role, password = create_runtime_role(auth_store.dsn, prefix="specification")
+    try:
+        provision_runtime_grant(
+            auth_store.dsn,
+            principal=role,
+            iwiki_id="wiki-a",
+            read_domains=["docs"],
+            write_domains=["docs"],
+            runtime="direct",
+        )
+        with psycopg.connect(auth_store.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT rolbypassrls FROM pg_roles WHERE rolname = %s",
+                    (role,),
+                )
+                assert cursor.fetchone() == (False,)
+                for table in (
+                    "specification_scenarios",
+                    "specification_bindings",
+                    "specification_evidence",
+                ):
+                    cursor.execute(
+                        "SELECT has_table_privilege(%s, %s, 'SELECT') "
+                        "AND has_table_privilege(%s, %s, 'INSERT') "
+                        "AND has_table_privilege(%s, %s, 'UPDATE') "
+                        "AND has_table_privilege(%s, %s, 'DELETE')",
+                        (
+                            role,
+                            f"iwiki.{table}",
+                            role,
+                            f"iwiki.{table}",
+                            role,
+                            f"iwiki.{table}",
+                            role,
+                            f"iwiki.{table}",
+                        ),
+                    )
+                    assert cursor.fetchone() == (True,)
+
+        values = conninfo_to_dict(auth_store.dsn)
+        runtime_dsn = make_conninfo(
+            **{**values, "user": role, "password": password}
+        )
+        with psycopg.connect(runtime_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT iwiki_id FROM iwiki.specification_scenarios ORDER BY 1"
+                )
+                assert cursor.fetchall() == [("wiki-a",)]
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    with connection.transaction():
+                        cursor.execute(
+                            "INSERT INTO iwiki.specification_scenarios "
+                            "(iwiki_id, domain_id, scenario_id, page_id, title, "
+                            "heading, anchor, source_hash, items, page_revision) "
+                            "VALUES ('wiki-b', %s, 'forbidden', %s, 'Forbidden', "
+                            "'Forbidden', 'forbidden', %s, '[]', 1)",
+                            (domain_ids["wiki-b"], page_ids["wiki-b"], "b" * 64),
+                        )
+    finally:
+        drop_runtime_role(auth_store.dsn, role)
+
+
+def test_read_only_runtime_principal_cannot_delete_specification_rows(auth_store):
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    from tests.postgres.conftest import create_runtime_role, drop_runtime_role
+
+    from iwiki_mcp.postgres.store import provision_runtime_grant
+
+    with psycopg.connect(auth_store.dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT domain_id FROM iwiki.domains "
+                "WHERE iwiki_id = 'wiki-a' AND slug = 'docs'"
+            )
+            domain_id = cursor.fetchone()[0]
+            cursor.execute(
+                "INSERT INTO iwiki.pages (iwiki_id, domain_id, slug, markdown) "
+                "VALUES ('wiki-a', %s, 'readonly-spec', '# Spec') "
+                "RETURNING page_id",
+                (domain_id,),
+            )
+            page_id = cursor.fetchone()[0]
+            cursor.execute(
+                "INSERT INTO iwiki.specification_scenarios "
+                "(iwiki_id, domain_id, scenario_id, page_id, title, heading, "
+                "anchor, source_hash, items, page_revision) VALUES "
+                "('wiki-a', %s, 'read-only', %s, 'Read only', 'Read only', "
+                "'read-only', %s, '[]', 1)",
+                (domain_id, page_id, "a" * 64),
+            )
+            cursor.execute(
+                "INSERT INTO iwiki.specification_bindings "
+                "(iwiki_id, domain_id, scenario_id, binding_id, relation, phase, "
+                "selector_kind, selector) VALUES "
+                "('wiki-a', %s, 'read-only', 'binding-a', 'implements', 'when', "
+                "'symbol', 'app.handle')",
+                (domain_id,),
+            )
+            cursor.execute(
+                "INSERT INTO iwiki.specification_evidence "
+                "(iwiki_id, domain_id, scenario_id, binding_id, state, targets, "
+                "unresolved_reference, graph_revision, graph_state_fingerprint, "
+                "specification_source_hash, checked_at, reason) VALUES "
+                "('wiki-a', %s, 'read-only', 'binding-a', 'resolved', "
+                "'[\"symbol-a\"]', NULL, 'graph-1', %s, %s, "
+                "CURRENT_TIMESTAMP, NULL)",
+                (domain_id, "sha256:" + "b" * 64, "a" * 64),
+            )
+
+    role, password = create_runtime_role(auth_store.dsn, prefix="spec-readonly")
+    try:
+        provision_runtime_grant(
+            auth_store.dsn,
+            principal=role,
+            iwiki_id="wiki-a",
+            read_domains=["docs"],
+            write_domains=[],
+            runtime="direct",
+        )
+        values = conninfo_to_dict(auth_store.dsn)
+        runtime_dsn = make_conninfo(
+            **{**values, "user": role, "password": password}
+        )
+        with psycopg.connect(runtime_dsn) as connection:
+            with connection.cursor() as cursor:
+                for table in (
+                    "specification_scenarios",
+                    "specification_bindings",
+                    "specification_evidence",
+                ):
+                    cursor.execute(f"SELECT count(*) FROM iwiki.{table}")
+                    assert cursor.fetchone() == (1,)
+                    cursor.execute(f"DELETE FROM iwiki.{table}")
+                    assert cursor.rowcount == 0
+        with psycopg.connect(auth_store.dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT "
+                    "(SELECT count(*) FROM iwiki.specification_scenarios), "
+                    "(SELECT count(*) FROM iwiki.specification_bindings), "
+                    "(SELECT count(*) FROM iwiki.specification_evidence)"
+                )
+                assert cursor.fetchone() == (1, 1, 1)
+    finally:
+        drop_runtime_role(auth_store.dsn, role)
+
+
 def test_bearer_boundary_returns_safe_401_and_403(auth_store):
     from iwiki_mcp.postgres.auth import (
         AccessError,

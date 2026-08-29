@@ -465,6 +465,143 @@ DELETE FROM iwiki.schema_migrations WHERE version = 5;
 """
 
 
+SPECIFICATION_MIGRATION_STATEMENTS = (
+    """
+    CREATE TABLE iwiki.specification_scenarios (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        scenario_id text NOT NULL,
+        page_id bigint NOT NULL,
+        title text NOT NULL,
+        heading text NOT NULL,
+        anchor text NOT NULL,
+        source_hash text NOT NULL,
+        items jsonb NOT NULL CHECK (jsonb_typeof(items) = 'array'),
+        page_revision bigint NOT NULL CHECK (page_revision > 0),
+        CONSTRAINT specification_scenarios_domain_identity_key
+            PRIMARY KEY (iwiki_id, domain_id, scenario_id),
+        CONSTRAINT specification_scenarios_domain_fk
+            FOREIGN KEY (iwiki_id, domain_id)
+            REFERENCES iwiki.domains (iwiki_id, domain_id)
+            ON DELETE CASCADE,
+        CONSTRAINT specification_scenarios_page_fk
+            FOREIGN KEY (iwiki_id, domain_id, page_id)
+            REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX specification_scenarios_title_idx
+        ON iwiki.specification_scenarios (iwiki_id, domain_id, lower(title))
+    """,
+    """
+    CREATE INDEX specification_scenarios_items_idx
+        ON iwiki.specification_scenarios USING gin (items jsonb_path_ops)
+    """,
+    """
+    CREATE TABLE iwiki.specification_bindings (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        scenario_id text NOT NULL,
+        binding_id text NOT NULL,
+        relation text NOT NULL CHECK (relation IN ('implements', 'verifies')),
+        phase text CHECK (phase IN ('given', 'when', 'then')),
+        selector_kind text NOT NULL CHECK (
+            selector_kind IN ('symbol', 'file', 'source_glob')
+        ),
+        selector text NOT NULL,
+        PRIMARY KEY (iwiki_id, domain_id, scenario_id, binding_id),
+        CONSTRAINT specification_bindings_scenario_fk
+            FOREIGN KEY (iwiki_id, domain_id, scenario_id)
+            REFERENCES iwiki.specification_scenarios (
+                iwiki_id, domain_id, scenario_id
+            ) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX specification_bindings_selector_idx
+        ON iwiki.specification_bindings (
+            iwiki_id, domain_id, selector_kind, selector
+        )
+    """,
+    """
+    CREATE TABLE iwiki.specification_evidence (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        scenario_id text NOT NULL,
+        binding_id text NOT NULL,
+        state text NOT NULL CHECK (
+            state IN ('resolved', 'ambiguous', 'unresolved', 'graph_unavailable')
+        ),
+        targets jsonb NOT NULL CHECK (jsonb_typeof(targets) = 'array'),
+        unresolved_reference text,
+        graph_revision text,
+        graph_state_fingerprint text NOT NULL,
+        specification_source_hash text NOT NULL,
+        checked_at timestamptz NOT NULL,
+        reason text,
+        PRIMARY KEY (iwiki_id, domain_id, scenario_id, binding_id),
+        CONSTRAINT specification_evidence_binding_fk
+            FOREIGN KEY (iwiki_id, domain_id, scenario_id, binding_id)
+            REFERENCES iwiki.specification_bindings (
+                iwiki_id, domain_id, scenario_id, binding_id
+            ) ON DELETE CASCADE
+    )
+    """,
+    *(f"ALTER TABLE iwiki.{table} ENABLE ROW LEVEL SECURITY" for table in (
+        "specification_scenarios",
+        "specification_bindings",
+        "specification_evidence",
+    )),
+    *(f"""
+    CREATE POLICY database_principal_select ON iwiki.{table}
+        FOR SELECT
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, false))
+    """ for table in (
+        "specification_scenarios",
+        "specification_bindings",
+        "specification_evidence",
+    )),
+    *(f"""
+    CREATE POLICY database_principal_insert ON iwiki.{table}
+        FOR INSERT
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """ for table in (
+        "specification_scenarios",
+        "specification_bindings",
+        "specification_evidence",
+    )),
+    *(f"""
+    CREATE POLICY database_principal_update ON iwiki.{table}
+        FOR UPDATE
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """ for table in (
+        "specification_scenarios",
+        "specification_bindings",
+        "specification_evidence",
+    )),
+    *(f"""
+    CREATE POLICY database_principal_delete ON iwiki.{table}
+        FOR DELETE
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """ for table in (
+        "specification_scenarios",
+        "specification_bindings",
+        "specification_evidence",
+    )),
+)
+
+
+SCHEMA6_COMPATIBILITY_ROLLBACK_SQL = f"""
+SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
+DROP TABLE iwiki.specification_evidence;
+DROP TABLE iwiki.specification_bindings;
+DROP TABLE iwiki.specification_scenarios;
+DELETE FROM iwiki.schema_migrations WHERE version = 6;
+"""
+
+
 MIGRATIONS = (
     Migration(
         version=1,
@@ -676,6 +813,7 @@ MIGRATIONS = (
         ),
     ),
     Migration(version=5, statements=GRAPH_MIGRATION_STATEMENTS),
+    Migration(version=6, statements=SPECIFICATION_MIGRATION_STATEMENTS),
 )
 
 
@@ -814,7 +952,7 @@ def run_migrations(
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 5,
+    expected_version: int = 6,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -918,4 +1056,58 @@ def rollback_v5_compatibility(
         "dry_run": False,
         "schema_version": 4,
         "removed_marker": 5,
+    }
+
+
+def rollback_v6_compatibility(
+    settings: MigrationSettings,
+    *,
+    confirm: bool,
+) -> dict[str, int | bool]:
+    """Drop only v6 specification objects and its migration marker."""
+    if confirm is not True:
+        raise ValueError("confirmation must be literal true")
+    try:
+        with psycopg.connect(
+            settings.dsn,
+            connect_timeout=settings.connect_timeout_s,
+        ) as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(settings.statement_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)",
+                        (str(settings.lock_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,)
+                    )
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(version), 0) "
+                        "FROM iwiki.schema_migrations"
+                    )
+                    current = cursor.fetchone()[0]
+                    if current != 6:
+                        raise MigrationError(
+                            "schema version 6 compatibility rollback is unavailable"
+                        )
+                    cursor.execute("DROP TABLE iwiki.specification_evidence")
+                    cursor.execute("DROP TABLE iwiki.specification_bindings")
+                    cursor.execute("DROP TABLE iwiki.specification_scenarios")
+                    cursor.execute(
+                        "DELETE FROM iwiki.schema_migrations WHERE version = 6"
+                    )
+                    if cursor.rowcount != 1:
+                        raise MigrationError("migration marker removal failed")
+    except MigrationError:
+        raise
+    except psycopg.Error as exc:
+        raise MigrationError("compatibility rollback failed") from exc
+    return {
+        "dry_run": False,
+        "schema_version": 5,
+        "removed_marker": 6,
     }
