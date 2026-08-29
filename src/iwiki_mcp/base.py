@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path, PureWindowsPath
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -371,6 +372,43 @@ def index_path(base: str, domain: str) -> str:
 
 def log_path(base: str, domain: str) -> str:
     return os.path.join(domain_dir(base, domain), "log.jsonl")
+
+
+def validate_domain_identifier(domain: str) -> str:
+    if (
+        type(domain) is not str
+        or not domain
+        or domain != domain.strip()
+        or domain.startswith(".")
+        or "\0" in domain
+        or "/" in domain
+        or "\\" in domain
+        or Path(domain).is_absolute()
+        or PureWindowsPath(domain).is_absolute()
+        or PureWindowsPath(domain).drive
+    ):
+        raise BaseError("domain identifier is invalid")
+    return domain
+
+
+def specifications_path(base: str, domain: str) -> str:
+    validate_domain_identifier(domain)
+    root = Path(base).resolve()
+    domain_path = root / domain
+    try:
+        domain_path.resolve().relative_to(root)
+    except ValueError as exc:
+        raise BaseError("domain path escapes wiki base") from exc
+    if domain_path.is_symlink():
+        raise BaseError("domain path escapes wiki base")
+    target = domain_path / "specifications.jsonl"
+    if target.is_symlink():
+        raise BaseError("specification path must not be a symlink")
+    try:
+        target.resolve().relative_to(root)
+    except ValueError as exc:
+        raise BaseError("specification path escapes wiki base") from exc
+    return str(target)
 
 
 def ensure_graph_store_excluded(base: str) -> bool:
