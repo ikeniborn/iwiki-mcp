@@ -209,14 +209,17 @@ iwiki-mcp base disable --iwiki team-wiki
 iwiki-mcp base enable --iwiki team-wiki
 iwiki-mcp domain create --iwiki team-wiki --domain backend
 iwiki-mcp token list --iwiki team-wiki
-iwiki-mcp token set-create-domain --iwiki team-wiki --token-id <token-id> --enabled
-iwiki-mcp token set-domain-management --iwiki team-wiki --token-id <token-id> --domain backend --enabled
-iwiki-mcp token revoke --token-id <token-id>
+iwiki-mcp token set-create-domain --iwiki team-wiki --token-id replace-with-token-id --enabled
+iwiki-mcp token set-domain-management --iwiki team-wiki --token-id replace-with-token-id --domain backend --enabled
+iwiki-mcp token revoke --token-id replace-with-token-id
 iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
 iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
 ```
 
-`token create` prints plaintext token material once; store it in a secret manager.
+`token create` prints plaintext token material once. The examples below therefore print
+to the terminal: do not run them in a recorded session, and store the result directly in
+a secret manager. Production operators should use the non-printing capture procedure in
+the [deployment runbook](docs/deployment.md#out-of-band-schema-migration-and-principal-provisioning).
 `token list` never returns it and reports `can_create_domain`, `managed_domains`,
 `read_domains`, and `write_domains` in both default JSON and `--json` output.
 `set-create-domain` and `set-domain-management` are server-side recovery operations;
@@ -262,9 +265,9 @@ and advances the schema before its requested operation; `base list` is the expli
 operator migration trigger used by the deployment runbook.
 
 ```bash
-iwiki-mcp base list --config /etc/iwiki/admin-server.toml --json
-iwiki-mcp base create --config /etc/iwiki/admin-server.toml --iwiki team-wiki
-iwiki-mcp domain create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --domain backend
+iwiki-mcp base list --config /opt/iwiki-mcp/admin-server.toml --json
+iwiki-mcp base create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki
+iwiki-mcp domain create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --domain backend
 ```
 
 Create the PostgreSQL runtime login out of band before registering it. Its password and
@@ -274,9 +277,9 @@ and its domain grants explicitly, then inspect the exact hosted role before issu
 token.
 
 ```bash
-iwiki-mcp principal grant --config /etc/iwiki/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
-iwiki-mcp principal grant --config /etc/iwiki/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
-iwiki-mcp principal inspect --config /etc/iwiki/admin-server.toml --principal iwiki_hosted --json
+iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal iwiki_hosted --json
 ```
 
 Only after that inspection, issue tokens against the exact deployed hosted role.
@@ -288,8 +291,8 @@ bootstrap token with `--can-create-domain`; another hosted role, or a generic "s
 hosted role exists" check, is not a substitute.
 
 ```bash
-iwiki-mcp token create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
-iwiki-mcp token create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --owner bootstrap --hosted-principal iwiki_hosted --read-domain backend --write-domain backend --can-create-domain
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --owner bootstrap --hosted-principal iwiki_hosted --read-domain backend --write-domain backend --can-create-domain
 iwiki-mcp serve --transport streamable-http
 ```
 
@@ -758,13 +761,13 @@ The bounded fusion benchmark under `eval/search_pipeline/` is evaluation-only: i
 Replay existing evidence without credentials:
 
 ```bash
-uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --pareto --replay-evidence <evidence.json>
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out replace-with-report-dir --pareto --replay-evidence replace-with-evidence.json
 ```
 
 After the replay passes, obtain operator confirmation before running a live benchmark. The live command uses an operator-created environment file; do not read or copy its credentials into the repository:
 
 ```bash
-uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out replace-with-report-dir --modes hybrid,lexical,semantic --pareto --env-file replace-with-operator-env-file
 ```
 
 ### Hard-negative gate

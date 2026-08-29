@@ -209,14 +209,17 @@ iwiki-mcp base disable --iwiki team-wiki
 iwiki-mcp base enable --iwiki team-wiki
 iwiki-mcp domain create --iwiki team-wiki --domain backend
 iwiki-mcp token list --iwiki team-wiki
-iwiki-mcp token set-create-domain --iwiki team-wiki --token-id <token-id> --enabled
-iwiki-mcp token set-domain-management --iwiki team-wiki --token-id <token-id> --domain backend --enabled
-iwiki-mcp token revoke --token-id <token-id>
+iwiki-mcp token set-create-domain --iwiki team-wiki --token-id replace-with-token-id --enabled
+iwiki-mcp token set-domain-management --iwiki team-wiki --token-id replace-with-token-id --domain backend --enabled
+iwiki-mcp token revoke --token-id replace-with-token-id
 iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
 iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
 ```
 
-`token create` показывает plaintext-токен один раз; сохраните его в secret manager.
+`token create` показывает plaintext-токен один раз. Поэтому примеры ниже выводят его в
+терминал: не запускайте их в записываемой сессии и передавайте результат прямо в secret
+manager. Для production используйте процедуру захвата без вывода из
+[deployment runbook](deployment.md#out-of-band-schema-migration-and-principal-provisioning).
 `token list` не возвращает токен и показывает `can_create_domain`, `managed_domains`,
 `read_domains` и `write_domains` как в стандартном JSON, так и с `--json`.
 `set-create-domain` и `set-domain-management` — server-side recovery; требуется ровно
@@ -261,9 +264,9 @@ base и домены. Каждая не dry-run admin-команда, кроме
 list` как явный операторский триггер миграции.
 
 ```bash
-iwiki-mcp base list --config /etc/iwiki/admin-server.toml --json
-iwiki-mcp base create --config /etc/iwiki/admin-server.toml --iwiki team-wiki
-iwiki-mcp domain create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --domain backend
+iwiki-mcp base list --config /opt/iwiki-mcp/admin-server.toml --json
+iwiki-mcp base create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki
+iwiki-mcp domain create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --domain backend
 ```
 
 До регистрации создайте PostgreSQL login runtime-роли вне iwiki. Его пароль и runtime-
@@ -272,9 +275,9 @@ iwiki-mcp domain create --config /etc/iwiki/admin-server.toml --iwiki team-wiki 
 доменные гранты, затем проверьте точную hosted-роль до выпуска любого токена.
 
 ```bash
-iwiki-mcp principal grant --config /etc/iwiki/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
-iwiki-mcp principal grant --config /etc/iwiki/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
-iwiki-mcp principal inspect --config /etc/iwiki/admin-server.toml --principal iwiki_hosted --json
+iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal iwiki_hosted --json
 ```
 
 Только после этой проверки выпускайте токены против точной развёрнутой hosted-роли.
@@ -286,8 +289,8 @@ hosted-сервера. Команда проверяет, что именно э
 «какая-то hosted-роль существует» заменой не является.
 
 ```bash
-iwiki-mcp token create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
-iwiki-mcp token create --config /etc/iwiki/admin-server.toml --iwiki team-wiki --owner bootstrap --hosted-principal iwiki_hosted --read-domain backend --write-domain backend --can-create-domain
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --owner bootstrap --hosted-principal iwiki_hosted --read-domain backend --write-domain backend --can-create-domain
 iwiki-mcp serve --transport streamable-http
 ```
 
@@ -763,13 +766,13 @@ Bounded fusion benchmark в `eval/search_pipeline/` предназначен т�
 Воспроизведите существующие evidence без credentials:
 
 ```bash
-uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --pareto --replay-evidence <evidence.json>
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out replace-with-report-dir --pareto --replay-evidence replace-with-evidence.json
 ```
 
 Только после успешного replay запросите подтверждение оператора перед live benchmark. Live-команда использует созданный оператором environment file; не читайте и не копируйте его credentials в репозиторий:
 
 ```bash
-uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out replace-with-report-dir --modes hybrid,lexical,semantic --pareto --env-file replace-with-operator-env-file
 ```
 
 ### Hard-negative gate
