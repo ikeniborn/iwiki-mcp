@@ -4,7 +4,16 @@ from iwiki_mcp.engine import frontmatter as fm
 def test_normalize_type_case_and_whitespace_insensitive_open():
     assert fm.normalize_type("API") == "api"
     assert fm.normalize_type(" Architecture ") == "architecture"
+    assert fm.normalize_type(" Specification ") == "specification"
     assert fm.normalize_type("weird") == "weird"      # open — not clamped
+
+
+def test_specification_is_governed_but_not_automatically_classifiable():
+    assert "specification" in fm.OKF_TYPES
+    assert fm.CLASSIFIABLE_TYPES == tuple(
+        item for item in fm.OKF_TYPES if item != "specification"
+    )
+    assert "specification" not in fm.CLASSIFIABLE_TYPES
 
 
 def test_normalize_tag_folds_list_delimiters():

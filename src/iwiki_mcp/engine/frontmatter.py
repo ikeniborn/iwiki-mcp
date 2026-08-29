@@ -6,7 +6,11 @@ import json
 import os
 import re
 
-OKF_TYPES = ("architecture", "api", "guide", "reference", "runbook", "concept")
+OKF_TYPES = (
+    "architecture", "api", "guide", "reference", "runbook", "concept",
+    "specification",
+)
+CLASSIFIABLE_TYPES = tuple(item for item in OKF_TYPES if item != "specification")
 DEFAULT_TYPE = "concept"
 MAX_TAGS = 5
 STATUS_VOCAB = ("stub", "developing", "stable", "deprecated")
