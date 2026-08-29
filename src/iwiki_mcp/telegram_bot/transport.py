@@ -1,12 +1,23 @@
 """Minimal Telegram Bot API long-polling transport."""
 
+from collections.abc import Awaitable, Callable
+import json
+import logging
 from pathlib import Path
+import random
+import time
 from typing import Any
 
-import httpx
+import anyio
+import urllib3
 
 from .access import AccessPolicy
 from .models import BotReply, WritePreview
+from .proxy import TelegramHttpClient
+from .runtime import Backoff, Heartbeat
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TelegramError(RuntimeError):
@@ -19,27 +30,33 @@ class TelegramTransport:
         token: str,
         access: AccessPolicy,
         conversation: Any,
-        http: httpx.AsyncClient | None = None,
+        http: TelegramHttpClient,
     ) -> None:
         self._token = token
         self._access = access
         self._conversation = conversation
-        self._owns_http = http is None
-        self._http = http or httpx.AsyncClient(timeout=40)
+        self._http = http
         self._api_base = f"https://api.telegram.org/bot{token}"
         self._file_base = f"https://api.telegram.org/file/bot{token}"
-
-    async def close(self) -> None:
-        if self._owns_http:
-            await self._http.aclose()
+        self._poll_offset: int | None = None
 
     async def _api(self, method: str, data: dict[str, object]) -> object:
         try:
-            response = await self._http.post(f"{self._api_base}/{method}", json=data)
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise TelegramError("telegram_request_failed") from exc
+            response = await self._http.post_json(
+                f"{self._api_base}/{method}", data
+            )
+            if not 200 <= response.status < 300:
+                raise TelegramError("telegram_request_failed")
+            payload = json.loads(response.body)
+        except TelegramError:
+            raise
+        except (
+            urllib3.exceptions.HTTPError,
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            raise TelegramError("telegram_request_failed") from None
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise TelegramError("telegram_request_failed")
         return payload.get("result")
@@ -52,11 +69,16 @@ class TelegramTransport:
             raise TelegramError("telegram_file_failed")
         file_path = metadata["file_path"]
         try:
-            response = await self._http.get(f"{self._file_base}/{file_path}")
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise TelegramError("telegram_file_failed") from exc
-        return Path(file_path).name or "voice.ogg", response.content
+            response = await self._http.get_bytes(
+                f"{self._file_base}/{file_path}"
+            )
+            if not 200 <= response.status < 300:
+                raise TelegramError("telegram_file_failed")
+        except TelegramError:
+            raise
+        except (urllib3.exceptions.HTTPError, OSError, UnicodeError):
+            raise TelegramError("telegram_file_failed") from None
+        return Path(file_path).name or "voice.ogg", response.body
 
     async def _send(self, chat_id: int, reply: BotReply | WritePreview) -> None:
         payload: dict[str, object] = {"chat_id": chat_id, "text": reply.text}
@@ -200,7 +222,7 @@ class TelegramTransport:
             reply = BotReply("Invalid action.")
         await self._send(chat_id, reply)
 
-    async def poll_once(self, offset: int | None) -> int | None:
+    async def _fetch_updates(self, offset: int | None) -> list[object]:
         self._conversation.expire_state()
         arguments: dict[str, object] = {"timeout": 30}
         if offset is not None:
@@ -208,6 +230,15 @@ class TelegramTransport:
         updates = await self._api("getUpdates", arguments)
         if not isinstance(updates, list):
             raise TelegramError("telegram_request_failed")
+        return updates
+
+    async def _dispatch_updates(
+        self,
+        updates: list[object],
+        offset: int | None,
+        *,
+        remember_offset: bool = False,
+    ) -> int | None:
         next_offset = offset
         for update in updates:
             if not isinstance(update, dict):
@@ -216,9 +247,44 @@ class TelegramTransport:
             update_id = update.get("update_id")
             if isinstance(update_id, int):
                 next_offset = update_id + 1
+                if remember_offset:
+                    self._poll_offset = next_offset
         return next_offset
 
-    async def poll_forever(self) -> None:
-        offset = None
+    async def poll_once(self, offset: int | None) -> int | None:
+        updates = await self._fetch_updates(offset)
+        return await self._dispatch_updates(updates, offset)
+
+    async def poll_forever(
+        self,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+        random_value: Callable[[], float] = random.random,
+        heartbeat: Heartbeat,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        backoff = Backoff()
         while True:
-            offset = await self.poll_once(offset)
+            started = clock()
+            try:
+                updates = await self._fetch_updates(self._poll_offset)
+            except TelegramError:
+                delay = backoff.next_delay(random_value())
+                LOGGER.warning(
+                    "telegram poll retry",
+                    extra={
+                        "operation": "poll",
+                        "outcome": "retry",
+                        "delay_seconds": float(delay),
+                        "elapsed_ms": int((clock() - started) * 1000),
+                    },
+                )
+                await sleep(delay)
+                continue
+            backoff.reset()
+            heartbeat.touch()
+            await self._dispatch_updates(
+                updates,
+                self._poll_offset,
+                remember_offset=True,
+            )

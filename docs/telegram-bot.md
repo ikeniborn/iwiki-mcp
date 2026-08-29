@@ -1,9 +1,9 @@
 # Telegram bot service
 
-The `iwiki-telegram-bot` process is a separately deployed long-polling client for a
-hosted iwiki MCP server. An administrator-owned Telegram ID allowlist gates domain
-listing, selected-domain questions, voice transcription, and preview-confirmed page
-changes before any iwiki or inference request is made.
+The `iwiki-telegram-bot` process is the Telegram child in the supported application
+container alongside hosted iwiki MCP and nginx. An administrator-owned Telegram ID
+allowlist gates domain listing, selected-domain questions, voice transcription, and
+preview-confirmed page changes before any iwiki or inference request is made.
 
 ## Trust model
 
@@ -29,8 +29,8 @@ conflict is never overwritten or retried.
 
 ## Configuration
 
-Supply configuration through the process environment or an owner-only service-manager
-environment file. Never commit these values.
+Supply configuration through the owner-only `/opt/iwiki-mcp/runtime.env` file read by
+`compose.yaml`. Never commit these values.
 
 | Variable | Purpose |
 | --- | --- |
@@ -43,6 +43,32 @@ environment file. Never commit these values.
 | `IWIKI_BOT_LLM_MODEL` | Public model alias for chat completions. |
 | `IWIKI_BOT_TRANSCRIPTION_MODEL` | Model accepted by `/audio/transcriptions`. |
 | `IWIKI_BOT_CONFIRMATION_TTL_SECONDS` | Optional positive TTL; default `300`. |
+| `IWIKI_BOT_TELEGRAM_PROXY_URL` | Required literal HTTPS proxy URL with explicit host and port. |
+
+## Telegram HTTPS proxy boundary
+
+Accepted values have one of these exact shapes:
+
+```text
+IWIKI_BOT_TELEGRAM_PROXY_URL=https://proxy.example:8443
+IWIKI_BOT_TELEGRAM_PROXY_URL=https://user:password@proxy.example:9443
+```
+
+The bot establishes TLS to the operator-managed proxy, sends
+`CONNECT api.telegram.org:443`, then establishes Telegram TLS inside the tunnel. Every
+Telegram Bot API and file request uses that proxy. There is no direct Telegram
+fallback: a proxy outage makes Telegram liveness unhealthy while the bot keeps retrying
+the same route.
+
+The literal lowercase `https://` prefix, valid host, and explicit valid port are
+required. The parser rejects `http://`, any `socks*` scheme, paths other than optional
+`/`, query strings, fragments, missing or invalid hosts, and missing, non-numeric, or
+out-of-range ports. Validation errors and logs never include proxy credentials or the
+supplied URL.
+
+Inference, remote iwiki, and PostgreSQL remain direct. The Compose service defines no
+standard proxy environment variables; the inference and remote-iwiki HTTPX clients use
+`trust_env=False`, while psycopg connects to PostgreSQL directly.
 
 The inference API must implement `POST /v1/chat/completions` and return
 `choices[0].message.content`. Voice uses `POST /v1/audio/transcriptions` with an OGG
@@ -64,55 +90,47 @@ unavailable until the transcription endpoint and model route exist.
 
 ## Deployment
 
-Install the package from the checkout, then keep the runtime and environment outside
-the Git repository. One possible host layout is `/opt/iwiki-telegram-bot/app` for the
-checkout and `/etc/iwiki/telegram-bot.env` for owner-only secrets.
+Use the one-service `compose.yaml` path documented in the
+[deployment runbook](deployment.md). The required host inputs are
+`/opt/iwiki-mcp/server.toml`, `/opt/iwiki-mcp/nginx.conf`, and owner-only
+`/opt/iwiki-mcp/runtime.env`; do not run a separate bot unit.
 
-```bash
-cd /opt/iwiki-telegram-bot/app
-uv sync
-uv run iwiki-telegram-bot --help
-uv run iwiki-telegram-bot
-```
+Supervisor runs exactly one bot process per Telegram token together with hosted MCP and
+nginx. Compose uses `restart: unless-stopped`, a 60-second graceful stop, a read-only
+root filesystem, and tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every
+unexpected child exit, including exit status zero; an explicit `supervisorctl stop`
+remains stopped until an explicit start. Each child receives `TERM` and has 55 seconds
+to stop before Supervisor can force its process group, inside the Compose 60-second
+window. Health covers all three children, loopback MCP, nginx ingress, and the Telegram
+polling heartbeat within the configured liveness window.
 
-A minimal systemd unit can supervise long polling:
+The application runtime creates no PostgreSQL database or schema objects and runs no
+migrations. It requires the exact compatible schema prepared out of band by the
+operator's separate administration/migrator role; that privileged credential is never
+the runtime login.
 
-```ini
-[Unit]
-Description=iwiki Telegram bot
-After=network-online.target
-Wants=network-online.target
+Full-container pre-cutover validation runs only on a separate isolated host or VM with
+a dedicated validation bot token, database, iwiki scope, listener, and Origin. The
+fixed host-network MCP port prevents a concurrent full-container precheck on the
+production host; without isolated infrastructure, use a maintenance window and the
+[documented rollback](deployment.md#rollback-before-old-component-removal).
 
-[Service]
-Type=simple
-User=iwiki-bot
-Group=iwiki-bot
-WorkingDirectory=/opt/iwiki-telegram-bot/app
-EnvironmentFile=/etc/iwiki/telegram-bot.env
-ExecStart=/usr/bin/uv run iwiki-telegram-bot
-Restart=on-failure
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Run exactly one bot process per Telegram token: long-poll offsets are process-local.
-The service keeps selected domains and pending previews only in memory. It has no
-database and does not persist Telegram updates, messages, user identifiers, prompts,
-answers, transcriptions, or voice files. Selected domains and pending previews expire
-after the confirmation TTL; the polling loop removes expired state even when no new
-message arrives. Operational logs must contain only operation
-type, outcome, elapsed time, and aggregate usage; never log content or credentials.
-Inference calls emit one content-free structured record with `operation`, `outcome`,
-`elapsed_ms`, and a numeric `usage` allowlist copied from the provider response. Use
-those fields for separate text/voice latency and transcription-cost aggregation.
+Selected domains, Telegram updates, user identifiers, message content, prompts,
+answers, voice files, and confirmation previews stay in memory or tmpfs and do not
+survive restart. Operational logs contain stable fields such as operation, outcome,
+elapsed time, and numeric usage only; they exclude message content, audio,
+transcriptions, response bodies, tokens, proxy URLs, and credentials. PostgreSQL is the
+external durable service. Existing user-bound, single-use confirmation consumption and
+revision/section-hash compare-and-swap remain unchanged.
 
 ## Failure behavior
 
 Missing configuration stops startup. Remote iwiki, inference, Telegram download, and
-malformed-response failures return sanitized messages. An unavailable domain is not
-selected. Empty retrieval produces no model answer. An expired, replayed, or
-wrong-user confirmation performs no mutation. A write conflict requires a new preview.
+malformed-response failures never expose dependency details. After a retryable MCP
+session failure, the running bot closes only that session, reconnects and initializes a
+new one with bounded backoff, then replays only the failed Telegram update; already
+completed updates keep their committed offsets. Conversation selection and pending
+confirmation state remain in memory during this reconnect. An unavailable domain is
+not selected. Empty retrieval produces no model answer. An expired, replayed, or
+wrong-user confirmation performs no mutation. A write conflict requires a new preview,
+and single-use confirmation consumption still prevents ambiguous writes from replaying.

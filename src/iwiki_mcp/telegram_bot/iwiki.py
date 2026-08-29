@@ -5,15 +5,59 @@ from contextlib import asynccontextmanager
 import json
 from typing import Any
 
-from mcp import ClientSession
+import httpx
+from mcp import ClientSession, McpError
 from mcp.client.streamable_http import streamablehttp_client
+
+try:
+    from builtins import BaseExceptionGroup
+except ImportError:
+    from exceptiongroup import BaseExceptionGroup
 
 
 class RemoteIwikiError(RuntimeError):
     """A sanitized remote iwiki failure."""
 
+    def __init__(self, code: str, *, retryable: bool = False) -> None:
+        super().__init__(code)
+        self.retryable = retryable
+
 
 ToolCaller = Callable[[str, dict[str, object]], Awaitable[object]]
+_SAFE_REMOTE_ERROR_CODES = frozenset({"conflict", "section_conflict"})
+
+
+def _retryable_http_failure(error: BaseException) -> bool:
+    if isinstance(error, BaseExceptionGroup):
+        return bool(error.exceptions) and all(
+            _retryable_http_failure(child) for child in error.exceptions
+        )
+    if isinstance(error, McpError):
+        return (
+            error.error.code == -32600
+            and error.error.message == "Session terminated"
+        )
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status == 429 or 500 <= status < 600
+    return isinstance(
+        error,
+        (
+            httpx.NetworkError,
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+        ),
+    )
+
+
+def _direct_httpx_client(headers=None, timeout=None, auth=None):
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout,
+        auth=auth,
+        follow_redirects=True,
+        trust_env=False,
+    )
 
 
 def _decode_result(result: object) -> dict[str, object]:
@@ -27,10 +71,13 @@ def _decode_result(result: object) -> dict[str, object]:
     text = getattr(content[0], "text", None)
     if not isinstance(text, str):
         raise RemoteIwikiError("invalid_remote_response")
+    invalid_json = False
     try:
         payload = json.loads(text)
-    except (TypeError, ValueError) as exc:
-        raise RemoteIwikiError("invalid_remote_response") from exc
+    except (TypeError, ValueError):
+        invalid_json = True
+    if invalid_json:
+        raise RemoteIwikiError("invalid_remote_response") from None
     if not isinstance(payload, dict):
         raise RemoteIwikiError("invalid_remote_response")
     return payload
@@ -41,15 +88,24 @@ class RemoteIwikiClient:
         self._call_tool = call_tool
 
     async def _call(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+        retryable = None
         try:
             payload = _decode_result(await self._call_tool(name, arguments))
         except RemoteIwikiError:
             raise
-        except Exception as exc:
-            raise RemoteIwikiError("remote_call_failed") from exc
+        except Exception as error:
+            retryable = _retryable_http_failure(error)
+        if retryable is not None:
+            raise RemoteIwikiError(
+                "remote_call_failed", retryable=retryable
+            ) from None
         error = payload.get("error")
         if error:
-            code = error if isinstance(error, str) else "remote_call_failed"
+            code = (
+                error
+                if isinstance(error, str) and error in _SAFE_REMOTE_ERROR_CODES
+                else "remote_call_failed"
+            )
             raise RemoteIwikiError(code)
         return payload
 
@@ -135,13 +191,33 @@ async def open_remote_iwiki(
     url: str, token: str
 ) -> AsyncIterator[RemoteIwikiClient]:
     headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(
-        url, headers=headers, timeout=30, sse_read_timeout=300
-    ) as (read_stream, write_stream, _session_id):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+    started = False
+    retryable = None
+    try:
+        async with streamablehttp_client(
+            url,
+            headers=headers,
+            timeout=30,
+            sse_read_timeout=300,
+            httpx_client_factory=_direct_httpx_client,
+        ) as (read_stream, write_stream, _session_id):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
 
-            async def call_tool(name: str, arguments: dict[str, object]) -> Any:
-                return await session.call_tool(name, arguments=arguments)
+                async def call_tool(
+                    name: str, arguments: dict[str, object]
+                ) -> Any:
+                    return await session.call_tool(name, arguments=arguments)
 
-            yield RemoteIwikiClient(call_tool)
+                started = True
+                yield RemoteIwikiClient(call_tool)
+    except RemoteIwikiError:
+        raise
+    except Exception as error:
+        if started:
+            raise
+        retryable = _retryable_http_failure(error)
+    if retryable is not None:
+        raise RemoteIwikiError(
+            "remote_call_failed", retryable=retryable
+        ) from None
