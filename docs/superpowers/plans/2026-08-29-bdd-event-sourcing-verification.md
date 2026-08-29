@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 4279c6e19074eba2
+  plan_hash: 51c148a490864910
   last_run: 2026-08-29
   phases:
     structure: { status: passed }
@@ -20,12 +20,12 @@ chain:
 
 **Goal:** Add server-owned, graph-optional Given-When-Then specifications with equivalent Git and PostgreSQL projections, semantic tools, strict/optional/disabled modes, and durable agent guidance.
 
-**Architecture:** Canonical Markdown is parsed by a standard-library engine module into immutable scenario and binding records. A backend-neutral application service owns projection assembly, queries, evidence freshness, and fail-soft graph resolution; Git JSONL and PostgreSQL v6 adapters persist equivalent records. Server mutation and transport seams apply policy without sending ordinary pages through specification or code-graph paths.
+**Architecture:** Canonical Markdown is parsed by a standard-library engine module into immutable scenario and binding records. A backend-neutral application service owns projection assembly, queries, evidence freshness, and fail-soft graph resolution; Git JSONL and PostgreSQL v6/v7 adapters persist equivalent records. PostgreSQL v7 stores last-success projection metadata and detaches stale scenario rows from deleted pages without weakening ordinary Wiki or optional code-graph boundaries.
 
 **Tech Stack:** Python 3.10+, `tomllib`/`tomli`, FastMCP, Git filesystem storage, PostgreSQL/psycopg, pytest/pytest-asyncio, existing code-graph readers.
 
 **Status:** approved
-**Approved specification:** `docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md` (`35ea5d3c8c0cb3d5`)
+**Approved specification:** `docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md` (`4a3cd06030b2a322`)
 
 ---
 
@@ -42,8 +42,10 @@ accepted contract with incompatible storage behavior.
   `strict` rejects only invalid specification-page mutations.
 - Ordinary pages must not open specification storage or inspect the code graph.
 - `implements` and `verifies` stay outside structural code-graph tables and public tools.
-- PostgreSQL migration is forward-only v6 with tenant/domain RLS. Git strict mutation
-  holds one cross-process lock across page/projection/index/commit/rollback.
+- PostgreSQL migrations are forward-only v6 and v7 with tenant/domain RLS. Version 7
+  adds last-success metadata, stored page slug, nullable page identity, and
+  `ON DELETE SET NULL`; Git strict mutation holds one cross-process lock across
+  page/projection/index/commit/rollback.
 - PostgreSQL-marked tests run only against the disposable pgvector test database guarded
   by `tests/postgres/conftest.py`.
 - Each worker owns only files listed by its task, does not revert other changes, returns
@@ -64,11 +66,13 @@ not an additional invocation. Exact monotonic targets are fixed here:
 | Task 3 | `0.7.208` |
 | Task 4 | `0.7.209` |
 | Task 5 | `0.7.210` |
-| Task 6 | `0.7.211` |
-| Task 7 | `0.7.212` |
-| Task 8 | `0.7.213` |
-| Task 9 | `0.7.214` |
-| Task 10 | `0.7.215` |
+| Approved schema-v7 spec | `0.7.211` |
+| Revised schema-v7 plan | `0.7.212` |
+| Task 6 | `0.7.213` |
+| Task 7 | `0.7.214` |
+| Task 8 | `0.7.215` |
+| Task 9 | `0.7.216` |
+| Task 10 | `0.7.217` |
 
 The synchronized execution base is `0.7.204`. Immediately after approval and before any
 implementation worker dispatch, the parent changes plan status to approved, updates all
@@ -76,6 +80,12 @@ four version surfaces to `0.7.205`, runs
 `uv sync --extra dev` and `uv run pytest -q tests/test_package.py`, then commits and
 pushes the approved plan plus version surfaces. Task 1 must refuse to start unless HEAD
 already contains that `0.7.205` prerequisite commit; its own commit is `0.7.206`.
+
+Tasks 1 through 5 and the approved schema-v7 spec are already delivered through
+`0.7.211`. Before resuming implementation, the parent changes this revised plan status
+to approved, updates all four version surfaces to `0.7.212`, runs the package tests, and
+commits/pushes only the plan plus version surfaces. Task 6 must refuse to start unless
+HEAD contains that `0.7.212` prerequisite; its implementation commit is `0.7.213`.
 
 If result reconciliation demonstrates a later defect requiring another repository
 commit, that owning task increments all four surfaces to the next unused patch before
@@ -491,8 +501,10 @@ v6 reapplication with NOBYPASSRLS roles. Update the concrete hosted guard in
 `server._initialize_postgres_storage()` as invoked by `server.main()`; tests must prove
 each rejects schema v5 and accepts schema v6 before installing its runtime.
 Task 5 changes `postgres/store.py` only where the current protected-table and runtime-
-grant/schema helpers live. Task 6 exclusively owns new projection APIs, savepoints, and
-page/projection transaction integration in that shared file.
+grant/schema helpers live. Task 6 owns schema-v7 metadata/detachment, startup guards,
+new projection APIs, savepoints, and page/projection transaction integration in that
+shared file. Schema and transaction work remain one task because they change the same
+files and together establish the optional-deletion durability invariant.
 
 - [ ] **Step 5: Bump to `0.7.210`, run migration tests, and commit**
 
@@ -505,20 +517,155 @@ git commit -m "feat(spec): add PostgreSQL specification schema"
 
 Expected: migration, rollback, RLS, and grant tests pass.
 
-## Task 6: PostgreSQL projection transactions and parity
+## Task 6: PostgreSQL v7 metadata, projection transactions, and parity
+
+**Closes:** R-010 through R-013, R-018, R-022; AC-012 through AC-015, AC-020, and
+AC-024.
 
 **Files:**
+- Modify: `src/iwiki_mcp/postgres/migrations.py`
 - Modify: `src/iwiki_mcp/postgres/store.py`
+- Modify: `src/iwiki_mcp/http.py`
+- Modify: `src/iwiki_mcp/server.py`
+- Modify: `tests/postgres/test_migrations.py`
+- Modify: `tests/postgres/test_specification_migrations.py`
+- Modify: `tests/postgres/test_auth.py`
+- Modify: `tests/postgres/test_http.py`
+- Modify: `tests/postgres/test_code_graph_migrations.py`
+- Modify: `tests/test_server_startup.py`
 - Create: `tests/postgres/test_specifications.py`
 - Modify: `tests/postgres/test_store.py`
 - Modify: `tests/postgres/test_section_ops.py`
 - Modify: `tests/test_specification_store.py`
 
-- [ ] **Step 1: Write failing projection, CAS, and persistence tests**
+- [ ] **Step 1: Write failing v7 migration, detachment, and rollback tests**
+
+Assert migration history `(1, 2, 3, 4, 5, 6, 7)`, one
+`specification_projection_state` table, non-null stored scenario `page_slug`, nullable
+`page_id`, and a composite page foreign key with `ON DELETE SET NULL`. Insert a v6
+scenario/binding/evidence fixture, apply v7, delete its page, and prove all logical rows
+remain while scenario `page_id` becomes null and `page_slug` remains exact. Assert an
+upgraded domain receives no invented last-success metadata row.
+
+```python
+assert tuple(item.version for item in MIGRATIONS) == (1, 2, 3, 4, 5, 6, 7)
+assert scenario_after_delete["page_id"] is None
+assert scenario_after_delete["page_slug"] == "payments/open-account"
+assert projection_state_rows == []
+```
+
+Add catalog assertions for metadata primary/domain keys, nonnegative counts, RLS without
+FORCE, command-specific read/write policies, runtime grants, NOBYPASSRLS isolation, and
+no structural code-graph table change. Add rollback probes proving every non-literal
+confirmation rejects before connection, clean v7 restores the v6 FK/columns/marker, and
+one detached row rejects before any DDL or marker change.
+
+- [ ] **Step 2: Run v7 migration tests and verify RED**
+
+```bash
+uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/test_server_startup.py
+```
+
+Expected: missing migration 7, metadata table, stored page slug, SET NULL foreign key,
+schema-7 guards, and compatibility rollback. If `IWIKI_TEST_POSTGRES_DSN` is absent,
+record its exact skip reason; the guarded real-database cases remain mandatory before
+result close.
+
+- [ ] **Step 3: Add forward-only migration v7**
+
+Add `page_slug`, backfill it from the existing composite page reference, then make it
+non-null. Replace the v6 page foreign key by making `page_id` nullable and adding the
+same composite reference with `ON DELETE SET NULL`. Create
+`specification_projection_state(iwiki_id, domain_id, markdown_revision,
+projection_revision, scenario_count, binding_count, updated_at)` with a composite
+domain foreign key and nonnegative count checks. Do not backfill a state row: the store
+must report an upgraded projection stale until its first successful rebuild. Domain
+deletion continues to cascade state and all derived rows.
+
+```python
+SPECIFICATION_METADATA_MIGRATION_STATEMENTS = (
+    "ALTER TABLE iwiki.specification_scenarios ADD COLUMN page_slug text",
+    """UPDATE iwiki.specification_scenarios s SET page_slug = p.slug
+       FROM iwiki.pages p WHERE p.iwiki_id = s.iwiki_id
+       AND p.domain_id = s.domain_id AND p.page_id = s.page_id""",
+    "ALTER TABLE iwiki.specification_scenarios ALTER COLUMN page_slug SET NOT NULL",
+    "ALTER TABLE iwiki.specification_scenarios DROP CONSTRAINT specification_scenarios_page_fk",
+    "ALTER TABLE iwiki.specification_scenarios ALTER COLUMN page_id DROP NOT NULL",
+    """ALTER TABLE iwiki.specification_scenarios
+       ADD CONSTRAINT specification_scenarios_page_fk
+       FOREIGN KEY (iwiki_id, domain_id, page_id)
+       REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+       ON DELETE SET NULL""",
+    """CREATE TABLE iwiki.specification_projection_state (
+       iwiki_id text NOT NULL, domain_id bigint NOT NULL,
+       markdown_revision text NOT NULL, projection_revision text NOT NULL,
+       scenario_count integer NOT NULL CHECK (scenario_count >= 0),
+       binding_count integer NOT NULL CHECK (binding_count >= 0),
+       updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       PRIMARY KEY (iwiki_id, domain_id),
+       FOREIGN KEY (iwiki_id, domain_id)
+       REFERENCES iwiki.domains (iwiki_id, domain_id) ON DELETE CASCADE)""",
+)
+SPECIFICATION_METADATA_MIGRATION = Migration(
+    version=7,
+    statements=SPECIFICATION_METADATA_MIGRATION_STATEMENTS,
+)
+```
+
+Append `SPECIFICATION_METADATA_MIGRATION` to the existing `MIGRATIONS` tuple after
+version 6; do not rewrite or reorder earlier migration objects.
+
+- [ ] **Step 4: Extend RLS, grants, startup guards, and safe rollback**
+
+Add metadata to `_PROTECTED_TABLES`, command-specific policies, and scoped runtime
+SELECT/DML grants. Require exact schema 7 in hosted and stdio startup before runtime
+installation. Add `SCHEMA7_COMPATIBILITY_ROLLBACK_SQL` and
+`rollback_v7_compatibility(confirm=True)`. Under the migration advisory lock, rollback
+first rejects any `specification_scenarios.page_id IS NULL`; only then may it drop state,
+restore non-null page identity with `ON DELETE CASCADE`, drop stored `page_slug`, and
+remove marker 7. No rejection path executes partial DDL or deletes projection data.
+
+```python
+SCHEMA7_COMPATIBILITY_ROLLBACK_SQL = f"""
+SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM iwiki.specification_scenarios WHERE page_id IS NULL) THEN
+    RAISE EXCEPTION 'schema v7 contains detached specification rows';
+  END IF;
+END $$;
+DROP TABLE iwiki.specification_projection_state;
+ALTER TABLE iwiki.specification_scenarios DROP CONSTRAINT specification_scenarios_page_fk;
+ALTER TABLE iwiki.specification_scenarios ALTER COLUMN page_id SET NOT NULL;
+ALTER TABLE iwiki.specification_scenarios ADD CONSTRAINT specification_scenarios_page_fk
+  FOREIGN KEY (iwiki_id, domain_id, page_id)
+  REFERENCES iwiki.pages (iwiki_id, domain_id, page_id) ON DELETE CASCADE;
+ALTER TABLE iwiki.specification_scenarios DROP COLUMN page_slug;
+DELETE FROM iwiki.schema_migrations WHERE version = 7;
+"""
+
+def rollback_v7_compatibility(dsn: str, *, confirm: bool = False) -> None:
+    if confirm is not True:
+        raise ValueError("schema v7 compatibility rollback requires confirm=True")
+    # Execute the constant above in one advisory-locked transaction.
+```
+
+- [ ] **Step 5: Verify v6 upgrade, v7 reapplication, auth, and code-graph isolation**
+
+```bash
+uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py
+```
+
+Expected: v6 upgrade, page detachment, metadata RLS/grants, exact schema guards,
+fail-closed rollback, clean rollback/reapplication, and unchanged code-graph contracts
+pass.
+
+- [ ] **Step 6: Write failing projection, CAS, and persistence tests**
 
 Cover coherent domain duplicate detection, strict page/projection rollback, optional
-savepoint rollback with page commit and previous projection preserved, evidence restart
-persistence, delete/move preservation rules, and ordinary/disabled zero projection SQL.
+savepoint rollback with page commit and previous projection/metadata preserved, evidence
+restart persistence, delete/move preservation rules, and ordinary/disabled zero
+projection SQL. An upgraded v6 projection without metadata is stale; a successful empty
+rebuild writes ready zero-count metadata.
 
 ```python
 before = store.specification_context("docs", "stable-id")
@@ -528,7 +675,15 @@ assert result["revision"] == revision + 1
 assert after == before  # optional projection refresh fault preserved old rows
 ```
 
-- [ ] **Step 2: Run PostgreSQL store tests and verify RED**
+For both last-page and non-last-page deletion, inject failure after the page delete and
+before projection replacement. Prove the page commits, old rows survive with null
+`page_id` and stored slug, metadata remains byte/field unchanged, a new connection
+reports stale and returns stale search/context, and a later rebuild removes obsolete rows
+and becomes ready. Add fault seams for projection page/domain reads, not only INSERT/
+DELETE statements. Add deterministic interleavings proving `record_specification_resolution`
+cannot be lost by a concurrent projection refresh and cannot persist an old source hash.
+
+- [ ] **Step 7: Run PostgreSQL store tests and verify RED**
 
 ```bash
 uv run pytest -q tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py
@@ -536,36 +691,56 @@ uv run pytest -q tests/postgres/test_specifications.py tests/postgres/test_store
 
 Expected: missing projection operations/transaction hooks.
 
-- [ ] **Step 3: Implement store projection and evidence operations**
+- [ ] **Step 8: Implement store projection and evidence operations**
 
 Add backend-equivalent `replace_specification_projection`, `search_specifications`,
 `specification_context`, `record_specification_resolution`, and
 `specification_status`. All methods call `_require_read` or `_require_write` before SQL.
-Use canonical logical records from `specification_store.py`.
+Use canonical logical records from `specification_store.py`. Successful replacement
+updates scenario/binding/evidence rows and `specification_projection_state` atomically;
+status compares the stored successful Markdown revision with the current coherent
+specification-source revision. Missing metadata with sources or rows is stale; no
+sources/rows/metadata is absent; zero-count metadata is ready.
 
-- [ ] **Step 4: Integrate strict transaction and optional savepoint**
+- [ ] **Step 9: Integrate strict transaction and optional savepoint**
 
 Prepare embeddings and specification parsing outside the transaction; re-read the
-coherent domain and make all DELETE/INSERT decisions inside it. Strict uses the existing
-outer page transaction. Optional wraps only derived projection replacement in
-`connection.transaction()` nested savepoint, catches the sanitized projection failure,
-and commits the page outer transaction.
+coherent domain and make all projection reads, evidence-preservation decisions, and
+DELETE/INSERT/metadata decisions inside it. Strict uses the existing outer page
+transaction. Optional wraps the complete derived refresh, including fallible page/domain
+reads, in `connection.transaction()` nested savepoint, catches only a sanitized refresh
+failure, and commits the page outer transaction. Resolution evidence writes acquire the
+same domain lock/order as refresh so neither interleaving loses newer evidence or stores
+an obsolete source hash.
 
-- [ ] **Step 5: Add Git/PostgreSQL golden parity assertions**
+- [ ] **Step 10: Add Git/PostgreSQL golden parity assertions**
 
 Run identical Markdown through both adapters and compare normalized scenario/binding/
-evidence dictionaries, excluding backend revision/storage metadata only.
+evidence dictionaries, excluding backend revision/storage metadata only. Canonicalize
+accepted `checked_at` timestamps at the logical record boundary so `Z`, non-`Z` offsets,
+and equivalent valid spellings round-trip identically through Git and PostgreSQL.
 
-- [ ] **Step 6: Bump to `0.7.211`, run store tests, and commit**
+- [ ] **Step 11: Run combined schema and projection verification**
+
+```bash
+uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py
+```
+
+Expected: schema upgrade/detachment/rollback, runtime guards, transaction/CAS/restart,
+stale recovery, and adapter parity pass together. Guarded PostgreSQL cases may skip only
+for the exact missing disposable-database reason and must run before result close.
+
+- [ ] **Step 12: Bump to `0.7.213` and commit the complete PostgreSQL boundary**
 
 ```bash
 uv sync --extra dev
-uv run pytest -q tests/test_package.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py
-git add src/iwiki_mcp/postgres/store.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
+uv run pytest -q tests/test_package.py tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py
+git add src/iwiki_mcp/postgres/migrations.py src/iwiki_mcp/postgres/store.py src/iwiki_mcp/http.py src/iwiki_mcp/server.py tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "feat(spec): persist PostgreSQL specification projections"
 ```
 
-Expected: transaction, CAS, restart, and parity tests pass.
+Expected: schema v7 is tenant/domain protected and fail-closed on unsafe rollback;
+transactions, CAS, restart, durable stale deletion, recovery, and parity pass.
 
 ## Task 7: Semantic search, context freshness, and graph-optional resolution
 
@@ -647,7 +822,7 @@ Capture scenario hash and graph revision, resolve every binding, recheck both, t
 one attempt transactionally. A changed revision records only
 `graph_unavailable/revision_changed`, never partial targets.
 
-- [ ] **Step 7: Bump to `0.7.212`, run query/resolution and graph tests, and commit**
+- [ ] **Step 7: Bump to `0.7.214`, run query/resolution and graph tests, and commit**
 
 ```bash
 uv sync --extra dev
@@ -707,7 +882,7 @@ Compose independent specification blocks after ordinary reports. Catch sanitized
 projection exceptions locally so ordinary status/lint data still returns. Do not place
 specification findings in `engine.lint` structural categories.
 
-- [ ] **Step 6: Bump to `0.7.213`, run transport/status tests, and commit**
+- [ ] **Step 6: Bump to `0.7.215`, run transport/status tests, and commit**
 
 ```bash
 uv sync --extra dev
@@ -765,7 +940,7 @@ uv run pytest -q -m measurement tests/measurement/test_specification_paths.py -s
 Expected: compatibility/parity suites pass; measurement emits one deterministic-shape
 JSON record without a timing gate.
 
-- [ ] **Step 5: Bump to `0.7.214`, verify, and commit regression coverage**
+- [ ] **Step 5: Bump to `0.7.216`, verify, and commit regression coverage**
 
 ```bash
 uv sync --extra dev
@@ -828,14 +1003,14 @@ page slugs/revisions and lint result in task ledger. No source hook writes Wiki.
 
 - [ ] **Step 6: Bump implementation release version**
 
-Task 9 commits `0.7.214`; this documentation repository change therefore bumps all four
-version surfaces to `0.7.215`:
+Task 9 commits `0.7.216`; this documentation repository change therefore bumps all four
+version surfaces to `0.7.217`:
 
 ```text
-pyproject.toml: version = "0.7.215"
-src/iwiki_mcp/__init__.py: __version__ = "0.7.215"
-tests/test_package.py: expected "0.7.215"
-uv.lock: iwiki-mcp package version "0.7.215"
+pyproject.toml: version = "0.7.217"
+src/iwiki_mcp/__init__.py: __version__ = "0.7.217"
+tests/test_package.py: expected "0.7.217"
+uv.lock: iwiki-mcp package version "0.7.217"
 ```
 
 - [ ] **Step 7: Run docs/resource/version checks and commit**
@@ -919,10 +1094,12 @@ Wiki/code-graph evidence, and no secrets.
 | R-019: agent rules | 10 |
 | R-020: regressions/no-graph compatibility | 4, 6, 9, 11 |
 | R-021: measurement evidence | 9, 11 |
+| R-022: durable optional deletion and recovery | 6, 11 |
 | AC-001, AC-002, AC-003, AC-004, AC-005, AC-006 | 1, 3, 4 |
 | AC-007, AC-008, AC-009, AC-010, AC-011 | 2, 4, 6, 9 |
 | AC-012, AC-013, AC-014, AC-015, AC-016, AC-017 | 3, 4, 6, 7 |
-| AC-018, AC-019, AC-020, AC-021, AC-022, AC-023 | 8, 9, 10, 11 |
+| AC-018, AC-019, AC-020, AC-021, AC-022, AC-023 | 7, 8, 9, 10, 11 |
+| AC-024: schema-v7 stale deletion/rebuild contract | 6, 11 |
 
 ## Worker review protocol
 
