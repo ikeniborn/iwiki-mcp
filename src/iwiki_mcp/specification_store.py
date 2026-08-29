@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -385,6 +386,23 @@ class ResolutionAttempt:
             _text(self.graph_revision, "graph revision")
         _text(self.specification_source_hash, "specification source hash")
         _text(self.checked_at, "resolution checked time")
+        try:
+            parsed_checked_at = datetime.fromisoformat(
+                self.checked_at[:-1] + "+00:00"
+                if self.checked_at.endswith("Z")
+                else self.checked_at
+            )
+        except ValueError as exc:
+            raise ValueError("invalid resolution checked time") from exc
+        if parsed_checked_at.tzinfo is None:
+            raise ValueError("invalid resolution checked time")
+        object.__setattr__(
+            self,
+            "checked_at",
+            parsed_checked_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        )
         object.__setattr__(
             self,
             "graph_state_fingerprint",

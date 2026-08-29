@@ -752,11 +752,18 @@ def test_runtime_principal_specification_grants_and_cross_tenant_rls(auth_store)
                 page_ids[iwiki_id] = cursor.fetchone()[0]
                 cursor.execute(
                     "INSERT INTO iwiki.specification_scenarios "
-                    "(iwiki_id, domain_id, scenario_id, page_id, title, heading, "
-                    "anchor, source_hash, items, page_revision) VALUES "
-                    "(%s, %s, 'stable-id', %s, 'Stable', 'Stable', 'stable', "
-                    "%s, '[]', 1)",
+                    "(iwiki_id, domain_id, scenario_id, page_id, page_slug, "
+                    "title, heading, anchor, source_hash, items, page_revision) "
+                    "VALUES (%s, %s, 'stable-id', %s, 'spec', 'Stable', "
+                    "'Stable', 'stable', %s, '[]', 1)",
                     (iwiki_id, domain_ids[iwiki_id], page_ids[iwiki_id], "a" * 64),
+                )
+                cursor.execute(
+                    "INSERT INTO iwiki.specification_projection_state "
+                    "(iwiki_id, domain_id, markdown_revision, "
+                    "projection_revision, scenario_count, binding_count) "
+                    "VALUES (%s, %s, 'markdown-1', 'projection-1', 1, 0)",
+                    (iwiki_id, domain_ids[iwiki_id]),
                 )
 
     role, password = create_runtime_role(auth_store.dsn, prefix="specification")
@@ -780,6 +787,7 @@ def test_runtime_principal_specification_grants_and_cross_tenant_rls(auth_store)
                     "specification_scenarios",
                     "specification_bindings",
                     "specification_evidence",
+                    "specification_projection_state",
                 ):
                     cursor.execute(
                         "SELECT has_table_privilege(%s, %s, 'SELECT') "
@@ -813,10 +821,11 @@ def test_runtime_principal_specification_grants_and_cross_tenant_rls(auth_store)
                     with connection.transaction():
                         cursor.execute(
                             "INSERT INTO iwiki.specification_scenarios "
-                            "(iwiki_id, domain_id, scenario_id, page_id, title, "
-                            "heading, anchor, source_hash, items, page_revision) "
-                            "VALUES ('wiki-b', %s, 'forbidden', %s, 'Forbidden', "
-                            "'Forbidden', 'forbidden', %s, '[]', 1)",
+                            "(iwiki_id, domain_id, scenario_id, page_id, page_slug, "
+                            "title, heading, anchor, source_hash, items, "
+                            "page_revision) VALUES ('wiki-b', %s, 'forbidden', "
+                            "%s, 'spec', 'Forbidden', 'Forbidden', 'forbidden', "
+                            "%s, '[]', 1)",
                             (domain_ids["wiki-b"], page_ids["wiki-b"], "b" * 64),
                         )
     finally:
@@ -847,10 +856,10 @@ def test_read_only_runtime_principal_cannot_delete_specification_rows(auth_store
             page_id = cursor.fetchone()[0]
             cursor.execute(
                 "INSERT INTO iwiki.specification_scenarios "
-                "(iwiki_id, domain_id, scenario_id, page_id, title, heading, "
-                "anchor, source_hash, items, page_revision) VALUES "
-                "('wiki-a', %s, 'read-only', %s, 'Read only', 'Read only', "
-                "'read-only', %s, '[]', 1)",
+                "(iwiki_id, domain_id, scenario_id, page_id, page_slug, title, "
+                "heading, anchor, source_hash, items, page_revision) VALUES "
+                "('wiki-a', %s, 'read-only', %s, 'readonly-spec', 'Read only', "
+                "'Read only', 'read-only', %s, '[]', 1)",
                 (domain_id, page_id, "a" * 64),
             )
             cursor.execute(
@@ -870,6 +879,13 @@ def test_read_only_runtime_principal_cannot_delete_specification_rows(auth_store
                 "'[\"symbol-a\"]', NULL, 'graph-1', %s, %s, "
                 "CURRENT_TIMESTAMP, NULL)",
                 (domain_id, "sha256:" + "b" * 64, "a" * 64),
+            )
+            cursor.execute(
+                "INSERT INTO iwiki.specification_projection_state "
+                "(iwiki_id, domain_id, markdown_revision, projection_revision, "
+                "scenario_count, binding_count) VALUES "
+                "('wiki-a', %s, 'markdown-1', 'projection-1', 1, 1)",
+                (domain_id,),
             )
 
     role, password = create_runtime_role(auth_store.dsn, prefix="spec-readonly")
@@ -892,6 +908,7 @@ def test_read_only_runtime_principal_cannot_delete_specification_rows(auth_store
                     "specification_scenarios",
                     "specification_bindings",
                     "specification_evidence",
+                    "specification_projection_state",
                 ):
                     cursor.execute(f"SELECT count(*) FROM iwiki.{table}")
                     assert cursor.fetchone() == (1,)
@@ -903,9 +920,10 @@ def test_read_only_runtime_principal_cannot_delete_specification_rows(auth_store
                     "SELECT "
                     "(SELECT count(*) FROM iwiki.specification_scenarios), "
                     "(SELECT count(*) FROM iwiki.specification_bindings), "
-                    "(SELECT count(*) FROM iwiki.specification_evidence)"
+                    "(SELECT count(*) FROM iwiki.specification_evidence), "
+                    "(SELECT count(*) FROM iwiki.specification_projection_state)"
                 )
-                assert cursor.fetchone() == (1, 1, 1)
+                assert cursor.fetchone() == (1, 1, 1, 1)
     finally:
         drop_runtime_role(auth_store.dsn, role)
 

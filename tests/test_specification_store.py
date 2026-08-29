@@ -180,6 +180,21 @@ def test_jsonl_metadata_version_order_and_exact_logical_round_trip():
     assert encode_jsonl(decode_jsonl(encoded)) == encoded
 
 
+@pytest.mark.parametrize(
+    "checked_at",
+    [
+        "2026-08-29T12:00:00Z",
+        "2026-08-29T14:00:00+02:00",
+        "2026-08-29T07:00:00-05:00",
+        "2026-08-29T12:00:00+00:00",
+    ],
+)
+def test_resolution_timestamp_normalizes_equivalent_offsets(checked_at):
+    attempt = replace(_projection().evidence[0], checked_at=checked_at)
+
+    assert attempt.checked_at == "2026-08-29T12:00:00Z"
+
+
 def test_projection_normalizes_logical_record_order_before_serialization():
     projection = _projection()
     second_binding = projection.bindings[1]

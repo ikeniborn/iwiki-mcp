@@ -377,6 +377,7 @@ def _postgres_store_for_binding(binding: base.PostgresBinding):
             _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
         ),
         require_database_principal=True,
+        specification_mode=binding.specification_mode,
     )
 
 
@@ -4634,7 +4635,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     if not _is_postgres(binding):
         return
     _postgres_migrations.require_schema_version(
-        binding.connection_dsn(), expected_version=6
+        binding.connection_dsn(), expected_version=7
     )
 
 

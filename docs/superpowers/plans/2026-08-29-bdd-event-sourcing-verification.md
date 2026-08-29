@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 51c148a490864910
+  plan_hash: e2ced5febc351929
   last_run: 2026-08-29
   phases:
     structure: { status: passed }
@@ -525,6 +525,7 @@ AC-024.
 **Files:**
 - Modify: `src/iwiki_mcp/postgres/migrations.py`
 - Modify: `src/iwiki_mcp/postgres/store.py`
+- Modify: `src/iwiki_mcp/specification_store.py`
 - Modify: `src/iwiki_mcp/http.py`
 - Modify: `src/iwiki_mcp/server.py`
 - Modify: `tests/postgres/test_migrations.py`
@@ -723,7 +724,7 @@ and equivalent valid spellings round-trip identically through Git and PostgreSQL
 - [ ] **Step 11: Run combined schema and projection verification**
 
 ```bash
-uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py
+uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_server_startup.py tests/test_specification_store.py
 ```
 
 Expected: schema upgrade/detachment/rollback, runtime guards, transaction/CAS/restart,
@@ -734,8 +735,8 @@ for the exact missing disposable-database reason and must run before result clos
 
 ```bash
 uv sync --extra dev
-uv run pytest -q tests/test_package.py tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py
-git add src/iwiki_mcp/postgres/migrations.py src/iwiki_mcp/postgres/store.py src/iwiki_mcp/http.py src/iwiki_mcp/server.py tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
+uv run pytest -q tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_package.py tests/test_server_startup.py tests/test_specification_store.py
+git add src/iwiki_mcp/postgres/migrations.py src/iwiki_mcp/postgres/store.py src/iwiki_mcp/specification_store.py src/iwiki_mcp/http.py src/iwiki_mcp/server.py tests/postgres/test_migrations.py tests/postgres/test_specification_migrations.py tests/postgres/test_auth.py tests/postgres/test_http.py tests/postgres/test_code_graph_migrations.py tests/test_server_startup.py tests/postgres/test_specifications.py tests/postgres/test_store.py tests/postgres/test_section_ops.py tests/test_specification_store.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "feat(spec): persist PostgreSQL specification projections"
 ```
 

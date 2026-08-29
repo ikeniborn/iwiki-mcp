@@ -593,12 +593,119 @@ SPECIFICATION_MIGRATION_STATEMENTS = (
 )
 
 
+SPECIFICATION_METADATA_MIGRATION_STATEMENTS = (
+    "ALTER TABLE iwiki.specification_scenarios ADD COLUMN page_slug text",
+    """
+    UPDATE iwiki.specification_scenarios s
+    SET page_slug = p.slug
+    FROM iwiki.pages p
+    WHERE p.iwiki_id = s.iwiki_id
+      AND p.domain_id = s.domain_id
+      AND p.page_id = s.page_id
+    """,
+    """
+    ALTER TABLE iwiki.specification_scenarios
+        ALTER COLUMN page_slug SET NOT NULL
+    """,
+    """
+    ALTER TABLE iwiki.specification_scenarios
+        DROP CONSTRAINT specification_scenarios_page_fk
+    """,
+    """
+    ALTER TABLE iwiki.specification_scenarios
+        ALTER COLUMN page_id DROP NOT NULL
+    """,
+    """
+    ALTER TABLE iwiki.specification_scenarios
+        ADD CONSTRAINT specification_scenarios_page_fk
+        FOREIGN KEY (iwiki_id, domain_id, page_id)
+        REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+        ON DELETE SET NULL (page_id)
+    """,
+    """
+    CREATE TABLE iwiki.specification_projection_state (
+        iwiki_id text NOT NULL,
+        domain_id bigint NOT NULL,
+        markdown_revision text NOT NULL,
+        projection_revision text NOT NULL,
+        scenario_count integer NOT NULL CHECK (scenario_count >= 0),
+        binding_count integer NOT NULL CHECK (binding_count >= 0),
+        updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (iwiki_id, domain_id),
+        CONSTRAINT specification_projection_state_domain_fk
+            FOREIGN KEY (iwiki_id, domain_id)
+            REFERENCES iwiki.domains (iwiki_id, domain_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    ALTER TABLE iwiki.specification_projection_state
+        ENABLE ROW LEVEL SECURITY
+    """,
+    """
+    CREATE POLICY database_principal_select
+        ON iwiki.specification_projection_state
+        FOR SELECT
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, false))
+    """,
+    """
+    CREATE POLICY database_principal_insert
+        ON iwiki.specification_projection_state
+        FOR INSERT
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """,
+    """
+    CREATE POLICY database_principal_update
+        ON iwiki.specification_projection_state
+        FOR UPDATE
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """,
+    """
+    CREATE POLICY database_principal_delete
+        ON iwiki.specification_projection_state
+        FOR DELETE
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """,
+)
+
+
+SPECIFICATION_METADATA_MIGRATION = Migration(
+    version=7,
+    statements=SPECIFICATION_METADATA_MIGRATION_STATEMENTS,
+)
+
+
 SCHEMA6_COMPATIBILITY_ROLLBACK_SQL = f"""
 SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
 DROP TABLE iwiki.specification_evidence;
 DROP TABLE iwiki.specification_bindings;
 DROP TABLE iwiki.specification_scenarios;
 DELETE FROM iwiki.schema_migrations WHERE version = 6;
+"""
+
+
+SCHEMA7_COMPATIBILITY_ROLLBACK_SQL = f"""
+SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
+DO $body$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM iwiki.specification_scenarios WHERE page_id IS NULL
+    ) THEN
+        RAISE EXCEPTION 'schema v7 contains detached specification rows';
+    END IF;
+END $body$;
+DROP TABLE iwiki.specification_projection_state;
+ALTER TABLE iwiki.specification_scenarios
+    DROP CONSTRAINT specification_scenarios_page_fk;
+ALTER TABLE iwiki.specification_scenarios
+    ALTER COLUMN page_id SET NOT NULL;
+ALTER TABLE iwiki.specification_scenarios
+    ADD CONSTRAINT specification_scenarios_page_fk
+    FOREIGN KEY (iwiki_id, domain_id, page_id)
+    REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+    ON DELETE CASCADE;
+ALTER TABLE iwiki.specification_scenarios DROP COLUMN page_slug;
+DELETE FROM iwiki.schema_migrations WHERE version = 7;
 """
 
 
@@ -814,6 +921,7 @@ MIGRATIONS = (
     ),
     Migration(version=5, statements=GRAPH_MIGRATION_STATEMENTS),
     Migration(version=6, statements=SPECIFICATION_MIGRATION_STATEMENTS),
+    SPECIFICATION_METADATA_MIGRATION,
 )
 
 
@@ -952,7 +1060,7 @@ def run_migrations(
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 6,
+    expected_version: int = 7,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -1110,4 +1218,86 @@ def rollback_v6_compatibility(
         "dry_run": False,
         "schema_version": 5,
         "removed_marker": 6,
+    }
+
+
+def rollback_v7_compatibility(
+    settings: MigrationSettings,
+    *,
+    confirm: bool,
+) -> dict[str, int | bool]:
+    """Restore schema v6 only when no detached specification rows exist."""
+    if confirm is not True:
+        raise ValueError("confirmation must be literal true")
+    try:
+        with psycopg.connect(
+            settings.dsn,
+            connect_timeout=settings.connect_timeout_s,
+        ) as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(settings.statement_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)",
+                        (str(settings.lock_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,)
+                    )
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(version), 0) "
+                        "FROM iwiki.schema_migrations"
+                    )
+                    current = cursor.fetchone()[0]
+                    if current != 7:
+                        raise MigrationError(
+                            "schema version 7 compatibility rollback is unavailable"
+                        )
+                    cursor.execute(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM iwiki.specification_scenarios "
+                        "WHERE page_id IS NULL)"
+                    )
+                    if cursor.fetchone()[0]:
+                        raise MigrationError(
+                            "schema v7 contains detached specification rows"
+                        )
+                    cursor.execute(
+                        "DROP TABLE iwiki.specification_projection_state"
+                    )
+                    cursor.execute(
+                        "ALTER TABLE iwiki.specification_scenarios "
+                        "DROP CONSTRAINT specification_scenarios_page_fk"
+                    )
+                    cursor.execute(
+                        "ALTER TABLE iwiki.specification_scenarios "
+                        "ALTER COLUMN page_id SET NOT NULL"
+                    )
+                    cursor.execute(
+                        "ALTER TABLE iwiki.specification_scenarios "
+                        "ADD CONSTRAINT specification_scenarios_page_fk "
+                        "FOREIGN KEY (iwiki_id, domain_id, page_id) "
+                        "REFERENCES iwiki.pages (iwiki_id, domain_id, page_id) "
+                        "ON DELETE CASCADE"
+                    )
+                    cursor.execute(
+                        "ALTER TABLE iwiki.specification_scenarios "
+                        "DROP COLUMN page_slug"
+                    )
+                    cursor.execute(
+                        "DELETE FROM iwiki.schema_migrations WHERE version = 7"
+                    )
+                    if cursor.rowcount != 1:
+                        raise MigrationError("migration marker removal failed")
+    except MigrationError:
+        raise
+    except psycopg.Error as exc:
+        raise MigrationError("compatibility rollback failed") from exc
+    return {
+        "dry_run": False,
+        "schema_version": 6,
+        "removed_marker": 7,
     }

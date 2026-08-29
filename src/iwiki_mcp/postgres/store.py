@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any, ContextManager
@@ -22,10 +23,21 @@ from ..engine.related import related
 from ..engine.store import SCHEMA_VERSION, Record, dequantize, make_record
 from ..engine.validate import validate_page
 from ..storage import expected_revision_required, revision_conflict
+from ..specification_store import (
+    BindingRecord,
+    DomainProjection,
+    PhaseItemRecord,
+    ProjectionStatus,
+    ResolutionAttempt,
+    ScenarioContext,
+    ScenarioRecord,
+    semantic_markdown_revision,
+)
 from .auth import AccessError, AuthContext
 
 
 _BLOCKING_FINDINGS = {"deep_heading", "pre_h2_text"}
+_SPECIFICATION_PREPARATION_FAILED = object()
 _PROTECTED_TABLES = (
     "domains",
     "pages",
@@ -42,7 +54,12 @@ _PROTECTED_TABLES = (
     "specification_scenarios",
     "specification_bindings",
     "specification_evidence",
+    "specification_projection_state",
 )
+
+
+class _SpecificationSnapshotChanged(RuntimeError):
+    """Request a full page transaction retry against a newer domain snapshot."""
 
 
 def _principal_shape(cursor, principal: str) -> tuple[bool, bool]:
@@ -158,7 +175,8 @@ def provision_runtime_grant(
                     "iwiki.code_graph_relations, iwiki.code_graph_wiki_links, "
                     "iwiki.specification_scenarios, "
                     "iwiki.specification_bindings, "
-                    "iwiki.specification_evidence TO {}"
+                    "iwiki.specification_evidence, "
+                    "iwiki.specification_projection_state TO {}"
                 ).format(role)
             )
             cursor.execute(
@@ -183,7 +201,8 @@ def provision_runtime_grant(
                     "iwiki.code_graph_relations, iwiki.code_graph_wiki_links, "
                     "iwiki.specification_scenarios, "
                     "iwiki.specification_bindings, "
-                    "iwiki.specification_evidence TO {}"
+                    "iwiki.specification_evidence, "
+                    "iwiki.specification_projection_state TO {}"
                 ).format(role)
             )
             cursor.execute(
@@ -319,6 +338,7 @@ class PostgresStore:
         auth_context: AuthContext | None = None,
         connection_factory: Callable[[], ContextManager[Any]] | None = None,
         require_database_principal: bool = False,
+        specification_mode: str = "optional",
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = _validate_identifier(iwiki_id, "iwiki id")
@@ -331,6 +351,9 @@ class PostgresStore:
             lambda: psycopg.connect(self._dsn)
         )
         self._require_database_principal = require_database_principal
+        if specification_mode not in {"disabled", "optional", "strict"}:
+            raise ValueError("invalid specification mode")
+        self.specification_mode = specification_mode
         if require_database_principal:
             context = auth_context
             if context is None or validate_direct_principal(
@@ -350,6 +373,7 @@ class PostgresStore:
             auth_context=self._auth_context,
             connection_factory=self._connection_factory,
             require_database_principal=self._require_database_principal,
+            specification_mode=self.specification_mode,
         )
 
     def _require_read(self, domain: str) -> None:
@@ -963,6 +987,597 @@ class PostgresStore:
             (self.iwiki_id, domain),
         )
 
+    @staticmethod
+    def _specification_timestamp(value) -> str:
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return str(value)
+
+    @staticmethod
+    def _stored_specification_revision(scenarios) -> str:
+        digest = hashlib.sha256()
+        for scenario in scenarios:
+            for value in (
+                scenario.page_slug,
+                scenario.page_revision,
+                scenario.source_hash,
+            ):
+                digest.update(str(value).encode("utf-8"))
+                digest.update(b"\0")
+        return f"sha256:{digest.hexdigest()}"
+
+    @staticmethod
+    def _specification_page(markdown: str) -> bool:
+        try:
+            metadata, _body = frontmatter.split(markdown)
+        except frontmatter.FrontmatterError:
+            return False
+        page_type = metadata.get("type")
+        return (
+            isinstance(page_type, str)
+            and frontmatter.normalize_type(page_type) == "specification"
+        )
+
+    def _specification_domain(self, cursor, domain: str) -> int:
+        cursor.execute(
+            "SELECT domain_id FROM iwiki.domains "
+            "WHERE iwiki_id = %s AND slug = %s",
+            (self.iwiki_id, domain),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ValueError("domain not found")
+        return row[0]
+
+    def _lock_specification_domain(self, cursor, domain: str) -> int:
+        cursor.execute(
+            "SELECT domain_id FROM iwiki.domains "
+            "WHERE iwiki_id = %s AND slug = %s FOR UPDATE",
+            (self.iwiki_id, domain),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ValueError("domain not found")
+        return row[0]
+
+    def _specification_pages(self, cursor, domain_id: int):
+        cursor.execute(
+            "SELECT slug, markdown, revision FROM iwiki.pages "
+            "WHERE iwiki_id = %s AND domain_id = %s ORDER BY slug",
+            (self.iwiki_id, domain_id),
+        )
+        return cursor.fetchall()
+
+    def _specification_projection_from_cursor(
+        self, cursor, domain: str, domain_id: int | None = None
+    ) -> DomainProjection:
+        if domain_id is None:
+            domain_id = self._specification_domain(cursor, domain)
+        cursor.execute(
+            "SELECT s.scenario_id, s.title, s.page_slug, s.heading, s.anchor, "
+            "s.source_hash, s.items, s.page_revision "
+            "FROM iwiki.specification_scenarios s "
+            "WHERE s.iwiki_id = %s AND s.domain_id = %s "
+            "ORDER BY s.scenario_id, s.page_slug, s.heading",
+            (self.iwiki_id, domain_id),
+        )
+        scenarios = tuple(
+            ScenarioRecord(
+                domain=domain,
+                scenario_id=scenario_id,
+                title=title,
+                page_slug=page_slug,
+                heading=heading,
+                anchor=anchor,
+                source_hash=source_hash,
+                items=tuple(
+                    PhaseItemRecord(
+                        phase=item["phase"], role=item["role"], name=item["name"]
+                    )
+                    for item in items
+                ),
+                page_revision=page_revision,
+            )
+            for (
+                scenario_id,
+                title,
+                page_slug,
+                heading,
+                anchor,
+                source_hash,
+                items,
+                page_revision,
+            ) in cursor.fetchall()
+        )
+        cursor.execute(
+            "SELECT scenario_id, binding_id, relation, phase, selector_kind, "
+            "selector FROM iwiki.specification_bindings "
+            "WHERE iwiki_id = %s AND domain_id = %s "
+            "ORDER BY scenario_id, binding_id",
+            (self.iwiki_id, domain_id),
+        )
+        bindings = tuple(
+            BindingRecord(
+                binding_id=binding_id,
+                domain=domain,
+                scenario_id=scenario_id,
+                relation=relation,
+                phase=phase,
+                selector_kind=selector_kind,
+                selector=selector,
+            )
+            for (
+                scenario_id,
+                binding_id,
+                relation,
+                phase,
+                selector_kind,
+                selector,
+            ) in cursor.fetchall()
+        )
+        cursor.execute(
+            "SELECT scenario_id, binding_id, state, targets, "
+            "unresolved_reference, graph_revision, graph_state_fingerprint, "
+            "specification_source_hash, checked_at, reason "
+            "FROM iwiki.specification_evidence "
+            "WHERE iwiki_id = %s AND domain_id = %s "
+            "ORDER BY scenario_id, binding_id",
+            (self.iwiki_id, domain_id),
+        )
+        evidence = tuple(
+            ResolutionAttempt(
+                binding_id=binding_id,
+                domain=domain,
+                scenario_id=scenario_id,
+                state=state,
+                targets=tuple(targets),
+                unresolved_reference=unresolved_reference,
+                graph_revision=graph_revision,
+                graph_state_fingerprint=graph_state_fingerprint,
+                specification_source_hash=specification_source_hash,
+                checked_at=self._specification_timestamp(checked_at),
+                reason=reason,
+            )
+            for (
+                scenario_id,
+                binding_id,
+                state,
+                targets,
+                unresolved_reference,
+                graph_revision,
+                graph_state_fingerprint,
+                specification_source_hash,
+                checked_at,
+                reason,
+            ) in cursor.fetchall()
+        )
+        cursor.execute(
+            "SELECT markdown_revision, projection_revision, scenario_count, "
+            "binding_count FROM iwiki.specification_projection_state "
+            "WHERE iwiki_id = %s AND domain_id = %s",
+            (self.iwiki_id, domain_id),
+        )
+        metadata = cursor.fetchone()
+        pages = self._specification_pages(cursor, domain_id)
+        current_revision = semantic_markdown_revision(
+            (slug, markdown, revision)
+            for slug, markdown, revision in pages
+            if self._specification_page(markdown)
+        )
+        state = (
+            "ready"
+            if metadata is not None and metadata[0] == current_revision
+            else "stale"
+        )
+        return DomainProjection(
+            domain=domain,
+            markdown_revision=(
+                metadata[0]
+                if metadata is not None
+                else self._stored_specification_revision(scenarios)
+            ),
+            scenarios=scenarios,
+            bindings=bindings,
+            evidence=evidence,
+            findings=(),
+            state=state,
+            reason="projection_stale" if state == "stale" else None,
+        )
+
+    def _replace_specification_projection(
+        self, cursor, projection: DomainProjection
+    ) -> dict[str, object]:
+        domain_id = self._lock_specification_domain(cursor, projection.domain)
+        current_pages = self._specification_pages(cursor, domain_id)
+        current_revision = semantic_markdown_revision(
+            (slug, markdown, revision)
+            for slug, markdown, revision in current_pages
+            if self._specification_page(markdown)
+        )
+        if current_revision != projection.markdown_revision:
+            raise _SpecificationSnapshotChanged
+        page_slugs = sorted({item.page_slug for item in projection.scenarios})
+        pages = {}
+        if page_slugs:
+            cursor.execute(
+                "SELECT slug, page_id, revision FROM iwiki.pages "
+                "WHERE iwiki_id = %s AND domain_id = %s AND slug = ANY(%s)",
+                (self.iwiki_id, domain_id, page_slugs),
+            )
+            pages = {
+                slug: (page_id, revision)
+                for slug, page_id, revision in cursor.fetchall()
+            }
+        if any(
+            item.page_slug not in pages
+            or item.page_revision != pages[item.page_slug][1]
+            for item in projection.scenarios
+        ):
+            raise ValueError("specification projection does not match pages")
+        current_projection = self._specification_projection_from_cursor(
+            cursor, projection.domain, domain_id
+        )
+        scenario_hashes = {
+            scenario.scenario_id: scenario.source_hash
+            for scenario in projection.scenarios
+        }
+        binding_ids = {binding.binding_id for binding in projection.bindings}
+        preserved_evidence: dict[str, ResolutionAttempt] = {}
+        for attempt in (*current_projection.evidence, *projection.evidence):
+            if (
+                attempt.binding_id in binding_ids
+                and scenario_hashes.get(attempt.scenario_id)
+                == attempt.specification_source_hash
+                and (
+                    attempt.binding_id not in preserved_evidence
+                    or preserved_evidence[attempt.binding_id].checked_at
+                    < attempt.checked_at
+                )
+            ):
+                preserved_evidence[attempt.binding_id] = attempt
+        cursor.execute(
+            "DELETE FROM iwiki.specification_scenarios "
+            "WHERE iwiki_id = %s AND domain_id = %s",
+            (self.iwiki_id, domain_id),
+        )
+        for scenario in projection.scenarios:
+            cursor.execute(
+                "INSERT INTO iwiki.specification_scenarios ("
+                "iwiki_id, domain_id, scenario_id, page_id, page_slug, title, "
+                "heading, anchor, source_hash, items, page_revision"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    self.iwiki_id,
+                    domain_id,
+                    scenario.scenario_id,
+                    pages[scenario.page_slug][0],
+                    scenario.page_slug,
+                    scenario.title,
+                    scenario.heading,
+                    scenario.anchor,
+                    scenario.source_hash,
+                    Jsonb([
+                        {"phase": item.phase, "role": item.role, "name": item.name}
+                        for item in scenario.items
+                    ]),
+                    scenario.page_revision,
+                ),
+            )
+        for binding in projection.bindings:
+            cursor.execute(
+                "INSERT INTO iwiki.specification_bindings ("
+                "iwiki_id, domain_id, scenario_id, binding_id, relation, phase, "
+                "selector_kind, selector"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    self.iwiki_id,
+                    domain_id,
+                    binding.scenario_id,
+                    binding.binding_id,
+                    binding.relation,
+                    binding.phase,
+                    binding.selector_kind,
+                    binding.selector,
+                ),
+            )
+        for attempt in preserved_evidence.values():
+            self._record_specification_resolution(cursor, domain_id, attempt)
+        logical_revision = self._stored_specification_revision(
+            projection.scenarios
+        )
+        cursor.execute(
+            "INSERT INTO iwiki.specification_projection_state ("
+            "iwiki_id, domain_id, markdown_revision, projection_revision, "
+            "scenario_count, binding_count) VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (iwiki_id, domain_id) DO UPDATE SET "
+            "markdown_revision = EXCLUDED.markdown_revision, "
+            "projection_revision = EXCLUDED.projection_revision, "
+            "scenario_count = EXCLUDED.scenario_count, "
+            "binding_count = EXCLUDED.binding_count, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (
+                self.iwiki_id,
+                domain_id,
+                projection.markdown_revision,
+                logical_revision,
+                projection.scenario_count,
+                projection.binding_count,
+            ),
+        )
+        return {
+            "state": "ready",
+            "scenarios": projection.scenario_count,
+            "bindings": projection.binding_count,
+        }
+
+    @staticmethod
+    def _projection_blocks_page(projection: DomainProjection, slug: str) -> bool:
+        return any(
+            finding.slug == slug
+            or any(location.slug == slug for location in finding.locations)
+            for finding in projection.findings
+        )
+
+    def _prepare_specification_projection(
+        self,
+        domain: str,
+        slug: str,
+        markdown: str | None,
+        page_revision: int | None,
+    ) -> DomainProjection | None:
+        """Parse one candidate domain snapshot before its write transaction."""
+        if self.specification_mode == "disabled":
+            return None
+        candidate_is_specification = (
+            markdown is not None and self._specification_page(markdown)
+        )
+        if not candidate_is_specification:
+            current = self.read_page(domain, slug)
+            if current is None or not self._specification_page(current["markdown"]):
+                return None
+        from ..specifications import PageSnapshot, assemble_projection
+
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._specification_domain(cursor, domain)
+                rows = self._specification_pages(cursor, domain_id)
+                previous = self._specification_projection_from_cursor(cursor, domain)
+        pages = {
+            page_slug: PageSnapshot(page_slug, page_markdown, revision)
+            for page_slug, page_markdown, revision in rows
+        }
+        if markdown is None:
+            pages.pop(slug, None)
+        else:
+            pages[slug] = PageSnapshot(slug, markdown, page_revision)
+        projection = assemble_projection(
+            domain,
+            tuple(pages.values()),
+            previous.evidence,
+            markdown_revision=semantic_markdown_revision(
+                (page.slug, page.markdown, page.revision)
+                for page in pages.values()
+                if self._specification_page(page.markdown)
+            ),
+        )
+        if (
+            self.specification_mode == "strict"
+            and self._projection_blocks_page(projection, slug)
+        ):
+            raise ValueError("invalid specification page")
+        return projection
+
+    def _safe_prepare_specification_projection(
+        self,
+        domain: str,
+        slug: str,
+        markdown: str | None,
+        page_revision: int | None,
+    ):
+        try:
+            return self._prepare_specification_projection(
+                domain, slug, markdown, page_revision
+            )
+        except ValueError as exc:
+            if str(exc) == "invalid specification page":
+                raise
+            if self.specification_mode == "optional":
+                return _SPECIFICATION_PREPARATION_FAILED
+            raise ValueError("specification projection update failed") from None
+        except Exception:
+            if self.specification_mode == "optional":
+                return _SPECIFICATION_PREPARATION_FAILED
+            raise ValueError("specification projection update failed") from None
+
+    def _publish_specification_projection(
+        self,
+        connection,
+        cursor,
+        projection,
+    ) -> str | None:
+        if projection is None:
+            return None
+        if projection is _SPECIFICATION_PREPARATION_FAILED:
+            return "specification projection is stale"
+        if self.specification_mode == "optional":
+            try:
+                with connection.transaction():
+                    self._replace_specification_projection(cursor, projection)
+            except _SpecificationSnapshotChanged:
+                raise
+            except Exception:
+                return "specification projection is stale"
+            return None
+        try:
+            self._replace_specification_projection(cursor, projection)
+        except _SpecificationSnapshotChanged:
+            raise
+        except Exception:
+            raise ValueError("specification projection update failed") from None
+        return None
+
+    def _run_specification_transaction(self, prepare, mutate):
+        for _attempt in range(3):
+            projection = prepare()
+            try:
+                return mutate(projection)
+            except _SpecificationSnapshotChanged:
+                continue
+        if self.specification_mode == "optional":
+            return mutate(_SPECIFICATION_PREPARATION_FAILED)
+        raise ValueError("specification projection update failed")
+
+    def replace_specification_projection(
+        self, projection: DomainProjection
+    ) -> dict[str, object]:
+        self._require_write(projection.domain)
+        if self.specification_mode == "disabled":
+            return {"state": "disabled"}
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                return self._replace_specification_projection(cursor, projection)
+
+    def search_specifications(
+        self, domains: tuple[str, ...], query: str, limit: int
+    ) -> tuple[ScenarioRecord, ...]:
+        from ..specifications import search_projections
+
+        valid_domains = tuple(
+            dict.fromkeys(_validate_identifier(domain, "domain") for domain in domains)
+        )
+        for domain in valid_domains:
+            self._require_read(domain)
+        if self.specification_mode == "disabled":
+            return ()
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                projections = tuple(
+                    self._specification_projection_from_cursor(cursor, domain)
+                    for domain in valid_domains
+                )
+        return search_projections(projections, query, limit)
+
+    def specification_context(
+        self, domain: str, scenario_id: str
+    ) -> ScenarioContext | None:
+        from ..specifications import projection_context
+
+        domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
+        if self.specification_mode == "disabled":
+            return None
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                projection = self._specification_projection_from_cursor(cursor, domain)
+        return projection_context(projection, scenario_id)
+
+    def _record_specification_resolution(
+        self, cursor, domain_id: int, attempt: ResolutionAttempt
+    ) -> None:
+        cursor.execute(
+            "SELECT s.source_hash FROM iwiki.specification_bindings b "
+            "JOIN iwiki.specification_scenarios s ON s.iwiki_id = b.iwiki_id "
+            "AND s.domain_id = b.domain_id AND s.scenario_id = b.scenario_id "
+            "WHERE b.iwiki_id = %s AND b.domain_id = %s "
+            "AND b.scenario_id = %s AND b.binding_id = %s",
+            (
+                self.iwiki_id,
+                domain_id,
+                attempt.scenario_id,
+                attempt.binding_id,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] != attempt.specification_source_hash:
+            raise ValueError("resolution attempt does not match projection")
+        cursor.execute(
+            "INSERT INTO iwiki.specification_evidence ("
+            "iwiki_id, domain_id, scenario_id, binding_id, state, targets, "
+            "unresolved_reference, graph_revision, graph_state_fingerprint, "
+            "specification_source_hash, checked_at, reason"
+            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (iwiki_id, domain_id, scenario_id, binding_id) "
+            "DO UPDATE SET state = EXCLUDED.state, targets = EXCLUDED.targets, "
+            "unresolved_reference = EXCLUDED.unresolved_reference, "
+            "graph_revision = EXCLUDED.graph_revision, "
+            "graph_state_fingerprint = EXCLUDED.graph_state_fingerprint, "
+            "specification_source_hash = EXCLUDED.specification_source_hash, "
+            "checked_at = EXCLUDED.checked_at, reason = EXCLUDED.reason",
+            (
+                self.iwiki_id,
+                domain_id,
+                attempt.scenario_id,
+                attempt.binding_id,
+                attempt.state,
+                Jsonb(list(attempt.targets)),
+                attempt.unresolved_reference,
+                attempt.graph_revision,
+                attempt.graph_state_fingerprint,
+                attempt.specification_source_hash,
+                attempt.checked_at,
+                attempt.reason,
+            ),
+        )
+
+    def record_specification_resolution(self, attempt: ResolutionAttempt) -> None:
+        self._require_write(attempt.domain)
+        if self.specification_mode == "disabled":
+            return
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._lock_specification_domain(
+                    cursor, attempt.domain
+                )
+                self._record_specification_resolution(cursor, domain_id, attempt)
+
+    def specification_status(self, domain: str) -> ProjectionStatus:
+        domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
+        if self.specification_mode == "disabled":
+            return ProjectionStatus(domain=domain, state="disabled")
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._specification_domain(cursor, domain)
+                pages = self._specification_pages(cursor, domain_id)
+                specification_pages = tuple(
+                    (slug, markdown, revision)
+                    for slug, markdown, revision in pages
+                    if self._specification_page(markdown)
+                )
+                cursor.execute(
+                    "SELECT markdown_revision, scenario_count, binding_count "
+                    "FROM iwiki.specification_projection_state "
+                    "WHERE iwiki_id = %s AND domain_id = %s",
+                    (self.iwiki_id, domain_id),
+                )
+                metadata = cursor.fetchone()
+                cursor.execute(
+                    "SELECT count(*), (SELECT count(*) FROM "
+                    "iwiki.specification_bindings WHERE iwiki_id = %s "
+                    "AND domain_id = %s) FROM iwiki.specification_scenarios "
+                    "WHERE iwiki_id = %s AND domain_id = %s",
+                    (self.iwiki_id, domain_id, self.iwiki_id, domain_id),
+                )
+                row_counts = cursor.fetchone()
+        if metadata is None and not specification_pages and row_counts == (0, 0):
+            return ProjectionStatus(domain=domain, state="absent")
+        current_revision = semantic_markdown_revision(specification_pages)
+        if metadata is None:
+            markdown_revision = self._stored_specification_revision(())
+            scenario_count, binding_count = row_counts
+            stale = True
+        else:
+            markdown_revision, scenario_count, binding_count = metadata
+            stale = markdown_revision != current_revision
+        return ProjectionStatus(
+            domain=domain,
+            state="stale" if stale else "ready",
+            markdown_revision=markdown_revision,
+            scenario_count=scenario_count,
+            binding_count=binding_count,
+            reason="projection_stale" if stale else None,
+        )
+
     def markdown_snapshot(self, domain: str):
         """Return one coherent Markdown snapshot with its canonical revision."""
         from ..codegraph.linking import (
@@ -1001,36 +1616,58 @@ class PostgresStore:
         domain, slug, markdown, chunks, records, targets = self._prepare_page(
             domain, slug, markdown
         )
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT domain_id FROM iwiki.domains "
-                    "WHERE iwiki_id = %s AND slug = %s",
-                    (self.iwiki_id, domain),
-                )
-                domain_row = cursor.fetchone()
-                if domain_row is None:
-                    raise ValueError("domain not found")
-                cursor.execute(
-                    "INSERT INTO iwiki.pages (iwiki_id, domain_id, slug, markdown) "
-                    "VALUES (%s, %s, %s, %s) "
-                    "ON CONFLICT (iwiki_id, domain_id, slug) DO NOTHING "
-                    "RETURNING page_id, revision",
-                    (self.iwiki_id, domain_row[0], slug, markdown),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    return {
-                        "error": "page_exists",
-                        "hint": "read the page before updating it",
-                    }
-                self._replace_derived(cursor, row[0], chunks, records, targets)
-                self._bump_markdown_generation(cursor, domain)
-        return {
+
+        def prepare_projection():
+            return self._safe_prepare_specification_projection(
+                domain, slug, markdown, 1
+            )
+
+        def mutate(projection):
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT domain_id FROM iwiki.domains "
+                        "WHERE iwiki_id = %s AND slug = %s",
+                        (self.iwiki_id, domain),
+                    )
+                    domain_row = cursor.fetchone()
+                    if domain_row is None:
+                        raise ValueError("domain not found")
+                    cursor.execute(
+                        "INSERT INTO iwiki.pages "
+                        "(iwiki_id, domain_id, slug, markdown) "
+                        "VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT (iwiki_id, domain_id, slug) DO NOTHING "
+                        "RETURNING page_id, revision",
+                        (self.iwiki_id, domain_row[0], slug, markdown),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        return {
+                            "error": "page_exists",
+                            "hint": "read the page before updating it",
+                        }
+                    self._replace_derived(cursor, row[0], chunks, records, targets)
+                    self._bump_markdown_generation(cursor, domain)
+                    warning = self._publish_specification_projection(
+                        connection, cursor, projection
+                    )
+            return row, warning
+
+        outcome = self._run_specification_transaction(
+            prepare_projection, mutate
+        )
+        if isinstance(outcome, dict):
+            return outcome
+        row, specification_warning = outcome
+        result = {
             "page": f"{domain}/{slug}.md",
             "revision": row[1],
             "indexed_chunks": len(records),
         }
+        if specification_warning is not None:
+            result["warning"] = specification_warning
+        return result
 
     def update_page(
         self,
@@ -1042,40 +1679,69 @@ class PostgresStore:
         self._require_write(_validate_identifier(domain, "domain"))
         if expected_revision is None:
             return expected_revision_required()
+        current_page = self.read_page(domain, slug)
+        if current_page is None or current_page["revision"] != expected_revision:
+            return revision_conflict(
+                current_page["revision"] if current_page is not None else None
+            )
         domain, slug, markdown, chunks, records, targets = self._prepare_page(
             domain, slug, markdown, reuse=True
         )
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "UPDATE iwiki.pages p SET markdown = %s, "
-                    "revision = p.revision + 1, updated_at = CURRENT_TIMESTAMP "
-                    "FROM iwiki.domains d WHERE p.iwiki_id = %s "
-                    "AND d.iwiki_id = p.iwiki_id AND d.domain_id = p.domain_id "
-                    "AND d.slug = %s AND p.slug = %s AND p.revision = %s "
-                    "RETURNING p.page_id, p.revision",
-                    (markdown, self.iwiki_id, domain, slug, expected_revision),
-                )
-                row = cursor.fetchone()
-                if row is None:
+
+        def prepare_projection():
+            return self._safe_prepare_specification_projection(
+                domain, slug, markdown, expected_revision + 1
+            )
+
+        def mutate(projection):
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
                     cursor.execute(
-                        "SELECT p.revision FROM iwiki.pages p "
-                        "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
-                        "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
-                        "AND d.slug = %s AND p.slug = %s",
-                        (self.iwiki_id, domain, slug),
+                        "UPDATE iwiki.pages p SET markdown = %s, "
+                        "revision = p.revision + 1, "
+                        "updated_at = CURRENT_TIMESTAMP "
+                        "FROM iwiki.domains d WHERE p.iwiki_id = %s "
+                        "AND d.iwiki_id = p.iwiki_id "
+                        "AND d.domain_id = p.domain_id "
+                        "AND d.slug = %s AND p.slug = %s AND p.revision = %s "
+                        "RETURNING p.page_id, p.revision",
+                        (markdown, self.iwiki_id, domain, slug, expected_revision),
                     )
-                    current = cursor.fetchone()
-                    return revision_conflict(current[0] if current else None)
-                self._replace_derived(
-                    cursor, row[0], chunks, records, targets, reuse=True
-                )
-                self._bump_markdown_generation(cursor, domain)
-        return {
+                    row = cursor.fetchone()
+                    if row is None:
+                        cursor.execute(
+                            "SELECT p.revision FROM iwiki.pages p "
+                            "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                            "AND d.domain_id = p.domain_id "
+                            "WHERE p.iwiki_id = %s "
+                            "AND d.slug = %s AND p.slug = %s",
+                            (self.iwiki_id, domain, slug),
+                        )
+                        current = cursor.fetchone()
+                        return revision_conflict(current[0] if current else None)
+                    self._replace_derived(
+                        cursor, row[0], chunks, records, targets, reuse=True
+                    )
+                    self._bump_markdown_generation(cursor, domain)
+                    warning = self._publish_specification_projection(
+                        connection, cursor, projection
+                    )
+            return row, warning
+
+        outcome = self._run_specification_transaction(
+            prepare_projection, mutate
+        )
+        if isinstance(outcome, dict):
+            return outcome
+        row, specification_warning = outcome
+        result = {
             "page": f"{domain}/{slug}.md",
             "revision": row[1],
             "indexed_chunks": len(records),
         }
+        if specification_warning is not None:
+            result["warning"] = specification_warning
+        return result
 
     def delete_page(
         self,
@@ -1088,29 +1754,56 @@ class PostgresStore:
             return expected_revision_required()
         domain = _validate_identifier(domain, "domain")
         slug = _validate_identifier(slug, "page slug")
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT p.page_id, p.revision FROM iwiki.pages p "
-                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
-                    "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
-                    "AND d.slug = %s AND p.slug = %s FOR UPDATE OF p",
-                    (self.iwiki_id, domain, slug),
-                )
-                current = cursor.fetchone()
-                if current is None or current[1] != expected_revision:
-                    return revision_conflict(current[1] if current else None)
-                cursor.execute(
-                    "UPDATE iwiki.links SET target_page_id = NULL "
-                    "WHERE iwiki_id = %s AND target_page_id = %s",
-                    (self.iwiki_id, current[0]),
-                )
-                cursor.execute(
-                    "DELETE FROM iwiki.pages WHERE iwiki_id = %s AND page_id = %s",
-                    (self.iwiki_id, current[0]),
-                )
-                self._bump_markdown_generation(cursor, domain)
-        return {"page": f"{domain}/{slug}.md", "deleted": True}
+        current_page = self.read_page(domain, slug)
+        if current_page is None or current_page["revision"] != expected_revision:
+            return revision_conflict(
+                current_page["revision"] if current_page is not None else None
+            )
+
+        def prepare_projection():
+            return self._safe_prepare_specification_projection(
+                domain, slug, None, None
+            )
+
+        def mutate(projection):
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT p.page_id, p.revision FROM iwiki.pages p "
+                        "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                        "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
+                        "AND d.slug = %s AND p.slug = %s FOR UPDATE OF p",
+                        (self.iwiki_id, domain, slug),
+                    )
+                    current = cursor.fetchone()
+                    if current is None or current[1] != expected_revision:
+                        return revision_conflict(current[1] if current else None)
+                    cursor.execute(
+                        "UPDATE iwiki.links SET target_page_id = NULL "
+                        "WHERE iwiki_id = %s AND target_page_id = %s",
+                        (self.iwiki_id, current[0]),
+                    )
+                    cursor.execute(
+                        "DELETE FROM iwiki.pages "
+                        "WHERE iwiki_id = %s AND page_id = %s",
+                        (self.iwiki_id, current[0]),
+                    )
+                    self._bump_markdown_generation(cursor, domain)
+                    warning = self._publish_specification_projection(
+                        connection, cursor, projection
+                    )
+            return current, warning
+
+        outcome = self._run_specification_transaction(
+            prepare_projection, mutate
+        )
+        if isinstance(outcome, dict):
+            return outcome
+        _current, specification_warning = outcome
+        result = {"page": f"{domain}/{slug}.md", "deleted": True}
+        if specification_warning is not None:
+            result["warning"] = specification_warning
+        return result
 
     @staticmethod
     def _decode_record(
@@ -1368,37 +2061,117 @@ class PostgresStore:
     def index_domain(self, domain: str) -> dict:
         domain = _validate_identifier(domain, "domain")
         self._require_write(domain)
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT p.page_id, p.slug, p.markdown FROM iwiki.pages p "
-                    "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
-                    "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
-                    "AND d.slug = %s ORDER BY p.slug",
-                    (self.iwiki_id, domain),
-                )
-                pages = cursor.fetchall()
-        prepared = []
-        for page_id, slug, markdown in pages:
-            _domain, _slug, _markdown, chunks, records, targets = (
-                self._prepare_page(domain, slug, markdown)
-            )
-            prepared.append((page_id, chunks, records, targets))
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                for page_id, chunks, records, targets in prepared:
-                    self._replace_derived(
-                        cursor, page_id, chunks, records, targets
+        from ..specifications import PageSnapshot, assemble_projection
+
+        prepared_pages = []
+
+        def prepare_projection():
+            with self._connect() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT p.page_id, p.slug, p.markdown, p.revision "
+                        "FROM iwiki.pages p JOIN iwiki.domains d "
+                        "ON d.iwiki_id = p.iwiki_id "
+                        "AND d.domain_id = p.domain_id WHERE p.iwiki_id = %s "
+                        "AND d.slug = %s ORDER BY p.slug",
+                        (self.iwiki_id, domain),
                     )
-        count = sum(len(records) for _page, _chunks, records, _targets in prepared)
-        return {
-            "domain": domain,
-            "indexed_chunks": count,
-            "reused": 0,
-            "embedded": count,
-            "bytes": 0,
-            "over_cap": False,
-        }
+                    pages = cursor.fetchall()
+            prepared_pages.clear()
+            for page_id, slug, markdown, _revision in pages:
+                _domain, _slug, _markdown, chunks, records, targets = (
+                    self._prepare_page(domain, slug, markdown)
+                )
+                prepared_pages.append((page_id, chunks, records, targets))
+            if self.specification_mode == "disabled":
+                return None
+            try:
+                snapshots = tuple(
+                    PageSnapshot(slug, markdown, revision)
+                    for _page_id, slug, markdown, revision in pages
+                )
+                return assemble_projection(
+                    domain,
+                    snapshots,
+                    markdown_revision=semantic_markdown_revision(
+                        (page.slug, page.markdown, page.revision)
+                        for page in snapshots
+                        if self._specification_page(page.markdown)
+                    ),
+                )
+            except Exception:
+                return _SPECIFICATION_PREPARATION_FAILED
+
+        def publish(projection):
+            warning = None
+            with self._connect() as connection:
+                with connection.transaction():
+                    with connection.cursor() as cursor:
+                        for page_id, chunks, records, targets in prepared_pages:
+                            self._replace_derived(
+                                cursor, page_id, chunks, records, targets
+                            )
+                        if self.specification_mode != "disabled":
+                            if self.specification_mode == "optional":
+                                warning = self._publish_specification_projection(
+                                    connection, cursor, projection
+                                )
+                            elif projection is _SPECIFICATION_PREPARATION_FAILED:
+                                warning = "specification projection is stale"
+                            else:
+                                try:
+                                    with connection.transaction():
+                                        self._replace_specification_projection(
+                                            cursor, projection
+                                        )
+                                except _SpecificationSnapshotChanged:
+                                    raise
+                                except Exception:
+                                    warning = "specification projection is stale"
+            count = sum(
+                len(records)
+                for _page_id, _chunks, records, _targets in prepared_pages
+            )
+            result = {
+                "domain": domain,
+                "indexed_chunks": count,
+                "reused": 0,
+                "embedded": count,
+                "bytes": 0,
+                "over_cap": False,
+            }
+            if self.specification_mode != "disabled":
+                state = (
+                    "failed"
+                    if warning and self.specification_mode == "strict"
+                    else "stale" if warning else "ready"
+                )
+                result["specifications"] = {
+                    "mode": self.specification_mode,
+                    "state": state,
+                    "scenarios": (
+                        0
+                        if projection is _SPECIFICATION_PREPARATION_FAILED
+                        else projection.scenario_count
+                    ),
+                    "bindings": (
+                        0
+                        if projection is _SPECIFICATION_PREPARATION_FAILED
+                        else projection.binding_count
+                    ),
+                }
+            if warning is not None:
+                result["warning"] = warning
+            return result
+
+        for _attempt in range(3):
+            projection = prepare_projection()
+            try:
+                return publish(projection)
+            except _SpecificationSnapshotChanged:
+                continue
+        prepare_projection()
+        return publish(_SPECIFICATION_PREPARATION_FAILED)
 
     def lint_domain(self, domain: str, visible_domains: list[str]) -> dict:
         domain = _validate_identifier(domain, "domain")
