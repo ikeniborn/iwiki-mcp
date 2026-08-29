@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 35ea5d3c8c0cb3d5
+  spec_hash: 4a3cd06030b2a322
   last_run: 2026-08-29
   phases:
     structure: { status: passed }
@@ -120,6 +120,10 @@ The approved design applies these source-backed decisions:
   `wiki_spec_resolve` attempt. It does not assert that tests passed.
 - **Freshness** is computed at read time by comparing persisted specification and graph
   revisions with current revisions. Reading context never mutates evidence.
+- **Projection state** is one tenant/domain record describing the last complete
+  successful projection, including its Markdown and logical projection revisions.
+  Missing state for an upgraded domain that still has specification sources or derived
+  rows is stale until a successful rebuild.
 - Ordinary pages are never parsed as semantic specifications, even when their prose
   contains a literal `iwiki-gwt` fence.
 - Structural code graph data remains independent and optional.
@@ -363,21 +367,54 @@ page and projection bytes. No projection failure affects an ordinary page mutati
 
 ### 9.3 PostgreSQL projection
 
-PostgreSQL schema version advances through a forward migration that adds tenant-scoped
-tables for specification scenarios, bindings, and resolution evidence. Every row is
-keyed by `iwiki_id` and domain/page identity, protected by the existing runtime grants
-and row-level security pattern, and excluded from unrelated schemas. Page and derived
-projection replacement occur in one transaction after optimistic revision checks.
+PostgreSQL schema version 6 adds tenant-scoped tables for specification scenarios,
+bindings, and resolution evidence. Schema version 7 adds
+`specification_projection_state`, keyed by `iwiki_id` and `domain_id`, with the last
+successful Markdown revision, logical projection revision, scenario/binding counts,
+and update time. The metadata table uses the same runtime grants, command-specific row
+level security, and tenant/domain authorization pattern as the three projection tables.
+It is independent of structural code-graph tables.
+
+Version 7 also makes a stale snapshot representable after page deletion. It adds a
+non-null stored `page_slug` to every scenario, backfilled from the referenced page;
+`page_id` becomes nullable and its foreign key changes from `ON DELETE CASCADE` to
+`ON DELETE SET NULL`. Scenario identity still excludes location. A present page keeps
+its normal composite foreign-key integrity, while a deleted page leaves its last
+scenario, binding, and evidence rows readable by stored slug until the next successful
+projection replacement. Domain deletion still cascades every projection and metadata
+row.
+
+The v6-to-v7 migration does not invent a successful revision for existing projections.
+An upgraded domain without a metadata row is reported stale when specification sources
+or derived rows exist, then becomes ready after `wiki_index` or the next successful
+specification mutation writes rows and metadata atomically. A domain with no
+specification sources, derived rows, or metadata remains absent. A successful empty
+rebuild writes metadata with zero counts so removal of the last scenario is durably
+distinguishable from an uninitialized domain.
 
 The logical behavior matches Git: optional mode retains Markdown and reports a
 projection warning if a derived refresh fails. Optional projection refresh runs in a
 transaction savepoint: its failure rolls back derived rows to their previous state while
-the outer page transaction may commit. Strict mode uses one transaction and commits
-neither page nor projection on any failure; ordinary pages bypass specification
-persistence. Domain projection rebuild scans one coherent domain page snapshot so
-cross-page duplicate IDs are handled deterministically. Evidence survives a refresh only
-for an unchanged binding ID and matching scenario source hash. PostgreSQL exports
-continue to export canonical Markdown; derived projections rebuild after import.
+the outer page transaction may commit. When that mutation deletes a specification page,
+the outer delete sets stale scenario `page_id` values to null rather than cascading the
+snapshot; the failed savepoint leaves projection metadata unchanged, and read-time
+revision comparison reports stale. Search and context may return that previous snapshot
+with its stored page slug only while explicitly marking it stale. A successful refresh
+replaces all domain projection rows and metadata together, removing deleted scenarios.
+
+Strict mode uses one transaction and commits neither page nor projection metadata on any
+failure; ordinary pages bypass specification persistence. Domain projection rebuild
+scans one coherent domain page snapshot so cross-page duplicate IDs are handled
+deterministically. Evidence survives a refresh only for an unchanged binding ID and
+matching scenario source hash. PostgreSQL exports continue to export canonical Markdown;
+derived projections rebuild after import.
+
+Hosted and stdio startup require schema version 7. A scoped v7 compatibility rollback
+restores the v6 page foreign key and removes only the v7 metadata, stored-slug column,
+and migration marker under the migration advisory lock. It fails closed without any
+DDL when detached scenario rows (`page_id IS NULL`) exist, because v6 cannot represent
+them without data loss. The rollback helper requires literal `confirm=True`; successful
+rollback and idempotent v7 reapplication are integration-tested.
 
 ### 9.4 Duplicate and move behavior
 
@@ -683,6 +720,10 @@ consume the server contract documented here.
 - **R-021 — Performance evidence:** implementation verification must record fixture
   size and elapsed time for projection rebuild, search, context, and resolution without
   applying a pass/fail threshold. **Acceptance:** AC-023.
+- **R-022 — Durable optional deletion:** PostgreSQL schema v7 must preserve the previous
+  logical projection and its metadata when an optional specification-page deletion
+  commits but derived refresh fails, while a later successful rebuild removes obsolete
+  rows and returns the domain to ready. **Acceptance:** AC-024.
 
 ## 16. Acceptance Criteria
 
@@ -742,6 +783,13 @@ consume the server contract documented here.
 - **AC-023:** a deterministic measurement command reports corpus/page/scenario/binding
   counts and elapsed projection/search/context/resolution timings; results are evidence
   only and create no threshold.
+- **AC-024:** PostgreSQL migration tests prove v6-to-v7 backfill, nullable page identity
+  with `ON DELETE SET NULL`, metadata RLS/grants, exact schema-7 startup guards, and
+  fail-closed compatibility rollback. Transaction tests inject optional refresh failure
+  after deleting both the last and a non-last specification page, then prove the page
+  commit, detached previous rows, unchanged metadata, durable stale status across a new
+  connection, readable stale search/context, and successful rebuild to ready with no
+  obsolete rows.
 
 ## 17. Verification Strategy
 
@@ -769,7 +817,8 @@ consume the server contract documented here.
 ### 17.3 PostgreSQL and HTTP integration
 
 - Migration, grants, RLS, transaction, CAS, duplicate-domain-snapshot, and restart
-  persistence tests cover the new tables.
+  persistence tests cover schema versions 6 and 7, including projection metadata,
+  detached stale rows, fail-closed v7 rollback, and rebuild recovery.
 - Hosted tests cover policy overrides, tenant/domain authorization, read-versus-write
   tools, redaction, and streamable HTTP dispatch.
 - Git/PostgreSQL golden fixtures compare logical projection and evidence behavior.
@@ -791,6 +840,7 @@ resolution. `wiki_lint` must show no new task/documentation finding before resul
 | Code graph becomes mandatory | Search/context never call it; resolve records graph-unavailable evidence | AC-011, AC-016, AC-017 |
 | New relations corrupt structural graph | Keep specification relations in separate records/adapters | AC-018 |
 | Optional mode creates compatibility failures | Optional findings are advisory and projection failure is fail-soft | AC-009, AC-010, AC-022 |
+| Page deletion destroys the last readable stale projection | Schema v7 stores page slug, detaches page ID with `ON DELETE SET NULL`, and keeps last-success metadata until rebuild | AC-013, AC-024 |
 | Hosted policy leaks or conflicts across tenants | Exact tenant/domain override key, startup duplicate rejection, existing auth context | AC-008, AC-020 |
 | Agents treat resolved selectors as passing behavior | Authoring rules require executable tests and task-ledger evidence | AC-021 |
 | Generated Git projection conflicts | Canonical order, one lock, atomic replacement, same commit, rebuild via `wiki_index` | AC-012, AC-013 |
@@ -817,7 +867,7 @@ resolution. `wiki_lint` must show no new task/documentation finding before resul
 |---|---|---|
 | T-001; three modes and coexistence | R-001, R-006–R-009 | AC-001, AC-002, AC-007–AC-011 |
 | T-002; stable readable executable semantics | R-002–R-005 | AC-003–AC-006 |
-| T-003; durable server authority | R-010–R-013 | AC-012–AC-015 |
+| T-003; durable server authority | R-010–R-013, R-022 | AC-012–AC-015, AC-024 |
 | T-004; optional graph enrichment | R-015, R-016, R-020 | AC-016–AC-018, AC-022 |
 | T-005; semantic queries | R-013–R-015, R-017, R-018 | AC-015–AC-020 |
 | T-006; ordinary Wiki compatibility | R-001, R-007–R-009, R-020 | AC-001, AC-009–AC-011, AC-022 |
