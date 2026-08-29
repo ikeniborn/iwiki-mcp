@@ -38,6 +38,7 @@ class TelegramTransport:
         self._http = http
         self._api_base = f"https://api.telegram.org/bot{token}"
         self._file_base = f"https://api.telegram.org/file/bot{token}"
+        self._poll_offset: int | None = None
 
     async def _api(self, method: str, data: dict[str, object]) -> object:
         try:
@@ -232,7 +233,11 @@ class TelegramTransport:
         return updates
 
     async def _dispatch_updates(
-        self, updates: list[object], offset: int | None
+        self,
+        updates: list[object],
+        offset: int | None,
+        *,
+        remember_offset: bool = False,
     ) -> int | None:
         next_offset = offset
         for update in updates:
@@ -242,6 +247,8 @@ class TelegramTransport:
             update_id = update.get("update_id")
             if isinstance(update_id, int):
                 next_offset = update_id + 1
+                if remember_offset:
+                    self._poll_offset = next_offset
         return next_offset
 
     async def poll_once(self, offset: int | None) -> int | None:
@@ -256,12 +263,11 @@ class TelegramTransport:
         heartbeat: Heartbeat,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        offset = None
         backoff = Backoff()
         while True:
             started = clock()
             try:
-                updates = await self._fetch_updates(offset)
+                updates = await self._fetch_updates(self._poll_offset)
             except TelegramError:
                 delay = backoff.next_delay(random_value())
                 LOGGER.warning(
@@ -277,4 +283,8 @@ class TelegramTransport:
                 continue
             backoff.reset()
             heartbeat.touch()
-            offset = await self._dispatch_updates(updates, offset)
+            await self._dispatch_updates(
+                updates,
+                self._poll_offset,
+                remember_offset=True,
+            )

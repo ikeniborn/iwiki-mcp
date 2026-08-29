@@ -1230,10 +1230,18 @@ trap - EXIT INT TERM HUP
 ## Health, recovery, and privacy
 
 Compose uses `restart: unless-stopped`, `stop_grace_period: 60s`, a read-only root
-filesystem, and tmpfs mounts for `/run` and `/tmp`. Supervisor restarts unexpected exits
-of hosted MCP, nginx, or the Telegram bot. Health verifies all three children, loopback
-MCP, nginx ingress, and a Telegram heartbeat newer than the configured window; it makes
-no extra Telegram request.
+filesystem, and tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every unexpected
+exit of hosted MCP, nginx, or the Telegram bot, including exit status zero; an explicit
+`supervisorctl stop` remains stopped. Each child receives `TERM` with a 55-second wait
+before process-group kill, leaving five seconds inside the Compose graceful window.
+Health verifies all three children, loopback MCP, nginx ingress, and a Telegram
+heartbeat newer than the configured window; it makes no extra Telegram request.
+
+If a running MCP session fails, the bot closes that session, reconnects and initializes
+a replacement with bounded backoff, and resumes the same failed Telegram update without
+repeating updates whose offsets were already committed. This does not restart the bot
+or container and does not change direct iwiki routing, single-use confirmation, or
+revision/section-hash compare-and-swap behavior.
 
 A proxy outage makes the heartbeat stale and the container unhealthy while the bot
 keeps retrying through the same proxy. It never reroutes Telegram directly. Telegram

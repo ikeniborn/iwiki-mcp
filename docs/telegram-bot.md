@@ -97,9 +97,12 @@ Use the one-service `compose.yaml` path documented in the
 
 Supervisor runs exactly one bot process per Telegram token together with hosted MCP and
 nginx. Compose uses `restart: unless-stopped`, a 60-second graceful stop, a read-only
-root filesystem, and tmpfs mounts for `/run` and `/tmp`. Health covers all three
-children, loopback MCP, nginx ingress, and the Telegram polling heartbeat within the
-configured liveness window.
+root filesystem, and tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every
+unexpected child exit, including exit status zero; an explicit `supervisorctl stop`
+remains stopped until an explicit start. Each child receives `TERM` and has 55 seconds
+to stop before Supervisor can force its process group, inside the Compose 60-second
+window. Health covers all three children, loopback MCP, nginx ingress, and the Telegram
+polling heartbeat within the configured liveness window.
 
 The application runtime creates no PostgreSQL database or schema objects and runs no
 migrations. It requires the exact compatible schema prepared out of band by the
@@ -123,6 +126,11 @@ revision/section-hash compare-and-swap remain unchanged.
 ## Failure behavior
 
 Missing configuration stops startup. Remote iwiki, inference, Telegram download, and
-malformed-response failures return sanitized messages. An unavailable domain is not
-selected. Empty retrieval produces no model answer. An expired, replayed, or
-wrong-user confirmation performs no mutation. A write conflict requires a new preview.
+malformed-response failures never expose dependency details. After a retryable MCP
+session failure, the running bot closes only that session, reconnects and initializes a
+new one with bounded backoff, then replays only the failed Telegram update; already
+completed updates keep their committed offsets. Conversation selection and pending
+confirmation state remain in memory during this reconnect. An unavailable domain is
+not selected. Empty retrieval produces no model answer. An expired, replayed, or
+wrong-user confirmation performs no mutation. A write conflict requires a new preview,
+and single-use confirmation consumption still prevents ambiguous writes from replaying.

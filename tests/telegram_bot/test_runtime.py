@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 from dataclasses import replace
+import json
 import logging
 import sys
 import traceback
@@ -288,6 +289,129 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
         assert isinstance(record.elapsed_ms, int)
         rendered = record.getMessage() + repr(record.__dict__)
         assert all(marker not in rendered for marker in markers)
+
+
+@pytest.mark.asyncio
+async def test_post_start_remote_failure_reconnects_and_replays_only_failed_update(
+    monkeypatch, caplog
+):
+    updates = (
+        {
+            "update_id": 20,
+            "message": {
+                "from": {"id": 1001},
+                "chat": {"id": 9},
+                "text": "/domains",
+            },
+        },
+        {
+            "update_id": 21,
+            "message": {
+                "from": {"id": 1001},
+                "chat": {"id": 10},
+                "text": "/domains",
+            },
+        },
+    )
+    offsets = []
+    sent = []
+
+    class TelegramHttp:
+        async def post_json(self, url, payload):
+            method = url.rsplit("/", 1)[-1]
+            if method == "getUpdates":
+                offsets.append(payload.get("offset"))
+                if len(offsets) == 1:
+                    result = list(updates)
+                elif len(offsets) == 2:
+                    result = [updates[1]]
+                else:
+                    raise RuntimeError("stop after recovered update")
+                return ProxyResponse(
+                    200,
+                    json.dumps({"ok": True, "result": result}).encode(),
+                )
+            if method == "sendMessage":
+                sent.append(payload)
+                return ProxyResponse(200, b'{"ok":true,"result":{}}')
+            raise AssertionError(f"unexpected Telegram method: {method}")
+
+        async def get_bytes(self, url):
+            raise AssertionError("voice download is not expected")
+
+        async def close(self):
+            pass
+
+    class Inference:
+        instances = 0
+
+        def __init__(self, *arguments):
+            self.__class__.instances += 1
+
+        async def probe(self):
+            pass
+
+        async def close(self):
+            pass
+
+    remotes = []
+
+    class Remote:
+        def __init__(self, attempt):
+            self.attempt = attempt
+            self.calls = 0
+
+        async def list_domains(self):
+            self.calls += 1
+            if self.attempt == 1 and self.calls == 3:
+                raise RemoteIwikiError(
+                    "post-start-session-failed", retryable=True
+                )
+            return ["team"]
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        remote = Remote(len(remotes) + 1)
+        remotes.append(remote)
+        yield remote
+
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    telegram_http = TelegramHttp()
+    monkeypatch.setattr(
+        main_module, "build_proxy_client", lambda config: telegram_http
+    )
+    monkeypatch.setattr(main_module, "InferenceClient", Inference)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+
+    with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.main"):
+        with pytest.raises(RuntimeError, match="stop after recovered update"):
+            await main_module.run_bot(
+                _config(),
+                sleep=sleep,
+                random_value=lambda: 0.0,
+                heartbeat=RecordingHeartbeat(),
+                clock=lambda: 10.0,
+            )
+
+    assert offsets == [None, 21, 22]
+    assert [(payload["chat_id"], payload["text"]) for payload in sent] == [
+        (9, "Available domains:"),
+        (10, "Available domains:"),
+    ]
+    assert len(remotes) == 2
+    assert Inference.instances == 1
+    assert sleeps == pytest.approx([0.8])
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.operation == "remote_session"
+    assert record.outcome == "retry"
+    rendered = record.getMessage() + repr(record.__dict__)
+    assert "post-start-session-failed" not in rendered
+    assert "iwiki-token-marker" not in rendered
 
 
 @pytest.mark.asyncio

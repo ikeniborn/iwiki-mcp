@@ -134,20 +134,85 @@ async def run_bot(
             continue
 
         backoff.reset()
+        conversation = ConversationService(
+            access,
+            remote,
+            inference,
+            confirmation_ttl_seconds=config.confirmation_ttl_seconds,
+        )
+        transport = TelegramTransport(
+            config.telegram_token,
+            access,
+            conversation,
+            telegram_http,
+        )
         try:
-            conversation = ConversationService(
-                access,
-                remote,
-                inference,
-                confirmation_ttl_seconds=config.confirmation_ttl_seconds,
-            )
-            transport = TelegramTransport(
-                config.telegram_token,
-                access,
-                conversation,
-                telegram_http,
-            )
-            await transport.poll_forever(heartbeat=heartbeat)
+            while True:
+                try:
+                    await transport.poll_forever(heartbeat=heartbeat)
+                    return
+                except RemoteIwikiError as error:
+                    session_exc_info = sys.exc_info()
+                    if not _retryable_startup_error(error):
+                        raise
+                    reconnect_started = clock()
+                    await _close_dependencies(
+                        remote_context,
+                        remote_entered,
+                        None,
+                        None,
+                        session_exc_info,
+                    )
+                    remote_context = None
+                    remote_entered = False
+
+                while True:
+                    retry_delay = backoff.next_delay(random_value())
+                    LOGGER.warning(
+                        "telegram bot remote session retry",
+                        extra={
+                            "operation": "remote_session",
+                            "outcome": "retry",
+                            "delay_seconds": float(retry_delay),
+                            "elapsed_ms": int(
+                                (clock() - reconnect_started) * 1000
+                            ),
+                        },
+                    )
+                    await sleep(retry_delay)
+                    candidate_context = open_remote_iwiki(
+                        config.iwiki_url, config.iwiki_token
+                    )
+                    candidate_entered = False
+                    candidate_ready = False
+                    candidate_exc_info = (None, None, None)
+                    try:
+                        candidate_remote = await candidate_context.__aenter__()
+                        candidate_entered = True
+                        await candidate_remote.list_domains()
+                        candidate_ready = True
+                    except RemoteIwikiError as error:
+                        candidate_exc_info = sys.exc_info()
+                        if not _retryable_startup_error(error):
+                            raise
+                    except BaseException:
+                        candidate_exc_info = sys.exc_info()
+                        raise
+                    finally:
+                        if not candidate_ready:
+                            await _close_dependencies(
+                                candidate_context,
+                                candidate_entered,
+                                None,
+                                None,
+                                candidate_exc_info,
+                            )
+                    if candidate_ready:
+                        remote_context = candidate_context
+                        remote_entered = True
+                        conversation.replace_remote(candidate_remote)
+                        backoff.reset()
+                        break
         finally:
             await _close_dependencies(
                 remote_context,
@@ -156,7 +221,6 @@ async def run_bot(
                 telegram_http,
                 sys.exc_info(),
             )
-        return
 
 
 def main() -> None:

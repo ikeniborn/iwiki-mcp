@@ -201,7 +201,9 @@ def test_supervisor_and_health_sources_define_one_restartable_process_tree():
     assert supervisor.count("[program:") == 3
     for child in ("iwiki-mcp", "nginx", "telegram-bot"):
         section = supervisor.split(f"[program:{child}]", 1)[1].split("[", 1)[0]
-        assert "autorestart=unexpected" in section
+        assert "autorestart=true" in section
+        assert "stopsignal=TERM" in section
+        assert "stopwaitsecs=55" in section
         assert "stopasgroup=true" in section
         assert "killasgroup=true" in section
     assert "nodaemon=true" in supervisor
@@ -321,6 +323,156 @@ def _callback_data(payload, prefix):
     return None
 
 
+def test_supervisor_restarts_clean_exit_but_honors_explicit_stop(
+    tmp_path, docker_command, acceptance_image
+):
+    child = tmp_path / "clean-exit-child.sh"
+    child.write_text(
+        "#!/bin/sh\n"
+        "count=0\n"
+        "test ! -f /run/clean-exit-count || count=$(cat /run/clean-exit-count)\n"
+        "count=$((count + 1))\n"
+        "printf '%s\\n' \"$count\" > /run/clean-exit-count\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o755)
+    config = tmp_path / "supervisord-clean-exit.conf"
+    config.write_text(
+        "[supervisord]\n"
+        "nodaemon=true\n"
+        "logfile=/dev/null\n"
+        "pidfile=/run/supervisord.pid\n\n"
+        "[unix_http_server]\n"
+        "file=/run/supervisor.sock\n"
+        "chmod=0600\n\n"
+        "[supervisorctl]\n"
+        "serverurl=unix:///run/supervisor.sock\n\n"
+        "[rpcinterface:supervisor]\n"
+        "supervisor.rpcinterface_factory="
+        "supervisor.rpcinterface:make_main_rpcinterface\n\n"
+        "[program:clean-exit]\n"
+        "command=/app/clean-exit-child.sh\n"
+        "autorestart=true\n"
+        "startsecs=0\n"
+        "startretries=1000000\n"
+        "stopsignal=TERM\n"
+        "stopwaitsecs=55\n"
+        "stopasgroup=true\n"
+        "killasgroup=true\n"
+        "stdout_logfile=/dev/null\n"
+        "stderr_logfile=/dev/null\n",
+        encoding="utf-8",
+    )
+    name = f"iwiki-supervisor-clean-exit-{secrets.token_hex(8)}"
+    supervisor = [
+        *docker_command,
+        "exec",
+        name,
+        "supervisorctl",
+        "-c",
+        "/app/supervisord-clean-exit.conf",
+    ]
+
+    try:
+        subprocess.run(
+            [
+                *docker_command,
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--read-only",
+                "--user",
+                "10001:10001",
+                "--tmpfs",
+                "/run:uid=10001,gid=10001,mode=0750",
+                "--tmpfs",
+                "/tmp:uid=10001,gid=10001,mode=1770",
+                "--volume",
+                f"{config}:/app/supervisord-clean-exit.conf:ro",
+                "--volume",
+                f"{child}:/app/clean-exit-child.sh:ro",
+                "--entrypoint",
+                "/usr/bin/supervisord",
+                acceptance_image,
+                "-c",
+                "/app/supervisord-clean-exit.conf",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+
+        def restart_count():
+            result = subprocess.run(
+                [*docker_command, "exec", name, "cat", "/run/clean-exit-count"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            return int(result.stdout) if result.returncode == 0 else 0
+
+        if not _eventually(lambda: restart_count() >= 2, timeout=15):
+            logs = subprocess.run(
+                [*docker_command, "logs", name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            status = subprocess.run(
+                [*supervisor, "status", "clean-exit"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            pytest.fail(
+                "clean-exit child did not restart: "
+                f"status={status.stdout.strip()!r} "
+                f"logs={(logs.stdout + logs.stderr)[-1000:]!r}"
+            )
+        subprocess.run(
+            [*supervisor, "stop", "clean-exit"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        )
+        assert _eventually(
+            lambda: "STOPPED"
+            in subprocess.run(
+                [*supervisor, "status", "clean-exit"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            ).stdout,
+            timeout=10,
+        )
+        stopped_count = restart_count()
+        time.sleep(1)
+        assert restart_count() == stopped_count
+    finally:
+        subprocess.run(
+            [*docker_command, "stop", "--time", "5", name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        subprocess.run(
+            [*docker_command, "rm", name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
+
 @pytest.mark.postgres_integration
 def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_stack):
     expected = {"iwiki-mcp", "nginx", "telegram-bot"}
@@ -329,6 +481,68 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
     assert {item["state"] for item in children.values()} == {"RUNNING"}
     assert full_stack.health_status() == "healthy"
     assert full_stack.telegram_api_addresses() == {"127.0.0.2"}
+
+    supervisor = [
+        *full_stack.docker,
+        "exec",
+        full_stack.name,
+        "supervisorctl",
+        "-c",
+        "/etc/supervisor/supervisord.conf",
+    ]
+    previous_nginx_pid = children["nginx"]["pid"]
+    subprocess.run(
+        [*supervisor, "signal", "QUIT", "nginx"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert _eventually(
+        lambda: (
+            current
+            if (current := full_stack.supervisor_status().get("nginx", {})).get(
+                "state"
+            )
+            == "RUNNING"
+            and current.get("pid") != previous_nginx_pid
+            else None
+        ),
+        timeout=20,
+    )
+
+    subprocess.run(
+        [*supervisor, "stop", "telegram-bot"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    assert _eventually(
+        lambda: full_stack.supervisor_status().get("telegram-bot", {}).get(
+            "state"
+        )
+        == "STOPPED"
+    )
+    time.sleep(1)
+    assert full_stack.supervisor_status()["telegram-bot"]["state"] == "STOPPED"
+    subprocess.run(
+        [*supervisor, "start", "telegram-bot"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    assert _eventually(
+        lambda: full_stack.supervisor_status().get("telegram-bot", {}).get(
+            "state"
+        )
+        == "RUNNING",
+        timeout=20,
+    )
+    assert _eventually(
+        lambda: full_stack.health_probe().returncode == 0, timeout=30
+    )
 
     for child in sorted(expected):
         previous_pid = full_stack.supervisor_status()[child]["pid"]
@@ -414,6 +628,8 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
     identities = full_stack.host_child_identities()
     assert set(identities) == expected
     assert all(identity["group_members"] for identity in identities.values())
+    full_stack.telegram.pause_polling()
+    assert full_stack.telegram.wait_until_polling()
     started = time.monotonic()
     subprocess.run(
         [
@@ -430,8 +646,8 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
         check=True,
         timeout=65,
     )
-    assert time.monotonic() - started < 60
-    assert full_stack.container_exit_code() != 137
+    assert time.monotonic() - started < 55
+    assert full_stack.container_exit_code() == 0
     assert full_stack.captured_identities_gone(identities)
     top = subprocess.run(
         [*full_stack.docker, "top", full_stack.name],
@@ -855,6 +1071,9 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         check=True,
         timeout=15,
     )
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text="/domains")
+    time.sleep(1)
     subprocess.run(
         [*supervisor, "start", "iwiki-mcp"],
         capture_output=True,
@@ -862,10 +1081,15 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         check=True,
         timeout=20,
     )
-    sent = len(full_stack.telegram.sent_payloads)
-    full_stack.enqueue_message(text="/domains")
-    assert full_stack.wait_for_sent(
-        sent, lambda payload: payload.get("text") == "Wiki service is unavailable."
+    domains = full_stack.wait_for_sent(
+        sent,
+        lambda payload: _callback_data(payload, "domain:") is not None,
+        timeout=30,
+    )
+    assert _callback_data(domains, "domain:") == "domain:docs"
+    assert all(
+        payload.get("text") != "Wiki service is unavailable."
+        for payload in full_stack.telegram.sent_payloads[sent:]
     )
 
     full_stack.telegram.disable()
