@@ -117,6 +117,17 @@ def _auto_commit_locked(
         return {"committed": False, "warning": str(e)}
 
 
+def commit_locked(base: str, message: str, pathspec: Pathspec = None) -> dict:
+    """Commit while caller owns ``base_lock``; never acquire it again."""
+    return _auto_commit_locked(base, message, pathspec)
+
+
+def unstage_locked(base: str, pathspec: Pathspec) -> None:
+    """Unstage one exact path set while caller owns ``base_lock``."""
+    paths = _normalized_pathspec(pathspec) or ()
+    _run(base, "reset", "--mixed", "HEAD", "--", *paths)
+
+
 def auto_commit(
     base: str,
     message: str,
@@ -387,40 +398,30 @@ def ensure_fresh(
         return {"state": "offline", "warning": str(e)}
 
 
-def commit_and_push(
+def _publish_committed(
     base: str,
-    message: str,
-    pathspec: Pathspec = None,
-    *,
-    _after_commit: Callable[[], str | None] | None = None,
+    commit: dict,
+    after_commit: Callable[[], str | None] | None = None,
 ) -> dict:
-    """Auto-commit, then push via ``sync`` when the commit landed.
-
-    Fail-soft: when nothing is committed, ``sync`` is not attempted. When the commit
-    landed, any ``sync`` failure — whether ``sync`` reported it as ``warning`` (push
-    rejected) or ``error`` (non-repo, pull conflict) — is surfaced under a single
-    ``warning`` key; the local commit stands.
-    """
-    commit = auto_commit(base, message, pathspec)
     if not commit.get("committed"):
         out = {"committed": False, "pushed": False,
                "sync_attempts": 0, "push_attempts": 0}
         if commit.get("warning"):
             out["warning"] = commit["warning"]
         if (
-            _after_commit is not None
+            after_commit is not None
             and commit.get("warning") == "nothing to commit"
         ):
             try:
-                if _after_commit() is not None:
+                if after_commit() is not None:
                     _add_graph_warning(out, _GRAPH_REFRESH_WARNING)
             except Exception:
                 _add_graph_warning(out, _GRAPH_REFRESH_WARNING)
         return out
     graph_warning: str | None = None
-    if _after_commit is not None:
+    if after_commit is not None:
         try:
-            if _after_commit() is not None:
+            if after_commit() is not None:
                 graph_warning = _GRAPH_REFRESH_WARNING
         except Exception:
             graph_warning = _GRAPH_REFRESH_WARNING
@@ -441,3 +442,30 @@ def commit_and_push(
         out["warning"] = _sanitize_git_output(str(warn))
     _add_graph_warning(out, graph_warning)
     return out
+
+
+def publish_committed(
+    base: str,
+    commit: dict,
+    after_commit: Callable[[], str | None] | None = None,
+) -> dict:
+    """Run graph finalization and sync after atomic local commit stands."""
+    return _publish_committed(base, commit, after_commit)
+
+
+def commit_and_push(
+    base: str,
+    message: str,
+    pathspec: Pathspec = None,
+    *,
+    _after_commit: Callable[[], str | None] | None = None,
+) -> dict:
+    """Auto-commit, then push via ``sync`` when the commit landed.
+
+    Fail-soft: when nothing is committed, ``sync`` is not attempted. When the commit
+    landed, any ``sync`` failure — whether ``sync`` reported it as ``warning`` (push
+    rejected) or ``error`` (non-repo, pull conflict) — is surfaced under a single
+    ``warning`` key; the local commit stands.
+    """
+    commit = auto_commit(base, message, pathspec)
+    return publish_committed(base, commit, after_commit=_after_commit)

@@ -162,3 +162,31 @@ def test_commit_and_push_forwards_exact_path_list_and_stays_fail_soft(monkeypatc
     assert result["committed"] is True
     assert result["pushed"] is False
     assert result["warning"] == "offline"
+
+
+def test_publish_committed_runs_after_commit_then_sync(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        sync,
+        "sync",
+        lambda _base: calls.append("sync") or {
+            "pulled": True,
+            "pushed": True,
+            "sync_attempts": 1,
+            "push_attempts": 1,
+        },
+    )
+
+    result = sync.publish_committed(
+        "/base",
+        {"committed": True},
+        after_commit=lambda: calls.append("graph"),
+    )
+
+    assert calls == ["graph", "sync"]
+    assert result == {
+        "committed": True,
+        "pushed": True,
+        "sync_attempts": 1,
+        "push_attempts": 1,
+    }

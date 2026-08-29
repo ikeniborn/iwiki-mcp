@@ -96,6 +96,41 @@ def test_locked_auto_commit_does_not_reacquire_base_lock(tmp_path, monkeypatch):
     )["committed"] is True
 
 
+def test_commit_locked_does_not_reacquire_base_lock(tmp_path, monkeypatch):
+    _init_repo(tmp_path)
+    (tmp_path / "page.md").write_text("content")
+
+    def fail_lock(*_args, **_kwargs):
+        raise AssertionError("nested base lock")
+
+    monkeypatch.setattr(sync, "base_lock", fail_lock)
+
+    assert sync.commit_locked(
+        str(tmp_path), "message", pathspec=("page.md",)
+    )["committed"] is True
+
+
+def test_unstage_locked_resets_only_exact_pathspec(tmp_path):
+    _init_repo(tmp_path)
+    for name in ("alpha/a.md", "beta/b.md"):
+        path = tmp_path / name
+        path.parent.mkdir()
+        path.write_text("old")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "seed")
+    for name in ("alpha/a.md", "beta/b.md"):
+        (tmp_path / name).write_text("new")
+    _git(tmp_path, "add", "alpha", "beta")
+
+    sync.unstage_locked(str(tmp_path), "alpha")
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"], cwd=tmp_path,
+        check=True, capture_output=True, text=True,
+    ).stdout.split()
+    assert staged == ["beta/b.md"]
+
+
 def test_sync_push_retry_on_non_fast_forward(tmp_path):
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(remote)],

@@ -1,7 +1,7 @@
 """Durable local journal primitives for cross-domain wiki mutations."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 import json
 import os
@@ -62,6 +62,14 @@ class MutationPlan:
     affected_domains: tuple[str, ...]
     rewritten_pages: tuple[str, ...]
     rewritten_links: int
+
+
+@dataclass
+class PreparedPlanExtension:
+    edits: tuple[PlannedEdit, ...] = ()
+    fail_soft_files: tuple[str, ...] = ()
+    metadata: dict = field(default_factory=dict)
+    error: dict | None = None
 
 
 def _transactions_root(base: str) -> Path:
@@ -408,6 +416,30 @@ def _committable_files(base: str, paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _has_unrelated_changes(
+    base: str, domains: tuple[str, ...], paths: tuple[str, ...]
+) -> bool:
+    status = _run(
+        base,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        *domains,
+    )
+    if status.returncode != 0:
+        return True
+    allowed = set(paths)
+    for record in status.stdout.split("\0"):
+        if not record:
+            continue
+        path = record[3:] if len(record) >= 3 else record
+        if path and path not in allowed:
+            return True
+    return False
+
+
 def _apply_edit(base: str, edit: PlannedEdit) -> None:
     path = _base_file(base, f"{edit.domain}/{_relative_file(edit.file)}")
     if edit.after is None:
@@ -418,16 +450,46 @@ def _apply_edit(base: str, edit: PlannedEdit) -> None:
     _atomic_write(path, edit.after)
 
 
+def _restore_manifest_file(
+    base: str, manifest: TransactionManifest, relative: str
+) -> None:
+    directory = _transaction_dir(base, manifest.transaction_id)
+    for index, item in enumerate(manifest.files):
+        if item.path != relative:
+            continue
+        path = _base_file(base, relative)
+        if item.existed:
+            payload = (directory / "snapshots" / f"{index:04d}.bin").read_bytes()
+            if sha256(payload).hexdigest() != item.sha256:
+                raise CrossDomainError("manual_recovery_required")
+            _atomic_write(path, payload)
+        elif path.exists():
+            path.unlink()
+            _fsync_directory(path.parent)
+        return
+    raise CrossDomainError("manual_recovery_required")
+
+
 def execute_plan(
-    base: str, binding, plan: MutationPlan, *, _include_index_stats: bool = False
+    base: str,
+    binding,
+    plan: MutationPlan,
+    *,
+    _include_index_stats: bool = False,
+    _prepare_locked: Callable[[], PreparedPlanExtension] | None = None,
 ) -> dict:
     """Execute one immutable multi-domain mutation under a durable journal."""
     domains = _validate_plan(base, binding, plan)
     paths = _affected_files(plan, domains)
+    active_plan = plan
+    extension = PreparedPlanExtension()
     committed = False
     manifest: TransactionManifest | None = None
-    graph_warning: str | None = None
     index_stats: dict[str, dict] = {}
+    mutations = ()
+    refresh_files: dict[str, tuple[str, ...]] = {}
+    delete_files: dict[str, tuple[str, ...]] = {}
+    commit: dict = {"committed": False}
     with mutation_lock(base):
         recover_pending_transactions(
             base,
@@ -443,10 +505,26 @@ def execute_plan(
         )
         if ignored.returncode != 0:
             raise CrossDomainError("mutation_failed")
+        if _prepare_locked is not None:
+            extension = _prepare_locked()
+            if extension.error is not None:
+                return extension.error
+            active_plan = replace(
+                plan,
+                edits=tuple((*plan.edits, *extension.edits)),
+            )
+            domains = _validate_plan(base, binding, active_plan)
+            paths = _affected_files(active_plan, domains)
+        dirty_allowed = tuple(sorted(
+            f"{edit.domain}/{_relative_file(edit.file)}"
+            for edit in plan.edits
+        ))
+        if _has_unrelated_changes(base, domains, dirty_allowed):
+            raise CrossDomainError("mutation_failed")
         staged = _run(base, "diff", "--cached", "--name-only", "--", *paths)
         if staged.returncode != 0 or staged.stdout.strip():
             raise CrossDomainError("mutation_failed")
-        domains = _validate_plan(base, binding, plan)
+        domains = _validate_plan(base, binding, active_plan)
         mutations = tuple(
             indexer.prepare_graph_mutation(base, domain, lock_held=True)
             for domain in domains
@@ -459,8 +537,18 @@ def execute_plan(
                 files=paths,
                 transaction_id=plan.transaction_id,
             )
-            for edit in sorted(plan.edits, key=lambda item: (item.domain, item.file)):
-                _apply_edit(base, edit)
+            fail_soft_files = set(extension.fail_soft_files)
+            for edit in sorted(
+                active_plan.edits, key=lambda item: (item.domain, item.file)
+            ):
+                relative = f"{edit.domain}/{_relative_file(edit.file)}"
+                try:
+                    _apply_edit(base, edit)
+                except Exception:
+                    if relative not in fail_soft_files:
+                        raise
+                    _restore_manifest_file(base, manifest, relative)
+                    extension.metadata["fail_soft_edit_failed"] = True
             manifest = transition_transaction(base, manifest, "applied")
             config = Config.load()
             for domain in domains:
@@ -469,7 +557,7 @@ def execute_plan(
                 f"iwiki: {plan.operation}\n\n"
                 f"Iwiki-Transaction: {plan.transaction_id}"
             )
-            commit = sync._auto_commit_locked(
+            commit = sync.commit_locked(
                 base, message, _committable_files(base, paths)
             )
             if not commit.get("committed"):
@@ -483,7 +571,7 @@ def execute_plan(
                 domain: tuple(
                     sorted(
                         edit.file
-                        for edit in plan.edits
+                        for edit in active_plan.edits
                         if edit.domain == domain
                         and edit.after is not None
                         and edit.file.endswith(".md")
@@ -496,7 +584,7 @@ def execute_plan(
                 domain: tuple(
                     sorted(
                         edit.file
-                        for edit in plan.edits
+                        for edit in active_plan.edits
                         if edit.domain == domain
                         and edit.after is None
                         and edit.file.endswith(".md")
@@ -505,11 +593,6 @@ def execute_plan(
                 )
                 for domain in domains
             }
-            graph_warning = indexer.finalize_graph_batch(
-                tuple(mutation for mutation in mutations if mutation is not None),
-                refresh_files,
-                delete_files,
-            )
             finalize_transaction(base, manifest)
         except Exception as exc:
             if committed:
@@ -524,25 +607,31 @@ def execute_plan(
                 raise CrossDomainError("manual_recovery_required") from recovery_error
             raise CrossDomainError("mutation_failed") from exc
 
-    pushed = sync.sync(base)
+    def finalize_graph() -> str | None:
+        return indexer.finalize_graph_batch(
+            tuple(mutation for mutation in mutations if mutation is not None),
+            refresh_files,
+            delete_files,
+        )
+
+    published = sync.publish_committed(
+        base, commit, after_commit=finalize_graph
+    )
     result = {
         "transaction_id": plan.transaction_id,
         "rewritten_pages": sorted(set(plan.rewritten_pages)),
         "affected_domains": list(domains),
         "rewritten_links": plan.rewritten_links,
         "committed": True,
-        "pushed": bool(pushed.get("pushed")),
-        "sync_attempts": pushed.get("sync_attempts", 0),
-        "push_attempts": pushed.get("push_attempts", 0),
+        "pushed": bool(published.get("pushed")),
+        "sync_attempts": published.get("sync_attempts", 0),
+        "push_attempts": published.get("push_attempts", 0),
     }
-    warning = pushed.get("warning") or pushed.get("error")
+    warning = published.get("warning")
     if warning:
         result["warning"] = sync._sanitize_git_output(str(warning))
-    if graph_warning:
-        existing = result.get("warning")
-        result["warning"] = (
-            f"{existing}; {graph_warning}" if existing else graph_warning
-        )
     if _include_index_stats:
         result["_index_stats"] = index_stats
+    if extension.metadata:
+        result["_extension"] = extension.metadata
     return result

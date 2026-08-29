@@ -8,9 +8,10 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import tempfile
-from typing import Callable, Literal, Protocol
+from typing import Callable, Iterable, Literal, Protocol
 
 from . import base
+from .engine import frontmatter
 
 
 ProjectionState = Literal["disabled", "absent", "ready", "stale", "failed"]
@@ -107,6 +108,21 @@ def _sanitized_fingerprint(value: str) -> str:
     if type(value) is str and _CANONICAL_FINGERPRINT.fullmatch(value):
         return value
     raise ValueError("invalid graph state fingerprint")
+
+
+def semantic_markdown_revision(
+    pages: Iterable[tuple[str, str, str | int | None]],
+) -> str:
+    """Hash one sorted specification-only Markdown source set."""
+    digest = hashlib.sha256()
+    for slug, markdown, revision in sorted(pages, key=lambda item: item[0]):
+        digest.update(slug.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(revision).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(markdown.encode("utf-8")).digest())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _collection(value: object, label: str) -> tuple:
@@ -1024,6 +1040,29 @@ class GitSpecificationStore:
         except FileNotFoundError:
             return None
 
+    def _current_markdown_revision(self, domain: str) -> str:
+        domain_path = Path(base.domain_dir(self.base, domain))
+        pages = []
+        for path in sorted(domain_path.rglob("*.md")):
+            relative = path.relative_to(domain_path).as_posix()
+            if relative in {"index.md", "log.md"}:
+                continue
+            markdown = path.read_text(encoding="utf-8")
+            metadata, _ = frontmatter.split(markdown)
+            page_type = metadata.get("type")
+            if not (
+                isinstance(page_type, str)
+                and frontmatter.normalize_type(page_type) == "specification"
+            ):
+                continue
+            page_digest = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+            pages.append((
+                relative[:-3],
+                markdown,
+                f"sha256:{page_digest}",
+            ))
+        return semantic_markdown_revision(pages)
+
     def prepare(self, projection: DomainProjection) -> PreparedProjectionReplace:
         if self.mode == "disabled":
             raise RuntimeError("specifications are disabled")
@@ -1185,6 +1224,29 @@ class GitSpecificationStore:
             )
         if projection is None:
             return ProjectionStatus(domain=safe_domain, state="absent")
+        try:
+            current_revision = self._current_markdown_revision(safe_domain)
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return ProjectionStatus(
+                domain=safe_domain,
+                state="failed",
+                markdown_revision=projection.markdown_revision,
+                scenario_count=projection.scenario_count,
+                binding_count=projection.binding_count,
+                reason="projection_failed",
+            )
+        if (
+            _CANONICAL_FINGERPRINT.fullmatch(projection.markdown_revision)
+            and current_revision != projection.markdown_revision
+        ):
+            return ProjectionStatus(
+                domain=safe_domain,
+                state="stale",
+                markdown_revision=projection.markdown_revision,
+                scenario_count=projection.scenario_count,
+                binding_count=projection.binding_count,
+                reason="out_of_band_change",
+            )
         return ProjectionStatus(
             domain=safe_domain,
             state=projection.state,
