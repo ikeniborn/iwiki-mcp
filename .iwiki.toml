@@ -1,4 +1,4 @@
-read = ["iwiki-mcp", "personal-ai-wiki", "obsidian-ai-wiki", "icodex", "iclaude", "okf","framework","minipc"]
+read = ["iwiki-mcp", "icodex", "iclaude", "okf","framework","minipc"]
 write = ["iwiki-mcp"]
 primary = "iwiki-mcp"
 
