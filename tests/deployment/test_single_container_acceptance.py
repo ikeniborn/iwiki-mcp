@@ -13,20 +13,47 @@ import pytest
 REPOSITORY = Path(__file__).parents[2]
 
 
-def test_postgres_topology_contract_rejects_generic_default_loopback():
-    from tests.deployment.conftest import postgres_topology_skip_reason
+@pytest.mark.parametrize(
+    ("env_name", "values", "message"),
+    (
+        (
+            "IWIKI_TEST_POSTGRES_DSN",
+            {"host": "127.0.0.1", "port": "5544"},
+            "IWIKI_TEST_POSTGRES_DSN must use a non-loopback host",
+        ),
+        (
+            "IWIKI_TEST_POSTGRES_LOOPBACK_DSN",
+            {"host": "172.18.0.2", "port": "5432"},
+            "IWIKI_TEST_POSTGRES_LOOPBACK_DSN must use a loopback host",
+        ),
+        (
+            "IWIKI_TEST_POSTGRES_LOOPBACK_DSN",
+            {"host": "127.0.0.1", "port": "5432"},
+            "IWIKI_TEST_POSTGRES_LOOPBACK_DSN must use a custom port",
+        ),
+    ),
+)
+def test_postgres_topology_contract_rejects_invalid_present_endpoint(
+    env_name, values, message
+):
+    from tests.deployment.conftest import require_postgres_topology
 
-    assert postgres_topology_skip_reason(
-        "IWIKI_TEST_POSTGRES_DSN", {"host": "127.0.0.1", "port": "5432"}
-    ) == (
-        "IWIKI_TEST_POSTGRES_DSN must use a non-loopback host or a custom port"
-    )
-    assert postgres_topology_skip_reason(
-        "IWIKI_TEST_POSTGRES_DSN", {"host": "127.0.0.1", "port": "5544"}
-    ) is None
-    assert postgres_topology_skip_reason(
-        "IWIKI_TEST_POSTGRES_DSN", {"host": "172.18.0.2", "port": "5432"}
-    ) is None
+    with pytest.raises(pytest.fail.Exception, match=message):
+        require_postgres_topology(env_name, values)
+
+
+def test_postgres_topology_contract_rejects_identical_normalized_endpoints():
+    from tests.deployment.conftest import require_distinct_postgres_endpoints
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match="IWIKI_TEST_POSTGRES_DSN and IWIKI_TEST_POSTGRES_LOOPBACK_DSN "
+        "must resolve to different endpoints",
+    ):
+        require_distinct_postgres_endpoints(
+            {"host": "LOCALHOST.", "port": "5544"},
+            {"host": "localhost", "port": 5544},
+        )
 
 
 def test_dynamic_prebuild_private_files_are_excluded_from_disposable_image(
@@ -64,6 +91,61 @@ def test_dynamic_prebuild_private_files_are_excluded_from_disposable_image(
     assert proof["image_removed"] is True
     assert proof["context_cleaned"] is True
     assert list(tmp_path.iterdir()) == []
+
+
+def test_acceptance_image_uses_unique_compose_project(
+    acceptance_image, docker_command
+):
+    inspected = json.loads(
+        subprocess.run(
+            [*docker_command, "image", "inspect", acceptance_image],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout
+    )[0]
+    project = inspected["Config"]["Labels"]["com.docker.compose.project"]
+
+    assert project.startswith("iwikiacceptance")
+    assert acceptance_image == f"{project}-iwiki:latest"
+    assert acceptance_image != "iwiki-mcp-iwiki:latest"
+
+
+def test_full_stack_cleanup_attempts_every_step_before_reraising():
+    from tests.deployment.conftest import run_cleanup_steps
+
+    attempted = []
+
+    def cleanup(name, fail=False):
+        def perform():
+            attempted.append(name)
+            if fail:
+                raise RuntimeError(f"{name} cleanup failed")
+
+        return perform
+
+    with pytest.raises(
+        RuntimeError,
+        match="telegram cleanup failed; files cleanup failed",
+    ):
+        run_cleanup_steps(
+            (
+                ("telegram", cleanup("telegram", fail=True)),
+                ("inference", cleanup("inference")),
+                ("container", cleanup("container")),
+                ("files", cleanup("files", fail=True)),
+                ("images", cleanup("images")),
+            )
+        )
+
+    assert attempted == [
+        "telegram",
+        "inference",
+        "container",
+        "files",
+        "images",
+    ]
 
 
 def _request(client, token, payload, session_id=None):
@@ -246,6 +328,7 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
     assert set(children) == expected
     assert {item["state"] for item in children.values()} == {"RUNNING"}
     assert full_stack.health_status() == "healthy"
+    assert full_stack.telegram_api_addresses() == {"127.0.0.2"}
 
     for child in sorted(expected):
         previous_pid = full_stack.supervisor_status()[child]["pid"]
@@ -315,6 +398,9 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
     )
     assert "telegram poll retry" in logs.stdout + logs.stderr
     generation = full_stack.telegram.enable()
+    assert full_stack.telegram.wait_for_connect_generation(
+        generation, timeout=20
+    )
     assert full_stack.telegram.wait_for_get_updates_generation(
         generation, timeout=20
     )
@@ -325,6 +411,9 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
     )
     assert full_stack.container_id() == container_id
 
+    identities = full_stack.host_child_identities()
+    assert set(identities) == expected
+    assert all(identity["group_members"] for identity in identities.values())
     started = time.monotonic()
     subprocess.run(
         [
@@ -341,7 +430,9 @@ def test_production_children_restart_proxy_recovers_and_term_is_bounded(full_sta
         check=True,
         timeout=65,
     )
-    assert time.monotonic() - started <= 60
+    assert time.monotonic() - started < 60
+    assert full_stack.container_exit_code() != 137
+    assert full_stack.captured_identities_gone(identities)
     top = subprocess.run(
         [*full_stack.docker, "top", full_stack.name],
         capture_output=True,
@@ -874,3 +965,47 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
     assert full_stack.wait_for_sent(
         sent, lambda payload: payload.get("text") == "Select a domain first."
     )
+
+    with httpx.Client(base_url="http://127.0.0.1:8766", timeout=30) as client:
+        assert _initialize(client, token).status_code == 200
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text="/domains")
+    domains = full_stack.wait_for_sent(
+        sent, lambda payload: _callback_data(payload, "domain:") is not None
+    )
+    assert _callback_data(domains, "domain:") == "domain:docs"
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_callback("domain:docs")
+    assert full_stack.wait_for_sent(
+        sent, lambda payload: payload.get("text") == "Selected domain: docs"
+    )
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(text=full_stack.markers["update"])
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == full_stack.markers["reply"],
+    )
+    sent = len(full_stack.telegram.sent_payloads)
+    full_stack.enqueue_message(voice=True)
+    assert full_stack.wait_for_sent(
+        sent,
+        lambda payload: payload.get("text") == full_stack.markers["reply"],
+    )
+    full_stack.telegram.disable()
+    assert full_stack.telegram.wait_until_disabled_quiescent()
+    generation = full_stack.telegram.enable()
+    assert full_stack.telegram.wait_for_connect_generation(generation, timeout=20)
+    assert full_stack.telegram.wait_for_get_updates_generation(
+        generation, timeout=20
+    )
+
+    snapshot = full_stack.private_marker_snapshot()
+    assert snapshot["runtime_bad_paths"] == []
+    for marker in full_stack.markers.values():
+        assert marker not in snapshot["logs"]
+        assert marker not in snapshot["mounts"]
+        assert marker not in snapshot["history"]
+        assert all(
+            marker.encode() not in content
+            for content in snapshot["mounted_files"].values()
+        )

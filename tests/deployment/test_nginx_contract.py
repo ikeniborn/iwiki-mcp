@@ -48,6 +48,7 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        self.server.accepted_body_lengths.append(len(body))
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -78,6 +79,7 @@ def running_nginx(tmp_path, docker_command, acceptance_image):
     ingress_port = _unused_port()
     upstream.authorizations = []
     upstream.requests = []
+    upstream.accepted_body_lengths = []
     upstream.valid_authorization = "Bearer ingress-marker"
     upstream.stream_started = threading.Event()
     upstream.release_stream = threading.Event()
@@ -86,36 +88,20 @@ def running_nginx(tmp_path, docker_command, acceptance_image):
     upstream_thread.start()
 
     config = tmp_path / "nginx.conf"
+    from tests.deployment.conftest import derive_nginx_config
+
+    source = (Path(__file__).parents[2] / "deploy/nginx.conf.example").read_text(
+        encoding="utf-8"
+    )
     config.write_text(
-        """worker_processes 1;
-pid /run/nginx.pid;
-error_log /dev/stderr warn;
-events { worker_connections 128; }
-http {
-    access_log off;
-    client_body_temp_path /tmp/client_temp;
-    proxy_temp_path /tmp/proxy_temp;
-    fastcgi_temp_path /tmp/fastcgi_temp;
-    uwsgi_temp_path /tmp/uwsgi_temp;
-    scgi_temp_path /tmp/scgi_temp;
-    client_max_body_size 16m;
-    server {
-        listen 127.0.0.1:%d;
-        location / {
-            proxy_pass http://127.0.0.1:%d;
-            proxy_http_version 1.1;
-            proxy_set_header Authorization $http_authorization;
-            proxy_set_header Host $host;
-            proxy_buffering off;
-            proxy_request_buffering off;
-            proxy_read_timeout 30s;
-        }
-    }
-}
-"""
-        % (ingress_port, upstream_port),
+        derive_nginx_config(
+            source,
+            listen=f"127.0.0.1:{ingress_port}",
+            upstream=f"127.0.0.1:{upstream_port}",
+        ),
         encoding="utf-8",
     )
+    upstream.nginx_config = config
     name = f"iwiki-nginx-acceptance-{uuid.uuid4().hex[:10]}"
     try:
         subprocess.run(
@@ -206,15 +192,36 @@ def test_authorization_is_preserved_and_rejected_only_by_upstream(running_nginx)
 
 
 def test_body_limit_accepts_exactly_16_mib_and_rejects_larger(running_nginx):
-    _name, port, _upstream = running_nginx
+    _name, port, upstream = running_nginx
+    before = len(upstream.requests)
 
     exact_status, _ = _post(port, b"x" * (16 * 1024 * 1024), "Bearer ingress-marker")
+    after_exact = len(upstream.requests)
     over_status, _ = _post(
         port, b"x" * (16 * 1024 * 1024 + 1), "Bearer ingress-marker"
     )
 
-    assert exact_status != 413
+    assert exact_status == 204
+    assert upstream.accepted_body_lengths == [16 * 1024 * 1024]
+    assert after_exact == before + 1
     assert over_status == 413
+    assert len(upstream.requests) == after_exact
+
+
+def test_running_nginx_uses_exact_derived_production_config(running_nginx):
+    from tests.deployment.conftest import derive_nginx_config
+
+    _name, port, upstream = running_nginx
+    source = (Path(__file__).parents[2] / "deploy/nginx.conf.example").read_text(
+        encoding="utf-8"
+    )
+    assert upstream.nginx_config.read_text(encoding="utf-8") == (
+        derive_nginx_config(
+            source,
+            listen=f"127.0.0.1:{port}",
+            upstream=f"127.0.0.1:{upstream.server_port}",
+        )
+    )
 
 
 def test_streaming_arrives_before_upstream_completion(running_nginx):
@@ -280,6 +287,19 @@ def test_access_log_omits_marker_sent_through_request(
 @pytest.mark.postgres_integration
 def test_actual_mcp_auth_rejection_matches_direct_upstream(full_stack):
     import httpx
+
+    from tests.deployment.conftest import derive_nginx_config
+
+    source = (Path(__file__).parents[2] / "deploy/nginx.conf.example").read_text(
+        encoding="utf-8"
+    )
+    assert full_stack.nginx_config.read_text(encoding="utf-8") == (
+        derive_nginx_config(
+            source,
+            listen="127.0.0.1:8766",
+            upstream="127.0.0.1:8765",
+        )
+    )
 
     payload = {
         "jsonrpc": "2.0",

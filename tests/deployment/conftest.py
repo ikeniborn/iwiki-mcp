@@ -4,6 +4,7 @@ import base64
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,21 @@ def run_checked(args, *, timeout=120, **kwargs):
         timeout=timeout,
         **kwargs,
     )
+
+
+def derive_nginx_config(source, *, listen, upstream):
+    substitutions = (
+        ("listen 192.168.68.123:8766;", f"listen {listen};"),
+        ("proxy_pass http://127.0.0.1:8765;", f"proxy_pass http://{upstream};"),
+    )
+    derived = source
+    for original, replacement in substitutions:
+        if derived.count(original) != 1:
+            raise AssertionError(
+                f"production nginx config must contain exactly one {original!r}"
+            )
+        derived = derived.replace(original, replacement)
+    return derived
 
 
 @pytest.fixture(scope="session")
@@ -94,33 +110,72 @@ def docker_command():
 
 @pytest.fixture(scope="session")
 def acceptance_image(docker_command, compose_command):
-    tag = f"iwiki-mcp:acceptance-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    project = f"iwikiacceptance{os.getpid()}{uuid.uuid4().hex[:8]}"
+    tag = f"{project}-iwiki:latest"
     try:
-        run_checked(
-            [
-                *compose_command,
-                "--env-file",
-                "tests/deployment/fixtures/render.env",
-                "build",
-                "iwiki",
-            ],
-            timeout=300,
+        try:
+            run_checked(
+                [
+                    *compose_command,
+                    "--project-name",
+                    project,
+                    "--env-file",
+                    "tests/deployment/fixtures/render.env",
+                    "build",
+                    "iwiki",
+                ],
+                timeout=300,
+            )
+        except subprocess.CalledProcessError as exc:
+            pytest.fail(
+                f"acceptance image build failed with exit code {exc.returncode}"
+            )
+        yield tag
+    finally:
+        def remove_compose_resources():
+            subprocess.run(
+                [
+                    *compose_command,
+                    "--project-name",
+                    project,
+                    "--env-file",
+                    "tests/deployment/fixtures/render.env",
+                    "down",
+                    "--rmi",
+                    "all",
+                    "--remove-orphans",
+                ],
+                cwd=REPOSITORY,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            )
+
+        def remove_image_reference():
+            inspected = subprocess.run(
+                [*docker_command, "image", "inspect", tag],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if inspected.returncode == 0:
+                subprocess.run(
+                    [*docker_command, "image", "rm", "-f", tag],
+                    cwd=REPOSITORY,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=30,
+                )
+
+        run_cleanup_steps(
+            (
+                ("compose resources", remove_compose_resources),
+                ("image reference", remove_image_reference),
+            )
         )
-        run_checked(
-            [*docker_command, "tag", "iwiki-mcp-iwiki:latest", tag],
-            timeout=20,
-        )
-    except subprocess.CalledProcessError as exc:
-        pytest.fail(f"acceptance image build failed with exit code {exc.returncode}")
-    yield tag
-    subprocess.run(
-        [*docker_command, "image", "rm", "-f", tag],
-        cwd=REPOSITORY,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
 
 
 # Reuse the repository's disposable PostgreSQL fixtures without adding a
@@ -477,20 +532,37 @@ class DisposablePostgresEndpoint:
         self.roles.clear()
 
 
-def postgres_topology_skip_reason(env_name, values):
+def _postgres_endpoint_identity(values):
+    host = values.get("host", "")
+    normalized_host = host.strip("[]").rstrip(".").lower()
+    try:
+        loopback = ipaddress.ip_address(normalized_host).is_loopback
+    except ValueError:
+        loopback = normalized_host == "localhost"
+    return ("loopback" if loopback else normalized_host, int(values.get("port", 5432)))
+
+
+def require_postgres_topology(env_name, values):
     host = values.get("host", "")
     if not host or host.startswith("/"):
-        return f"{env_name} has no container-reachable TCP host"
-    port = int(values.get("port", 5432))
-    loopback = host in {"localhost", "::1"} or host.startswith("127.")
+        pytest.fail(f"{env_name} has no container-reachable TCP host")
+    normalized_host, port = _postgres_endpoint_identity(values)
+    loopback = normalized_host == "loopback"
     if env_name == "IWIKI_TEST_POSTGRES_LOOPBACK_DSN":
         if not loopback:
-            return f"{env_name} is not loopback-hosted"
+            pytest.fail(f"{env_name} must use a loopback host")
         if port == 5432:
-            return f"{env_name} does not use a custom port"
-    elif loopback and port == 5432:
-        return f"{env_name} must use a non-loopback host or a custom port"
-    return None
+            pytest.fail(f"{env_name} must use a custom port")
+    elif loopback:
+        pytest.fail(f"{env_name} must use a non-loopback host")
+
+
+def require_distinct_postgres_endpoints(generic, loopback):
+    if _postgres_endpoint_identity(generic) == _postgres_endpoint_identity(loopback):
+        pytest.fail(
+            "IWIKI_TEST_POSTGRES_DSN and IWIKI_TEST_POSTGRES_LOOPBACK_DSN "
+            "must resolve to different endpoints"
+        )
 
 
 @pytest.fixture(
@@ -511,9 +583,26 @@ def postgres_endpoint(request):
         values = conninfo_to_dict(dsn)
     except (ValueError, psycopg.ProgrammingError) as exc:
         pytest.fail(f"{env_name} is not a disposable test DSN: {type(exc).__name__}")
-    topology_reason = postgres_topology_skip_reason(env_name, values)
-    if topology_reason:
-        pytest.skip(topology_reason)
+    peer_name = (
+        "IWIKI_TEST_POSTGRES_LOOPBACK_DSN"
+        if env_name == "IWIKI_TEST_POSTGRES_DSN"
+        else "IWIKI_TEST_POSTGRES_DSN"
+    )
+    peer_raw = os.environ.get(peer_name, "").strip()
+    if peer_raw:
+        try:
+            peer_values = conninfo_to_dict(validated_test_dsn(peer_raw))
+        except (ValueError, psycopg.ProgrammingError) as exc:
+            pytest.fail(
+                f"{peer_name} is not a disposable test DSN: {type(exc).__name__}"
+            )
+        generic, loopback = (
+            (values, peer_values)
+            if env_name == "IWIKI_TEST_POSTGRES_DSN"
+            else (peer_values, values)
+        )
+        require_distinct_postgres_endpoints(generic, loopback)
+    require_postgres_topology(env_name, values)
     try:
         with psycopg.connect(dsn, connect_timeout=10, autocommit=True) as connection:
             with connection.cursor() as cursor:
@@ -545,6 +634,17 @@ def _wait_until(predicate, *, timeout, interval=0.1):
             return value
         time.sleep(interval)
     return value
+
+
+def run_cleanup_steps(steps):
+    failures = []
+    for name, cleanup in steps:
+        try:
+            cleanup()
+        except Exception as exc:
+            failures.append(str(exc) or f"{name} cleanup failed")
+    if failures:
+        raise RuntimeError("; ".join(failures))
 
 
 class FullStackHarness:
@@ -687,33 +787,15 @@ class FullStackHarness:
             "lock_timeout_ms = 5000\n",
             encoding="utf-8",
         )
+        nginx_source = (REPOSITORY / "deploy/nginx.conf.example").read_text(
+            encoding="utf-8"
+        )
         self.nginx_config.write_text(
-            """worker_processes 1;
-pid /run/nginx.pid;
-error_log /dev/stderr warn;
-events { worker_connections 128; }
-http {
-    access_log off;
-    client_body_temp_path /tmp/client_temp;
-    proxy_temp_path /tmp/proxy_temp;
-    fastcgi_temp_path /tmp/fastcgi_temp;
-    uwsgi_temp_path /tmp/uwsgi_temp;
-    scgi_temp_path /tmp/scgi_temp;
-    client_max_body_size 16m;
-    server {
-        listen 127.0.0.1:8766;
-        location / {
-            proxy_pass http://127.0.0.1:8765;
-            proxy_http_version 1.1;
-            proxy_set_header Authorization $http_authorization;
-            proxy_set_header Host $host;
-            proxy_buffering off;
-            proxy_request_buffering off;
-            proxy_read_timeout 30s;
-        }
-    }
-}
-""",
+            derive_nginx_config(
+                nginx_source,
+                listen="127.0.0.1:8766",
+                upstream="127.0.0.1:8765",
+            ),
             encoding="utf-8",
         )
         values = {
@@ -766,6 +848,8 @@ http {
                 f"{self.markers['proxy_origin']}:127.0.0.1",
                 "--add-host",
                 f"{self.inference_hostname}:127.0.0.1",
+                "--add-host",
+                "api.telegram.org:127.0.0.2",
                 "--restart",
                 "unless-stopped",
                 "--read-only",
@@ -876,6 +960,98 @@ http {
             timeout=10,
         ).stdout.strip()
 
+    def telegram_api_addresses(self):
+        result = run_checked(
+            [
+                *self.docker,
+                "exec",
+                self.name,
+                "/app/.venv/bin/python",
+                "-c",
+                (
+                    "import json,socket; "
+                    "print(json.dumps(sorted({row[4][0] for row in "
+                    "socket.getaddrinfo('api.telegram.org', 443)})))"
+                ),
+            ],
+            timeout=10,
+        )
+        return set(json.loads(result.stdout))
+
+    @staticmethod
+    def _process_start_time(pid):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        return int(stat.rpartition(")")[2].split()[19])
+
+    def host_child_identities(self):
+        children = self.supervisor_status()
+        result = run_checked(
+            [*self.docker, "top", self.name, "-eo", "pid,pgid,args"],
+            timeout=10,
+        )
+        rows = []
+        for line in result.stdout.splitlines()[1:]:
+            fields = line.split(maxsplit=2)
+            if len(fields) < 2:
+                continue
+            host_pid, host_pgid = map(int, fields[:2])
+            status = Path(f"/proc/{host_pid}/status").read_text(encoding="utf-8")
+            nspid_line = next(
+                item for item in status.splitlines() if item.startswith("NSpid:")
+            )
+            namespace_pid = int(nspid_line.split()[-1])
+            rows.append((host_pid, host_pgid, namespace_pid))
+        identities = {}
+        for child, status in children.items():
+            namespace_pid = status["pid"]
+            host_pid, host_pgid, _namespace_pid = next(
+                row for row in rows if row[2] == namespace_pid
+            )
+            members = tuple(
+                (pid, self._process_start_time(pid))
+                for pid, pgid, _nested_pid in rows
+                if pgid == host_pgid
+            )
+            identities[child] = {
+                "pid": host_pid,
+                "pid_start": self._process_start_time(host_pid),
+                "pgid": host_pgid,
+                "group_members": members,
+            }
+        return identities
+
+    def container_exit_code(self):
+        return int(
+            run_checked(
+                [
+                    *self.docker,
+                    "inspect",
+                    self.name,
+                    "--format",
+                    "{{.State.ExitCode}}",
+                ],
+                timeout=10,
+            ).stdout.strip()
+        )
+
+    def captured_identities_gone(self, identities):
+        captured = {
+            member
+            for identity in identities.values()
+            for member in identity["group_members"]
+        }
+        captured.update(
+            (identity["pid"], identity["pid_start"])
+            for identity in identities.values()
+        )
+        return all(
+            self._process_start_time(pid) != start_time
+            for pid, start_time in captured
+        )
+
     def enqueue_message(self, *, text=None, voice=False):
         message = {
             "from": {"id": 1001},
@@ -930,23 +1106,111 @@ http {
             "logs": sanitized[-2000:],
         }
 
-    def stop(self):
-        if not self.telegram_stopped:
-            self.telegram.stop()
-            self.telegram_stopped = True
-        if self.started:
-            self.inference.stop()
-            self.started = False
-        subprocess.run(
-            [*self.docker, "rm", "-f", self.name],
+    def private_marker_snapshot(self):
+        logs = subprocess.run(
+            [*self.docker, "logs", self.name],
             capture_output=True,
             text=True,
-            check=False,
-            timeout=30,
+            check=True,
+            timeout=10,
         )
-        for path in self.directory.iterdir():
-            if path.is_file():
-                path.unlink()
+        mounts = run_checked(
+            [
+                *self.docker,
+                "inspect",
+                self.name,
+                "--format",
+                "{{json .Mounts}}",
+            ],
+            timeout=10,
+        ).stdout
+        mounted_paths = (
+            "/etc/iwiki/server.toml",
+            "/etc/nginx/nginx.conf",
+            "/etc/ssl/certs/ca-certificates.crt",
+            self.httpx_ca_path,
+        )
+        runtime_scan = run_checked(
+            [
+                *self.docker,
+                "exec",
+                self.name,
+                "/app/.venv/bin/python",
+                "-c",
+                (
+                    "import pathlib,sys; "
+                    "markers=[bytes.fromhex(x) for x in sys.argv[1].split(',')]; "
+                    "mounted=[pathlib.Path(x) for x in sys.argv[2:]]; "
+                    "paths=[p for root in ('/run','/tmp') "
+                    "for p in pathlib.Path(root).rglob('*') if p.is_file()]+mounted; "
+                    "print('\\n'.join(str(p) for p in paths "
+                    "if any(m in p.read_bytes() for m in markers)))"
+                ),
+                ",".join(value.encode().hex() for value in self.markers.values()),
+                *mounted_paths,
+            ],
+            timeout=10,
+        )
+        mounted_files = {}
+        for path in mounted_paths:
+            mounted_files[path] = subprocess.run(
+                [*self.docker, "exec", self.name, "/bin/cat", path],
+                capture_output=True,
+                check=True,
+                timeout=10,
+            ).stdout
+        history = run_checked(
+            [*self.docker, "history", "--no-trunc", self.image],
+            timeout=20,
+        ).stdout
+        return {
+            "logs": logs.stdout + logs.stderr,
+            "mounts": mounts,
+            "runtime_bad_paths": [
+                line for line in runtime_scan.stdout.splitlines() if line
+            ],
+            "mounted_files": mounted_files,
+            "history": history,
+        }
+
+    def stop(self):
+        def stop_telegram():
+            if not self.telegram_stopped:
+                self.telegram.stop()
+                self.telegram_stopped = True
+
+        def stop_inference():
+            if self.started:
+                self.inference.stop()
+                self.started = False
+
+        def remove_container():
+            removed = subprocess.run(
+                [*self.docker, "rm", "-f", self.name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if removed.returncode and "No such container" not in removed.stderr:
+                raise RuntimeError(
+                    f"container cleanup failed: {removed.stderr.strip()}"
+                )
+
+        steps = [
+            ("telegram", stop_telegram),
+            ("inference", stop_inference),
+            ("container", remove_container),
+        ]
+        steps.extend(
+            (
+                f"file {path.name}",
+                lambda path=path: path.unlink(missing_ok=True),
+            )
+            for path in tuple(self.directory.iterdir())
+            if path.is_file()
+        )
+        run_cleanup_steps(steps)
 
 
 @pytest.fixture

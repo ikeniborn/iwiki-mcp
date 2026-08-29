@@ -200,6 +200,8 @@ class _HttpsConnectProxy:
         self._poll_waiting = threading.Event()
         self._disabled_quiescent = threading.Event()
         self._disabled_quiescent.set()
+        self._connect_served = threading.Event()
+        self._served_connect_generation = None
         self._get_updates_served = threading.Event()
         self._generation = 0
         self._served_get_updates_generation = None
@@ -341,7 +343,18 @@ class _HttpsConnectProxy:
                     )
                     return
                 self.connect_targets.append(target)
+                with self._lock:
+                    connect_generation = self._generation
+                    connect_started_enabled = self.enabled
                 outer.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                with self._lock:
+                    if (
+                        connect_started_enabled
+                        and self.enabled
+                        and connect_generation == self._generation
+                    ):
+                        self._served_connect_generation = connect_generation
+                        self._connect_served.set()
                 if remainder:
                     raise AssertionError("unexpected bytes after CONNECT headers")
 
@@ -415,10 +428,18 @@ class _HttpsConnectProxy:
     def enable(self):
         with self._lock:
             self._generation += 1
+            self._served_connect_generation = None
+            self._connect_served.clear()
             self._served_get_updates_generation = None
             self._get_updates_served.clear()
             self.enabled = True
             return self._generation
+
+    def wait_for_connect_generation(self, generation, timeout=5):
+        if not self._connect_served.wait(timeout):
+            return False
+        with self._lock:
+            return self._served_connect_generation == generation
 
     def wait_for_get_updates_generation(self, generation, timeout=5):
         if not self._get_updates_served.wait(timeout):
