@@ -159,14 +159,16 @@ host-side files:
 PostgreSQL remains an external, operator-managed durable service. A same-host database
 container must publish a host port such as `127.0.0.1:55432`; a remote database supplies
 its host and custom port and should use `sslmode = "verify-full"`. This Compose project
-creates neither a PostgreSQL service nor schema migrations. Follow the
+and its runtime create no PostgreSQL service, database, or schema objects and run no
+migrations. An operator must provision the exact compatible schema out of band with the
+repository's administration/migrator path. Follow the
 [deployment runbook](docs/deployment.md) for configuration, HTTPS proxy routing,
 validation, migration, and rollback.
 
 The server opens a bounded connection pool and applies the configured statement and
-lock timeouts. Startup probes the model endpoint, validates model metadata, and applies
-forward-only, transaction-locked migrations before opening the listener. Repeated
-startup is idempotent. One database can hold many isolated wikis under distinct
+lock timeouts. Startup probes the model endpoint, validates model metadata, and requires
+the exact schema version and provisioned runtime principal before opening the listener;
+it never runs migrations. One database can hold many isolated wikis under distinct
 `iwiki_id` values. The configured embedding model and dimension are database-wide
 metadata: a mismatch refuses startup; changing them is an operator-managed migration,
 not an automatic re-embedding. Embedding and rerank credentials remain server-only.
@@ -181,12 +183,14 @@ never writes those project files.
 
 ### PostgreSQL provisioning and least privilege
 
-The operator creates the database and installs the `vector` extension. The application
-creates and migrates only the `iwiki` schema. Prefer a dedicated login role with
-`CONNECT` on the database and ownership of the `iwiki` schema; alternatively grant
-only `USAGE` plus the required table and sequence privileges after a privileged role
-runs migrations. Do not grant access to unrelated schemas. Use `sslmode="verify-full"`
-with a trusted CA and matching database hostname outside an isolated development host.
+The operator creates the database and installs the `vector` extension. A dedicated
+administration-only schema owner/migrator uses the repository's admin commands to create
+and migrate only the `iwiki` schema before runtime starts. Never configure that
+credential as the running server login. Grant the runtime role only `CONNECT`, `USAGE`,
+and the required table and sequence privileges after migration; it owns no schema,
+receives no `CREATE`, and runs no migrations. Do not grant access to unrelated schemas.
+Use `sslmode="verify-full"` with a trusted CA and matching database hostname outside an
+isolated development host.
 
 All PostgreSQL admin commands accept `--config PATH`; otherwise they read
 `IWIKI_SERVER_CONFIG`. Only the bare stdio command accepts `--project`; `serve` accepts

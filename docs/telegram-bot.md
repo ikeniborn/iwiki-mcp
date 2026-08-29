@@ -101,6 +101,11 @@ root filesystem, and tmpfs mounts for `/run` and `/tmp`. Health covers all three
 children, loopback MCP, nginx ingress, and the Telegram polling heartbeat within the
 configured liveness window.
 
+The application runtime creates no PostgreSQL database or schema objects and runs no
+migrations. It requires the exact compatible schema prepared out of band by the
+operator's separate administration/migrator role; that privileged credential is never
+the runtime login.
+
 Selected domains, Telegram updates, user identifiers, message content, prompts,
 answers, voice files, and confirmation previews stay in memory or tmpfs and do not
 survive restart. Operational logs contain stable fields such as operation, outcome,

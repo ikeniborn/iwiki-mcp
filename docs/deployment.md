@@ -50,23 +50,40 @@ host-network application container. For remote PostgreSQL, configure its DNS nam
 IP and custom port and use `sslmode = "verify-full"` with a trusted CA and matching
 hostname.
 
-This Compose project creates no PostgreSQL service, database, or schema migration.
-Provision a compatible database and least-privilege runtime role before starting the
-container. PostgreSQL remains the durable service throughout deployment and rollback.
+The application Compose project and runtime create no PostgreSQL service, database, or
+schema objects and run no migrations. At startup, runtime calls its
+`require_schema_version` guard, requires the provisioned least-privilege principal, and
+refuses a mismatch. Before starting the container, an operator must use the repository's
+administration/migrator path with a separate schema-owner credential to create or
+migrate only the `iwiki` schema out of band. Never configure that credential as the
+runtime login. PostgreSQL remains the durable service throughout deployment and
+rollback.
 
 Copy the nginx template, then change only the host-specific `listen` value. Keep
 `proxy_pass http://127.0.0.1:8765`, explicit `Authorization` forwarding, disabled
 request and response buffering, `client_max_body_size 16m`, and `access_log off`
 unchanged.
 
+For a new target directory, create every file with its final ownership and mode before
+editing. These commands intentionally initialize empty `server.toml` and `runtime.env`;
+do not rerun them over populated files. Back up existing files or install reviewed
+source copies with the same owner/mode instead.
+
 ```bash
-sudo install -d -m 0750 /opt/iwiki-mcp
-sudo install -m 0644 deploy/nginx.conf.example /opt/iwiki-mcp/nginx.conf
+sudo install -d -o root -g root -m 0755 /opt/iwiki-mcp
+sudo install -o root -g root -m 0644 /dev/null /opt/iwiki-mcp/server.toml
+sudo install -o root -g root -m 0644 deploy/nginx.conf.example /opt/iwiki-mcp/nginx.conf
+sudo install -o root -g root -m 0600 /dev/null /opt/iwiki-mcp/runtime.env
 sudoedit /opt/iwiki-mcp/server.toml
 sudoedit /opt/iwiki-mcp/nginx.conf
 sudoedit /opt/iwiki-mcp/runtime.env
-sudo chmod 0600 /opt/iwiki-mcp/runtime.env
 ```
+
+Expected host metadata is `root:root 0755` for `/opt/iwiki-mcp`, `root:root 0644` for
+`server.toml` and `nginx.conf`, and `root:root 0600` for `runtime.env`. The two
+non-secret configuration files are readable by container UID `10001` through read-only
+bind mounts. Compose reads the owner-only runtime file on the host and injects its
+environment; the file is not mounted into the container.
 
 `runtime.env` supplies the PostgreSQL password, server inference settings, bot
 settings, the dedicated iwiki and inference credentials, the Telegram proxy URL, and
@@ -78,8 +95,10 @@ image layers, or command lines.
 
 ## Reversible migration from `iwiki-mcp-proxy-1`
 
-Keep the old nginx proxy stopped but recoverable until all acceptance checks pass. Do
-not modify PostgreSQL during this migration.
+Keep the old nginx proxy running and recoverable while the combined validation
+container starts on its non-conflicting listener and becomes healthy. Stop the old
+proxy only after that healthy result, and keep its stopped container recoverable until
+production acceptance passes. Do not modify PostgreSQL during this migration.
 
 1. Copy and validate `server.toml`, `nginx.conf`, and `runtime.env`. Confirm the MCP
    loopback, PostgreSQL endpoint, nginx upstream, allowed origins, proxy URL, and health
@@ -89,8 +108,8 @@ not modify PostgreSQL during this migration.
    mounts, host networking, tmpfs mounts, and absence of standard proxy variables.
 3. Copy nginx and runtime configuration to temporary validation files. Select a free,
    non-conflicting LAN address/port in the validation nginx `listen` directive and set
-   the validation health host/port to that listener. Keep both validation files
-   owner-only when they contain secrets.
+   the validation health host/port to that listener. Keep nginx validation configuration
+   `root:root 0644` and the secret runtime validation file `root:root 0600`.
 4. Start the combined container under a validation Compose project using those
    temporary files. Wait for Docker health to become `healthy`; inspect child state and
    secret-free logs. The old `iwiki-mcp-proxy-1` must still be running during this step.
@@ -118,8 +137,8 @@ Prepare validation copies, edit their listener/health values, then render and st
 validation project:
 
 ```bash
-sudo install -m 0644 /opt/iwiki-mcp/nginx.conf /opt/iwiki-mcp/nginx.validation.conf
-sudo install -m 0600 /opt/iwiki-mcp/runtime.env /opt/iwiki-mcp/runtime.validation.env
+sudo install -o root -g root -m 0644 /opt/iwiki-mcp/nginx.conf /opt/iwiki-mcp/nginx.validation.conf
+sudo install -o root -g root -m 0600 /opt/iwiki-mcp/runtime.env /opt/iwiki-mcp/runtime.validation.env
 sudoedit /opt/iwiki-mcp/nginx.validation.conf
 sudoedit /opt/iwiki-mcp/runtime.validation.env
 sudo env IWIKI_NGINX_CONFIG_FILE=/opt/iwiki-mcp/nginx.validation.conf IWIKI_RUNTIME_ENV_FILE=/opt/iwiki-mcp/runtime.validation.env docker compose -p iwiki-mcp-validation config --quiet
@@ -149,7 +168,10 @@ sudo rm /opt/iwiki-mcp/nginx.validation.conf /opt/iwiki-mcp/runtime.validation.e
 
 ## Rollback before old-proxy removal
 
-Rollback changes only ingress/application processes. It never changes PostgreSQL:
+The old proxy still exists in a stopped, restartable state throughout production
+verification and the acceptance window, so this rollback remains executable until step
+7 removes it. Rollback changes only ingress/application processes and never changes
+PostgreSQL:
 
 1. Stop the combined container with its 60-second graceful-stop allowance.
 2. Restart `iwiki-mcp-proxy-1`.
