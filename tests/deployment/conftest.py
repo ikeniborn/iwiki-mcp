@@ -1089,6 +1089,16 @@ class FullStackHarness:
 
         return _wait_until(observed, timeout=timeout)
 
+    def stable_log_count(self, message):
+        result = subprocess.run(
+            [*self.docker, "logs", self.name],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        return (result.stdout + result.stderr).count(message)
+
     def safe_diagnostics(self):
         logs = subprocess.run(
             [*self.docker, "logs", self.name],

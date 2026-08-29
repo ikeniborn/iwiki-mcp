@@ -8,12 +8,14 @@ import traceback
 
 import pytest
 import urllib3
+from mcp import McpError
+from mcp.types import ErrorData
 
 import iwiki_mcp.telegram_bot.main as main_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.config import BotConfig, TelegramProxyConfig
 from iwiki_mcp.telegram_bot.inference import InferenceClient, InferenceError
-from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiError
+from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiClient, RemoteIwikiError
 from iwiki_mcp.telegram_bot.proxy import ProxyResponse
 from iwiki_mcp.telegram_bot.runtime import Backoff, Heartbeat
 from iwiki_mcp.telegram_bot.transport import TelegramTransport
@@ -364,9 +366,18 @@ async def test_post_start_remote_failure_reconnects_and_replays_only_failed_upda
         async def list_domains(self):
             self.calls += 1
             if self.attempt == 1 and self.calls == 3:
-                raise RemoteIwikiError(
-                    "post-start-session-failed", retryable=True
-                )
+                marker = "post-start-session-private-marker"
+
+                async def terminated_call(name, arguments):
+                    raise McpError(
+                        ErrorData(
+                            code=-32600,
+                            message="Session terminated",
+                            data={"detail": marker},
+                        )
+                    )
+
+                return await RemoteIwikiClient(terminated_call).list_domains()
             return ["team"]
 
     @asynccontextmanager
@@ -410,7 +421,7 @@ async def test_post_start_remote_failure_reconnects_and_replays_only_failed_upda
     assert record.operation == "remote_session"
     assert record.outcome == "retry"
     rendered = record.getMessage() + repr(record.__dict__)
-    assert "post-start-session-failed" not in rendered
+    assert "post-start-session-private-marker" not in rendered
     assert "iwiki-token-marker" not in rendered
 
 

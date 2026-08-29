@@ -4,6 +4,8 @@ import traceback
 from types import SimpleNamespace
 
 import httpx
+from mcp import McpError
+from mcp.types import ErrorData
 import pytest
 
 try:
@@ -190,6 +192,57 @@ async def test_remote_runtime_failure_has_no_private_exception_chain():
     with pytest.raises(RemoteIwikiError) as captured:
         await RemoteIwikiClient(call_tool).list_domains()
 
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
+async def test_exact_session_terminated_mcp_error_is_sanitized_and_retryable():
+    marker = "session-error-private-payload-marker"
+
+    async def call_tool(name, arguments):
+        raise McpError(
+            ErrorData(
+                code=-32600,
+                message="Session terminated",
+                data={"detail": marker},
+            )
+        )
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        await RemoteIwikiClient(call_tool).list_domains()
+
+    assert str(captured.value) == "remote_call_failed"
+    assert captured.value.retryable is True
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message_template"),
+    (
+        (-32601, "Session terminated"),
+        (-32600, "Different invalid request: {marker}"),
+    ),
+    ids=("different-code", "different-invalid-request"),
+)
+async def test_other_mcp_errors_remain_sanitized_and_non_retryable(
+    code, message_template
+):
+    marker = "other-mcp-private-payload-marker"
+    error_data = ErrorData(
+        code=code,
+        message=message_template.format(marker=marker),
+        data={"detail": marker},
+    )
+
+    async def call_tool(name, arguments):
+        raise McpError(error_data)
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        await RemoteIwikiClient(call_tool).list_domains()
+
+    assert str(captured.value) == "remote_call_failed"
+    assert captured.value.retryable is False
     assert_sanitized_error(captured, marker)
 
 

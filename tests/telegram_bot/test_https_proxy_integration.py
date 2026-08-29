@@ -466,6 +466,18 @@ class _HttpsConnectProxy:
         with self._lock:
             self._updates.extend(updates)
 
+    def wait_until_update_consumed(self, update_id, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if all(
+                    update.get("update_id") != update_id
+                    for update in self._updates
+                ):
+                    return True
+            time.sleep(0.05)
+        return False
+
     def stop(self):
         self._stopping.set()
         self._poll_release.set()

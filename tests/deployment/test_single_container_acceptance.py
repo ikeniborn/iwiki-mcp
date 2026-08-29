@@ -1071,14 +1071,75 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         check=True,
         timeout=15,
     )
+    retry_message = "telegram bot remote session retry"
+    retry_count = full_stack.stable_log_count(retry_message)
     sent = len(full_stack.telegram.sent_payloads)
-    full_stack.enqueue_message(text="/domains")
-    time.sleep(1)
+    attempted_while_down = full_stack.enqueue_message(text="/domains")
+    assert full_stack.telegram.wait_until_update_consumed(
+        attempted_while_down["update_id"], timeout=10
+    )
+    assert _eventually(
+        lambda: full_stack.stable_log_count(retry_message) > retry_count,
+        timeout=20,
+    )
     subprocess.run(
         [*supervisor, "start", "iwiki-mcp"],
         capture_output=True,
         text=True,
         check=True,
+        timeout=20,
+    )
+    domains = full_stack.wait_for_sent(
+        sent,
+        lambda payload: _callback_data(payload, "domain:") is not None,
+        timeout=30,
+    )
+    assert _callback_data(domains, "domain:") == "domain:docs"
+    assert all(
+        payload.get("text") != "Wiki service is unavailable."
+        for payload in full_stack.telegram.sent_payloads[sent:]
+    )
+
+    subprocess.run(
+        [*supervisor, "stop", "iwiki-mcp"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    subprocess.run(
+        [*supervisor, "start", "iwiki-mcp"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    assert _eventually(
+        lambda: full_stack.supervisor_status().get("iwiki-mcp", {}).get(
+            "state"
+        )
+        == "RUNNING",
+        timeout=20,
+    )
+
+    def restarted_mcp_accepts_fresh_session():
+        try:
+            with httpx.Client(
+                base_url="http://127.0.0.1:8766", timeout=5
+            ) as client:
+                return _initialize(client, token).status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    assert _eventually(restarted_mcp_accepts_fresh_session, timeout=20)
+    retry_count = full_stack.stable_log_count(retry_message)
+    sent = len(full_stack.telegram.sent_payloads)
+    stale_session_update = full_stack.enqueue_message(text="/domains")
+    assert full_stack.telegram.wait_until_update_consumed(
+        stale_session_update["update_id"], timeout=10
+    )
+    assert _eventually(
+        lambda: full_stack.stable_log_count(retry_message) > retry_count,
         timeout=20,
     )
     domains = full_stack.wait_for_sent(

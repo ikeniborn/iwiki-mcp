@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 import httpx
-from mcp import ClientSession
+from mcp import ClientSession, McpError
 from mcp.client.streamable_http import streamablehttp_client
 
 try:
@@ -31,6 +31,11 @@ def _retryable_http_failure(error: BaseException) -> bool:
     if isinstance(error, BaseExceptionGroup):
         return bool(error.exceptions) and all(
             _retryable_http_failure(child) for child in error.exceptions
+        )
+    if isinstance(error, McpError):
+        return (
+            error.error.code == -32600
+            and error.error.message == "Session terminated"
         )
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
