@@ -4,6 +4,7 @@ import pytest
 
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.conversation import ConversationService
+from iwiki_mcp.telegram_bot.inference import InferenceError
 
 
 class FakeRemote:
@@ -113,6 +114,44 @@ async def test_voice_file_is_removed_after_transcription(service, tmp_path):
     assert reply.text == "Answer"
     assert ("transcribe", "voice.ogg", b"audio") in service.inference.calls
     assert list(Path(tmp_path).iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_voice_file_is_removed_when_transcription_fails(tmp_path, clock):
+    temporary_directory = tmp_path / "transient"
+    temporary_directory.mkdir()
+    outside_directory = tmp_path / "outside"
+    outside_directory.mkdir()
+    observed_paths = []
+
+    class FailingInference(FakeInference):
+        async def transcribe(self, filename, audio):
+            observed_paths.extend(temporary_directory.iterdir())
+            assert filename == "filename-marker.ogg"
+            assert audio == b"audio-content-marker"
+            raise InferenceError("inference_failed")
+
+    remote = FakeRemote()
+    inference = FailingInference()
+    service = ConversationService(
+        AccessPolicy(frozenset({1001})),
+        remote,
+        inference,
+        confirmation_ttl_seconds=300,
+        temporary_directory=temporary_directory,
+        clock=clock,
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_voice(
+        1001, "filename-marker.ogg", b"audio-content-marker"
+    )
+
+    assert reply.text == "Voice transcription is unavailable."
+    assert len(observed_paths) == 1
+    assert observed_paths[0].exists() is False
+    assert list(temporary_directory.iterdir()) == []
+    assert list(outside_directory.iterdir()) == []
 
 
 @pytest.mark.asyncio

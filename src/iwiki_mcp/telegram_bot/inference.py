@@ -23,6 +23,24 @@ _USAGE_FIELDS = frozenset({
 class InferenceError(RuntimeError):
     """A sanitized inference failure."""
 
+    def __init__(self, code: str, *, retryable: bool = False) -> None:
+        super().__init__(code)
+        self.retryable = retryable
+
+
+def _retryable_http_error(error: httpx.HTTPError) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status == 429 or 500 <= status < 600
+    return isinstance(
+        error,
+        (
+            httpx.NetworkError,
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+        ),
+    )
+
 
 class InferenceClient:
     def __init__(
@@ -38,13 +56,14 @@ class InferenceClient:
         self._chat_model = chat_model
         self._transcription_model = transcription_model
         self._owns_http = http is None
-        self._http = http or httpx.AsyncClient(timeout=60)
+        self._http = http or httpx.AsyncClient(timeout=60, trust_env=False)
 
     async def close(self) -> None:
         if self._owns_http:
             await self._http.aclose()
 
     async def probe(self) -> None:
+        retryable = None
         try:
             response = await self._http.get(
                 f"{self._base_url}/models",
@@ -52,8 +71,14 @@ class InferenceClient:
             )
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise InferenceError("inference_failed") from exc
+        except httpx.HTTPError as error:
+            retryable = _retryable_http_error(error)
+        except (httpx.InvalidURL, ValueError):
+            retryable = False
+        if retryable is not None:
+            raise InferenceError(
+                "inference_failed", retryable=retryable
+            ) from None
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or self._chat_model not in {
             item.get("id") for item in data if isinstance(item, dict)
@@ -72,6 +97,7 @@ class InferenceClient:
 
     async def _complete(self, instruction: str, request: str, context: str) -> str:
         started = time.monotonic()
+        invalid_response = False
         try:
             payload = await self._post_json(
                 "/chat/completions",
@@ -90,12 +116,14 @@ class InferenceClient:
             content = payload["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise InferenceError("invalid_inference_response")
-        except (KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError):
             self._record_telemetry("chat", "failure", started, {})
-            raise InferenceError("invalid_inference_response") from exc
+            invalid_response = True
         except InferenceError:
             self._record_telemetry("chat", "failure", started, {})
             raise
+        if invalid_response:
+            raise InferenceError("invalid_inference_response") from None
         self._record_telemetry("chat", "success", started, payload)
         return content
 
@@ -144,6 +172,7 @@ class InferenceClient:
         )
 
     async def _post_json(self, path: str, **kwargs: Any) -> dict[str, object]:
+        retryable = None
         try:
             response = await self._http.post(
                 f"{self._base_url}{path}",
@@ -152,8 +181,14 @@ class InferenceClient:
             )
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise InferenceError("inference_failed") from exc
+        except httpx.HTTPError as error:
+            retryable = _retryable_http_error(error)
+        except (httpx.InvalidURL, ValueError):
+            retryable = False
+        if retryable is not None:
+            raise InferenceError(
+                "inference_failed", retryable=retryable
+            ) from None
         if not isinstance(payload, dict):
             raise InferenceError("invalid_inference_response")
         return payload

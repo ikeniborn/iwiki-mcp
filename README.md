@@ -8,9 +8,10 @@ iwiki-mcp is a shared wiki service split into domains and queried over MCP from 
 and Claude Code. It supports a Git-synced local base or tenant-isolated PostgreSQL,
 over stdio or hosted Streamable HTTP as described below.
 
-An optional separately deployed [Telegram bot service](docs/telegram-bot.md) lets
-allowlisted employees select domains, ask text or voice questions, and confirm page
-changes through a hosted iwiki server.
+The supported container deployment runs hosted iwiki MCP, nginx, and the
+[Telegram bot service](docs/telegram-bot.md) together. Allowlisted employees can
+select domains, ask text or voice questions, and confirm page changes. See the
+[deployment runbook](docs/deployment.md) for the operator path and migration steps.
 
 ## Install
 
@@ -142,10 +143,35 @@ Hosted mode does not emit server-initiated notifications: after Bearer authentic
 the MCP session manager. Stateful `POST` requests and `DELETE` session termination remain
 available.
 
+### Supported application container
+
+Production deployment uses the repository `compose.yaml` as one hardened application
+service with three supervised children: hosted MCP on `127.0.0.1:8765`, nginx on the
+operator-selected LAN/Traefik listener, and `iwiki-telegram-bot`. Supply exactly these
+host-side files:
+
+```text
+/opt/iwiki-mcp/server.toml       hosted MCP and external PostgreSQL endpoint
+/opt/iwiki-mcp/nginx.conf        LAN/Traefik listener and loopback upstream
+/opt/iwiki-mcp/runtime.env       owner-only runtime secrets and bot settings
+```
+
+PostgreSQL remains an external, operator-managed durable service. A same-host database
+container must publish a host port such as `127.0.0.1:55432`; a remote database supplies
+its host and custom port and should use `sslmode = "verify-full"`. This Compose project
+and its runtime create no PostgreSQL service, database, or schema objects and run no
+migrations. An operator must provision the exact compatible schema out of band with the
+repository's administration/migrator path. Follow the
+[deployment runbook](docs/deployment.md) for configuration, HTTPS proxy routing,
+isolated-host validation, migration, cutover, and rollback. Because production uses
+host networking with a fixed MCP listener on `127.0.0.1:8765`, a full combined-container
+precheck cannot run concurrently on that host; without an isolated host or VM, schedule
+maintenance downtime and retain the old services for rollback.
+
 The server opens a bounded connection pool and applies the configured statement and
-lock timeouts. Startup probes the model endpoint, validates model metadata, and applies
-forward-only, transaction-locked migrations before opening the listener. Repeated
-startup is idempotent. One database can hold many isolated wikis under distinct
+lock timeouts. Startup probes the model endpoint, validates model metadata, and requires
+the exact schema version and provisioned runtime principal before opening the listener;
+it never runs migrations. One database can hold many isolated wikis under distinct
 `iwiki_id` values. The configured embedding model and dimension are database-wide
 metadata: a mismatch refuses startup; changing them is an operator-managed migration,
 not an automatic re-embedding. Embedding and rerank credentials remain server-only.
@@ -160,12 +186,14 @@ never writes those project files.
 
 ### PostgreSQL provisioning and least privilege
 
-The operator creates the database and installs the `vector` extension. The application
-creates and migrates only the `iwiki` schema. Prefer a dedicated login role with
-`CONNECT` on the database and ownership of the `iwiki` schema; alternatively grant
-only `USAGE` plus the required table and sequence privileges after a privileged role
-runs migrations. Do not grant access to unrelated schemas. Use `sslmode="verify-full"`
-with a trusted CA and matching database hostname outside an isolated development host.
+The operator creates the database and installs the `vector` extension. A dedicated
+administration-only schema owner/migrator uses the repository's admin commands to create
+and migrate only the `iwiki` schema before runtime starts. Never configure that
+credential as the running server login. Grant the runtime role only `CONNECT`, `USAGE`,
+and the required table and sequence privileges after migration; it owns no schema,
+receives no `CREATE`, and runs no migrations. Do not grant access to unrelated schemas.
+Use `sslmode="verify-full"` with a trusted CA and matching database hostname outside an
+isolated development host.
 
 All PostgreSQL admin commands accept `--config PATH`; otherwise they read
 `IWIKI_SERVER_CONFIG`. Only the bare stdio command accepts `--project`; `serve` accepts
@@ -180,17 +208,18 @@ iwiki-mcp base show --iwiki team-wiki
 iwiki-mcp base disable --iwiki team-wiki
 iwiki-mcp base enable --iwiki team-wiki
 iwiki-mcp domain create --iwiki team-wiki --domain backend
-iwiki-mcp token create --iwiki team-wiki --owner deploy --read-domain backend --write-domain backend
-iwiki-mcp token create --iwiki team-wiki --owner bootstrap --can-create-domain
 iwiki-mcp token list --iwiki team-wiki
-iwiki-mcp token set-create-domain --iwiki team-wiki --token-id <token-id> --enabled
-iwiki-mcp token set-domain-management --iwiki team-wiki --token-id <token-id> --domain backend --enabled
-iwiki-mcp token revoke --token-id <token-id>
+iwiki-mcp token set-create-domain --iwiki team-wiki --token-id replace-with-token-id --enabled
+iwiki-mcp token set-domain-management --iwiki team-wiki --token-id replace-with-token-id --domain backend --enabled
+iwiki-mcp token revoke --token-id replace-with-token-id
 iwiki-mcp base import-git --iwiki team-wiki --path /srv/old-wiki --dry-run --json
 iwiki-mcp base export-git --iwiki team-wiki --path /srv/rollback-wiki --dry-run --json
 ```
 
-`token create` prints plaintext token material once; store it in a secret manager.
+`token create` prints plaintext token material once. The examples below therefore print
+to the terminal: do not run them in a recorded session, and store the result directly in
+a secret manager. Production operators should use the non-printing capture procedure in
+the [deployment runbook](docs/deployment.md#out-of-band-schema-migration-and-principal-provisioning).
 `token list` never returns it and reports `can_create_domain`, `managed_domains`,
 `read_domains`, and `write_domains` in both default JSON and `--json` output.
 `set-create-domain` and `set-domain-management` are server-side recovery operations;
@@ -230,27 +259,40 @@ runtime roles are non-owner, hold no `BYPASSRLS`, run no migrations, and receive
 database or schema `CREATE`. Row-level security is enabled with ordinary
 `ENABLE ROW LEVEL SECURITY`, never `FORCE`, because the owner is administration-only.
 
-Register each runtime role and its domain grants explicitly. `principal grant` never
-creates a role and never accepts its password; create the login separately with the
-credentials your platform manages.
+First use the administration-only configuration to apply migrations and create the base
+and domains. Any non-dry-run admin command except the schema compatibility path checks
+and advances the schema before its requested operation; `base list` is the explicit
+operator migration trigger used by the deployment runbook.
 
 ```bash
-iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
-iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
-iwiki-mcp principal inspect --principal iwiki_hosted --json
+iwiki-mcp base list --config /opt/iwiki-mcp/admin-server.toml --json
+iwiki-mcp base create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki
+iwiki-mcp domain create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --domain backend
 ```
 
-Provision domains before enabling tokens, then issue tokens against the exact deployed
-hosted role. `token create` requires `--hosted-principal ROLE`, where `ROLE` equals the
-hosted server's `[storage].user`. It verifies that this named role is registered as
-`runtime=hosted`, is a non-owner without `BYPASSRLS`, and already covers every requested
-read and write domain before any token material is generated. Another hosted role, or a
-generic "some hosted role exists" check, is not a substitute.
+Create the PostgreSQL runtime login out of band before registering it. Its password and
+runtime configuration stay separate from the schema-owner configuration. `principal
+grant` never creates a role and never accepts its password. Register each runtime role
+and its domain grants explicitly, then inspect the exact hosted role before issuing any
+token.
 
 ```bash
-iwiki-mcp domain create --iwiki team-wiki --domain backend
-iwiki-mcp principal grant --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
-iwiki-mcp token create --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
+iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal iwiki_hosted --json
+```
+
+Only after that inspection, issue tokens against the exact deployed hosted role.
+`token create` requires `--hosted-principal ROLE`, where `ROLE` equals the hosted
+server's `[storage].user`. It verifies that this named role is registered as
+`runtime=hosted`, is a non-owner without `BYPASSRLS`, and already covers every requested
+read and write domain before any token material is generated. This also applies to a
+bootstrap token with `--can-create-domain`; another hosted role, or a generic "some
+hosted role exists" check, is not a substitute.
+
+```bash
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --owner deploy --hosted-principal iwiki_hosted --read-domain backend --write-domain backend
+iwiki-mcp token create --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --owner bootstrap --hosted-principal iwiki_hosted --read-domain backend --write-domain backend --can-create-domain
 iwiki-mcp serve --transport streamable-http
 ```
 
@@ -719,13 +761,13 @@ The bounded fusion benchmark under `eval/search_pipeline/` is evaluation-only: i
 Replay existing evidence without credentials:
 
 ```bash
-uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --pareto --replay-evidence <evidence.json>
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out replace-with-report-dir --pareto --replay-evidence replace-with-evidence.json
 ```
 
 After the replay passes, obtain operator confirmation before running a live benchmark. The live command uses an operator-created environment file; do not read or copy its credentials into the repository:
 
 ```bash
-uv run python -m eval.search_pipeline --domain iwiki-mcp --out <report-dir> --modes hybrid,lexical,semantic --pareto --env-file <operator-env-file>
+uv run python -m eval.search_pipeline --domain iwiki-mcp --out replace-with-report-dir --modes hybrid,lexical,semantic --pareto --env-file replace-with-operator-env-file
 ```
 
 ### Hard-negative gate

@@ -1,10 +1,21 @@
 import json
 import logging
+import traceback
 
 import httpx
 import pytest
 
+import iwiki_mcp.telegram_bot.inference as inference_module
 from iwiki_mcp.telegram_bot.inference import InferenceClient, InferenceError
+
+
+def assert_sanitized_error(captured, marker):
+    formatted = "".join(
+        traceback.format_exception(captured.type, captured.value, captured.tb)
+    )
+    assert marker not in formatted
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
 
 
 @pytest.mark.asyncio
@@ -40,10 +51,98 @@ async def test_probe_rejects_missing_chat_model():
         "https://models.example/v1", "key", "chat-model", "audio-model", http
     )
 
-    with pytest.raises(InferenceError, match="configured_model_unavailable"):
+    with pytest.raises(InferenceError, match="configured_model_unavailable") as captured:
         await client.probe()
 
+    assert captured.value.retryable is False
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_transport_failure_has_no_private_exception_chain():
+    marker = "probe-provider-url-key-marker"
+
+    class FailingHttp:
+        async def get(self, *args, **kwargs):
+            raise httpx.ConnectError(marker)
+
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        FailingHttp(),
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is True
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    ((401, False), (403, False), (429, True), (500, True)),
+)
+async def test_probe_http_status_retryability(status, retryable):
+    def handler(request):
+        return httpx.Response(status, text="provider-response-marker")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is retryable
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_unsupported_protocol_is_not_retryable():
+    client = InferenceClient(
+        "provider-without-scheme",
+        "key",
+        "chat-model",
+        "audio-model",
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is False
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ("probe", "post"))
+async def test_invalid_url_is_sanitized_and_not_retryable(operation):
+    marker = "invalid-port-marker"
+    client = InferenceClient(
+        f"https://provider.example:{marker}/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+    )
+
+    try:
+        with pytest.raises(InferenceError) as captured:
+            if operation == "probe":
+                await client.probe()
+            else:
+                await client.answer("Question", "Context")
+    finally:
+        await client.close()
+
+    assert str(captured.value) == "inference_failed"
+    assert captured.value.retryable is False
+    assert_sanitized_error(captured, marker)
 
 
 @pytest.mark.asyncio
@@ -173,6 +272,48 @@ async def test_http_failure_is_sanitized():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ("post", "json", "schema"))
+async def test_completion_failures_have_no_private_exception_chain(failure_stage):
+    marker = f"{failure_stage}-provider-response-marker"
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            if failure_stage == "json":
+                raise ValueError(marker)
+            if failure_stage == "schema":
+                class InvalidPayload(dict):
+                    def __getitem__(self, key):
+                        raise KeyError(marker)
+
+                return InvalidPayload()
+            return {}
+
+    class FailingHttp:
+        async def post(self, *args, **kwargs):
+            if failure_stage == "post":
+                raise httpx.ConnectError(marker)
+            return Response()
+
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        FailingHttp(),
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.answer("Question", "Context")
+
+    if failure_stage in {"json", "schema"}:
+        assert captured.value.retryable is False
+    assert_sanitized_error(captured, marker)
+
+
+@pytest.mark.asyncio
 async def test_empty_completion_is_rejected():
     def handler(request):
         return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
@@ -197,3 +338,42 @@ async def test_close_closes_internally_owned_http_client():
     await client.close()
 
     assert client._http.is_closed is True
+
+
+def test_internal_http_client_ignores_environment_proxies(monkeypatch):
+    seen = {}
+
+    class RecordingAsyncClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setenv("HTTP_PROXY", "http://environment-proxy-marker:8000")
+    monkeypatch.setenv("HTTPS_PROXY", "http://environment-proxy-marker:8001")
+    monkeypatch.setenv("ALL_PROXY", "socks5://environment-proxy-marker:1080")
+    monkeypatch.setenv("NO_PROXY", "models.example")
+    monkeypatch.setattr(inference_module.httpx, "AsyncClient", RecordingAsyncClient)
+
+    InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model"
+    )
+
+    assert seen == {"timeout": 60, "trust_env": False}
+
+
+def test_injected_http_client_is_used_without_constructing_another(monkeypatch):
+    injected = object()
+
+    def unexpected_client(**kwargs):
+        raise AssertionError("an injected client must be used")
+
+    monkeypatch.setattr(inference_module.httpx, "AsyncClient", unexpected_client)
+
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        injected,
+    )
+
+    assert client._http is injected

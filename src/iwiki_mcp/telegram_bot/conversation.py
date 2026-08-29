@@ -36,6 +36,15 @@ class ConversationService:
     def _allowed(self, telegram_id: int) -> bool:
         return self._access.allows(telegram_id)
 
+    def replace_remote(self, remote: Any) -> None:
+        self._remote = remote
+
+    @staticmethod
+    def _remote_unavailable(error: RemoteIwikiError) -> BotReply:
+        if error.retryable:
+            raise error
+        return BotReply("Wiki service is unavailable.")
+
     def expire_state(self) -> None:
         now = self._clock()
         self._selected_domains = {
@@ -59,8 +68,8 @@ class ConversationService:
             return BotReply("Access denied.")
         try:
             domains = await self._remote.list_domains()
-        except RemoteIwikiError:
-            return BotReply("Wiki service is unavailable.")
+        except RemoteIwikiError as error:
+            return self._remote_unavailable(error)
         return BotReply("Available domains:", tuple(f"domain:{item}" for item in domains))
 
     async def select_domain(self, telegram_id: int, domain: str) -> BotReply:
@@ -68,8 +77,8 @@ class ConversationService:
             return BotReply("Access denied.")
         try:
             domains = await self._remote.list_domains()
-        except RemoteIwikiError:
-            return BotReply("Wiki service is unavailable.")
+        except RemoteIwikiError as error:
+            return self._remote_unavailable(error)
         if domain not in domains:
             return BotReply("Domain is not available.")
         self._selected_domains[telegram_id] = (
@@ -103,8 +112,10 @@ class ConversationService:
             if not context:
                 return BotReply("No relevant wiki content found.")
             answer = await self._inference.answer(question, context)
-        except (KeyError, RemoteIwikiError):
+        except KeyError:
             return BotReply("Wiki service is unavailable.")
+        except RemoteIwikiError as error:
+            return self._remote_unavailable(error)
         except InferenceError:
             return BotReply("Inference service is unavailable.")
         return BotReply(answer)
@@ -141,8 +152,8 @@ class ConversationService:
         try:
             context = await self._draft_context(domain, request)
             markdown = await self._inference.draft_markdown(request, context)
-        except RemoteIwikiError:
-            return BotReply("Wiki service is unavailable.")
+        except RemoteIwikiError as error:
+            return self._remote_unavailable(error)
         except InferenceError:
             return BotReply("Inference service is unavailable.")
         return self._store_preview(
@@ -166,8 +177,8 @@ class ConversationService:
             if not isinstance(context, str):
                 return BotReply("Page section is unavailable.")
             markdown = await self._inference.draft_markdown(request, context)
-        except RemoteIwikiError:
-            return BotReply("Wiki service is unavailable.")
+        except RemoteIwikiError as error:
+            return self._remote_unavailable(error)
         except InferenceError:
             return BotReply("Inference service is unavailable.")
         target = PageTarget(domain=domain, slug=slug, heading=heading)
@@ -269,6 +280,8 @@ class ConversationService:
             else:
                 return BotReply("Confirmation is invalid.")
         except RemoteIwikiError as exc:
+            if exc.retryable:
+                raise
             if str(exc) in {"conflict", "section_conflict"}:
                 return BotReply("Page changed; request a new preview.")
             return BotReply("Wiki service is unavailable.")

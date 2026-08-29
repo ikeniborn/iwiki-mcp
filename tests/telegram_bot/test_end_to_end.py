@@ -55,9 +55,20 @@ class FakeInference:
         return "# Runbook\n\nDeployment steps"
 
 
+class FakeTelegramHttp:
+    async def post_json(self, url, payload):
+        raise AssertionError("BotHarness must handle Telegram API calls")
+
+    async def get_bytes(self, url):
+        raise AssertionError("BotHarness must handle Telegram file downloads")
+
+    async def close(self):
+        pass
+
+
 class BotHarness(TelegramTransport):
     def __init__(self, access, conversation):
-        super().__init__("token", access, conversation)
+        super().__init__("token", access, conversation, FakeTelegramHttp())
         self.sent = []
 
     async def _api(self, method, data):

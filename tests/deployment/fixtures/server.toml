@@ -1,0 +1,16 @@
+[storage]
+type = "postgres"
+host = "127.0.0.1"
+port = 5432
+database = "iwiki_render_fixture"
+user = "iwiki_render_fixture"
+sslmode = "disable"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+allowed_origins = ["https://fixture.invalid"]
+pool_min_size = 1
+pool_max_size = 2
+statement_timeout_ms = 30000
+lock_timeout_ms = 5000
