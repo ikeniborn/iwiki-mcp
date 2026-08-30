@@ -636,7 +636,7 @@ def _wait_until(predicate, *, timeout, interval=0.1):
     return value
 
 
-def _generate_ogg_voice(image, docker):
+def _generate_ogg_voice(image, docker, privacy_marker):
     generated = subprocess.run(
         [
             *docker,
@@ -654,6 +654,8 @@ def _generate_ogg_voice(image, docker):
             "anullsrc=r=16000:cl=mono",
             "-t",
             "0.1",
+            "-metadata",
+            f"comment={privacy_marker}",
             "-c:a",
             "libopus",
             "-f",
@@ -666,6 +668,8 @@ def _generate_ogg_voice(image, docker):
     )
     if not generated.stdout.startswith(b"OggS"):
         raise RuntimeError("ffmpeg did not produce OGG/Opus acceptance audio")
+    if privacy_marker.encode() not in generated.stdout:
+        raise RuntimeError("ffmpeg did not preserve the audio privacy marker")
     return generated.stdout
 
 
@@ -783,7 +787,9 @@ class FullStackHarness:
             telegram_cert,
             token=self.markers["telegram_token"],
             updates=[],
-            audio=_generate_ogg_voice(self.image, self.docker),
+            audio=_generate_ogg_voice(
+                self.image, self.docker, self.markers["audio"]
+            ),
             voice_path=f"voice/{self.markers['filename']}.ogg",
             proxy_authorization=proxy_authorization,
             poll_delay=0.05,
@@ -1131,6 +1137,24 @@ class FullStackHarness:
             timeout=10,
         )
         return (result.stdout + result.stderr).count(message)
+
+    def transient_audio_paths(self):
+        result = run_checked(
+            [
+                *self.docker,
+                "exec",
+                self.name,
+                "/app/.venv/bin/python",
+                "-c",
+                (
+                    "import pathlib; root=pathlib.Path('/tmp'); "
+                    "print('\\n'.join(str(p) for p in root.rglob('*') "
+                    "if p.name in {'input.ogg','audio.wav'}))"
+                ),
+            ],
+            timeout=10,
+        )
+        return [line for line in result.stdout.splitlines() if line]
 
     def safe_diagnostics(self):
         logs = subprocess.run(

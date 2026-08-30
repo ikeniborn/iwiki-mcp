@@ -176,6 +176,28 @@ async def test_voice_rejects_wav_larger_than_framework_limit(
 
 
 @pytest.mark.asyncio
+async def test_voice_accepts_wav_at_framework_limit(service, monkeypatch):
+    await service.select_domain(1001, "team")
+    wav = b"RIFF\x24\x00\x00\x00WAVEexact-boundary"
+    monkeypatch.setattr(
+        conversation_module,
+        "_TRANSCRIPTION_MAX_BYTES",
+        len(wav),
+        raising=False,
+    )
+
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(wav)
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    reply = await service.answer_voice(1001, "voice.ogg", b"opus-audio")
+
+    assert reply.text == "Answer"
+    assert ("transcribe", "audio.wav", wav) in service.inference.calls
+
+
+@pytest.mark.asyncio
 async def test_voice_conversion_failure_is_sanitized_and_temp_files_are_removed(
     service, tmp_path, monkeypatch
 ):
@@ -206,6 +228,9 @@ async def test_voice_cancellation_removes_temp_files(
     observed_paths = []
 
     async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(
+            b"RIFF\x24\x00\x00\x00WAVEpartial-audio"
+        )
         observed_paths.extend(Path(command[-1]).parent.iterdir())
         conversion_started.set()
         await asyncio.Event().wait()
