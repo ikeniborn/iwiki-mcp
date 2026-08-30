@@ -288,7 +288,7 @@ def test_specification_relations_never_enter_structural_graph_rows(
 ):
     publication_adapter.publish_complete("structural-only")
 
-    rows = publication_adapter.persisted_rows()
+    rows = publication_adapter.rows
 
     assert {row["relation_type"] for row in rows["relations"]} <= {
         "DECLARES", "IMPORTS", "CALLS", "INHERITS"

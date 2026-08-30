@@ -34,12 +34,26 @@ def _retryable_http_failure(error: BaseException) -> bool:
         )
     if isinstance(error, McpError):
         return (
-            error.error.code == -32600
-            and error.error.message == "Session terminated"
+            (
+                error.error.code == -32600
+                and error.error.message
+                in {"Session terminated", "Session not found"}
+            )
+            or (
+                error.error.code == 32600
+                and error.error.message == "Session terminated"
+            )
         )
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
-        return status == 429 or 500 <= status < 600
+        return (
+            status == 429
+            or 500 <= status < 600
+            or (
+                status == 404
+                and "mcp-session-id" in error.request.headers
+            )
+        )
     return isinstance(
         error,
         (
@@ -97,7 +111,8 @@ class RemoteIwikiClient:
             retryable = _retryable_http_failure(error)
         if retryable is not None:
             raise RemoteIwikiError(
-                "remote_call_failed", retryable=retryable
+                "remote_call_failed",
+                retryable=retryable,
             ) from None
         error = payload.get("error")
         if error:

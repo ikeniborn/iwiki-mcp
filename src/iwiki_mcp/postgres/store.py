@@ -1642,21 +1642,18 @@ class PostgresStore:
         def mutate(projection):
             with self._connect() as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT domain_id FROM iwiki.domains "
-                        "WHERE iwiki_id = %s AND slug = %s",
-                        (self.iwiki_id, domain),
+                    domain_id = (
+                        self._specification_domain(cursor, domain)
+                        if projection is None
+                        else self._lock_specification_domain(cursor, domain)
                     )
-                    domain_row = cursor.fetchone()
-                    if domain_row is None:
-                        raise ValueError("domain not found")
                     cursor.execute(
                         "INSERT INTO iwiki.pages "
                         "(iwiki_id, domain_id, slug, markdown) "
                         "VALUES (%s, %s, %s, %s) "
                         "ON CONFLICT (iwiki_id, domain_id, slug) DO NOTHING "
                         "RETURNING page_id, revision",
-                        (self.iwiki_id, domain_row[0], slug, markdown),
+                        (self.iwiki_id, domain_id, slug, markdown),
                     )
                     row = cursor.fetchone()
                     if row is None:

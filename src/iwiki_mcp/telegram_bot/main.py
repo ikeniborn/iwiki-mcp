@@ -1,6 +1,7 @@
 """Composition root for the separately deployed Telegram bot process."""
 
 import argparse
+import asyncio
 from collections.abc import Awaitable, Callable
 import logging
 from pathlib import Path
@@ -31,6 +32,14 @@ def _retryable_startup_error(error: Exception) -> bool:
     return bool(error.retryable)
 
 
+def _is_anyio_cancel_scope_cancellation(error: asyncio.CancelledError) -> bool:
+    return (
+        len(error.args) == 1
+        and type(error.args[0]) is str
+        and error.args[0].startswith("Cancelled via cancel scope ")
+    )
+
+
 async def _close_dependencies(
     remote_context,
     remote_entered: bool,
@@ -39,12 +48,12 @@ async def _close_dependencies(
     exc_info,
 ) -> None:
     failures = []
+    if remote_entered:
+        try:
+            await remote_context.__aexit__(*exc_info)
+        except BaseException as error:
+            failures.append(error)
     with anyio.CancelScope(shield=True):
-        if remote_entered:
-            try:
-                await remote_context.__aexit__(*exc_info)
-            except BaseException as error:
-                failures.append(error)
         if inference is not None:
             try:
                 await inference.close()
@@ -165,6 +174,24 @@ async def run_bot(
                     )
                     remote_context = None
                     remote_entered = False
+                except asyncio.CancelledError as error:
+                    if not _is_anyio_cancel_scope_cancellation(error):
+                        raise
+                    session_exc_info = sys.exc_info()
+                    reconnect_started = clock()
+                    await _close_dependencies(
+                        remote_context,
+                        remote_entered,
+                        None,
+                        None,
+                        session_exc_info,
+                    )
+                    remote_context = None
+                    remote_entered = False
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                    await anyio.lowlevel.checkpoint_if_cancelled()
 
                 while True:
                     retry_delay = backoff.next_delay(random_value())

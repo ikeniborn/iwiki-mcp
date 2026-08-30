@@ -344,6 +344,22 @@ def test_principal_grant_inspect_and_schema_rollback_commands(admin_runtime):
             }
         ]
 
+        from iwiki_mcp.postgres.migrations import (
+            MigrationSettings,
+            rollback_v6_compatibility,
+            rollback_v7_compatibility,
+        )
+
+        settings = MigrationSettings(
+            dsn=service.dsn,
+            embed_model=service.config.models.embed_model,
+            embed_dimensions=service.config.models.embed_dimensions,
+            statement_timeout_ms=service.config.server.statement_timeout_ms,
+            lock_timeout_ms=service.config.server.lock_timeout_ms,
+        )
+        rollback_v7_compatibility(settings, confirm=True)
+        rollback_v6_compatibility(settings, confirm=True)
+
         code, output, error = _run(
             ["schema", "rollback-v5-compat", *prefix, "--json"], environ
         )

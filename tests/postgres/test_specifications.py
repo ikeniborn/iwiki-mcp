@@ -921,7 +921,13 @@ def test_strict_projection_failure_rolls_back_page_and_optional_preserves_rows(
     assert result["revision"] == 2
     assert result["warning"] == "specification projection is stale"
     after = store.specification_context("docs", "stable-id")
-    assert after == before
+    assert after is not None
+    assert after.scenario == before.scenario
+    assert after.bindings == before.bindings
+    assert after.evidence == before.evidence
+    assert after.findings == before.findings
+    assert after.projection_revision == before.projection_revision
+    assert after.projection_state == "stale"
 
 
 @pytest.mark.postgres_integration
@@ -984,7 +990,7 @@ def test_domain_duplicates_are_coherent_and_strict_rejection_preserves_projectio
 
 @pytest.mark.postgres_integration
 def test_optional_duplicate_server_context_reports_sorted_authorized_locations(
-    store_factory, monkeypatch,
+    store_factory, monkeypatch, tmp_path,
 ):
     import psycopg
 
@@ -1004,10 +1010,21 @@ def test_optional_duplicate_server_context_reports_sorted_authorized_locations(
                 "FROM iwiki.specification_projection_state"
             )
             metadata_before = cursor.fetchone()
-    binding = SimpleNamespace(
+    binding = server.base.PostgresBinding(
+        host="127.0.0.1",
+        port=5432,
+        database="iwiki_bdd_test",
+        user="iwiki_test",
+        sslmode="disable",
+        password="iwiki_test_only",
+        iwiki_id=store.iwiki_id,
         read=("docs",),
         write=("docs",),
         primary="docs",
+        project_dir=str(tmp_path),
+        embed_model="test-embedding",
+        embed_dimensions=3,
+        rerank_model="",
         specification_mode="optional",
     )
     monkeypatch.setattr(server, "_resolved_binding", lambda: binding)
@@ -1295,8 +1312,10 @@ def test_public_index_projection_failure_keeps_ordinary_index_and_sanitizes_warn
     with psycopg.connect(store._dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT count(*) FROM iwiki.chunks c JOIN iwiki.domains d "
-                "ON d.iwiki_id = c.iwiki_id AND d.domain_id = c.domain_id "
+                "SELECT count(*) FROM iwiki.chunks c JOIN iwiki.pages p "
+                "ON p.iwiki_id = c.iwiki_id AND p.page_id = c.page_id "
+                "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
+                "AND d.domain_id = p.domain_id "
                 "WHERE d.iwiki_id = %s AND d.slug = 'docs'",
                 (store.iwiki_id,),
             )

@@ -474,10 +474,10 @@ def test_v6_compatibility_rollback_drops_only_v6_and_reapplies(clean_postgres):
         with psycopg.connect(clean_postgres) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT to_regclass('iwiki.specification_scenarios'), "
-                    "to_regclass('iwiki.code_graph_snapshots')"
+                    "SELECT to_regclass('iwiki.specification_scenarios') IS NULL, "
+                    "to_regclass('iwiki.code_graph_snapshots') IS NOT NULL"
                 )
-                assert cursor.fetchone() == (None, "iwiki.code_graph_snapshots")
+                assert cursor.fetchone() == (True, True)
 
         reapplied = run_migrations(settings)
         assert reapplied.applied_versions == (6, 7)
@@ -636,14 +636,14 @@ def test_v7_compatibility_rollback_rejects_detached_rows_without_ddl(
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT max(version), "
-                "to_regclass('iwiki.specification_projection_state'), "
+                "to_regclass('iwiki.specification_projection_state') IS NOT NULL, "
                 "page_id, page_slug FROM iwiki.schema_migrations, "
                 "iwiki.specification_scenarios "
                 "GROUP BY page_id, page_slug"
             )
             assert cursor.fetchone() == (
                 7,
-                "iwiki.specification_projection_state",
+                True,
                 None,
                 "spec",
             )

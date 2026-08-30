@@ -12,6 +12,13 @@ review:
 chain:
   intent: docs/superpowers/intents/2026-08-29-bdd-event-sourcing-verification-intent.md
   spec: docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: 410a57137192fbfc
+  last_run: 2026-08-30
+  reviewed: true
+  docs_checked: true
 ---
 
 # BDD Event-Sourcing Verification Implementation Plan
