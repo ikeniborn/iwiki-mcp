@@ -1,7 +1,7 @@
 ---
 review:
-  spec_hash: 4a3cd06030b2a322
-  last_run: 2026-08-29
+  spec_hash: 353b804c0a4829b6
+  last_run: 2026-08-30
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -371,9 +371,12 @@ PostgreSQL schema version 6 adds tenant-scoped tables for specification scenario
 bindings, and resolution evidence. Schema version 7 adds
 `specification_projection_state`, keyed by `iwiki_id` and `domain_id`, with the last
 successful Markdown revision, logical projection revision, scenario/binding counts,
-and update time. The metadata table uses the same runtime grants, command-specific row
-level security, and tenant/domain authorization pattern as the three projection tables.
-It is independent of structural code-graph tables.
+sanitized projection findings, and update time. Findings are stored as a non-null JSONB
+array with an empty-array default and a JSON-array check. Each element uses the same
+canonical sanitized finding record as the Git metadata row, including every authorized
+location for a duplicate scenario ID. The metadata table uses the same runtime grants,
+command-specific row level security, and tenant/domain authorization pattern as the
+three projection tables. It is independent of structural code-graph tables.
 
 Version 7 also makes a stale snapshot representable after page deletion. It adds a
 non-null stored `page_slug` to every scenario, backfilled from the referenced page;
@@ -389,8 +392,10 @@ An upgraded domain without a metadata row is reported stale when specification s
 or derived rows exist, then becomes ready after `wiki_index` or the next successful
 specification mutation writes rows and metadata atomically. A domain with no
 specification sources, derived rows, or metadata remains absent. A successful empty
-rebuild writes metadata with zero counts so removal of the last scenario is durably
-distinguishable from an uninitialized domain.
+rebuild writes metadata with zero counts and its complete findings array so removal of
+the last scenario is durably distinguishable from an uninitialized domain. Every
+successful replacement writes scenarios, bindings, preserved evidence, findings, and
+metadata in one transaction.
 
 The logical behavior matches Git: optional mode retains Markdown and reports a
 projection warning if a derived refresh fails. Optional projection refresh runs in a
@@ -399,8 +404,11 @@ the outer page transaction may commit. When that mutation deletes a specificatio
 the outer delete sets stale scenario `page_id` values to null rather than cascading the
 snapshot; the failed savepoint leaves projection metadata unchanged, and read-time
 revision comparison reports stale. Search and context may return that previous snapshot
-with its stored page slug only while explicitly marking it stale. A successful refresh
-replaces all domain projection rows and metadata together, removing deleted scenarios.
+with its stored page slug only while explicitly marking it stale. They read duplicate
+and other projection findings from that same persisted metadata and never reparse
+current Markdown to answer a semantic query. A successful refresh replaces all domain
+projection rows, findings, and metadata together, removing deleted scenarios and
+obsolete findings.
 
 Strict mode uses one transaction and commits neither page nor projection metadata on any
 failure; ordinary pages bypass specification persistence. Domain projection rebuild
@@ -420,7 +428,11 @@ rollback and idempotent v7 reapplication are integration-tested.
 
 Projection assembly checks domain-wide uniqueness after parsing all specification
 pages. In optional mode, every instance of a duplicated scenario ID is excluded from
-the query projection and reported with both page locations. In strict mode, a mutation
+the query projection and reported with every page location. PostgreSQL persists this
+duplicate finding in the same successful snapshot as its projection metadata, so
+`wiki_spec_context` returns `ambiguous_scenario_id` from persisted authorized locations.
+If a later optional refresh fails, context continues to use the previous findings and
+projection revision instead of interpreting newer Markdown. In strict mode, a mutation
 that introduces a duplicate is rejected. Moving a unique scenario without changing its
 block keeps scenario identity and binding IDs; location fields update and matching
 resolution evidence remains valid unless the source or graph revision changed.
@@ -686,7 +698,8 @@ consume the server contract documented here.
 ### 15.3 Persistence and queries
 
 - **R-010 — Equivalent projections:** Git JSONL and PostgreSQL tables must preserve the
-  same logical scenario, binding, and evidence records and duplicate handling.
+  same logical scenario, binding, evidence, and sanitized finding records, including
+  duplicate handling and last-success stale-snapshot semantics.
   **Acceptance:** AC-012.
 - **R-011 — Atomic strict mutation:** a strict specification-page mutation must commit
   page and projection together or change neither. **Acceptance:** AC-013.
@@ -753,7 +766,10 @@ consume the server contract documented here.
 - **AC-011:** disabled-mode instrumentation proves zero parser, projection, and graph
   calls during all ordinary Wiki operations.
 - **AC-012:** shared golden records produced through Git and PostgreSQL adapters are
-  byte/field equivalent except backend revision types and storage metadata.
+  byte/field equivalent except backend revision types and storage metadata. A PostgreSQL
+  optional-mode integration case persists duplicate locations, forces a later projection
+  refresh failure after Markdown changes, and proves search/context keep the previous
+  scenarios, findings, and revision without reparsing the newer Markdown.
 - **AC-013:** fault injection at parse, projection preparation, projection publication,
   PostgreSQL transaction, and Git commit boundaries proves strict all-or-nothing
   behavior and optional fail-soft behavior.
@@ -835,7 +851,7 @@ resolution. `wiki_lint` must show no new task/documentation finding before resul
 | Risk | Mitigation | Acceptance evidence |
 |---|---|---|
 | Specification parsing breaks ordinary pages | Type classification precedes parser use; disabled and ordinary paths bypass the subsystem | AC-001, AC-010, AC-011, AC-022 |
-| Derived projection contradicts Markdown | Store source/page revisions, rebuild from coherent snapshots, compute freshness, and keep Markdown canonical | AC-004, AC-012, AC-015 |
+| Derived projection contradicts Markdown | Store source/page revisions and findings, rebuild from coherent snapshots, compute freshness, and keep Markdown canonical; stale queries use one persisted last-success snapshot | AC-004, AC-012, AC-015 |
 | Persisted targets become stale | Persist graph revision and source hash; context reports stale without mutation; refresh is explicit | AC-014, AC-015, AC-017 |
 | Code graph becomes mandatory | Search/context never call it; resolve records graph-unavailable evidence | AC-011, AC-016, AC-017 |
 | New relations corrupt structural graph | Keep specification relations in separate records/adapters | AC-018 |

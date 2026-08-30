@@ -296,6 +296,19 @@ def _code_mapping(markdown: str | Mapping[str, object]) -> object | None:
     return meta.get("code")
 
 
+def binding_selector_mapping(
+    selector_kind: str, selector: str
+) -> dict[str, object]:
+    """Map one validated specification binding to the shared selector grammar."""
+    if selector_kind == "symbol":
+        return {"symbols": [{"qualified_name": selector}]}
+    if selector_kind == "file":
+        return {"files": [selector]}
+    if selector_kind == "source_glob":
+        return {"source_globs": [selector]}
+    raise SelectorError("invalid specification selector kind")
+
+
 def resolve_selectors(
     markdown: str | Mapping[str, object],
     snapshot: Mapping[str, Sequence[Mapping[str, object]]],

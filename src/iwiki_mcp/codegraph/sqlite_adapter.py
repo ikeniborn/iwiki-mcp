@@ -1378,6 +1378,36 @@ class SqliteCodeGraphReader:
                 "error": "missing_snapshot",
             }
 
+    def specification_snapshot(self):
+        """Capture private selector rows from one guarded ready revision."""
+        from ..specifications import SpecificationGraphSnapshot
+
+        try:
+            with _selector_read_lock(self._wiki_base, self._lock_path, 0):
+                with self._store.read_lease() as connection:
+                    status = self._status(connection)
+                    revision = status.get("revision")
+                    if status.get("state") != "ready" or not isinstance(
+                        revision, str
+                    ):
+                        return None
+                    files = _table_rows(connection, "files")
+                    symbols = _table_rows(connection, "symbols")
+                    repository = connection.execute(
+                        "SELECT state, revision FROM repositories "
+                        "WHERE repository_id = ?",
+                        (self._domain,),
+                    ).fetchone()
+                    if repository != ("ready", revision):
+                        return None
+                    return SpecificationGraphSnapshot(
+                        revision=revision,
+                        files=files,
+                        symbols=symbols,
+                    )
+        except (Timeout, OSError, sqlite3.DatabaseError, CodeGraphStoreError):
+            return None
+
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
         try:
             with _selector_read_lock(self._wiki_base, self._lock_path, 0):

@@ -1,7 +1,7 @@
 ---
 review:
-  plan_hash: e2ced5febc351929
-  last_run: 2026-08-29
+  plan_hash: 410a57137192fbfc
+  last_run: 2026-08-30
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -20,12 +20,12 @@ chain:
 
 **Goal:** Add server-owned, graph-optional Given-When-Then specifications with equivalent Git and PostgreSQL projections, semantic tools, strict/optional/disabled modes, and durable agent guidance.
 
-**Architecture:** Canonical Markdown is parsed by a standard-library engine module into immutable scenario and binding records. A backend-neutral application service owns projection assembly, queries, evidence freshness, and fail-soft graph resolution; Git JSONL and PostgreSQL v6/v7 adapters persist equivalent records. PostgreSQL v7 stores last-success projection metadata and detaches stale scenario rows from deleted pages without weakening ordinary Wiki or optional code-graph boundaries.
+**Architecture:** Canonical Markdown is parsed by a standard-library engine module into immutable scenario and binding records. A backend-neutral application service owns projection assembly, queries, evidence freshness, and fail-soft graph resolution; Git JSONL and PostgreSQL v6/v7 adapters persist equivalent records. PostgreSQL v7 stores last-success projection metadata and sanitized findings, and detaches stale scenario rows from deleted pages without weakening ordinary Wiki or optional code-graph boundaries.
 
 **Tech Stack:** Python 3.10+, `tomllib`/`tomli`, FastMCP, Git filesystem storage, PostgreSQL/psycopg, pytest/pytest-asyncio, existing code-graph readers.
 
 **Status:** approved
-**Approved specification:** `docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md` (`4a3cd06030b2a322`)
+**Approved specification:** `docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md` (`353b804c0a4829b6`)
 
 ---
 
@@ -43,9 +43,9 @@ accepted contract with incompatible storage behavior.
 - Ordinary pages must not open specification storage or inspect the code graph.
 - `implements` and `verifies` stay outside structural code-graph tables and public tools.
 - PostgreSQL migrations are forward-only v6 and v7 with tenant/domain RLS. Version 7
-  adds last-success metadata, stored page slug, nullable page identity, and
-  `ON DELETE SET NULL`; Git strict mutation holds one cross-process lock across
-  page/projection/index/commit/rollback.
+  adds last-success metadata with sanitized findings, stored page slug, nullable page
+  identity, and `ON DELETE SET NULL`; Git strict mutation holds one cross-process lock
+  across page/projection/index/commit/rollback.
 - PostgreSQL-marked tests run only against the disposable pgvector test database guarded
   by `tests/postgres/conftest.py`.
 - Each worker owns only files listed by its task, does not revert other changes, returns
@@ -86,6 +86,14 @@ Tasks 1 through 5 and the approved schema-v7 spec are already delivered through
 to approved, updates all four version surfaces to `0.7.212`, runs the package tests, and
 commits/pushes only the plan plus version surfaces. Task 6 must refuse to start unless
 HEAD contains that `0.7.212` prerequisite; its implementation commit is `0.7.213`.
+
+Task 6 is delivered at `0.7.213`. The later persisted-findings correction to the
+approved schema-v7 design is not a released migration version and does not create an
+intermediate repository commit. Its spec/plan edits, v7 table definition, PostgreSQL
+adapter changes, and tests are owned and staged by the still-uncommitted Task 7 commit
+at `0.7.214`. Existing pre-release v7 test databases are recreated or explicitly rolled
+back/reapplied before real integration evidence; production compatibility is not
+claimed for intermediate branch artifacts.
 
 If result reconciliation demonstrates a later defect requiring another repository
 commit, that owning task increments all four surfaces to the next unused patch before
@@ -743,9 +751,13 @@ git commit -m "feat(spec): persist PostgreSQL specification projections"
 Expected: schema v7 is tenant/domain protected and fail-closed on unsafe rollback;
 transactions, CAS, restart, durable stale deletion, recovery, and parity pass.
 
-## Task 7: Semantic search, context freshness, and graph-optional resolution
+## Task 7: Persisted findings, semantic search, context freshness, and graph-optional resolution
 
 **Files:**
+- Modify: `docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md`
+- Modify: `docs/superpowers/plans/2026-08-29-bdd-event-sourcing-verification.md`
+- Modify: `src/iwiki_mcp/postgres/migrations.py`
+- Modify: `src/iwiki_mcp/postgres/store.py`
 - Modify: `src/iwiki_mcp/specifications.py`
 - Modify: `src/iwiki_mcp/server.py`
 - Modify: `src/iwiki_mcp/codegraph/application.py`
@@ -760,12 +772,17 @@ transactions, CAS, restart, durable stale deletion, recovery, and parity pass.
 - Modify: `tests/codegraph/test_server_tools.py`
 - Modify: `tests/postgres/test_code_graph_reader.py`
 - Modify: `tests/postgres/test_code_graph_contract.py`
+- Modify: `tests/postgres/test_specification_migrations.py`
+- Modify: `tests/postgres/test_specifications.py`
 
 - [ ] **Step 1: Write failing semantic query and freshness tests**
 
 Test query validation/scope/limit/ranking; complete context; `not_checked`, `fresh`,
 `stale_spec`, `stale_graph`; graph recovery/state/reason/revision changes; and zero graph
-resolution or write calls from search/context.
+resolution or write calls from search/context. Add PostgreSQL schema and adapter parity
+tests for canonical persisted findings, duplicate authorized locations, and a failed
+optional refresh that preserves the previous scenarios, findings, and projection
+revision even when current Markdown has changed.
 
 - [ ] **Step 2: Write failing coherent resolution tests**
 
@@ -783,16 +800,25 @@ assert structural_graph_rows_after == structural_graph_rows_before
 - [ ] **Step 3: Run tool/resolution tests and verify RED**
 
 ```bash
-uv run pytest -q tests/test_specification_tools.py tests/test_specification_resolution.py tests/codegraph/test_server_tools.py tests/postgres/test_code_graph_contract.py
+uv run pytest -q tests/test_specification_tools.py tests/test_specification_resolution.py tests/codegraph/test_server_tools.py tests/postgres/test_code_graph_contract.py tests/postgres/test_specification_migrations.py tests/postgres/test_specifications.py
 ```
 
-Expected: missing query/resolution service APIs.
+Expected: missing persisted-findings schema/adapter behavior and query/resolution
+service APIs before Task 7 implementation.
 
 - [ ] **Step 4: Implement pure search/context and freshness**
 
 Search/context operate only on persisted projections. Freshness compares scenario hash
 first; ready evidence then compares graph revision; unavailable evidence compares only
 the sanitized `(state, reason, revision-or-null)` fingerprint. Reads never persist.
+Extend the schema-v7 `specification_projection_state` definition with
+`findings jsonb NOT NULL DEFAULT '[]'::jsonb` and a JSON-array check. Serialize the same
+canonical sanitized finding dictionaries used by Git. Write and replace findings in the
+same transaction as scenarios, bindings, preserved evidence, counts, and revisions;
+reconstruct PostgreSQL `DomainProjection.findings` only from that stored JSONB. Missing
+metadata remains stale under the existing v6-upgrade rule. Duplicate context reads the
+persisted finding locations and never reparses current Markdown. A failed optional
+savepoint leaves the previous findings and metadata byte/field unchanged.
 
 - [ ] **Step 5: Implement private coherent selector adapter**
 
@@ -827,12 +853,13 @@ one attempt transactionally. A changed revision records only
 
 ```bash
 uv sync --extra dev
-uv run pytest -q tests/test_package.py tests/test_specification_tools.py tests/test_specification_resolution.py tests/codegraph/test_application.py tests/codegraph/test_linking.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_schema.py tests/codegraph/test_query.py tests/codegraph/test_server_tools.py tests/postgres/test_code_graph_reader.py tests/postgres/test_code_graph_contract.py
-git add src/iwiki_mcp/specifications.py src/iwiki_mcp/server.py src/iwiki_mcp/codegraph/application.py src/iwiki_mcp/codegraph/linking.py src/iwiki_mcp/codegraph/sqlite_adapter.py src/iwiki_mcp/postgres/codegraph.py tests/test_specification_tools.py tests/test_specification_resolution.py tests/codegraph/test_application.py tests/codegraph/test_linking.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_server_tools.py tests/postgres/test_code_graph_reader.py tests/postgres/test_code_graph_contract.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
+uv run pytest -q tests/test_package.py tests/test_specification_tools.py tests/test_specification_resolution.py tests/codegraph/test_application.py tests/codegraph/test_linking.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_schema.py tests/codegraph/test_query.py tests/codegraph/test_server_tools.py tests/postgres/test_code_graph_reader.py tests/postgres/test_code_graph_contract.py tests/postgres/test_specification_migrations.py tests/postgres/test_specifications.py
+git add docs/superpowers/specs/2026-08-29-bdd-event-sourcing-verification-design.md docs/superpowers/plans/2026-08-29-bdd-event-sourcing-verification.md src/iwiki_mcp/postgres/migrations.py src/iwiki_mcp/postgres/store.py src/iwiki_mcp/specifications.py src/iwiki_mcp/server.py src/iwiki_mcp/codegraph/application.py src/iwiki_mcp/codegraph/linking.py src/iwiki_mcp/codegraph/sqlite_adapter.py src/iwiki_mcp/postgres/codegraph.py tests/test_specification_tools.py tests/test_specification_resolution.py tests/codegraph/test_application.py tests/codegraph/test_linking.py tests/codegraph/test_sqlite_adapter.py tests/codegraph/test_server_tools.py tests/postgres/test_code_graph_reader.py tests/postgres/test_code_graph_contract.py tests/postgres/test_specification_migrations.py tests/postgres/test_specifications.py pyproject.toml src/iwiki_mcp/__init__.py tests/test_package.py uv.lock
 git commit -m "feat(spec): add semantic specification queries"
 ```
 
-Expected: semantic tools pass and structural code-graph contract tests remain unchanged.
+Expected: persisted findings match Git semantics, stale queries use one last-success
+snapshot, semantic tools pass, and structural code-graph contract tests remain unchanged.
 
 ## Task 8: MCP registration, hosted authorization, status, and lint
 

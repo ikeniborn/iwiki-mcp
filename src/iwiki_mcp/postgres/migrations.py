@@ -630,8 +630,11 @@ SPECIFICATION_METADATA_MIGRATION_STATEMENTS = (
         projection_revision text NOT NULL,
         scenario_count integer NOT NULL CHECK (scenario_count >= 0),
         binding_count integer NOT NULL CHECK (binding_count >= 0),
+        findings jsonb NOT NULL DEFAULT '[]'::jsonb,
         updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (iwiki_id, domain_id),
+        CONSTRAINT specification_projection_state_findings_array_check
+            CHECK (jsonb_typeof(findings) = 'array'),
         CONSTRAINT specification_projection_state_domain_fk
             FOREIGN KEY (iwiki_id, domain_id)
             REFERENCES iwiki.domains (iwiki_id, domain_id)

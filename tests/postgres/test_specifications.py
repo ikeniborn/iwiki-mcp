@@ -7,13 +7,16 @@ from dataclasses import asdict
 from types import SimpleNamespace
 import pytest
 
+from iwiki_mcp import server
 from iwiki_mcp.engine.config import Config
 from iwiki_mcp.postgres.auth import AccessError, AuthContext
 from iwiki_mcp.postgres.store import PostgresStore
 from iwiki_mcp.specification_store import (
     DomainProjection,
+    FindingRecord,
     GitSpecificationStore,
     ResolutionAttempt,
+    ScenarioLocation,
 )
 from iwiki_mcp.specifications import PageSnapshot, assemble_projection
 
@@ -266,6 +269,141 @@ def test_optional_refresh_read_fault_rolls_back_savepoint_and_commits_outer_muta
         ("rollback", 2),
         ("commit", 1),
     ]
+
+
+def test_projection_reconstructs_canonical_findings_from_persisted_metadata():
+    duplicate = {
+        "locations": [
+            {
+                "anchor": "second",
+                "heading": "Second",
+                "slug": "specification/z-second",
+            },
+            {
+                "anchor": "first",
+                "heading": "First",
+                "slug": "specification/a-first",
+            },
+        ],
+        "scenario_id": "shared-id",
+        "type": "duplicate_scenario_id",
+    }
+    unsafe = {
+        "reason": "postgresql://secret.invalid/private",
+        "slug": "specification/broken",
+        "type": "invalid_scenario",
+    }
+
+    class Cursor:
+        sql = ""
+
+        def execute(self, sql, _params):
+            self.sql = sql
+
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            if "specification_projection_state" in self.sql:
+                return (
+                    "sha256:" + "0" * 64,
+                    "sha256:" + "1" * 64,
+                    0,
+                    0,
+                    [unsafe, duplicate],
+                )
+            raise AssertionError(self.sql)
+
+    store = PostgresStore(
+        "postgresql://example.invalid/unused",
+        "wiki-a",
+        _cfg(),
+        specification_mode="optional",
+        connection_factory=lambda: None,
+    )
+
+    projection = store._specification_projection_from_cursor(
+        Cursor(), "docs", domain_id=7
+    )
+
+    assert projection.findings == (
+        FindingRecord(
+            type="duplicate_scenario_id",
+            scenario_id="shared-id",
+            locations=(
+                ScenarioLocation("specification/a-first", "First", "first"),
+                ScenarioLocation("specification/z-second", "Second", "second"),
+            ),
+        ),
+        FindingRecord(
+            type="invalid_scenario",
+            slug="specification/broken",
+            reason="invalid_finding_reason",
+        ),
+    )
+
+
+def test_projection_replace_writes_canonical_findings_in_metadata_upsert(monkeypatch):
+    pages = (
+        PageSnapshot(
+            "specification/z-second",
+            _specification_markdown("shared-id"),
+            2,
+        ),
+        PageSnapshot(
+            "specification/a-first",
+            _specification_markdown("shared-id"),
+            1,
+        ),
+    )
+    projection = assemble_projection("docs", pages)
+    calls = []
+
+    class Cursor:
+        def execute(self, sql, params):
+            calls.append((sql, params))
+
+    store = PostgresStore(
+        "postgresql://example.invalid/unused",
+        "wiki-a",
+        _cfg(),
+        specification_mode="optional",
+        connection_factory=lambda: None,
+    )
+    monkeypatch.setattr(store, "_lock_specification_domain", lambda *_args: 7)
+    monkeypatch.setattr(
+        store,
+        "_specification_pages",
+        lambda *_args: tuple(
+            (page.slug, page.markdown, page.revision) for page in pages
+        ),
+    )
+    monkeypatch.setattr(
+        store,
+        "_specification_projection_from_cursor",
+        lambda *_args: _empty_projection(),
+    )
+
+    store._replace_specification_projection(Cursor(), projection)
+
+    metadata_sql, metadata_params = calls[-1]
+    assert "findings = EXCLUDED.findings" in metadata_sql
+    assert metadata_params[-1].obj == [{
+        "type": "duplicate_scenario_id",
+        "scenario_id": "shared-id",
+        "locations": [
+            {
+                "anchor": "stable-behavior",
+                "heading": "Stable behavior",
+                "slug": "specification/a-first",
+            },
+            {
+                "anchor": "stable-behavior",
+                "heading": "Stable behavior",
+                "slug": "specification/z-second",
+            },
+        ],
+    }]
 
 
 def test_index_domain_rebuilds_projection_from_its_sorted_page_snapshot(monkeypatch):
@@ -662,6 +800,99 @@ def test_domain_duplicates_are_coherent_and_strict_rejection_preserves_projectio
     assert result["revision"] == 1
     assert store.specification_context("docs", "shared-id") is None
     assert store.specification_status("docs").scenario_count == 0
+
+
+@pytest.mark.postgres_integration
+def test_optional_duplicate_server_context_reports_sorted_authorized_locations(
+    store_factory, monkeypatch,
+):
+    import psycopg
+
+    store = store_factory()
+    store.specification_mode = "optional"
+    store.write_page(
+        "docs", "specification/z-second", _specification_markdown("shared-id")
+    )
+    store.write_page(
+        "docs", "specification/a-first", _specification_markdown("shared-id")
+    )
+    with psycopg.connect(store._dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT markdown_revision, projection_revision, scenario_count, "
+                "binding_count, findings, updated_at "
+                "FROM iwiki.specification_projection_state"
+            )
+            metadata_before = cursor.fetchone()
+    binding = SimpleNamespace(
+        read=("docs",),
+        write=("docs",),
+        primary="docs",
+        specification_mode="optional",
+    )
+    monkeypatch.setattr(server, "_resolved_binding", lambda: binding)
+    monkeypatch.setattr(
+        server,
+        "_specification_store",
+        lambda _binding: server._PostgresSpecificationQueryStore(store),
+    )
+    monkeypatch.setattr(
+        server,
+        "_specification_graph_resolver",
+        lambda _binding, _domain: server._specifications.UnavailableSpecificationGraphResolver(
+            "not_configured"
+        ),
+    )
+
+    result = server.wiki_spec_context("docs", "shared-id")
+
+    assert result["error"] == "ambiguous_scenario_id"
+    assert result["locations"] == [
+        {
+            "slug": "specification/a-first",
+            "heading": "Stable behavior",
+            "anchor": "stable-behavior",
+        },
+        {
+            "slug": "specification/z-second",
+            "heading": "Stable behavior",
+            "anchor": "stable-behavior",
+        },
+    ]
+    assert all("docs" not in item["slug"] for item in result["locations"])
+
+    original_lock = store._lock_specification_domain
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("private database detail")
+
+    monkeypatch.setattr(store, "_lock_specification_domain", fail_refresh)
+    changed = _specification_markdown("changed-id")
+    updated = store.update_page(
+        "docs", "specification/a-first", changed, expected_revision=1
+    )
+    assert updated["revision"] == 2
+    assert updated["warning"] == "specification projection is stale"
+    monkeypatch.setattr(store, "_lock_specification_domain", original_lock)
+
+    restarted = store_factory()
+    monkeypatch.setattr(
+        server,
+        "_specification_store",
+        lambda _binding: server._PostgresSpecificationQueryStore(restarted),
+    )
+    stale = server.wiki_spec_context("docs", "shared-id")
+    assert stale["error"] == "ambiguous_scenario_id"
+    assert stale["locations"] == result["locations"]
+    assert restarted.specification_status("docs").state == "stale"
+    with psycopg.connect(store._dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT markdown_revision, projection_revision, scenario_count, "
+                "binding_count, findings, updated_at "
+                "FROM iwiki.specification_projection_state"
+            )
+            assert cursor.fetchone() == metadata_before
 
 
 @pytest.mark.postgres_integration

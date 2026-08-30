@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from typing import Iterable, Literal, Mapping, Sequence
+from types import MappingProxyType
+from typing import Callable, Iterable, Literal, Mapping, Protocol, Sequence
 
 from .engine import frontmatter
 from .engine.specifications import parse_specification_page
@@ -45,6 +47,90 @@ class PageSnapshot:
     slug: str
     markdown: str
     revision: str | int | None
+
+
+@dataclass(frozen=True)
+class SpecificationGraphSnapshot:
+    """Immutable file/symbol rows captured from one ready graph revision."""
+
+    revision: str
+    files: tuple[Mapping[str, object], ...]
+    symbols: tuple[Mapping[str, object], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.revision, str) or not _REVISION.fullmatch(
+            self.revision
+        ):
+            raise ValueError("invalid specification graph revision")
+        for name in ("files", "symbols"):
+            rows = getattr(self, name)
+            if isinstance(rows, (str, bytes, bytearray, dict)):
+                raise ValueError("invalid specification graph snapshot")
+            try:
+                immutable = tuple(
+                    MappingProxyType(dict(row)) for row in rows
+                )
+            except (TypeError, ValueError):
+                raise ValueError("invalid specification graph snapshot") from None
+            object.__setattr__(self, name, immutable)
+
+    def selector_rows(self) -> Mapping[str, tuple[Mapping[str, object], ...]]:
+        return MappingProxyType({"files": self.files, "symbols": self.symbols})
+
+
+class SpecificationGraphResolver(Protocol):
+    """Internal coherent snapshot boundary; not a public code-graph reader."""
+
+    def status(self) -> Mapping[str, object]: ...
+
+    def specification_snapshot(self) -> SpecificationGraphSnapshot | None: ...
+
+
+class UnavailableSpecificationGraphResolver:
+    """Stable fail-soft resolver for graphless and non-primary routes."""
+
+    def __init__(self, reason: str, revision: str | None = None) -> None:
+        self.reason = _graph_reason(reason)
+        self.revision = revision if _safe_revision(revision) else None
+
+    def status(self) -> Mapping[str, object]:
+        return {
+            "state": self.reason,
+            "reason": self.reason,
+            "revision": self.revision,
+        }
+
+    def specification_snapshot(self) -> None:
+        return None
+
+
+@dataclass(frozen=True)
+class FreshScenarioContext:
+    context: ScenarioContext
+    freshness: tuple[tuple[str, "Freshness"], ...]
+    graph_state: Mapping[str, object]
+
+    @property
+    def scenario(self) -> ScenarioRecord:
+        return self.context.scenario
+
+    @property
+    def bindings(self) -> tuple[BindingRecord, ...]:
+        return self.context.bindings
+
+    @property
+    def evidence(self) -> tuple[ResolutionAttempt, ...]:
+        return self.context.evidence
+
+
+@dataclass(frozen=True)
+class ScenarioResolution:
+    domain: str
+    scenario_id: str
+    specification_hash: str
+    graph_revision: str | None
+    evidence: tuple[ResolutionAttempt, ...]
+    graph_state: Mapping[str, object]
 
 
 def _markdown_revision(pages: Sequence[PageSnapshot]) -> str:
@@ -410,3 +496,251 @@ def graph_state_fingerprint(state: object) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _safe_revision(value: object) -> bool:
+    return isinstance(value, str) and _REVISION.fullmatch(value) is not None
+
+
+def _graph_reason(value: object) -> str:
+    if isinstance(value, str) and value in _GRAPH_REASON_CODES - {"ready"}:
+        return value
+    aliases = {
+        "missing_snapshot": "missing",
+        "stale_snapshot": "stale_graph",
+        "busy": "rebuilding",
+        "invalid_config": "failed",
+        "rebuild_failed": "failed",
+    }
+    return aliases.get(value, "failed")
+
+
+def normalized_graph_state(status: object) -> dict[str, object]:
+    """Reduce arbitrary graph status to the safe freshness fingerprint fields."""
+    value = status if isinstance(status, Mapping) else {}
+    revision = value.get("revision")
+    safe_revision = revision if _safe_revision(revision) else None
+    if value.get("state") == "ready" and value.get("fresh") is not False:
+        if safe_revision is not None:
+            return {"state": "ready", "reason": None, "revision": safe_revision}
+    reason = None
+    for candidate in (
+        value.get("reason"),
+        value.get("code"),
+        value.get("error"),
+        value.get("state"),
+    ):
+        if candidate is not None:
+            reason = _graph_reason(candidate)
+            if reason != "failed" or candidate == "failed":
+                break
+    return {"state": reason or "failed", "reason": reason or "failed",
+            "revision": safe_revision}
+
+
+def validate_specification_query(query: object, limit: object) -> tuple[str, int]:
+    if type(query) is not str or not query.strip() or "\0" in query:
+        raise ValueError("invalid_query")
+    try:
+        encoded = query.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("invalid_query") from None
+    if len(encoded) > 4096:
+        raise ValueError("invalid_query")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("invalid_limit")
+    return query, limit
+
+
+def _checked_at(clock: Callable[[], object]) -> str:
+    value = clock()
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, datetime):
+        raise ValueError("invalid resolution clock")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class SpecificationService:
+    """Graph-optional semantic queries and explicit coherent resolution."""
+
+    def __init__(
+        self,
+        store,
+        *,
+        resolver: SpecificationGraphResolver | None = None,
+        clock: Callable[[], object] | None = None,
+    ) -> None:
+        self.store = store
+        self.resolver = resolver or UnavailableSpecificationGraphResolver(
+            "not_configured"
+        )
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _graph_status(self) -> dict[str, object]:
+        try:
+            return normalized_graph_state(self.resolver.status())
+        except Exception:
+            return {"state": "failed", "reason": "failed", "revision": None}
+
+    def search(
+        self, domains: tuple[str, ...], query: str, limit: int = 20
+    ) -> tuple[ScenarioRecord, ...]:
+        query, limit = validate_specification_query(query, limit)
+        return self.store.search(domains, query, limit)
+
+    def context(
+        self, domain: str, scenario_id: str
+    ) -> FreshScenarioContext | None:
+        context = self.store.context(domain, scenario_id)
+        if context is None:
+            return None
+        graph_state = self._graph_status()
+        return FreshScenarioContext(
+            context=context,
+            freshness=context_freshness(
+                context,
+                current_graph_revision=(
+                    graph_state["revision"]
+                    if isinstance(graph_state["revision"], str) else None
+                ),
+                current_graph_state_fingerprint=graph_state_fingerprint(graph_state),
+                graph_ready=graph_state["state"] == "ready",
+            ),
+            graph_state=MappingProxyType(graph_state),
+        )
+
+    @staticmethod
+    def _unavailable_attempts(
+        context: ScenarioContext,
+        graph_state: Mapping[str, object],
+        checked_at: str,
+        reason: str,
+    ) -> tuple[ResolutionAttempt, ...]:
+        safe_state = {
+            "state": reason,
+            "reason": reason,
+            "revision": graph_state.get("revision"),
+        }
+        fingerprint = graph_state_fingerprint(safe_state)
+        return tuple(ResolutionAttempt(
+            binding_id=binding.binding_id,
+            domain=binding.domain,
+            scenario_id=binding.scenario_id,
+            state="graph_unavailable",
+            targets=(),
+            unresolved_reference=binding.selector,
+            graph_revision=None,
+            graph_state_fingerprint=fingerprint,
+            specification_source_hash=context.scenario.source_hash,
+            checked_at=checked_at,
+            reason=reason,
+        ) for binding in context.bindings)
+
+    def _persist(
+        self, context: ScenarioContext, attempts: tuple[ResolutionAttempt, ...]
+    ) -> None:
+        batch = getattr(self.store, "record_resolutions", None)
+        if callable(batch):
+            batch(attempts)
+            return
+        if len(attempts) == 1:
+            self.store.record_resolution(attempts[0])
+            return
+        raise RuntimeError("atomic resolution persistence is unavailable")
+
+    def resolve(self, domain: str, scenario_id: str) -> ScenarioResolution:
+        from .codegraph.linking import binding_selector_mapping, resolve_selectors
+
+        context = self.store.context(domain, scenario_id)
+        if context is None:
+            raise ValueError("not_found")
+        source_hash = context.scenario.source_hash
+        checked_at = _checked_at(self.clock)
+        graph_state = self._graph_status()
+        snapshot = None
+        if graph_state["state"] == "ready":
+            try:
+                snapshot = self.resolver.specification_snapshot()
+            except Exception:
+                graph_state = {
+                    "state": "failed", "reason": "failed", "revision": None
+                }
+
+        if snapshot is None:
+            reason = _graph_reason(graph_state.get("reason"))
+            attempts = self._unavailable_attempts(
+                context, graph_state, checked_at, reason
+            )
+        elif snapshot.revision != graph_state["revision"]:
+            attempts = self._unavailable_attempts(
+                context, graph_state, checked_at, "revision_changed"
+            )
+        else:
+            fingerprint = graph_state_fingerprint(graph_state)
+            resolved: list[ResolutionAttempt] = []
+            for binding in context.bindings:
+                links = resolve_selectors(
+                    {"code": binding_selector_mapping(
+                        binding.selector_kind, binding.selector
+                    )},
+                    snapshot.selector_rows(),
+                    domain=domain,
+                    page_id=context.scenario.page_slug,
+                )
+                targets = tuple(sorted({
+                    str(link["symbol_id"] or link["file_id"])
+                    for link in links
+                }))
+                state = (
+                    "unresolved" if not targets
+                    else "resolved" if len(targets) == 1
+                    else "ambiguous"
+                )
+                resolved.append(ResolutionAttempt(
+                    binding_id=binding.binding_id,
+                    domain=binding.domain,
+                    scenario_id=binding.scenario_id,
+                    state=state,
+                    targets=targets,
+                    unresolved_reference=(binding.selector if not targets else None),
+                    graph_revision=snapshot.revision,
+                    graph_state_fingerprint=fingerprint,
+                    specification_source_hash=source_hash,
+                    checked_at=checked_at,
+                    reason=None,
+                ))
+            attempts = tuple(resolved)
+
+        current = self.store.context(domain, scenario_id)
+        if current is None or current.scenario.source_hash != source_hash:
+            raise ValueError("source_changed")
+        final_state = self._graph_status()
+        if snapshot is not None and (
+            final_state["state"] != "ready"
+            or final_state["revision"] != snapshot.revision
+        ):
+            reason = (
+                "revision_changed"
+                if final_state["revision"] != snapshot.revision
+                else _graph_reason(final_state.get("reason"))
+            )
+            attempts = self._unavailable_attempts(
+                context, final_state, checked_at, reason
+            )
+        self._persist(context, attempts)
+        return ScenarioResolution(
+            domain=domain,
+            scenario_id=scenario_id,
+            specification_hash=source_hash,
+            graph_revision=(
+                snapshot.revision
+                if snapshot is not None
+                and all(item.state != "graph_unavailable" for item in attempts)
+                else None
+            ),
+            evidence=attempts,
+            graph_state=MappingProxyType(dict(final_state)),
+        )

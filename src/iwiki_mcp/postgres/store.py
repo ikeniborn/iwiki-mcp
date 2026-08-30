@@ -31,6 +31,8 @@ from ..specification_store import (
     ResolutionAttempt,
     ScenarioContext,
     ScenarioRecord,
+    _finding_dict,
+    _finding_record,
     semantic_markdown_revision,
 )
 from .auth import AccessError, AuthContext
@@ -1153,7 +1155,7 @@ class PostgresStore:
         )
         cursor.execute(
             "SELECT markdown_revision, projection_revision, scenario_count, "
-            "binding_count FROM iwiki.specification_projection_state "
+            "binding_count, findings FROM iwiki.specification_projection_state "
             "WHERE iwiki_id = %s AND domain_id = %s",
             (self.iwiki_id, domain_id),
         )
@@ -1179,7 +1181,11 @@ class PostgresStore:
             scenarios=scenarios,
             bindings=bindings,
             evidence=evidence,
-            findings=(),
+            findings=(
+                tuple(_finding_record(item) for item in metadata[4])
+                if metadata is not None
+                else ()
+            ),
             state=state,
             reason="projection_stale" if state == "stale" else None,
         )
@@ -1288,12 +1294,14 @@ class PostgresStore:
         cursor.execute(
             "INSERT INTO iwiki.specification_projection_state ("
             "iwiki_id, domain_id, markdown_revision, projection_revision, "
-            "scenario_count, binding_count) VALUES (%s, %s, %s, %s, %s, %s) "
+            "scenario_count, binding_count, findings) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (iwiki_id, domain_id) DO UPDATE SET "
             "markdown_revision = EXCLUDED.markdown_revision, "
             "projection_revision = EXCLUDED.projection_revision, "
             "scenario_count = EXCLUDED.scenario_count, "
             "binding_count = EXCLUDED.binding_count, "
+            "findings = EXCLUDED.findings, "
             "updated_at = CURRENT_TIMESTAMP",
             (
                 self.iwiki_id,
@@ -1302,6 +1310,7 @@ class PostgresStore:
                 logical_revision,
                 projection.scenario_count,
                 projection.binding_count,
+                Jsonb([_finding_dict(item) for item in projection.findings]),
             ),
         )
         return {
@@ -1470,6 +1479,14 @@ class PostgresStore:
             with connection.cursor() as cursor:
                 projection = self._specification_projection_from_cursor(cursor, domain)
         return projection_context(projection, scenario_id)
+
+    def _specification_projection(self, domain: str) -> DomainProjection:
+        """Read one persisted projection for internal semantic query composition."""
+        domain = _validate_identifier(domain, "domain")
+        self._require_read(domain)
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                return self._specification_projection_from_cursor(cursor, domain)
 
     def _record_specification_resolution(
         self, cursor, domain_id: int, attempt: ResolutionAttempt

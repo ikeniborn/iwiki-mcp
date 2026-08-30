@@ -31,6 +31,7 @@ from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
 from . import specifications as _specifications
 from .specification_store import (
     GitSpecificationStore,
+    ResolutionAttempt,
     semantic_markdown_revision,
 )
 from . import http as _http  # noqa: F401
@@ -75,7 +76,7 @@ from .engine.related import related
 # store.query defers its import (cycle guard), and a module missing from the
 # closure gets loaded lazily from disk — after an on-disk package upgrade that
 # mixes new source with stale cached modules in a long-lived stdio process.
-from .engine import search  # noqa: F401
+from .engine import search as _engine_search  # noqa: F401
 from .engine.section import (
     SectionError, delete_section, insert_section, list_sections, move_section,
     replace_section, _locate,
@@ -807,6 +808,407 @@ def _postgres_code_reader(binding: base.PostgresBinding):
         binding.primary,
         max_snapshot_age_seconds=settings.max_snapshot_age_seconds,
     )
+
+
+class _GitSpecificationQueryStore:
+    """Add scenario-atomic evidence replacement to the Git projection adapter."""
+
+    def __init__(self, binding: base.Binding) -> None:
+        self._store = GitSpecificationStore(
+            binding.base, binding.specification_mode
+        )
+
+    def search(self, domains, query, limit):
+        return self._store.search(domains, query, limit)
+
+    def context(self, domain, scenario_id):
+        return self._store.context(domain, scenario_id)
+
+    def status(self, domain):
+        return self._store.status(domain)
+
+    def duplicate_locations(self, domain, scenario_id):
+        projection = self._store._load(domain)
+        if projection is None:
+            return ()
+        finding = next((item for item in projection.findings if (
+            item.type == "duplicate_scenario_id"
+            and item.scenario_id == scenario_id
+        )), None)
+        return () if finding is None else finding.locations
+
+    def record_resolutions(
+        self, attempts: tuple[ResolutionAttempt, ...]
+    ) -> None:
+        if not attempts:
+            return
+        domain = attempts[0].domain
+        if any(item.domain != domain for item in attempts):
+            raise ValueError("resolution attempt scope mismatch")
+        with base_lock(self._store.base):
+            projection = self._store._load(domain)
+            if projection is None:
+                raise ValueError("specification projection not found")
+            current = {
+                (item.domain, item.scenario_id, item.binding_id): item
+                for item in projection.evidence
+            }
+            binding_ids = {
+                (item.domain, item.scenario_id, item.binding_id)
+                for item in projection.bindings
+            }
+            source_hashes = {
+                (item.domain, item.scenario_id): item.source_hash
+                for item in projection.scenarios
+            }
+            for attempt in attempts:
+                key = (
+                    attempt.domain, attempt.scenario_id, attempt.binding_id
+                )
+                if (
+                    key not in binding_ids
+                    or source_hashes.get((attempt.domain, attempt.scenario_id))
+                    != attempt.specification_source_hash
+                ):
+                    raise ValueError(
+                        "resolution attempt does not match projection"
+                    )
+                current[key] = attempt
+            self._store.replace_projection(
+                projection.with_evidence(tuple(current.values()))
+            )
+
+
+class _PostgresSpecificationQueryStore:
+    """Map PostgreSQL names and persist a scenario attempt in one transaction."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+
+    def search(self, domains, query, limit):
+        return self._store.search_specifications(domains, query, limit)
+
+    def context(self, domain, scenario_id):
+        return self._store.specification_context(domain, scenario_id)
+
+    def status(self, domain):
+        return self._store.specification_status(domain)
+
+    def duplicate_locations(self, domain, scenario_id):
+        projection = self._store._specification_projection(domain)
+        finding = next((item for item in projection.findings if (
+            item.type == "duplicate_scenario_id"
+            and item.scenario_id == scenario_id
+        )), None)
+        return () if finding is None else finding.locations
+
+    def record_resolutions(
+        self, attempts: tuple[ResolutionAttempt, ...]
+    ) -> None:
+        if not attempts:
+            return
+        domain = attempts[0].domain
+        if any(item.domain != domain for item in attempts):
+            raise ValueError("resolution attempt scope mismatch")
+        self._store._require_write(domain)
+        if self._store.specification_mode == "disabled":
+            return
+        with self._store._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._store._lock_specification_domain(
+                    cursor, domain
+                )
+                for attempt in attempts:
+                    self._store._record_specification_resolution(
+                        cursor, domain_id, attempt
+                    )
+
+
+def _specification_store(binding):
+    if _is_postgres(binding):
+        return _PostgresSpecificationQueryStore(
+            _postgres_store_for_binding(binding)
+        )
+    return _GitSpecificationQueryStore(binding)
+
+
+def _specification_graph_resolver(binding, domain: str):
+    if binding.primary != domain:
+        return _specifications.UnavailableSpecificationGraphResolver(
+            "not_primary"
+        )
+    if _is_postgres(binding):
+        return _postgres_code_reader(binding)
+    runtime = _codegraph_application.code_runtime(
+        _codegraph_application.source_context(binding)
+    )
+    return _codegraph_application.specification_graph_resolver(runtime)
+
+
+def _spec_error(code: str, hint: str) -> dict[str, object]:
+    return {"error": code, "hint": hint}
+
+
+def _specification_safe(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            code = (
+                "resolution_failed"
+                if fn.__name__ == "wiki_spec_resolve"
+                else "specification_failed"
+            )
+            return _spec_error(
+                code, "retry or inspect sanitized server diagnostics"
+            )
+
+    return wrapped
+
+
+def _validate_spec_scenario_id(value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value.encode("utf-8")) > 128
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value) is None
+    ):
+        raise ValueError("invalid_scenario_id")
+    return value
+
+
+def _spec_binding_result(binding, evidence, freshness) -> dict[str, object]:
+    result: dict[str, object] = {
+        "binding_id": binding.binding_id,
+        "relation": binding.relation,
+        "phase": binding.phase,
+        "selector_kind": binding.selector_kind,
+        "selector": binding.selector,
+        "freshness": freshness,
+    }
+    if evidence is not None:
+        result["evidence"] = {
+            "state": evidence.state,
+            "targets": list(evidence.targets),
+            "unresolved_reference": evidence.unresolved_reference,
+            "graph_revision": evidence.graph_revision,
+            "graph_state_fingerprint": evidence.graph_state_fingerprint,
+            "specification_source_hash": evidence.specification_source_hash,
+            "checked_at": evidence.checked_at,
+            "reason": evidence.reason,
+        }
+    else:
+        result["evidence"] = None
+    return result
+
+
+def _spec_context_result(value, *, mode: str) -> dict[str, object]:
+    context = value.context
+    scenario = context.scenario
+    evidence = {item.binding_id: item for item in context.evidence}
+    freshness = dict(value.freshness)
+    return {
+        "domain": scenario.domain,
+        "scenario_id": scenario.scenario_id,
+        "identity": scenario.identity,
+        "title": scenario.title,
+        "location": {
+            "slug": scenario.page_slug,
+            "heading": scenario.heading,
+            "anchor": scenario.anchor,
+        },
+        "source_hash": scenario.source_hash,
+        "items": [
+            {"phase": item.phase, "role": item.role, "name": item.name}
+            for item in scenario.items
+        ],
+        "bindings": [
+            _spec_binding_result(
+                binding,
+                evidence.get(binding.binding_id),
+                freshness[binding.binding_id],
+            )
+            for binding in context.bindings
+        ],
+        "projection_state": context.projection_state,
+        "projection_revision": context.projection_revision,
+        "mode": mode,
+        "graph": dict(value.graph_state),
+        "findings": [
+            _specification_finding_dict(item) for item in context.findings
+        ],
+    }
+
+
+def _spec_missing_context(store, domain: str, scenario_id: str) -> dict:
+    locations = store.duplicate_locations(domain, scenario_id)
+    if locations:
+        return {
+            "error": "ambiguous_scenario_id",
+            "locations": [
+                {
+                    "slug": item.slug,
+                    "heading": item.heading,
+                    "anchor": item.anchor,
+                }
+                for item in locations
+            ],
+            "hint": "make the scenario ID unique inside the domain",
+        }
+    return _spec_error("not_found", "scenario was not found")
+
+
+@_specification_safe
+def wiki_spec_search(
+    query: str,
+    domains: list[str] | None = None,
+    limit: int = 20,
+) -> dict:
+    try:
+        _specifications.validate_specification_query(query, limit)
+    except ValueError as exc:
+        code = str(exc)
+        return _spec_error(code, "provide a valid semantic query and limit")
+    if domains is not None and (
+        type(domains) is not list
+        or any(type(item) is not str for item in domains)
+    ):
+        return _spec_error("invalid_domains", "provide an array of domain names")
+    bind = _resolved_binding()
+    try:
+        if domains is None:
+            requested_values = bind.read
+        else:
+            requested_values = tuple(
+                _validate_domain(item.encode("utf-8").decode("utf-8"))
+                for item in domains
+                if "\0" not in item
+            )
+            if len(requested_values) != len(domains):
+                raise ValueError("invalid domain")
+        requested = tuple(sorted(dict.fromkeys(requested_values)))
+    except (UnicodeError, ValueError):
+        return _spec_error("invalid_domains", "provide valid domain names")
+    if any(domain not in bind.read for domain in requested):
+        return _spec_error("access_denied", "requested domain is outside read scope")
+    if bind.specification_mode == "disabled":
+        return {
+            "query": query,
+            "domains": list(requested),
+            "domain_states": [
+                {"domain": domain, "state": "disabled", "mode": "disabled"}
+                for domain in requested
+            ],
+            "results": [],
+        }
+    store = _specification_store(bind)
+    scenarios = _specifications.SpecificationService(store).search(
+        requested, query, limit
+    )
+    results = []
+    for scenario in scenarios:
+        context = store.context(scenario.domain, scenario.scenario_id)
+        bindings = () if context is None else context.bindings
+        status = store.status(scenario.domain)
+        results.append({
+            "domain": scenario.domain,
+            "scenario_id": scenario.scenario_id,
+            "identity": scenario.identity,
+            "title": scenario.title,
+            "location": {
+                "slug": scenario.page_slug,
+                "heading": scenario.heading,
+                "anchor": scenario.anchor,
+            },
+            "items": [
+                {"phase": item.phase, "role": item.role, "name": item.name}
+                for item in scenario.items
+            ],
+            "bindings": [
+                {
+                    "binding_id": item.binding_id,
+                    "relation": item.relation,
+                    "phase": item.phase,
+                    "selector_kind": item.selector_kind,
+                    "selector": item.selector,
+                }
+                for item in bindings
+            ],
+            "projection_state": status.state,
+            "mode": bind.specification_mode,
+        })
+    return {
+        "query": query,
+        "domains": list(requested),
+        "domain_states": [
+            {
+                "domain": domain,
+                "state": store.status(domain).state,
+                "mode": bind.specification_mode,
+            }
+            for domain in requested
+        ],
+        "results": results,
+    }
+
+
+@_specification_safe
+def wiki_spec_context(domain: str, scenario_id: str) -> dict:
+    try:
+        valid_domain = _validate_domain(domain)
+        valid_scenario = _validate_spec_scenario_id(scenario_id)
+    except (UnicodeEncodeError, ValueError):
+        return _spec_error("invalid_request", "provide a valid domain and scenario ID")
+    bind = _resolved_binding()
+    if valid_domain not in bind.read:
+        return _spec_error("access_denied", "domain is outside read scope")
+    if bind.specification_mode == "disabled":
+        return _spec_error("specifications_disabled", "enable specifications")
+    store = _specification_store(bind)
+    service = _specifications.SpecificationService(
+        store,
+        resolver=_specification_graph_resolver(bind, valid_domain),
+    )
+    value = service.context(valid_domain, valid_scenario)
+    if value is None:
+        return _spec_missing_context(store, valid_domain, valid_scenario)
+    return _spec_context_result(value, mode=bind.specification_mode)
+
+
+@_specification_safe
+def wiki_spec_resolve(domain: str, scenario_id: str) -> dict:
+    try:
+        valid_domain = _validate_domain(domain)
+        valid_scenario = _validate_spec_scenario_id(scenario_id)
+    except (UnicodeEncodeError, ValueError):
+        return _spec_error("invalid_request", "provide a valid domain and scenario ID")
+    bind = _resolved_binding()
+    if valid_domain not in bind.write:
+        return _spec_error("access_denied", "domain is outside write scope")
+    if bind.specification_mode == "disabled":
+        return _spec_error("specifications_disabled", "enable specifications")
+    store = _specification_store(bind)
+    service = _specifications.SpecificationService(
+        store,
+        resolver=_specification_graph_resolver(bind, valid_domain),
+    )
+    try:
+        attempt = service.resolve(valid_domain, valid_scenario)
+    except ValueError as exc:
+        if str(exc) == "not_found":
+            return _spec_missing_context(store, valid_domain, valid_scenario)
+        code = str(exc) if str(exc) == "source_changed" else "resolution_failed"
+        return _spec_error(code, "retry against current specification and graph state")
+    value = service.context(valid_domain, valid_scenario)
+    if value is None:
+        return _spec_error("source_changed", "retry against current specification")
+    result = _spec_context_result(value, mode=bind.specification_mode)
+    result["attempt"] = {
+        "specification_hash": attempt.specification_hash,
+        "graph_revision": attempt.graph_revision,
+        "states": [item.state for item in attempt.evidence],
+    }
+    return result
 
 
 # Bound wait for the domain activation lock. It is deliberately separate from

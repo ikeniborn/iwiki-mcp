@@ -76,6 +76,8 @@ def test_v7_metadata_migration_is_scoped_and_has_no_invented_backfill():
     assert "create table iwiki.specification_projection_state" in statements
     assert "check (scenario_count >= 0)" in statements
     assert "check (binding_count >= 0)" in statements
+    assert "findings jsonb not null default '[]'::jsonb" in statements
+    assert "jsonb_typeof(findings) = 'array'" in statements
     assert "insert into iwiki.specification_projection_state" not in statements
     assert "code_graph_" not in statements
 
@@ -304,6 +306,17 @@ def test_v7_catalog_has_nullable_page_fk_metadata_checks_and_no_force_rls(
             cursor.execute(_SPECIFICATION_TABLE_FLAGS_SQL)
             assert ("specification_projection_state", True, False) in cursor.fetchall()
             cursor.execute(
+                "SELECT is_nullable, column_default, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_schema = 'iwiki' "
+                "AND table_name = 'specification_projection_state' "
+                "AND column_name = 'findings'"
+            )
+            nullable, default, data_type = cursor.fetchone()
+            assert nullable == "NO"
+            assert default == "'[]'::jsonb"
+            assert data_type == "jsonb"
+            cursor.execute(
                 "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
                 "JOIN pg_class t ON t.oid = c.conrelid "
                 "JOIN pg_namespace n ON n.oid = t.relnamespace "
@@ -313,6 +326,7 @@ def test_v7_catalog_has_nullable_page_fk_metadata_checks_and_no_force_rls(
             definitions = " ".join(row[0] for row in cursor.fetchall())
             assert "scenario_count >= 0" in definitions
             assert "binding_count >= 0" in definitions
+            assert "jsonb_typeof(findings) = 'array'::text" in definitions
 
 
 def test_v6_rejects_cross_domain_page_and_cascades_derived_rows(clean_postgres):
