@@ -134,6 +134,94 @@ def _assert_tool_denied(response, *, request_id=2):
     }
 
 
+def _authorization_request(name, arguments):
+    return {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+
+
+def test_specification_http_authorization_uses_authenticated_scope(monkeypatch):
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "shared"),
+        write_domains=("docs",),
+        primary="docs",
+    )
+    calls = []
+    monkeypatch.setattr(
+        http,
+        "authorize_domains",
+        lambda _context, **kwargs: calls.append(kwargs),
+    )
+
+    http._authorize_tool(
+        context, _authorization_request("wiki_spec_search", {"query": "open"})
+    )
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_spec_search",
+            {"query": "open", "domains": ["shared", "shared"]},
+        ),
+    )
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_spec_context", {"domain": "shared", "scenario_id": "open"}
+        ),
+    )
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_spec_resolve", {"domain": "docs", "scenario_id": "open"}
+        ),
+    )
+
+    assert calls == [
+        {"read_domains": ("docs", "shared"), "write_domains": ()},
+        {"read_domains": ("shared", "shared"), "write_domains": ()},
+        {"read_domains": ("shared",), "write_domains": ()},
+        {"read_domains": (), "write_domains": ("docs",)},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("wiki_spec_search", {"query": "open", "domains": "docs"}),
+        ("wiki_spec_search", {"query": "open", "domains": ["docs", 7]}),
+        ("wiki_spec_search", {"query": "open", "domains": ["private"]}),
+        ("wiki_spec_context", {"domain": "private", "scenario_id": "open"}),
+        ("wiki_spec_context", {"domain": 7, "scenario_id": "open"}),
+        ("wiki_spec_resolve", {"domain": "shared", "scenario_id": "open"}),
+        ("wiki_spec_resolve", {"domain": "docs", "scenario_id": "open", "iwiki_id": "wiki-b"}),
+    ],
+)
+def test_specification_http_authorization_denies_malformed_or_cross_scope(
+    name, arguments,
+):
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "shared"),
+        write_domains=("docs", "shared"),
+        primary="docs",
+    )
+
+    with pytest.raises(AccessError):
+        http._authorize_tool(context, _authorization_request(name, arguments))
+
+
 def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
     runtime = hosted_runtime.runtime
     auth = hosted_runtime.auth
@@ -213,6 +301,14 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             "write": ["docs"],
             "primary": "docs",
             "domains": ["docs"],
+            "specifications": {"domains": [{
+                "domain": "docs",
+                "mode": "optional",
+                "source": "hosted_default",
+                "projection_state": "absent",
+                "scenarios": 0,
+                "bindings": 0,
+            }]},
         }
         assert runtime.config.storage.password not in status.text
         assert "server-only-model-key" not in status.text

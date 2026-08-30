@@ -312,21 +312,28 @@ _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
 _HOSTED_POOL = None
 _HOSTED_CONFIG: Config | None = None
 _HOSTED_CODE_GRAPH = None
+_HOSTED_SPECIFICATIONS = None
 
 
-def _install_hosted_runtime(pool, cfg: Config, code_graph=None) -> None:
+def _install_hosted_runtime(
+    pool, cfg: Config, code_graph=None, specifications=None
+) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
+    global _HOSTED_SPECIFICATIONS
     _HOSTED_POOL = pool
     _HOSTED_CONFIG = cfg
     _HOSTED_CODE_GRAPH = code_graph
+    _HOSTED_SPECIFICATIONS = specifications
 
 
 def _clear_hosted_runtime(pool) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
+    global _HOSTED_SPECIFICATIONS
     if _HOSTED_POOL is pool:
         _HOSTED_POOL = None
         _HOSTED_CONFIG = None
         _HOSTED_CODE_GRAPH = None
+        _HOSTED_SPECIFICATIONS = None
 
 
 def _resolved_binding() -> base.Binding | base.PostgresBinding:
@@ -754,15 +761,28 @@ def wiki_status() -> dict:
         }
         if _SESSION_BINDING.get() is None:
             result["project_dir"] = bind.project_dir
+        result["specifications"] = {
+            "domains": [
+                _specification_status_domain(bind, domain)
+                for domain in domains
+            ]
+        }
         return result
-    return {
+    domains = base.list_domains(bind.base)
+    result = {
         "base": bind.base,
         "read": list(bind.read),
         "write": list(bind.write),
         "primary": bind.primary,
         "project_dir": bind.project_dir,
-        "domains": base.list_domains(bind.base),
+        "domains": domains,
     }
+    result["specifications"] = {
+        "domains": [
+            _specification_status_domain(bind, domain) for domain in domains
+        ]
+    }
+    return result
 
 
 def _missing_code_primary() -> dict:
@@ -826,6 +846,9 @@ class _GitSpecificationQueryStore:
 
     def status(self, domain):
         return self._store.status(domain)
+
+    def projection_for_lint(self, domain):
+        return self._store._load(domain)
 
     def duplicate_locations(self, domain, scenario_id):
         projection = self._store._load(domain)
@@ -894,6 +917,9 @@ class _PostgresSpecificationQueryStore:
     def status(self, domain):
         return self._store.specification_status(domain)
 
+    def projection_for_lint(self, domain):
+        return self._store._specification_projection(domain)
+
     def duplicate_locations(self, domain, scenario_id):
         projection = self._store._specification_projection(domain)
         finding = next((item for item in projection.findings if (
@@ -930,6 +956,193 @@ def _specification_store(binding):
             _postgres_store_for_binding(binding)
         )
     return _GitSpecificationQueryStore(binding)
+
+
+def _specification_policy(binding, domain: str) -> tuple[str, str]:
+    if _is_postgres(binding) and _SESSION_BINDING.get() is not None:
+        policy = _HOSTED_SPECIFICATIONS
+        if policy is None:
+            return "optional", "built_in_default"
+        exact = any(
+            item.iwiki_id == binding.iwiki_id and item.domain == domain
+            for item in policy.overrides
+        )
+        return policy.mode_for(binding.iwiki_id, domain), (
+            "hosted_override" if exact else "hosted_default"
+        )
+    source = "built_in_default"
+    config_path = Path(binding.project_dir) / ".iwiki.toml"
+    try:
+        with config_path.open("rb") as fh:
+            raw = base.tomllib.load(fh)
+        specifications = raw.get("specifications")
+        if isinstance(specifications, dict) and "mode" in specifications:
+            source = "project"
+    except (OSError, UnicodeDecodeError, base.tomllib.TOMLDecodeError):
+        pass
+    if binding.specification_mode != "optional":
+        source = "project"
+    return binding.specification_mode, source
+
+
+def _specification_binding(binding, domain: str):
+    mode, _source = _specification_policy(binding, domain)
+    return replace(binding, specification_mode=mode)
+
+
+def _specification_status_domain(binding, domain: str) -> dict[str, object]:
+    mode, source = _specification_policy(binding, domain)
+    result: dict[str, object] = {
+        "domain": domain,
+        "mode": mode,
+        "source": source,
+        "projection_state": "disabled" if mode == "disabled" else "absent",
+        "scenarios": 0,
+        "bindings": 0,
+    }
+    if mode == "disabled":
+        return result
+    try:
+        status = _specification_store(
+            replace(binding, specification_mode=mode)
+        ).status(domain)
+        result.update({
+            "projection_state": status.state,
+            "scenarios": status.scenario_count,
+            "bindings": status.binding_count,
+        })
+    except Exception:
+        result["projection_state"] = "failed"
+    return result
+
+
+_SPECIFICATION_AUTHORING_FINDINGS = {
+    "missing_scenario",
+    "invalid_scenario",
+    "duplicate_scenario_id",
+    "incomplete_bindings",
+}
+
+
+def _specification_lint_finding(
+    finding_type: str,
+    mode: str,
+    **details,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "type": finding_type,
+        "severity": (
+            "block"
+            if mode == "strict"
+            and finding_type in _SPECIFICATION_AUTHORING_FINDINGS
+            else "advisory"
+        ),
+    }
+    result.update({key: value for key, value in details.items() if value is not None})
+    return result
+
+
+def _specification_lint_report(binding, domain: str) -> dict[str, object]:
+    mode, source = _specification_policy(binding, domain)
+    result: dict[str, object] = {
+        "mode": mode,
+        "source": source,
+        "state": "disabled" if mode == "disabled" else "absent",
+        "projection_revision": None,
+        "scenarios": 0,
+        "bindings": 0,
+        "findings": [],
+    }
+    if mode == "disabled":
+        return result
+    try:
+        scoped = replace(binding, specification_mode=mode)
+        store = _specification_store(scoped)
+        status = store.status(domain)
+        projection = store.projection_for_lint(domain)
+        result.update({
+            "state": status.state,
+            "projection_revision": status.markdown_revision,
+            "scenarios": status.scenario_count,
+            "bindings": status.binding_count,
+        })
+        if projection is None:
+            return result
+        result.update({
+            "projection_revision": projection.markdown_revision,
+            "scenarios": projection.scenario_count,
+            "bindings": projection.binding_count,
+        })
+        findings = []
+        for finding in projection.findings:
+            item = _specification_finding_dict(finding)
+            finding_type = item.pop("type")
+            findings.append(_specification_lint_finding(
+                finding_type, mode, **item
+            ))
+        if status.state in {"stale", "failed"}:
+            findings.append(_specification_lint_finding(
+                f"projection_{status.state}", mode
+            ))
+        resolver = _specification_graph_resolver(scoped, domain)
+        service = _specifications.SpecificationService(
+            store, resolver=resolver
+        )
+        for scenario in projection.scenarios:
+            context = service.context(domain, scenario.scenario_id)
+            if context is None:
+                continue
+            evidence = {item.binding_id: item for item in context.context.evidence}
+            freshness = dict(context.freshness)
+            for specification_binding in context.context.bindings:
+                attempt = evidence.get(specification_binding.binding_id)
+                details = {
+                    "scenario_id": scenario.scenario_id,
+                    "binding_id": specification_binding.binding_id,
+                }
+                if attempt is None:
+                    findings.append(_specification_lint_finding(
+                        "resolution_not_checked", mode, **details
+                    ))
+                elif attempt.state == "unresolved":
+                    findings.append(_specification_lint_finding(
+                        "binding_unresolved", mode, **details
+                    ))
+                elif attempt.state == "ambiguous":
+                    findings.append(_specification_lint_finding(
+                        "binding_ambiguous", mode, **details
+                    ))
+                elif attempt.state == "graph_unavailable":
+                    findings.append(_specification_lint_finding(
+                        "graph_unavailable", mode,
+                        reason=attempt.reason, **details
+                    ))
+                current_freshness = freshness[specification_binding.binding_id]
+                if status.state == "stale" and attempt is not None:
+                    findings.append(_specification_lint_finding(
+                        "resolution_stale_spec", mode, **details
+                    ))
+                elif current_freshness == "stale_spec":
+                    findings.append(_specification_lint_finding(
+                        "resolution_stale_spec", mode, **details
+                    ))
+                if current_freshness == "stale_graph":
+                    findings.append(_specification_lint_finding(
+                        "resolution_stale_graph", mode, **details
+                    ))
+        result["findings"] = findings
+        return result
+    except Exception:
+        result.update({
+            "state": "failed",
+            "projection_revision": None,
+            "scenarios": 0,
+            "bindings": 0,
+            "findings": [
+                _specification_lint_finding("projection_failed", mode)
+            ],
+        })
+        return result
 
 
 def _specification_graph_resolver(binding, domain: str):
@@ -1058,6 +1271,7 @@ def _spec_missing_context(store, domain: str, scenario_id: str) -> dict:
     return _spec_error("not_found", "scenario was not found")
 
 
+@_safe
 @_specification_safe
 def wiki_spec_search(
     query: str,
@@ -1091,7 +1305,12 @@ def wiki_spec_search(
         return _spec_error("invalid_domains", "provide valid domain names")
     if any(domain not in bind.read for domain in requested):
         return _spec_error("access_denied", "requested domain is outside read scope")
-    if bind.specification_mode == "disabled":
+    modes = {
+        domain: _specification_policy(bind, domain)[0]
+        for domain in requested
+    }
+    enabled = tuple(domain for domain in requested if modes[domain] != "disabled")
+    if not enabled:
         return {
             "query": query,
             "domains": list(requested),
@@ -1101,12 +1320,28 @@ def wiki_spec_search(
             ],
             "results": [],
         }
-    store = _specification_store(bind)
-    scenarios = _specifications.SpecificationService(store).search(
-        requested, query, limit
-    )
+    stores = {
+        domain: _specification_store(_specification_binding(bind, domain))
+        for domain in enabled
+    }
+    if len(set(modes[domain] for domain in enabled)) == 1:
+        store = stores[enabled[0]]
+        scenarios = _specifications.SpecificationService(store).search(
+            enabled, query, limit
+        )
+    else:
+        projections = tuple(
+            projection
+            for domain in enabled
+            for projection in (stores[domain].projection_for_lint(domain),)
+            if projection is not None
+        )
+        scenarios = _specifications.search_projections(
+            projections, query, limit
+        )
     results = []
     for scenario in scenarios:
+        store = stores[scenario.domain]
         context = store.context(scenario.domain, scenario.scenario_id)
         bindings = () if context is None else context.bindings
         status = store.status(scenario.domain)
@@ -1135,7 +1370,7 @@ def wiki_spec_search(
                 for item in bindings
             ],
             "projection_state": status.state,
-            "mode": bind.specification_mode,
+            "mode": modes[scenario.domain],
         })
     return {
         "query": query,
@@ -1143,8 +1378,11 @@ def wiki_spec_search(
         "domain_states": [
             {
                 "domain": domain,
-                "state": store.status(domain).state,
-                "mode": bind.specification_mode,
+                "state": (
+                    "disabled" if modes[domain] == "disabled"
+                    else stores[domain].status(domain).state
+                ),
+                "mode": modes[domain],
             }
             for domain in requested
         ],
@@ -1152,6 +1390,7 @@ def wiki_spec_search(
     }
 
 
+@_safe
 @_specification_safe
 def wiki_spec_context(domain: str, scenario_id: str) -> dict:
     try:
@@ -1162,6 +1401,7 @@ def wiki_spec_context(domain: str, scenario_id: str) -> dict:
     bind = _resolved_binding()
     if valid_domain not in bind.read:
         return _spec_error("access_denied", "domain is outside read scope")
+    bind = _specification_binding(bind, valid_domain)
     if bind.specification_mode == "disabled":
         return _spec_error("specifications_disabled", "enable specifications")
     store = _specification_store(bind)
@@ -1175,6 +1415,7 @@ def wiki_spec_context(domain: str, scenario_id: str) -> dict:
     return _spec_context_result(value, mode=bind.specification_mode)
 
 
+@_safe
 @_specification_safe
 def wiki_spec_resolve(domain: str, scenario_id: str) -> dict:
     try:
@@ -1185,6 +1426,7 @@ def wiki_spec_resolve(domain: str, scenario_id: str) -> dict:
     bind = _resolved_binding()
     if valid_domain not in bind.write:
         return _spec_error("access_denied", "domain is outside write scope")
+    bind = _specification_binding(bind, valid_domain)
     if bind.specification_mode == "disabled":
         return _spec_error("specifications_disabled", "enable specifications")
     store = _specification_store(bind)
@@ -4340,6 +4582,10 @@ def wiki_lint(domain: str | None = None) -> dict:
             target: store.lint_domain(target, list(bind.read))
             for target in valid_targets
         }
+        for target, report in reports.items():
+            report["specifications"] = _specification_lint_report(
+                bind, target
+            )
         return {"domains": list(reports), "reports": reports}
     targets = [domain] if domain else base.resolve_scope(bind, "project", None)
     valid_targets = [_validate_domain(target) for target in targets]
@@ -4382,6 +4628,7 @@ def wiki_lint(domain: str | None = None) -> dict:
                 "hint": "inspect wiki_code_status and retry",
             }
         report["code_graph"] = code_report
+        report["specifications"] = _specification_lint_report(bind, target)
         reports[target] = report
     return {"domains": list(reports.keys()), "reports": reports}
 
@@ -4972,6 +5219,9 @@ mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)
 mcp.tool()(wiki_search)
+mcp.tool()(wiki_spec_search)
+mcp.tool()(wiki_spec_context)
+mcp.tool()(wiki_spec_resolve)
 mcp.tool()(wiki_related)
 mcp.tool()(wiki_write_page)
 mcp.tool()(wiki_update_page)

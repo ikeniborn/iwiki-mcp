@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "wiki_code_status", "wiki_code_index", "wiki_code_search",
     "wiki_code_context", "wiki_code_publish_begin", "wiki_code_publish_batch",
     "wiki_code_publish_finalize", "wiki_code_publish_abort",
+    "wiki_spec_search", "wiki_spec_context", "wiki_spec_resolve",
 }
 
 
@@ -152,6 +153,17 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 assert "seeds" in context_properties
                 assert "symbols" not in context_properties
                 assert context_properties["include_source"]["default"] is False
+                spec_search = tools["wiki_spec_search"].inputSchema
+                assert set(spec_search["properties"]) == {
+                    "query", "domains", "limit",
+                }
+                assert spec_search.get("required") == ["query"]
+                assert spec_search["properties"]["limit"]["default"] == 20
+                assert "iwiki_id" not in spec_search["properties"]
+                for name in ("wiki_spec_context", "wiki_spec_resolve"):
+                    schema = tools[name].inputSchema
+                    assert set(schema["properties"]) == {"domain", "scenario_id"}
+                    assert schema.get("required") == ["domain", "scenario_id"]
                 bind_schema = tools["wiki_bind"].inputSchema
                 assert "write" in bind_schema["properties"]
                 assert "primary" in bind_schema["properties"]

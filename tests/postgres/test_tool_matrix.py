@@ -8,6 +8,7 @@ import pytest
 
 from iwiki_mcp import server
 from iwiki_mcp.engine.config import Config
+from iwiki_mcp.specification_store import ProjectionStatus
 from iwiki_mcp.storage import PostgresBinding
 
 
@@ -25,6 +26,9 @@ TOOLS = {
     "wiki_list_pages": "supported",
     "wiki_read_page": "supported",
     "wiki_search": "supported",
+    "wiki_spec_search": "supported",
+    "wiki_spec_context": "supported",
+    "wiki_spec_resolve": "supported",
     "wiki_related": "supported",
     "wiki_write_page": "supported",
     "wiki_update_page": "supported",
@@ -111,6 +115,12 @@ class FakeStore:
     def lint_domain(self, domain, visible_domains):
         return {"domain": domain, "visible_domains": visible_domains, "broken": []}
 
+    def specification_status(self, domain):
+        return ProjectionStatus(domain=domain, state="absent")
+
+    def _specification_projection(self, _domain):
+        return None
+
 
 @pytest.fixture
 def postgres_server(monkeypatch, postgres_binding):
@@ -156,7 +166,7 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 32
+    assert len(TOOLS) == 35
     assert registered == set(TOOLS)
 
 
@@ -252,6 +262,14 @@ def test_postgres_supported_handlers_use_store_without_local_access(postgres_ser
         "primary": "docs",
         "project_dir": "/not-used",
         "domains": ["docs"],
+        "specifications": {"domains": [{
+            "domain": "docs",
+            "mode": "optional",
+            "source": "built_in_default",
+            "projection_state": "absent",
+            "scenarios": 0,
+            "bindings": 0,
+        }]},
     }
     assert "fixture-secret" not in repr(status)
     assert server.wiki_list_domains()["domains"] == ["docs"]

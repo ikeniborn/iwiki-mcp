@@ -38,6 +38,7 @@ _READ_DOMAIN_TOOLS = {
     "wiki_read_page",
     "wiki_related",
     "wiki_lint",
+    "wiki_spec_context",
 }
 _WRITE_DOMAIN_TOOLS = {
     "wiki_write_page",
@@ -47,6 +48,7 @@ _WRITE_DOMAIN_TOOLS = {
     "wiki_delete_section",
     "wiki_move_section",
     "wiki_index",
+    "wiki_spec_resolve",
 }
 _CODE_PUBLISH_TOOLS = {
     "wiki_code_publish_begin",
@@ -241,6 +243,9 @@ def _binding(
         embed_model=config.models.embed_model,
         embed_dimensions=config.models.embed_dimensions,
         rerank_model=config.models.rerank_model,
+        specification_mode=config.specifications.mode_for(
+            context.iwiki_id, context.primary
+        ) if context.primary is not None else config.specifications.default_mode,
     )
 
 
@@ -287,7 +292,9 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
     code_graph = name in _CODE_PUBLISH_TOOLS or name in _CODE_READ_TOOLS
     arguments = params.get("arguments")
     if not isinstance(arguments, dict):
-        if protected:
+        if protected or name in {
+            "wiki_spec_search", "wiki_spec_context", "wiki_spec_resolve"
+        }:
             raise AccessError(403)
         if not code_graph:
             return
@@ -323,7 +330,25 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
     read_domains: tuple[str, ...] = ()
     write_domains: tuple[str, ...] = ()
     domain = arguments.get("domain")
-    if name in _READ_DOMAIN_TOOLS and isinstance(domain, str):
+    if name == "wiki_spec_search":
+        raw_domains = arguments.get("domains")
+        if raw_domains is None:
+            read_domains = context.read_domains
+        elif type(raw_domains) is not list or any(
+            type(item) is not str for item in raw_domains
+        ):
+            raise AccessError(403)
+        else:
+            read_domains = tuple(raw_domains)
+    elif name == "wiki_spec_context":
+        if type(domain) is not str:
+            raise AccessError(403)
+        read_domains = (domain,)
+    elif name == "wiki_spec_resolve":
+        if type(domain) is not str or domain != context.require_primary_write():
+            raise AccessError(403)
+        write_domains = (domain,)
+    elif name in _READ_DOMAIN_TOOLS and isinstance(domain, str):
         read_domains = (domain,)
     elif name in _WRITE_DOMAIN_TOOLS:
         target = domain if isinstance(domain, str) else context.primary
@@ -580,7 +605,9 @@ def prepare_runtime(
         pool.open(wait=True)
         from . import server
 
-        server._install_hosted_runtime(pool, cfg, config.code_graph)
+        server._install_hosted_runtime(
+            pool, cfg, config.code_graph, config.specifications
+        )
         server.mcp.settings.json_response = True
         server.mcp.settings.stateless_http = False
         server.mcp.settings.transport_security = TransportSecuritySettings(
