@@ -192,6 +192,26 @@ def test_sqlite_adapter_uses_shared_batches_and_atomic_replace(sqlite_contract):
     assert publisher.finalize(session) == result
 
 
+def test_specification_snapshot_captures_only_active_file_and_symbol_rows(
+    sqlite_contract,
+):
+    runtime, built, _clock, publisher, reader = sqlite_contract
+    _session, published = _publish_all(publisher, built)
+    before = runtime.paths.database.read_bytes()
+
+    snapshot = reader.specification_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.revision == published["snapshot_revision"]
+    assert tuple(snapshot.files) == tuple(sorted(
+        built.tables["files"], key=lambda row: row["file_id"]
+    ))
+    assert tuple(snapshot.symbols) == tuple(sorted(
+        built.tables["symbols"], key=lambda row: row["symbol_id"]
+    ))
+    assert runtime.paths.database.read_bytes() == before
+
+
 def test_sqlite_adapter_preserves_existing_link_inclusive_revision(
     sqlite_contract,
 ):

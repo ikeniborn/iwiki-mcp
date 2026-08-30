@@ -27,6 +27,26 @@ def test_classify_keeps_type_open(monkeypatch):
     assert out["type"] == "person"
 
 
+def test_classify_prompt_and_output_never_select_specification(monkeypatch):
+    prompts = []
+
+    def answer(cfg, prompt):
+        prompts.append(prompt)
+        return '{"type": " Specification ", "tags": ["GWT"]}'
+
+    monkeypatch.setattr(classify, "_chat", answer)
+    out = classify.classify_page(
+        _cfg(),
+        "Given an iwiki-gwt fence, When classified, Then stay ordinary.",
+        existing_tags=[],
+    )
+
+    assert "specification" not in prompts[0].split("type MUST", 1)[1].split("Pick by", 1)[0]
+    assert out["type"] == "concept"
+    assert out["tags"] == ["gwt"]
+    assert out["warning"] is None
+
+
 def test_classify_failure_is_best_effort(monkeypatch):
     def boom(cfg, prompt):
         raise RuntimeError("endpoint down")

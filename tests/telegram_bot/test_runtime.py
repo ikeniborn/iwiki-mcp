@@ -6,6 +6,7 @@ import logging
 import sys
 import traceback
 
+import anyio
 import pytest
 import urllib3
 from mcp import McpError
@@ -81,6 +82,172 @@ def test_heartbeat_writes_only_timestamp(tmp_path):
     Heartbeat(path, clock=lambda: 123.5).touch()
 
     assert path.read_bytes() == b"123.500000\n"
+
+
+@pytest.mark.asyncio
+async def test_remote_cancel_scope_is_closed_before_shielded_cleanup():
+    @asynccontextmanager
+    async def remote_context():
+        async with anyio.create_task_group() as task_group:
+            class Remote:
+                async def cancel_session(self):
+                    task_group.cancel_scope.cancel()
+                    await anyio.sleep(0)
+
+            yield Remote()
+
+    context = remote_context()
+    remote = await context.__aenter__()
+    with pytest.raises(asyncio.CancelledError):
+        await remote.cancel_session()
+    error = RemoteIwikiError(
+        "remote_call_failed",
+        retryable=True,
+    )
+    await main_module._close_dependencies(
+        context,
+        True,
+        None,
+        None,
+        (RemoteIwikiError, error, error.__traceback__),
+    )
+
+    await anyio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_internal_remote_cancel_scope_reconnects_after_scope_closes(
+    monkeypatch,
+):
+    polling = anyio.Event()
+    remotes = []
+
+    class Proxy:
+        async def close(self):
+            pass
+
+    class Inference:
+        def __init__(self, *arguments):
+            pass
+
+        async def probe(self):
+            pass
+
+        async def close(self):
+            pass
+
+    class Remote:
+        async def list_domains(self):
+            return ["team"]
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        remote = Remote()
+        remotes.append(remote)
+        if len(remotes) == 1:
+            async with anyio.create_task_group() as task_group:
+                async def cancel_during_poll():
+                    await polling.wait()
+                    task_group.cancel_scope.cancel()
+
+                task_group.start_soon(cancel_during_poll)
+                yield remote
+        else:
+            yield remote
+
+    class Transport:
+        calls = 0
+
+        def __init__(self, *arguments):
+            pass
+
+        async def poll_forever(self, **kwargs):
+            self.__class__.calls += 1
+            if self.calls == 1:
+                polling.set()
+                await anyio.sleep_forever()
+            raise RuntimeError("stop after remote reconnect")
+
+    async def sleep(delay):
+        pass
+
+    monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
+    monkeypatch.setattr(main_module, "InferenceClient", Inference)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+    monkeypatch.setattr(main_module, "TelegramTransport", Transport)
+
+    with pytest.raises(RuntimeError, match="stop after remote reconnect"):
+        await main_module.run_bot(
+            _config(),
+            sleep=sleep,
+            heartbeat=RecordingHeartbeat(),
+        )
+
+    assert len(remotes) == 2
+    assert Transport.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_bot_preserves_external_anyio_cancellation(monkeypatch):
+    polling = anyio.Event()
+    events = []
+
+    class Proxy:
+        async def close(self):
+            events.append("proxy_close")
+
+    class Inference:
+        def __init__(self, *arguments):
+            pass
+
+        async def probe(self):
+            pass
+
+        async def close(self):
+            events.append("inference_close")
+
+    class Remote:
+        async def list_domains(self):
+            return ["team"]
+
+    @asynccontextmanager
+    async def remote_context(*arguments):
+        events.append("remote_enter")
+        try:
+            yield Remote()
+        finally:
+            events.append("remote_close")
+
+    class Transport:
+        def __init__(self, *arguments):
+            pass
+
+        async def poll_forever(self, **kwargs):
+            polling.set()
+            await anyio.sleep_forever()
+
+    monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
+    monkeypatch.setattr(main_module, "InferenceClient", Inference)
+    monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
+    monkeypatch.setattr(main_module, "TelegramTransport", Transport)
+
+    async def invoke():
+        with pytest.raises(asyncio.CancelledError):
+            await main_module.run_bot(
+                _config(), heartbeat=RecordingHeartbeat()
+            )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(invoke)
+        await polling.wait()
+        task_group.cancel_scope.cancel()
+
+    assert events == [
+        "remote_enter",
+        "remote_close",
+        "inference_close",
+        "proxy_close",
+    ]
 
 
 @pytest.mark.asyncio

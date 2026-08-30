@@ -204,11 +204,12 @@ def test_rollback_v5_compat_is_dry_run_then_marker_only_and_reapplicable(
     import psycopg
 
     from iwiki_mcp.postgres.migrations import (
+        MIGRATIONS,
         rollback_v5_compatibility,
         run_migrations,
     )
 
-    run_migrations(_settings(clean_postgres))
+    run_migrations(_settings(clean_postgres), migrations=MIGRATIONS[:5])
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
             cursor.execute("INSERT INTO iwiki.iwikis VALUES ('wiki-a', 'wiki-a')")
@@ -245,14 +246,18 @@ def test_rollback_v5_compat_is_dry_run_then_marker_only_and_reapplicable(
     }
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT to_regclass('iwiki.code_graph_snapshots')")
-            assert cursor.fetchone()[0] == "iwiki.code_graph_snapshots"
+            cursor.execute(
+                "SELECT to_regclass('iwiki.code_graph_snapshots') IS NOT NULL"
+            )
+            assert cursor.fetchone() == (True,)
             cursor.execute("SELECT markdown_generation FROM iwiki.domains")
             assert cursor.fetchone() == (7,)
             cursor.execute("SELECT snapshot_id FROM iwiki.code_graph_snapshots")
             assert cursor.fetchone() == ("staged",)
 
-    reapplied = run_migrations(_settings(clean_postgres))
+    reapplied = run_migrations(
+        _settings(clean_postgres), migrations=MIGRATIONS[:5]
+    )
     assert reapplied.applied_versions == (5,)
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
@@ -310,6 +315,8 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
 
     from iwiki_mcp.postgres.auth import AuthStore
     from iwiki_mcp.postgres.migrations import (
+        rollback_v6_compatibility,
+        rollback_v7_compatibility,
         rollback_v5_compatibility,
         run_migrations,
     )
@@ -347,6 +354,8 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
                 write_domains=["docs"],
                 runtime=name,
             )
+        rollback_v7_compatibility(settings, confirm=True)
+        rollback_v6_compatibility(settings, confirm=True)
         with psycopg.connect(clean_postgres) as connection:
             with connection.cursor() as cursor:
                 for role in roles.values():
@@ -439,7 +448,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
                 assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4]
 
         reapplied = run_migrations(settings)
-        assert reapplied.applied_versions == (5,)
+        assert reapplied.applied_versions == (5, 6, 7)
     finally:
         with psycopg.connect(clean_postgres, autocommit=True) as connection:
             with connection.cursor() as cursor:

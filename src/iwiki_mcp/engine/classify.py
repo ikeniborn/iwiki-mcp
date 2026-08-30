@@ -45,13 +45,16 @@ def _chat(cfg: Config, prompt: str) -> str:
 
 def classify_page(cfg: Config, body: str, existing_tags: list) -> dict:
     prompt = _PROMPT.format(
-        types=", ".join(fm.OKF_TYPES), max_tags=fm.MAX_TAGS,
+        types=", ".join(fm.CLASSIFIABLE_TYPES), max_tags=fm.MAX_TAGS,
         existing=", ".join(existing_tags) or "(none yet)", body=body[:6000],
     )
     try:
         raw = _chat(cfg, prompt)
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
-        return {"type": fm.normalize_type(data.get("type")),
+        classified_type = fm.normalize_type(data.get("type"))
+        if classified_type == "specification":
+            classified_type = fm.DEFAULT_TYPE
+        return {"type": classified_type,
                 "tags": fm.normalize_tags(data.get("tags", []) or []),
                 "warning": None}
     except Exception as e:

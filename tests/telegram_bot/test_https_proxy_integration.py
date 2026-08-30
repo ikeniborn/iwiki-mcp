@@ -193,6 +193,7 @@ class _HttpsConnectProxy:
         self.voice_path = voice_path
         self.proxy_authorization = proxy_authorization
         self._updates = list(updates if updates is not None else self._default_updates())
+        self._served_update_ids = set()
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._poll_release = threading.Event()
@@ -277,9 +278,21 @@ class _HttpsConnectProxy:
                 self._poll_release.wait()
             if self.poll_delay:
                 time.sleep(self.poll_delay)
+            request = json.loads(body) if body else {}
+            offset = request.get("offset")
             with self._lock:
-                updates = self._updates
-                self._updates = []
+                if isinstance(offset, int):
+                    self._updates = [
+                        update
+                        for update in self._updates
+                        if update.get("update_id", -1) >= offset
+                    ]
+                updates = list(self._updates)
+                self._served_update_ids.update(
+                    update["update_id"]
+                    for update in updates
+                    if isinstance(update.get("update_id"), int)
+                )
             return json.dumps(
                 {"ok": True, "result": updates},
                 separators=(",", ":"),
@@ -470,10 +483,7 @@ class _HttpsConnectProxy:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._lock:
-                if all(
-                    update.get("update_id") != update_id
-                    for update in self._updates
-                ):
+                if update_id in self._served_update_ids:
                     return True
             time.sleep(0.05)
         return False

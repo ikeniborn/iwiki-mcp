@@ -77,4 +77,104 @@ AUTHORING_RULES: str = """\
   from Git. Keep portable `index.jsonl` and `log.jsonl` at each domain root; never
   copy or edit the graph database between machines. A stale cache falls back to
   Markdown and is rebuilt locally when needed.
+
+## GWT specifications
+
+Ordinary Wiki pages and `type: specification` pages coexist. The `disabled`, `optional`,
+and `strict` modes affect only explicit specification pages; ordinary Wiki validation,
+storage, search, and lint never depend on GWT parsing or on a code graph. The semantic
+tool surface is exactly `wiki_spec_search`, `wiki_spec_context`, and
+`wiki_spec_resolve`.
+
+Use one canonical TOML block in an H2 section:
+
+```iwiki-gwt
+id = "confirm-account-opening"
+title = "Confirm account opening"
+
+given = [
+  { role = "event", name = "AccountOpeningRequested" }
+]
+when = { role = "command", name = "ConfirmAccountOpening" }
+then = [
+  { role = "event", name = "AccountOpened" }
+]
+
+code = [
+  { relation = "implements", phase = "when", symbol = "accounts.Account.confirm" },
+  { relation = "verifies", symbol = "tests.accounts.test_confirm_account_opening" }
+]
+```
+
+Allowed phase roles are exact: Given roles: `event`, `state`, `fact`; When roles:
+`command`, `request`, `action`; Then roles: `event`, `response`, `outcome`, `exception`.
+An `exception` is exclusive and cannot coexist with another Then item.
+
+Grammar is closed and bounded. `id` is required, contains 1-128 UTF-8 bytes, and
+matches `[a-z0-9]+(?:-[a-z0-9]+)*`. `title` is required and nonblank, contains no NUL,
+and is at most 250 Unicode code points. Every phase-item `name` is required and
+nonblank, contains no NUL, and is at most 1,024 UTF-8 bytes. Unknown keys at the
+top level, in phase items, or in bindings are invalid; malformed TOML and duplicate
+TOML keys are invalid.
+
+`given` is required and accepts 0 or more items. `when` is required and contains
+exactly one item. `then` is required and contains 1 or more items. `code` is required
+and contains 1 or more bindings. Every binding has relation `implements` or `verifies`;
+`phase` is optional and, when present, is `given`, `when`, or `then`. Each binding has
+exactly one of `symbol`, `file`, or `source_glob`. Completeness requires at least one
+`implements` and one `verifies` binding.
+
+Binding grammar is exact: relation is exactly `implements | verifies`; `phase` is
+optional and exactly `given | when | then`. Every selector value is a nonempty UTF-8
+string of at most 4,096 bytes with no NUL. `symbol` is a code-graph qualified-name
+string, but the parser enforces only the shared selector scalar constraints and no
+stricter symbol regex. `file` and `source_glob` are trimmed, safe, relative POSIX paths
+or patterns with at most 256 path segments; they reject a backslash, absolute path,
+Windows drive, empty segment, `.` or `..`. `file` forbids glob metacharacters `*`, `?`,
+and `[`, while `source_glob` allows them. `code` is limited to at most 256 bindings.
+Duplicate phase identity `(phase, role, name)` is invalid. Duplicate binding identity
+`(relation, phase, selector kind, selector)` is invalid.
+
+Mode and lint behavior is exact. Disabled mode produces no projection and no
+specification findings for missing, invalid, duplicate, or incomplete specification
+pages. Optional mode makes every specification finding advisory. In strict mode,
+syntax (`missing_scenario` and `invalid_scenario`), `duplicate_scenario_id`, and
+`incomplete_bindings` findings are blocking only for future mutations of the reported
+explicit specification page. Projection and resolution findings remain advisory, and
+ordinary Wiki pages remain unaffected in every mode.
+
+`wiki_status` reports `domain`, `mode`, `source`, `projection_state`, `scenarios`, and
+`bindings`. Source is exactly
+`project | hosted_default | hosted_override | built_in_default`; projection state is
+exactly `disabled | absent | ready | stale | failed`.
+
+`wiki_lint` reports the full specification taxonomy: `missing_scenario`,
+`invalid_scenario`, `duplicate_scenario_id`, `incomplete_bindings`, `projection_stale`,
+`projection_failed`, `binding_unresolved`, `binding_ambiguous`,
+`resolution_not_checked`, `resolution_stale_spec`, `resolution_stale_graph`, and
+`graph_unavailable`. It remains read-only and always returns the complete ordinary Wiki
+report.
+
+1. Create or update a scenario for a new observable domain behavior, public contract,
+   bug reproduction, or business invariant. Do not require one for formatting,
+   mechanical refactoring with unchanged behavior, or ordinary Wiki maintenance.
+2. Write Given as prior domain facts, events, or state; When as one observable trigger;
+   and Then as public events, responses, outcomes, or an exclusive exception. Do not
+   encode internal method steps or database state as expected behavior.
+3. Keep the existing scenario ID when wording, page location, implementation, or test
+   location changes but observable behavior remains the same. Propose a behavioral
+   contract change before changing Given/When/Then meaning.
+4. Add at least one `implements` and one `verifies` selector. Planned unresolved targets
+   are acceptable while implementing specification-first behavior.
+5. Write or update the executable test before or with implementation. Run the focused
+   test and relevant regression suite; record command, exit status, and repository
+   revision in the task ledger.
+6. Call `wiki_spec_context` before changing an existing specification. When a ready
+   graph exists, call `wiki_spec_resolve` after code or test changes. Treat ambiguous,
+   stale, or unresolved evidence as a maintenance finding, not as permission to guess.
+7. When the graph is absent or unusable, continue Wiki and GWT work, preserve declared
+   selectors, record graph-unavailable evidence, and verify through repository search
+   and executable tests. Never block ordinary Wiki work on graph recovery.
+8. Review the scenario, executable test, implementation bindings, and test evidence as
+   one coherent unit before reporting the change complete.
 """

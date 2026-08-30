@@ -973,3 +973,76 @@ def test_publish_from_mapping_hash_mismatch_carries_no_size_diagnostics():
         "error": "invalid_batch",
         "hint": "send batches that match the declared header",
     }
+
+
+def test_specification_graph_composition_keeps_non_primary_graphless(
+    seed_binding,
+):
+    resolver = server._specification_graph_resolver(seed_binding, "other")
+
+    assert resolver.status() == {
+        "state": "not_primary",
+        "reason": "not_primary",
+        "revision": None,
+    }
+    assert resolver.specification_snapshot() is None
+
+
+def test_specification_graph_composition_reuses_local_runtime_only_for_primary(
+    seed_binding, monkeypatch
+):
+    runtime = object()
+    resolver = object()
+    monkeypatch.setattr(
+        server._codegraph_application, "source_context", lambda binding: binding
+    )
+    monkeypatch.setattr(
+        server._codegraph_application, "code_runtime", lambda binding: runtime
+    )
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "specification_graph_resolver",
+        lambda current: resolver if current is runtime else None,
+    )
+
+    assert server._specification_graph_resolver(
+        seed_binding, seed_binding.primary
+    ) is resolver
+
+
+def test_specification_graph_composition_selects_postgres_reader_for_primary(
+    monkeypatch,
+):
+    binding = server.base.PostgresBinding(
+        host="localhost",
+        port=5432,
+        database="iwiki_test",
+        user="tester",
+        sslmode="disable",
+        iwiki_id="iwiki-test",
+        read=("project",),
+        write=("project",),
+        primary="project",
+        project_dir="/tmp/does-not-matter",
+        embed_model="test-embed",
+        embed_dimensions=2,
+        rerank_model="test-rerank",
+        password="secret",
+    )
+    resolver = object()
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_postgres_code_reader",
+        lambda current: calls.append(current) or resolver,
+    )
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "code_runtime",
+        lambda *_args: pytest.fail("PostgreSQL must not select local runtime"),
+    )
+
+    assert server._specification_graph_resolver(
+        binding, binding.primary
+    ) is resolver
+    assert calls == [binding]

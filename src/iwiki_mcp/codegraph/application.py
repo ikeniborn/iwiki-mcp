@@ -31,6 +31,11 @@ from .publication import (
     iter_snapshot_batches,
 )
 from .store import _is_canonical_revision
+from .sqlite_adapter import SqliteCodeGraphReader
+from iwiki_mcp.specifications import (
+    UnavailableSpecificationGraphResolver,
+    normalized_graph_state,
+)
 
 
 class CodeGraphApplicationError(CodeGraphError):
@@ -264,6 +269,34 @@ def code_runtime(
             source.wiki_base
         )
     return runtime
+
+
+def specification_graph_resolver(
+    runtime: codegraph_runtime.CodeGraphRuntime,
+):
+    """Compose a private local specification resolver without widening runtime."""
+    config = runtime.config
+    if config is not None and config.publish_mode != "sqlite":
+        return UnavailableSpecificationGraphResolver("source_unavailable")
+    status = normalized_graph_state(runtime.status())
+    if (
+        status["state"] != "ready"
+        or runtime.paths is None
+        or runtime._store is None
+        or config is None
+    ):
+        return UnavailableSpecificationGraphResolver(
+            str(status["reason"] or "missing"),
+            status["revision"] if isinstance(status["revision"], str) else None,
+        )
+    return SqliteCodeGraphReader(
+        store=runtime._store,
+        domain=runtime.binding.primary,
+        private_root=runtime._context_root,
+        lock_path=runtime.paths.lock,
+        max_file_bytes=config.max_file_bytes,
+        selector_resolver=linking.WikiSelectorResolver(runtime.binding.base),
+    )
 
 
 def create_postgres_publisher(

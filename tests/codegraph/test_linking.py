@@ -21,6 +21,7 @@ from iwiki_mcp.codegraph import indexer as codegraph_indexer
 from iwiki_mcp.codegraph.context import CodeGraphContext, validate_context_request
 from iwiki_mcp.codegraph.indexer import CodeGraphStaleError
 from iwiki_mcp.codegraph.linking import (
+    binding_selector_mapping,
     SelectorError,
     SelectorSnapshotChanged,
     WikiPageSnapshot,
@@ -29,6 +30,27 @@ from iwiki_mcp.codegraph.linking import (
     resolve_selectors,
     selector_capture_budget,
 )
+
+
+@pytest.mark.parametrize(
+    "kind,selector,expected",
+    [
+        (
+            "symbol",
+            "pkg.service.Service.run",
+            {"symbols": [{"qualified_name": "pkg.service.Service.run"}]},
+        ),
+        ("file", "src/pkg/service.py", {"files": ["src/pkg/service.py"]}),
+        ("source_glob", "tests/**/*.py", {"source_globs": ["tests/**/*.py"]}),
+    ],
+)
+def test_specification_binding_reuses_pure_selector_mapping(kind, selector, expected):
+    assert binding_selector_mapping(kind, selector) == expected
+
+
+def test_specification_binding_mapping_rejects_unknown_kind_without_graph_access():
+    with pytest.raises(SelectorError, match="selector kind"):
+        binding_selector_mapping("module", "pkg.service")
 
 
 def test_selectors_materialize_only_symbol_or_file_targets(link_fixture):

@@ -157,8 +157,8 @@ def test_graph_migration_creates_v5_objects_and_composite_integrity(clean_postgr
     from iwiki_mcp.postgres.migrations import run_migrations
 
     result = run_migrations(_settings(clean_postgres))
-    assert result.schema_version == 5
-    assert result.applied_versions == (1, 2, 3, 4, 5)
+    assert result.schema_version == 7
+    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7)
     assert {
         "code_graph_domain_state",
         "code_graph_publication_sessions",

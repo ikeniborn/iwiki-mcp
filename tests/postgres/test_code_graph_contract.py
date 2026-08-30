@@ -283,6 +283,21 @@ def test_published_rows_carry_no_source_or_absolute_path(publication_adapter):
 
 
 @pytest.mark.parametrize("publication_adapter", ROUTES, indirect=True)
+def test_specification_relations_never_enter_structural_graph_rows(
+    publication_adapter,
+):
+    publication_adapter.publish_complete("structural-only")
+
+    rows = publication_adapter.rows
+
+    assert {row["relation_type"] for row in rows["relations"]} <= {
+        "DECLARES", "IMPORTS", "CALLS", "INHERITS"
+    }
+    assert "implements" not in json.dumps(rows).casefold()
+    assert "verifies" not in json.dumps(rows).casefold()
+
+
+@pytest.mark.parametrize("publication_adapter", ROUTES, indirect=True)
 def test_forged_payload_revision_is_recomputed_and_rejected(
     publication_adapter
 ):

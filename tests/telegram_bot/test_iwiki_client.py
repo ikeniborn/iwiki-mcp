@@ -3,6 +3,7 @@ import asyncio
 import traceback
 from types import SimpleNamespace
 
+import anyio
 import httpx
 from mcp import McpError
 from mcp.types import ErrorData
@@ -196,14 +197,25 @@ async def test_remote_runtime_failure_has_no_private_exception_chain():
 
 
 @pytest.mark.asyncio
-async def test_exact_session_terminated_mcp_error_is_sanitized_and_retryable():
+@pytest.mark.parametrize(
+    ("code", "message"),
+    (
+        (-32600, "Session terminated"),
+        (-32600, "Session not found"),
+        (32600, "Session terminated"),
+    ),
+    ids=("server-terminated", "server-not-found", "sdk-terminated"),
+)
+async def test_exact_stale_session_mcp_error_is_sanitized_and_retryable(
+    code, message
+):
     marker = "session-error-private-payload-marker"
 
     async def call_tool(name, arguments):
         raise McpError(
             ErrorData(
-                code=-32600,
-                message="Session terminated",
+                code=code,
+                message=message,
                 data={"detail": marker},
             )
         )
@@ -217,13 +229,81 @@ async def test_exact_session_terminated_mcp_error_is_sanitized_and_retryable():
 
 
 @pytest.mark.asyncio
+async def test_anyio_like_cancellation_without_owned_scope_is_not_converted():
+    marker = "Cancelled via cancel scope private-session-marker"
+
+    async def call_tool(name, arguments):
+        raise asyncio.CancelledError(marker)
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await RemoteIwikiClient(call_tool).list_domains()
+
+    assert str(captured.value) == marker
+
+
+@pytest.mark.asyncio
+async def test_plain_task_cancellation_is_not_converted_to_remote_failure():
+    async def call_tool(name, arguments):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await RemoteIwikiClient(call_tool).list_domains()
+
+
+@pytest.mark.asyncio
+async def test_external_anyio_cancellation_is_not_converted_to_remote_failure():
+    started = anyio.Event()
+
+    async def call_tool(name, arguments):
+        started.set()
+        await anyio.sleep_forever()
+
+    async def invoke():
+        with pytest.raises(asyncio.CancelledError):
+            await RemoteIwikiClient(call_tool).list_domains()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(invoke)
+        await started.wait()
+        task_group.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_stale_session_http_404_is_retryable():
+    request = httpx.Request(
+        "POST",
+        "https://wiki.example/mcp",
+        headers={"Mcp-Session-Id": "opaque-session"},
+    )
+    response = httpx.Response(404, request=request)
+
+    async def call_tool(name, arguments):
+        raise httpx.HTTPStatusError(
+            "stale-session-private-marker",
+            request=request,
+            response=response,
+        )
+
+    with pytest.raises(RemoteIwikiError) as captured:
+        await RemoteIwikiClient(call_tool).list_domains()
+
+    assert str(captured.value) == "remote_call_failed"
+    assert captured.value.retryable is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("code", "message_template"),
     (
         (-32601, "Session terminated"),
         (-32600, "Different invalid request: {marker}"),
+        (32600, "Different invalid request: {marker}"),
     ),
-    ids=("different-code", "different-invalid-request"),
+    ids=(
+        "different-code",
+        "server-different-invalid-request",
+        "sdk-different-invalid-request",
+    ),
 )
 async def test_other_mcp_errors_remain_sanitized_and_non_retryable(
     code, message_template
@@ -359,7 +439,7 @@ async def test_remote_connection_failure_is_sanitized_before_startup_retry(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "retryable"),
-    ((401, False), (403, False), (429, True), (500, True)),
+    ((401, False), (403, False), (404, False), (429, True), (500, True)),
 )
 async def test_remote_startup_http_status_retryability(
     monkeypatch, status, retryable

@@ -236,6 +236,123 @@ yet wire real type information into resolution. JavaScript support is the same
 Tree-sitter-only extraction over the shared ECMAScript core described above (see
 "Shared ECMAScript core"), across `.js`, `.jsx`, `.mjs`, and `.cjs`.
 
+## Given-When-Then specification projection
+
+Ordinary Wiki pages and explicit `type: specification` pages share each domain, while
+their processing paths remain separate. Ordinary Wiki pages never enter GWT parsing and
+keep working in `disabled`, `optional`, and `strict` modes without a code graph.
+
+Local Git and local PostgreSQL load one project policy from `.iwiki.toml`:
+
+```toml
+[specifications]
+mode = "optional"
+```
+
+Hosted PostgreSQL loads operator policy from server TOML:
+
+```toml
+[specifications]
+default_mode = "optional"
+
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
+domain = "payments"
+mode = "strict"
+```
+
+Hosted precedence is the exact `(iwiki_id, domain)` override, hosted default, then
+built-in `optional`. `wiki_bind` cannot change this policy. Disabled mode bypasses the
+projection. Optional mode commits Markdown and reports advisory projection findings.
+Strict mode prepares a valid coherent projection before committing a target
+specification mutation; ordinary Wiki mutations bypass specification persistence.
+
+The parser accepts one fenced TOML scenario per H2 section:
+
+```iwiki-gwt
+id = "confirm-account-opening"
+title = "Confirm account opening"
+given = [{ role = "event", name = "AccountOpeningRequested" }]
+when = { role = "command", name = "ConfirmAccountOpening" }
+then = [{ role = "event", name = "AccountOpened" }]
+code = [
+  { relation = "implements", phase = "when", symbol = "accounts.Account.confirm" },
+  { relation = "verifies", symbol = "tests.accounts.test_confirm_account_opening" }
+]
+```
+
+`given` admits `event`, `state`, and `fact`; `when` admits `command`, `request`, and
+`action`; `then` admits `event`, `response`, `outcome`, or an exclusive `exception`.
+A complete scenario contains both `implements` and `verifies`. Markdown is canonical;
+scenario and binding records are derived, and scenario identity remains independent of
+page or section location.
+
+Grammar is closed and bounded. `id` is required, contains 1-128 UTF-8 bytes, and
+matches `[a-z0-9]+(?:-[a-z0-9]+)*`. `title` is required and nonblank, contains no NUL,
+and is at most 250 Unicode code points. Every phase-item `name` is required and
+nonblank, contains no NUL, and is at most 1,024 UTF-8 bytes. Unknown keys at the top
+level, in phase items, or in bindings are invalid; malformed TOML and duplicate TOML
+keys are invalid.
+
+`given` is required and accepts 0 or more items. `when` is required and contains
+exactly one item. `then` is required and contains 1 or more items. `code` is required
+and contains 1 or more bindings. In each binding, `phase` is optional and exactly one
+of `symbol`, `file`, or `source_glob` is required. Completeness requires at least one
+`implements` and one `verifies` binding.
+
+Binding grammar is exact: relation is exactly `implements | verifies`; `phase` is
+optional and exactly `given | when | then`. Every selector value is a nonempty UTF-8
+string of at most 4,096 bytes with no NUL. `symbol` is a code-graph qualified-name
+string, but the parser enforces only the shared selector scalar constraints and no
+stricter symbol regex. `file` and `source_glob` are trimmed, safe, relative POSIX paths
+or patterns with at most 256 path segments; they reject a backslash, absolute path,
+Windows drive, empty segment, `.` or `..`. `file` forbids glob metacharacters `*`, `?`,
+and `[`, while `source_glob` allows them. `code` is limited to at most 256 bindings.
+Duplicate phase identity `(phase, role, name)` is invalid. Duplicate binding identity
+`(relation, phase, selector kind, selector)` is invalid.
+
+Disabled mode produces no projection and no specification findings for missing,
+invalid, duplicate, or incomplete specification pages. Optional mode makes every
+specification finding advisory. In strict mode, syntax (`missing_scenario` and
+`invalid_scenario`), `duplicate_scenario_id`, and `incomplete_bindings` findings are
+blocking only for future mutations of the reported explicit specification page.
+Projection and resolution findings remain advisory; ordinary Wiki pages remain
+unaffected in every mode.
+
+Git publishes the rebuildable `<domain>/specifications.jsonl` beside canonical Markdown
+under the existing mutation lock. PostgreSQL stores the equivalent projection,
+findings, and metadata transactionally with tenant/domain RLS. Optional refresh failure
+leaves the previous projection stale while preserving authored Markdown; strict failure
+commits neither target page nor projection.
+
+The MCP boundary registers exactly `wiki_spec_search`, `wiki_spec_context`, and
+`wiki_spec_resolve`. Search and context require read scope. Resolve requires write scope,
+persists evidence, and cannot expand binding, graph-publication, or tenant authority.
+`wiki_status` exposes effective mode and projection state; `wiki_lint` adds independent
+specification findings without suppressing the ordinary Wiki report.
+
+The `wiki_status` specification record contains exactly `domain`, `mode`, `source`,
+`projection_state`, `scenarios`, and `bindings`. Source is
+`project | hosted_default | hosted_override | built_in_default`; projection state is
+`disabled | absent | ready | stale | failed`. The complete `wiki_lint` finding taxonomy
+is `missing_scenario`, `invalid_scenario`, `duplicate_scenario_id`,
+`incomplete_bindings`, `projection_stale`, `projection_failed`, `binding_unresolved`,
+`binding_ambiguous`, `resolution_not_checked`, `resolution_stale_spec`,
+`resolution_stale_graph`, and `graph_unavailable`. Lint is read-only and always returns
+the complete ordinary Wiki report.
+
+Evidence attempts are `resolved`, `ambiguous`, `unresolved`, or `graph_unavailable`.
+Context computes `fresh`, `stale_spec`, or `stale_graph` from current source and graph
+revisions without mutating evidence. A missing or unusable graph records sanitized
+`graph_unavailable`; callers preserve selectors and use repository search and executable
+tests. Resolution identifies targets but neither runs nor authorizes tests.
+
+The deterministic path-shape measurement has no timing threshold:
+
+```bash
+uv run pytest -q -m measurement tests/measurement/test_specification_paths.py -s
+```
+
 ## Layered architecture
 
 Two layers live under `src/iwiki_mcp/`. The **top layer** is MCP-aware and reaches

@@ -134,6 +134,94 @@ def _assert_tool_denied(response, *, request_id=2):
     }
 
 
+def _authorization_request(name, arguments):
+    return {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+
+
+def test_specification_http_authorization_uses_authenticated_scope(monkeypatch):
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "shared"),
+        write_domains=("docs",),
+        primary="docs",
+    )
+    calls = []
+    monkeypatch.setattr(
+        http,
+        "authorize_domains",
+        lambda _context, **kwargs: calls.append(kwargs),
+    )
+
+    http._authorize_tool(
+        context, _authorization_request("wiki_spec_search", {"query": "open"})
+    )
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_spec_search",
+            {"query": "open", "domains": ["shared", "shared"]},
+        ),
+    )
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_spec_context", {"domain": "shared", "scenario_id": "open"}
+        ),
+    )
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_spec_resolve", {"domain": "docs", "scenario_id": "open"}
+        ),
+    )
+
+    assert calls == [
+        {"read_domains": ("docs", "shared"), "write_domains": ()},
+        {"read_domains": ("shared", "shared"), "write_domains": ()},
+        {"read_domains": ("shared",), "write_domains": ()},
+        {"read_domains": (), "write_domains": ("docs",)},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("wiki_spec_search", {"query": "open", "domains": "docs"}),
+        ("wiki_spec_search", {"query": "open", "domains": ["docs", 7]}),
+        ("wiki_spec_search", {"query": "open", "domains": ["private"]}),
+        ("wiki_spec_context", {"domain": "private", "scenario_id": "open"}),
+        ("wiki_spec_context", {"domain": 7, "scenario_id": "open"}),
+        ("wiki_spec_resolve", {"domain": "shared", "scenario_id": "open"}),
+        ("wiki_spec_resolve", {"domain": "docs", "scenario_id": "open", "iwiki_id": "wiki-b"}),
+    ],
+)
+def test_specification_http_authorization_denies_malformed_or_cross_scope(
+    name, arguments,
+):
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "shared"),
+        write_domains=("docs", "shared"),
+        primary="docs",
+    )
+
+    with pytest.raises(AccessError):
+        http._authorize_tool(context, _authorization_request(name, arguments))
+
+
 def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
     runtime = hosted_runtime.runtime
     auth = hosted_runtime.auth
@@ -213,6 +301,14 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             "write": ["docs"],
             "primary": "docs",
             "domains": ["docs"],
+            "specifications": {"domains": [{
+                "domain": "docs",
+                "mode": "optional",
+                "source": "hosted_default",
+                "projection_state": "absent",
+                "scenarios": 0,
+                "bindings": 0,
+            }]},
         }
         assert runtime.config.storage.password not in status.text
         assert "server-only-model-key" not in status.text
@@ -429,11 +525,82 @@ def test_hosted_runtime_rejects_git_before_listener(
     assert listener_started is False
 
 
-@pytest.mark.parametrize("installed_version", [4, 6])
-def test_hosted_runtime_requires_exact_v5_without_running_migrations(
+def test_hosted_runtime_pins_v7_guard_before_install_without_database(
+    tmp_path, monkeypatch
+):
+    from iwiki_mcp import http, server
+
+    config_path = tmp_path / "server.toml"
+    _write_server_config(
+        config_path,
+        {
+            "host": "db.invalid",
+            "port": 5432,
+            "dbname": "fixture",
+            "user": "fixture",
+            "sslmode": "require",
+        },
+    )
+    environ = RedactedEnv(
+        {
+            "IWIKI_DB_PASSWORD": "fixture-password",
+            "IWIKI_LLM_BASE_URL": "http://example.invalid/v1",
+            "IWIKI_LLM_KEY": "fixture-key",
+            "IWIKI_EMBED_MODEL": "fixture-model",
+            "IWIKI_EMBED_DIMENSIONS": "3",
+            "IWIKI_RERANK_MODEL": "",
+        }
+    )
+    calls = []
+    monkeypatch.setattr(
+        http,
+        "require_schema_version",
+        lambda _dsn, *, expected_version: calls.append(
+            ("schema", expected_version)
+        ),
+    )
+    monkeypatch.setattr(
+        http,
+        "require_hosted_runtime_principal",
+        lambda _dsn: calls.append("principal"),
+    )
+
+    class Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def open(self, *, wait):
+            assert wait is True
+            calls.append("pool")
+
+        def close(self):
+            calls.append("close")
+
+        def connection(self):
+            raise AssertionError("mock runtime opened a database connection")
+
+    monkeypatch.setattr(http, "ConnectionPool", Pool)
+    monkeypatch.setattr(
+        http, "AuthenticatedMCPMiddleware", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        server,
+        "_install_hosted_runtime",
+        lambda *_args, **_kwargs: calls.append("install"),
+    )
+
+    runtime = http.prepare_runtime(
+        str(config_path), environ=environ, probe=lambda _cfg: calls.append("probe")
+    )
+
+    assert calls[:5] == ["probe", ("schema", 7), "principal", "pool", "install"]
+    runtime.close()
+
+
+@pytest.mark.parametrize("installed_version", [6, 7])
+def test_hosted_runtime_requires_exact_v7_before_installing_runtime(
     clean_postgres, tmp_path, monkeypatch, installed_version
 ):
-    import psycopg
     from psycopg.conninfo import conninfo_to_dict
 
     from iwiki_mcp import http, server
@@ -446,15 +613,9 @@ def test_hosted_runtime_requires_exact_v5_without_running_migrations(
         statement_timeout_ms=30_000,
         lock_timeout_ms=5_000,
     )
-    selected = migrations.MIGRATIONS[:installed_version]
-    migrations.run_migrations(settings, migrations=selected)
-    if installed_version == 6:
-        with psycopg.connect(clean_postgres) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO iwiki.schema_migrations (version) VALUES (6)"
-                )
-            connection.commit()
+    migrations.run_migrations(
+        settings, migrations=migrations.MIGRATIONS[:installed_version]
+    )
     values = conninfo_to_dict(clean_postgres)
     config_path = tmp_path / "server.toml"
     _write_server_config(config_path, values)
@@ -473,19 +634,48 @@ def test_hosted_runtime_requires_exact_v5_without_running_migrations(
         "run_migrations",
         lambda *_args, **_kwargs: pytest.fail("runtime must not migrate"),
     )
+    installed = []
     monkeypatch.setattr(
         server,
         "_install_hosted_runtime",
-        lambda *_args, **_kwargs: pytest.fail("runtime must fail before install"),
+        lambda *_args, **_kwargs: installed.append("runtime"),
     )
+    monkeypatch.setattr(http, "require_hosted_runtime_principal", lambda _dsn: None)
 
-    with pytest.raises(
-        migrations.MigrationError,
-        match="schema version 5 is required",
-    ):
-        http.prepare_runtime(
+    class Pool:
+        def __init__(self, *_args, **_kwargs):
+            self.closed = False
+
+        def open(self, *, wait):
+            assert wait is True
+
+        def close(self):
+            self.closed = True
+
+        def connection(self):
+            raise AssertionError("connection is not opened while installing runtime")
+
+    monkeypatch.setattr(http, "ConnectionPool", Pool)
+    monkeypatch.setattr(
+        http, "AuthenticatedMCPMiddleware", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(server.mcp, "streamable_http_app", lambda: object())
+
+    if installed_version == 6:
+        with pytest.raises(
+            migrations.MigrationError,
+            match="schema version 7 is required",
+        ):
+            http.prepare_runtime(
+                str(config_path), environ=environ, probe=lambda _cfg: None
+            )
+        assert installed == []
+    else:
+        runtime = http.prepare_runtime(
             str(config_path), environ=environ, probe=lambda _cfg: None
         )
+        assert installed == ["runtime"]
+        runtime.close()
 
 
 def test_hosted_runtime_rejects_an_unprovisioned_session_user(
@@ -548,12 +738,10 @@ def test_hosted_runtime_rejects_an_unprovisioned_session_user(
         drop_runtime_role(clean_postgres, role)
 
 
-@pytest.mark.parametrize("installed_version", [4, 6])
-def test_stdio_runtime_requires_exact_v5_without_running_migrations(
+@pytest.mark.parametrize("installed_version", [6, 7])
+def test_stdio_runtime_requires_exact_v7_without_running_migrations(
     clean_postgres, monkeypatch, installed_version
 ):
-    import psycopg
-
     from iwiki_mcp import server
     from iwiki_mcp.engine.config import Config
     from iwiki_mcp.postgres import migrations
@@ -565,14 +753,9 @@ def test_stdio_runtime_requires_exact_v5_without_running_migrations(
         statement_timeout_ms=30_000,
         lock_timeout_ms=5_000,
     )
-    migrations.run_migrations(settings, migrations=migrations.MIGRATIONS[:installed_version])
-    if installed_version == 6:
-        with psycopg.connect(clean_postgres) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO iwiki.schema_migrations (version) VALUES (6)"
-                )
-            connection.commit()
+    migrations.run_migrations(
+        settings, migrations=migrations.MIGRATIONS[:installed_version]
+    )
     binding = type(
         "DisposableBinding",
         (),
@@ -610,10 +793,13 @@ def test_stdio_runtime_requires_exact_v5_without_running_migrations(
         seed_threshold=0.0,
     )
 
-    with pytest.raises(
-        migrations.MigrationError,
-        match="schema version 5 is required",
-    ):
+    if installed_version == 6:
+        with pytest.raises(
+            migrations.MigrationError,
+            match="schema version 7 is required",
+        ):
+            server._initialize_postgres_storage(cfg)
+    else:
         server._initialize_postgres_storage(cfg)
 
 

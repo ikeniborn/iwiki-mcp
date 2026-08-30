@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path, PureWindowsPath
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -49,6 +50,9 @@ _PROJECT_CONFIG_TEMPLATE = """\
 # user = "iwiki_app"
 # sslmode = "verify-full"
 # iwiki_id = "team-wiki"
+
+# [specifications]
+# mode = "optional"  # disabled | optional | strict
 
 # --- Optional local code graph ---
 # The graph is always built from this local checkout. publish_mode and read_mode
@@ -154,6 +158,20 @@ def _unique_str_tuple(value: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _specification_mode(config: Mapping[str, Any]) -> str:
+    specifications = config.get("specifications")
+    if specifications is None:
+        return "optional"
+    if not isinstance(specifications, dict):
+        raise BaseError("specification configuration must be a table")
+    if set(specifications) - {"mode"}:
+        raise BaseError("specification configuration contains keys that are not allowed")
+    mode = specifications.get("mode", "optional")
+    if not isinstance(mode, str) or mode not in {"disabled", "optional", "strict"}:
+        raise BaseError("specification mode is invalid")
+    return mode
+
+
 def _resolved_write_domains(
     wiki_base: str,
     read: tuple[str, ...],
@@ -213,6 +231,7 @@ def _postgres_binding(
     cfg: dict[str, Any],
     resolved_project_dir: str,
     storage: dict[str, Any],
+    specification_mode: str,
     environ: Mapping[str, str] | None = None,
 ) -> PostgresBinding:
     for name in ("read", "write"):
@@ -261,6 +280,7 @@ def _postgres_binding(
         embed_model=models.embed_model,
         embed_dimensions=models.embed_dimensions,
         rerank_model=models.rerank_model,
+        specification_mode=specification_mode,
     )
 
 
@@ -276,8 +296,16 @@ def resolve_storage_binding(
     if storage is not None and not isinstance(storage, dict):
         raise BaseError("storage must be a table")
     storage_type = "git" if storage is None else storage.get("type")
+    specification_mode = _specification_mode(cfg)
     if storage_type == "postgres":
-        if set(cfg) - {"read", "write", "primary", "storage", "code_graph"}:
+        if set(cfg) - {
+            "read",
+            "write",
+            "primary",
+            "storage",
+            "code_graph",
+            "specifications",
+        }:
             raise BaseError("project configuration contains keys that are not allowed")
         code_graph = cfg.get("code_graph")
         if code_graph is not None and not isinstance(code_graph, dict):
@@ -290,6 +318,7 @@ def resolve_storage_binding(
             cfg,
             resolved_project_dir,
             storage,
+            specification_mode,
             environ=env,
         )
     if storage_type != "git":
@@ -321,6 +350,7 @@ def resolve_storage_binding(
         write=write,
         primary=primary,
         project_dir=resolved_project_dir,
+        specification_mode=specification_mode,
     )
 
 
@@ -342,6 +372,43 @@ def index_path(base: str, domain: str) -> str:
 
 def log_path(base: str, domain: str) -> str:
     return os.path.join(domain_dir(base, domain), "log.jsonl")
+
+
+def validate_domain_identifier(domain: str) -> str:
+    if (
+        type(domain) is not str
+        or not domain
+        or domain != domain.strip()
+        or domain.startswith(".")
+        or "\0" in domain
+        or "/" in domain
+        or "\\" in domain
+        or Path(domain).is_absolute()
+        or PureWindowsPath(domain).is_absolute()
+        or PureWindowsPath(domain).drive
+    ):
+        raise BaseError("domain identifier is invalid")
+    return domain
+
+
+def specifications_path(base: str, domain: str) -> str:
+    validate_domain_identifier(domain)
+    root = Path(base).resolve()
+    domain_path = root / domain
+    try:
+        domain_path.resolve().relative_to(root)
+    except ValueError as exc:
+        raise BaseError("domain path escapes wiki base") from exc
+    if domain_path.is_symlink():
+        raise BaseError("domain path escapes wiki base")
+    target = domain_path / "specifications.jsonl"
+    if target.is_symlink():
+        raise BaseError("specification path must not be a symlink")
+    try:
+        target.resolve().relative_to(root)
+    except ValueError as exc:
+        raise BaseError("specification path escapes wiki base") from exc
+    return str(target)
 
 
 def ensure_graph_store_excluded(base: str) -> bool:

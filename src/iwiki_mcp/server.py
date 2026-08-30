@@ -28,6 +28,12 @@ from pydantic import Field
 
 from . import admin as _admin  # noqa: F401
 from . import base, cross_domain, graph, ignore, indexer, okf, retrieval, sync
+from . import specifications as _specifications
+from .specification_store import (
+    GitSpecificationStore,
+    ResolutionAttempt,
+    semantic_markdown_revision,
+)
 from . import http as _http  # noqa: F401
 from .telegram_bot import main as _telegram_bot_main  # noqa: F401
 from .postgres import migrations as _postgres_migrations  # noqa: F401
@@ -49,7 +55,7 @@ from .codegraph import schema as _codegraph_schema  # noqa: F401
 from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
-from .lock import mutation_lock
+from .lock import base_lock, mutation_lock
 from .engine import classify, rerank
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
@@ -70,7 +76,7 @@ from .engine.related import related
 # store.query defers its import (cycle guard), and a module missing from the
 # closure gets loaded lazily from disk — after an on-disk package upgrade that
 # mixes new source with stale cached modules in a long-lived stdio process.
-from .engine import search  # noqa: F401
+from .engine import search as _engine_search  # noqa: F401
 from .engine.section import (
     SectionError, delete_section, insert_section, list_sections, move_section,
     replace_section, _locate,
@@ -306,21 +312,28 @@ _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
 _HOSTED_POOL = None
 _HOSTED_CONFIG: Config | None = None
 _HOSTED_CODE_GRAPH = None
+_HOSTED_SPECIFICATIONS = None
 
 
-def _install_hosted_runtime(pool, cfg: Config, code_graph=None) -> None:
+def _install_hosted_runtime(
+    pool, cfg: Config, code_graph=None, specifications=None
+) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
+    global _HOSTED_SPECIFICATIONS
     _HOSTED_POOL = pool
     _HOSTED_CONFIG = cfg
     _HOSTED_CODE_GRAPH = code_graph
+    _HOSTED_SPECIFICATIONS = specifications
 
 
 def _clear_hosted_runtime(pool) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
+    global _HOSTED_SPECIFICATIONS
     if _HOSTED_POOL is pool:
         _HOSTED_POOL = None
         _HOSTED_CONFIG = None
         _HOSTED_CODE_GRAPH = None
+        _HOSTED_SPECIFICATIONS = None
 
 
 def _resolved_binding() -> base.Binding | base.PostgresBinding:
@@ -372,6 +385,7 @@ def _postgres_store_for_binding(binding: base.PostgresBinding):
             _HOSTED_POOL.connection if _HOSTED_POOL is not None else None
         ),
         require_database_principal=True,
+        specification_mode=binding.specification_mode,
     )
 
 
@@ -747,15 +761,28 @@ def wiki_status() -> dict:
         }
         if _SESSION_BINDING.get() is None:
             result["project_dir"] = bind.project_dir
+        result["specifications"] = {
+            "domains": [
+                _specification_status_domain(bind, domain)
+                for domain in domains
+            ]
+        }
         return result
-    return {
+    domains = base.list_domains(bind.base)
+    result = {
         "base": bind.base,
         "read": list(bind.read),
         "write": list(bind.write),
         "primary": bind.primary,
         "project_dir": bind.project_dir,
-        "domains": base.list_domains(bind.base),
+        "domains": domains,
     }
+    result["specifications"] = {
+        "domains": [
+            _specification_status_domain(bind, domain) for domain in domains
+        ]
+    }
+    return result
 
 
 def _missing_code_primary() -> dict:
@@ -801,6 +828,629 @@ def _postgres_code_reader(binding: base.PostgresBinding):
         binding.primary,
         max_snapshot_age_seconds=settings.max_snapshot_age_seconds,
     )
+
+
+class _GitSpecificationQueryStore:
+    """Add scenario-atomic evidence replacement to the Git projection adapter."""
+
+    def __init__(self, binding: base.Binding) -> None:
+        self._store = GitSpecificationStore(
+            binding.base, binding.specification_mode
+        )
+
+    def search(self, domains, query, limit):
+        return self._store.search(domains, query, limit)
+
+    def context(self, domain, scenario_id):
+        return self._store.context(domain, scenario_id)
+
+    def status(self, domain):
+        return self._store.status(domain)
+
+    def projection_for_lint(self, domain):
+        return self._store._load(domain)
+
+    def duplicate_locations(self, domain, scenario_id):
+        projection = self._store._load(domain)
+        if projection is None:
+            return ()
+        finding = next((item for item in projection.findings if (
+            item.type == "duplicate_scenario_id"
+            and item.scenario_id == scenario_id
+        )), None)
+        return () if finding is None else finding.locations
+
+    def record_resolutions(
+        self, attempts: tuple[ResolutionAttempt, ...]
+    ) -> None:
+        if not attempts:
+            return
+        domain = attempts[0].domain
+        if any(item.domain != domain for item in attempts):
+            raise ValueError("resolution attempt scope mismatch")
+        with base_lock(self._store.base):
+            projection = self._store._load(domain)
+            if projection is None:
+                raise ValueError("specification projection not found")
+            current = {
+                (item.domain, item.scenario_id, item.binding_id): item
+                for item in projection.evidence
+            }
+            binding_ids = {
+                (item.domain, item.scenario_id, item.binding_id)
+                for item in projection.bindings
+            }
+            source_hashes = {
+                (item.domain, item.scenario_id): item.source_hash
+                for item in projection.scenarios
+            }
+            for attempt in attempts:
+                key = (
+                    attempt.domain, attempt.scenario_id, attempt.binding_id
+                )
+                if (
+                    key not in binding_ids
+                    or source_hashes.get((attempt.domain, attempt.scenario_id))
+                    != attempt.specification_source_hash
+                ):
+                    raise ValueError(
+                        "resolution attempt does not match projection"
+                    )
+                current[key] = attempt
+            self._store.replace_projection(
+                projection.with_evidence(tuple(current.values()))
+            )
+
+
+class _PostgresSpecificationQueryStore:
+    """Map PostgreSQL names and persist a scenario attempt in one transaction."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+
+    def search(self, domains, query, limit):
+        return self._store.search_specifications(domains, query, limit)
+
+    def context(self, domain, scenario_id):
+        return self._store.specification_context(domain, scenario_id)
+
+    def status(self, domain):
+        return self._store.specification_status(domain)
+
+    def projection_for_lint(self, domain):
+        return self._store._specification_projection(domain)
+
+    def duplicate_locations(self, domain, scenario_id):
+        projection = self._store._specification_projection(domain)
+        finding = next((item for item in projection.findings if (
+            item.type == "duplicate_scenario_id"
+            and item.scenario_id == scenario_id
+        )), None)
+        return () if finding is None else finding.locations
+
+    def record_resolutions(
+        self, attempts: tuple[ResolutionAttempt, ...]
+    ) -> None:
+        if not attempts:
+            return
+        domain = attempts[0].domain
+        if any(item.domain != domain for item in attempts):
+            raise ValueError("resolution attempt scope mismatch")
+        self._store._require_write(domain)
+        if self._store.specification_mode == "disabled":
+            return
+        with self._store._connect() as connection:
+            with connection.cursor() as cursor:
+                domain_id = self._store._lock_specification_domain(
+                    cursor, domain
+                )
+                for attempt in attempts:
+                    self._store._record_specification_resolution(
+                        cursor, domain_id, attempt
+                    )
+
+
+def _specification_store(binding):
+    if _is_postgres(binding):
+        return _PostgresSpecificationQueryStore(
+            _postgres_store_for_binding(binding)
+        )
+    return _GitSpecificationQueryStore(binding)
+
+
+def _specification_policy(binding, domain: str) -> tuple[str, str]:
+    if _is_postgres(binding) and _SESSION_BINDING.get() is not None:
+        policy = _HOSTED_SPECIFICATIONS
+        if policy is None:
+            return "optional", "built_in_default"
+        exact = any(
+            item.iwiki_id == binding.iwiki_id and item.domain == domain
+            for item in policy.overrides
+        )
+        return policy.mode_for(binding.iwiki_id, domain), (
+            "hosted_override" if exact else "hosted_default"
+        )
+    source = "built_in_default"
+    config_path = Path(binding.project_dir) / ".iwiki.toml"
+    try:
+        with config_path.open("rb") as fh:
+            raw = base.tomllib.load(fh)
+        specifications = raw.get("specifications")
+        if isinstance(specifications, dict) and "mode" in specifications:
+            source = "project"
+    except (OSError, UnicodeDecodeError, base.tomllib.TOMLDecodeError):
+        pass
+    if binding.specification_mode != "optional":
+        source = "project"
+    return binding.specification_mode, source
+
+
+def _specification_binding(binding, domain: str):
+    mode, _source = _specification_policy(binding, domain)
+    return replace(binding, specification_mode=mode)
+
+
+def _specification_status_domain(binding, domain: str) -> dict[str, object]:
+    mode, source = _specification_policy(binding, domain)
+    result: dict[str, object] = {
+        "domain": domain,
+        "mode": mode,
+        "source": source,
+        "projection_state": "disabled" if mode == "disabled" else "absent",
+        "scenarios": 0,
+        "bindings": 0,
+    }
+    if mode == "disabled":
+        return result
+    try:
+        status = _specification_store(
+            replace(binding, specification_mode=mode)
+        ).status(domain)
+        result.update({
+            "projection_state": status.state,
+            "scenarios": status.scenario_count,
+            "bindings": status.binding_count,
+        })
+    except Exception:
+        result["projection_state"] = "failed"
+    return result
+
+
+_SPECIFICATION_AUTHORING_FINDINGS = {
+    "missing_scenario",
+    "invalid_scenario",
+    "duplicate_scenario_id",
+    "incomplete_bindings",
+}
+
+
+def _specification_lint_finding(
+    finding_type: str,
+    mode: str,
+    **details,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "type": finding_type,
+        "severity": (
+            "block"
+            if mode == "strict"
+            and finding_type in _SPECIFICATION_AUTHORING_FINDINGS
+            else "advisory"
+        ),
+    }
+    result.update({key: value for key, value in details.items() if value is not None})
+    return result
+
+
+def _specification_lint_report(binding, domain: str) -> dict[str, object]:
+    mode, source = _specification_policy(binding, domain)
+    result: dict[str, object] = {
+        "mode": mode,
+        "source": source,
+        "state": "disabled" if mode == "disabled" else "absent",
+        "projection_revision": None,
+        "scenarios": 0,
+        "bindings": 0,
+        "findings": [],
+    }
+    if mode == "disabled":
+        return result
+    try:
+        scoped = replace(binding, specification_mode=mode)
+        store = _specification_store(scoped)
+        status = store.status(domain)
+        projection = store.projection_for_lint(domain)
+        result.update({
+            "state": status.state,
+            "projection_revision": status.markdown_revision,
+            "scenarios": status.scenario_count,
+            "bindings": status.binding_count,
+        })
+        if projection is None:
+            return result
+        result.update({
+            "projection_revision": projection.markdown_revision,
+            "scenarios": projection.scenario_count,
+            "bindings": projection.binding_count,
+        })
+        findings = []
+        for finding in projection.findings:
+            item = _specification_finding_dict(finding)
+            finding_type = item.pop("type")
+            findings.append(_specification_lint_finding(
+                finding_type, mode, **item
+            ))
+        if status.state in {"stale", "failed"}:
+            findings.append(_specification_lint_finding(
+                f"projection_{status.state}", mode
+            ))
+        resolver = _specification_graph_resolver(scoped, domain)
+        service = _specifications.SpecificationService(
+            store, resolver=resolver
+        )
+        for scenario in projection.scenarios:
+            context = service.context(domain, scenario.scenario_id)
+            if context is None:
+                continue
+            evidence = {item.binding_id: item for item in context.context.evidence}
+            freshness = dict(context.freshness)
+            for specification_binding in context.context.bindings:
+                attempt = evidence.get(specification_binding.binding_id)
+                details = {
+                    "scenario_id": scenario.scenario_id,
+                    "binding_id": specification_binding.binding_id,
+                }
+                if attempt is None:
+                    findings.append(_specification_lint_finding(
+                        "resolution_not_checked", mode, **details
+                    ))
+                elif attempt.state == "unresolved":
+                    findings.append(_specification_lint_finding(
+                        "binding_unresolved", mode, **details
+                    ))
+                elif attempt.state == "ambiguous":
+                    findings.append(_specification_lint_finding(
+                        "binding_ambiguous", mode, **details
+                    ))
+                elif attempt.state == "graph_unavailable":
+                    findings.append(_specification_lint_finding(
+                        "graph_unavailable", mode,
+                        reason=attempt.reason, **details
+                    ))
+                current_freshness = freshness[specification_binding.binding_id]
+                if status.state == "stale" and attempt is not None:
+                    findings.append(_specification_lint_finding(
+                        "resolution_stale_spec", mode, **details
+                    ))
+                elif current_freshness == "stale_spec":
+                    findings.append(_specification_lint_finding(
+                        "resolution_stale_spec", mode, **details
+                    ))
+                if current_freshness == "stale_graph":
+                    findings.append(_specification_lint_finding(
+                        "resolution_stale_graph", mode, **details
+                    ))
+        result["findings"] = findings
+        return result
+    except Exception:
+        result.update({
+            "state": "failed",
+            "projection_revision": None,
+            "scenarios": 0,
+            "bindings": 0,
+            "findings": [
+                _specification_lint_finding("projection_failed", mode)
+            ],
+        })
+        return result
+
+
+def _specification_graph_resolver(binding, domain: str):
+    if binding.primary != domain:
+        return _specifications.UnavailableSpecificationGraphResolver(
+            "not_primary"
+        )
+    if _is_postgres(binding):
+        return _postgres_code_reader(binding)
+    runtime = _codegraph_application.code_runtime(
+        _codegraph_application.source_context(binding)
+    )
+    return _codegraph_application.specification_graph_resolver(runtime)
+
+
+def _spec_error(code: str, hint: str) -> dict[str, object]:
+    return {"error": code, "hint": hint}
+
+
+def _specification_safe(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            code = (
+                "resolution_failed"
+                if fn.__name__ == "wiki_spec_resolve"
+                else "specification_failed"
+            )
+            return _spec_error(
+                code, "retry or inspect sanitized server diagnostics"
+            )
+
+    return wrapped
+
+
+def _validate_spec_scenario_id(value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value.encode("utf-8")) > 128
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value) is None
+    ):
+        raise ValueError("invalid_scenario_id")
+    return value
+
+
+def _spec_binding_result(binding, evidence, freshness) -> dict[str, object]:
+    result: dict[str, object] = {
+        "binding_id": binding.binding_id,
+        "relation": binding.relation,
+        "phase": binding.phase,
+        "selector_kind": binding.selector_kind,
+        "selector": binding.selector,
+        "freshness": freshness,
+    }
+    if evidence is not None:
+        result["evidence"] = {
+            "state": evidence.state,
+            "targets": list(evidence.targets),
+            "unresolved_reference": evidence.unresolved_reference,
+            "graph_revision": evidence.graph_revision,
+            "graph_state_fingerprint": evidence.graph_state_fingerprint,
+            "specification_source_hash": evidence.specification_source_hash,
+            "checked_at": evidence.checked_at,
+            "reason": evidence.reason,
+        }
+    else:
+        result["evidence"] = None
+    return result
+
+
+def _spec_context_result(value, *, mode: str) -> dict[str, object]:
+    context = value.context
+    scenario = context.scenario
+    evidence = {item.binding_id: item for item in context.evidence}
+    freshness = dict(value.freshness)
+    return {
+        "domain": scenario.domain,
+        "scenario_id": scenario.scenario_id,
+        "identity": scenario.identity,
+        "title": scenario.title,
+        "location": {
+            "slug": scenario.page_slug,
+            "heading": scenario.heading,
+            "anchor": scenario.anchor,
+        },
+        "source_hash": scenario.source_hash,
+        "items": [
+            {"phase": item.phase, "role": item.role, "name": item.name}
+            for item in scenario.items
+        ],
+        "bindings": [
+            _spec_binding_result(
+                binding,
+                evidence.get(binding.binding_id),
+                freshness[binding.binding_id],
+            )
+            for binding in context.bindings
+        ],
+        "projection_state": context.projection_state,
+        "projection_revision": context.projection_revision,
+        "mode": mode,
+        "graph": dict(value.graph_state),
+        "findings": [
+            _specification_finding_dict(item) for item in context.findings
+        ],
+    }
+
+
+def _spec_missing_context(store, domain: str, scenario_id: str) -> dict:
+    locations = store.duplicate_locations(domain, scenario_id)
+    if locations:
+        return {
+            "error": "ambiguous_scenario_id",
+            "locations": [
+                {
+                    "slug": item.slug,
+                    "heading": item.heading,
+                    "anchor": item.anchor,
+                }
+                for item in locations
+            ],
+            "hint": "make the scenario ID unique inside the domain",
+        }
+    return _spec_error("not_found", "scenario was not found")
+
+
+@_safe
+@_specification_safe
+def wiki_spec_search(
+    query: str,
+    domains: list[str] | None = None,
+    limit: int = 20,
+) -> dict:
+    try:
+        _specifications.validate_specification_query(query, limit)
+    except ValueError as exc:
+        code = str(exc)
+        return _spec_error(code, "provide a valid semantic query and limit")
+    if domains is not None and (
+        type(domains) is not list
+        or any(type(item) is not str for item in domains)
+    ):
+        return _spec_error("invalid_domains", "provide an array of domain names")
+    bind = _resolved_binding()
+    try:
+        if domains is None:
+            requested_values = bind.read
+        else:
+            requested_values = tuple(
+                _validate_domain(item.encode("utf-8").decode("utf-8"))
+                for item in domains
+                if "\0" not in item
+            )
+            if len(requested_values) != len(domains):
+                raise ValueError("invalid domain")
+        requested = tuple(sorted(dict.fromkeys(requested_values)))
+    except (UnicodeError, ValueError):
+        return _spec_error("invalid_domains", "provide valid domain names")
+    if any(domain not in bind.read for domain in requested):
+        return _spec_error("access_denied", "requested domain is outside read scope")
+    modes = {
+        domain: _specification_policy(bind, domain)[0]
+        for domain in requested
+    }
+    enabled = tuple(domain for domain in requested if modes[domain] != "disabled")
+    if not enabled:
+        return {
+            "query": query,
+            "domains": list(requested),
+            "domain_states": [
+                {"domain": domain, "state": "disabled", "mode": "disabled"}
+                for domain in requested
+            ],
+            "results": [],
+        }
+    stores = {
+        domain: _specification_store(_specification_binding(bind, domain))
+        for domain in enabled
+    }
+    if len(set(modes[domain] for domain in enabled)) == 1:
+        store = stores[enabled[0]]
+        scenarios = _specifications.SpecificationService(store).search(
+            enabled, query, limit
+        )
+    else:
+        projections = tuple(
+            projection
+            for domain in enabled
+            for projection in (stores[domain].projection_for_lint(domain),)
+            if projection is not None
+        )
+        scenarios = _specifications.search_projections(
+            projections, query, limit
+        )
+    results = []
+    for scenario in scenarios:
+        store = stores[scenario.domain]
+        context = store.context(scenario.domain, scenario.scenario_id)
+        bindings = () if context is None else context.bindings
+        status = store.status(scenario.domain)
+        results.append({
+            "domain": scenario.domain,
+            "scenario_id": scenario.scenario_id,
+            "identity": scenario.identity,
+            "title": scenario.title,
+            "location": {
+                "slug": scenario.page_slug,
+                "heading": scenario.heading,
+                "anchor": scenario.anchor,
+            },
+            "items": [
+                {"phase": item.phase, "role": item.role, "name": item.name}
+                for item in scenario.items
+            ],
+            "bindings": [
+                {
+                    "binding_id": item.binding_id,
+                    "relation": item.relation,
+                    "phase": item.phase,
+                    "selector_kind": item.selector_kind,
+                    "selector": item.selector,
+                }
+                for item in bindings
+            ],
+            "projection_state": status.state,
+            "mode": modes[scenario.domain],
+        })
+    return {
+        "query": query,
+        "domains": list(requested),
+        "domain_states": [
+            {
+                "domain": domain,
+                "state": (
+                    "disabled" if modes[domain] == "disabled"
+                    else stores[domain].status(domain).state
+                ),
+                "mode": modes[domain],
+            }
+            for domain in requested
+        ],
+        "results": results,
+    }
+
+
+@_safe
+@_specification_safe
+def wiki_spec_context(domain: str, scenario_id: str) -> dict:
+    try:
+        valid_domain = _validate_domain(domain)
+        valid_scenario = _validate_spec_scenario_id(scenario_id)
+    except (UnicodeEncodeError, ValueError):
+        return _spec_error("invalid_request", "provide a valid domain and scenario ID")
+    bind = _resolved_binding()
+    if valid_domain not in bind.read:
+        return _spec_error("access_denied", "domain is outside read scope")
+    bind = _specification_binding(bind, valid_domain)
+    if bind.specification_mode == "disabled":
+        return _spec_error("specifications_disabled", "enable specifications")
+    store = _specification_store(bind)
+    service = _specifications.SpecificationService(
+        store,
+        resolver=_specification_graph_resolver(bind, valid_domain),
+    )
+    value = service.context(valid_domain, valid_scenario)
+    if value is None:
+        return _spec_missing_context(store, valid_domain, valid_scenario)
+    return _spec_context_result(value, mode=bind.specification_mode)
+
+
+@_safe
+@_specification_safe
+def wiki_spec_resolve(domain: str, scenario_id: str) -> dict:
+    try:
+        valid_domain = _validate_domain(domain)
+        valid_scenario = _validate_spec_scenario_id(scenario_id)
+    except (UnicodeEncodeError, ValueError):
+        return _spec_error("invalid_request", "provide a valid domain and scenario ID")
+    bind = _resolved_binding()
+    if valid_domain not in bind.write:
+        return _spec_error("access_denied", "domain is outside write scope")
+    bind = _specification_binding(bind, valid_domain)
+    if bind.specification_mode == "disabled":
+        return _spec_error("specifications_disabled", "enable specifications")
+    store = _specification_store(bind)
+    service = _specifications.SpecificationService(
+        store,
+        resolver=_specification_graph_resolver(bind, valid_domain),
+    )
+    try:
+        attempt = service.resolve(valid_domain, valid_scenario)
+    except ValueError as exc:
+        if str(exc) == "not_found":
+            return _spec_missing_context(store, valid_domain, valid_scenario)
+        code = str(exc) if str(exc) == "source_changed" else "resolution_failed"
+        return _spec_error(code, "retry against current specification and graph state")
+    value = service.context(valid_domain, valid_scenario)
+    if value is None:
+        return _spec_error("source_changed", "retry against current specification")
+    result = _spec_context_result(value, mode=bind.specification_mode)
+    result["attempt"] = {
+        "specification_hash": attempt.specification_hash,
+        "graph_revision": attempt.graph_revision,
+        "states": [item.state for item in attempt.evidence],
+    }
+    return result
 
 
 # Bound wait for the domain activation lock. It is deliberately separate from
@@ -1488,6 +2138,551 @@ def _compose_warnings(*warnings: str | None) -> str | None:
     return "; ".join(parts) or None
 
 
+_SPECIFICATION_WARNING = "specification projection is stale"
+_SPECIFICATION_BLOCKING = {
+    "missing_scenario",
+    "invalid_scenario",
+    "incomplete_bindings",
+    "duplicate_scenario_id",
+}
+
+
+def _git_specification_store_factory(base_dir: str, mode: str):
+    return GitSpecificationStore(base_dir, mode)
+
+
+def _assemble_specification_projection(
+    domain: str,
+    pages: tuple[_specifications.PageSnapshot, ...],
+    previous_evidence=(),
+):
+    specification_pages = tuple(
+        page for page in pages
+        if _is_specification_markdown(page.markdown)
+    )
+    revision = semantic_markdown_revision(
+        (page.slug, page.markdown, page.revision)
+        for page in specification_pages
+    )
+    return _specifications.assemble_projection(
+        domain,
+        pages,
+        previous_evidence=previous_evidence,
+        markdown_revision=revision,
+    )
+
+
+def _is_specification_markdown(markdown: str) -> bool:
+    metadata, _ = _fm.split(markdown)
+    page_type = metadata.get("type")
+    return (
+        isinstance(page_type, str)
+        and _fm.normalize_type(page_type) == "specification"
+    )
+
+
+def _specification_finding_dict(finding) -> dict:
+    result = {"type": finding.type}
+    for name in ("slug", "heading", "scenario_id", "reason"):
+        value = getattr(finding, name)
+        if value is not None:
+            result[name] = value
+    if finding.missing:
+        result["missing"] = list(finding.missing)
+    if finding.locations:
+        result["locations"] = [
+            {
+                "slug": item.slug,
+                "heading": item.heading,
+                "anchor": item.anchor,
+            }
+            for item in finding.locations
+        ]
+    return result
+
+
+def _specification_result(mode: str, state: str, projection=None) -> dict:
+    result = {"mode": mode, "state": state, "findings": []}
+    if projection is not None:
+        result.update({
+            "scenarios": projection.scenario_count,
+            "bindings": projection.binding_count,
+            "findings": [
+                _specification_finding_dict(item)
+                for item in projection.findings
+            ],
+        })
+    return result
+
+
+def _domain_page_snapshots(
+    base_dir: str,
+    domain: str,
+    *,
+    target_slug: str | None = None,
+    candidate_markdown: str | None = None,
+    delete_target: bool = False,
+    planned_markdown: dict[str, str | None] | None = None,
+) -> tuple[_specifications.PageSnapshot, ...]:
+    domain_path = Path(base.domain_dir(base_dir, domain))
+    pages = []
+    found_target = False
+    found_planned: set[str] = set()
+    for path in sorted(domain_path.rglob("*.md")):
+        slug = path.relative_to(domain_path).as_posix()[:-3]
+        if f"{slug}.md" in RESERVED_OKF:
+            continue
+        if planned_markdown is not None and slug in planned_markdown:
+            found_planned.add(slug)
+            markdown = planned_markdown[slug]
+        elif slug == target_slug:
+            found_target = True
+            if delete_target:
+                continue
+            markdown = candidate_markdown
+        else:
+            markdown = path.read_text(encoding="utf-8")
+        if markdown is None:
+            continue
+        pages.append(_specifications.PageSnapshot(
+            slug=slug,
+            markdown=markdown,
+            revision=f"sha256:{sha256(markdown.encode('utf-8')).hexdigest()}",
+        ))
+    if planned_markdown is not None:
+        for slug in sorted(set(planned_markdown) - found_planned):
+            markdown = planned_markdown[slug]
+            if markdown is None:
+                continue
+            pages.append(_specifications.PageSnapshot(
+                slug=slug,
+                markdown=markdown,
+                revision=(
+                    f"sha256:{sha256(markdown.encode('utf-8')).hexdigest()}"
+                ),
+            ))
+    elif target_slug is not None and not found_target and not delete_target:
+        if candidate_markdown is None:
+            raise ValueError("specification candidate is missing")
+        pages.append(_specifications.PageSnapshot(
+            slug=target_slug,
+            markdown=candidate_markdown,
+            revision=(
+                f"sha256:{sha256(candidate_markdown.encode('utf-8')).hexdigest()}"
+            ),
+        ))
+    return tuple(sorted(pages, key=lambda item: item.slug))
+
+
+def _finding_targets_slug(finding, slug: str) -> bool:
+    if finding.slug == slug:
+        return True
+    return any(item.slug == slug for item in finding.locations)
+
+
+def _prepare_git_specification(
+    binding: base.Binding,
+    domain: str,
+    *,
+    target_slug: str | None = None,
+    candidate_markdown: str | None = None,
+    original_markdown: str | None = None,
+    delete_target: bool = False,
+    rebuild: bool = False,
+):
+    mode = binding.specification_mode
+    if mode == "disabled":
+        return None
+    target_is_specification = (
+        original_markdown is not None
+        and _is_specification_markdown(original_markdown)
+        if delete_target
+        else candidate_markdown is not None
+        and _is_specification_markdown(candidate_markdown)
+    )
+    if not rebuild and not target_is_specification:
+        return None
+    return {
+        "binding": binding,
+        "domain": domain,
+        "mode": mode,
+        "target_slug": target_slug,
+        "candidate_markdown": candidate_markdown,
+        "original_markdown": original_markdown,
+        "delete_target": delete_target,
+        "rebuild": rebuild,
+    }
+
+
+def _resolve_git_specification_locked(request: dict):
+    binding = request["binding"]
+    domain = request["domain"]
+    mode = request["mode"]
+    target_slug = request["target_slug"]
+    candidate_markdown = request["candidate_markdown"]
+    original_markdown = request["original_markdown"]
+    delete_target = request["delete_target"]
+    rebuild = request["rebuild"]
+    planned_markdown = request.get("planned_markdown")
+    if target_slug is not None and planned_markdown is None:
+        target_path = Path(_page_path(binding.base, domain, target_slug))
+        current_markdown = (
+            target_path.read_text(encoding="utf-8")
+            if target_path.is_file()
+            else None
+        )
+        if original_markdown is None:
+            if current_markdown is not None:
+                return {
+                    "error": "specification candidate changed",
+                    "specifications": _specification_result(mode, "failed"),
+                }
+        elif current_markdown != original_markdown:
+            return {
+                "error": "specification candidate changed",
+                "specifications": _specification_result(mode, "failed"),
+            }
+    projection_path = Path(base.specifications_path(binding.base, domain))
+    pages = _domain_page_snapshots(
+        binding.base,
+        domain,
+        target_slug=target_slug,
+        candidate_markdown=candidate_markdown,
+        delete_target=delete_target,
+        planned_markdown=planned_markdown,
+    )
+    if rebuild and not projection_path.exists() and not any(
+        _is_specification_markdown(page.markdown) for page in pages
+    ):
+        return None
+    try:
+        store = _git_specification_store_factory(binding.base, mode)
+        previous = store._load(domain)
+        projection = _assemble_specification_projection(
+            domain,
+            pages,
+            previous_evidence=() if previous is None else previous.evidence,
+        )
+    except Exception:
+        if mode == "strict" and not rebuild:
+            return {
+                "error": "specification projection preparation failed",
+                "specifications": _specification_result("strict", "failed"),
+            }
+        return {
+            "mode": mode,
+            "projection": None,
+            "prepared": None,
+            "warning": _SPECIFICATION_WARNING,
+            "fail_soft": True,
+        }
+    if (
+        mode == "strict"
+        and not rebuild
+        and target_slug is not None
+        and any(
+            item.type in _SPECIFICATION_BLOCKING
+            and _finding_targets_slug(item, target_slug)
+            for item in projection.findings
+        )
+    ):
+        return {
+            "error": "specification validation failed",
+            "specifications": _specification_result("strict", "failed", projection),
+        }
+    try:
+        prepared = store.prepare(projection)
+    except Exception:
+        if mode == "strict" and not rebuild:
+            return {
+                "error": "specification projection preparation failed",
+                "specifications": _specification_result(
+                    "strict", "failed", projection
+                ),
+            }
+        prepared = None
+    return {
+        "mode": mode,
+        "projection": projection,
+        "prepared": prepared,
+        "warning": None if prepared is not None else _SPECIFICATION_WARNING,
+        "fail_soft": rebuild or mode == "optional",
+    }
+
+
+def _snapshot_files(paths: tuple[Path, ...]) -> dict[Path, bytes | None]:
+    return {
+        path: path.read_bytes() if path.is_file() else None
+        for path in paths
+    }
+
+
+def _restore_files(snapshot: dict[Path, bytes | None]) -> None:
+    for path, content in snapshot.items():
+        if content is None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _remove_empty_page_parents(page_path: Path, domain_path: Path) -> None:
+    parent = page_path.parent
+    while parent != domain_path:
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent
+
+
+def _relative_transaction_paths(
+    base_dir: str, paths: tuple[Path, ...]
+) -> tuple[str, ...]:
+    root = Path(base_dir).resolve()
+    return tuple(sorted(
+        path.resolve(strict=False).relative_to(root).as_posix()
+        for path in paths
+    ))
+
+
+def _has_unrelated_domain_changes(
+    base_dir: str, domain: str, allowed: tuple[str, ...]
+) -> bool:
+    status = sync._run(
+        base_dir,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        domain,
+    )
+    if status.returncode != 0:
+        return True
+    allowed_set = set(allowed)
+    records = status.stdout.split("\0")
+    for record in records:
+        if not record:
+            continue
+        path = record[3:] if len(record) >= 3 else record
+        if path and path not in allowed_set:
+            return True
+    return False
+
+
+def _execute_git_specification_transaction(
+    binding: base.Binding,
+    domain: str,
+    prepared_specification: dict,
+    *,
+    page_path: str | None,
+    mutate_page,
+    cfg: Config,
+    message: str,
+    after_commit=None,
+    mutates_log: bool = False,
+) -> dict:
+    projection_path = Path(base.specifications_path(binding.base, domain))
+    paths = tuple(dict.fromkeys(path for path in (
+        Path(page_path) if page_path is not None else None,
+        Path(base.index_path(binding.base, domain)),
+        Path(base.log_path(binding.base, domain)),
+        projection_path,
+    ) if path is not None))
+    commit_files = tuple(
+        path for path in paths
+        if mutates_log or path != Path(base.log_path(binding.base, domain))
+    )
+    transaction_paths = _relative_transaction_paths(binding.base, commit_files)
+    commit_pathspec = (
+        domain if prepared_specification.get("rebuild") else transaction_paths
+    )
+    resolved_specification = None
+    prepared = None
+    published = False
+    snapshot = None
+    head_before = None
+    try:
+        with base_lock(binding.base, 15.0):
+            dirty_allowed = (
+                _relative_transaction_paths(
+                    binding.base, (Path(page_path),)
+                )
+                if page_path is not None
+                else ()
+            )
+            if not prepared_specification.get("rebuild") and _has_unrelated_domain_changes(
+                binding.base, domain, dirty_allowed
+            ):
+                raise RuntimeError("unrelated domain changes present")
+            resolved_specification = _resolve_git_specification_locked(
+                prepared_specification
+            )
+            if (
+                isinstance(resolved_specification, dict)
+                and "error" in resolved_specification
+            ):
+                return resolved_specification
+            if resolved_specification is not None:
+                prepared = resolved_specification["prepared"]
+            snapshot = _snapshot_files(paths)
+            head_before = sync._head_revision(binding.base)
+            try:
+                mutate_page()
+                stats = indexer.index_domain(cfg, binding.base, domain)
+                if prepared is not None:
+                    try:
+                        prepared.publish()
+                        published = True
+                    except BaseException:
+                        if not resolved_specification.get("fail_soft"):
+                            raise
+                        _restore_files({
+                            projection_path: snapshot[projection_path]
+                        })
+                        prepared.cleanup()
+                        resolved_specification["warning"] = _SPECIFICATION_WARNING
+                commit = sync.commit_locked(
+                    binding.base,
+                    message,
+                    pathspec=commit_pathspec,
+                )
+                if (
+                    sync.is_git_repo(binding.base)
+                    and not commit.get("committed")
+                    and commit.get("warning") != "nothing to commit"
+                ):
+                    raise RuntimeError("local commit failed")
+            except BaseException:
+                if (
+                    head_before is not None
+                    and sync._head_revision(binding.base) != head_before
+                ):
+                    sync._run(binding.base, "reset", "--soft", head_before)
+                if snapshot is not None:
+                    _restore_files(snapshot)
+                    if page_path is not None and snapshot.get(Path(page_path)) is None:
+                        _remove_empty_page_parents(
+                            Path(page_path),
+                            Path(base.domain_dir(binding.base, domain)),
+                        )
+                try:
+                    sync.unstage_locked(binding.base, commit_pathspec)
+                except Exception:
+                    pass
+                if prepared is not None:
+                    prepared.cleanup()
+                raise
+    except BaseException:
+        return {
+            "error": "specification transaction failed",
+            "rolled_back": True,
+            "specifications": _specification_result(
+                prepared_specification["mode"],
+                "failed",
+                (
+                    resolved_specification.get("projection")
+                    if isinstance(resolved_specification, dict)
+                    else None
+                ),
+            ),
+        }
+    commit = sync.publish_committed(
+        binding.base, commit, after_commit=after_commit
+    )
+    if resolved_specification is None:
+        return {
+            "stats": stats,
+            "commit": commit,
+            "specifications": None,
+            "specification_warning": None,
+        }
+    specification_result = _specification_result(
+        resolved_specification["mode"],
+        (
+            "ready"
+            if published
+            else "failed"
+            if resolved_specification["mode"] == "strict"
+            else "stale"
+        ),
+        resolved_specification["projection"],
+    )
+    if resolved_specification["warning"]:
+        specification_result["warning"] = resolved_specification["warning"]
+    return {
+        "stats": stats,
+        "commit": commit,
+        "specifications": specification_result,
+        "specification_warning": resolved_specification["warning"],
+    }
+
+
+def _maybe_execute_specification_page_transaction(
+    binding: base.Binding,
+    domain: str,
+    *,
+    slug: str,
+    candidate_markdown: str | None,
+    original_markdown: str | None,
+    delete_target: bool,
+    path: str,
+    mutate_page,
+    cfg: Config,
+    message: str,
+    after_commit,
+    mutates_log: bool,
+    freshness_warning: str | None,
+    response_fields: dict,
+) -> dict | None:
+    prepared_specification = _prepare_git_specification(
+        binding,
+        domain,
+        target_slug=slug,
+        candidate_markdown=candidate_markdown,
+        original_markdown=original_markdown,
+        delete_target=delete_target,
+    )
+    if prepared_specification is None:
+        return None
+    if "error" in prepared_specification:
+        return prepared_specification
+    transaction = _execute_git_specification_transaction(
+        binding,
+        domain,
+        prepared_specification,
+        page_path=path,
+        mutate_page=mutate_page,
+        cfg=cfg,
+        message=message,
+        after_commit=after_commit,
+        mutates_log=mutates_log,
+    )
+    if "error" in transaction:
+        return transaction
+    stats = transaction["stats"]
+    result = {
+        **response_fields,
+        "indexed_chunks": stats["indexed_chunks"],
+        "bytes": stats["bytes"],
+    }
+    if "deleted" not in response_fields:
+        for name in ("reused", "embedded", "over_cap"):
+            if name in stats:
+                result[name] = stats[name]
+    result.update(_write_sync_result(
+        transaction["commit"],
+        freshness_warning,
+        graph_warning=transaction["specification_warning"],
+    ))
+    result["specifications"] = transaction["specifications"]
+    return result
+
+
 def _after_commit_graph(
     mutation,
     *,
@@ -1771,6 +2966,61 @@ def wiki_write_page(
     log_src_hash = indexer.src_hash(source) if source else None
     log_appended = False
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    prepared_specification = _prepare_git_specification(
+        bind,
+        valid_domain,
+        target_slug=identity,
+        candidate_markdown=full_md,
+    )
+    if (
+        isinstance(prepared_specification, dict)
+        and "error" in prepared_specification
+    ):
+        return prepared_specification
+    if prepared_specification is not None:
+        def mutate_specification_page() -> None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(full_md)
+            indexer.append_log(
+                bind.base,
+                valid_domain,
+                "ingest",
+                log_source,
+                page_file,
+                log_src_hash,
+            )
+
+        page_rel = f"{valid_domain}/{page_file}"
+        transaction = _execute_git_specification_transaction(
+            bind,
+            valid_domain,
+            prepared_specification,
+            page_path=path,
+            mutate_page=mutate_specification_page,
+            cfg=cfg,
+            message=f"iwiki: ingest {page_rel}",
+            after_commit=_after_commit_graph(
+                graph_mutation, refresh_files=(page_file,)
+            ),
+            mutates_log=True,
+        )
+        if "error" in transaction:
+            return transaction
+        stats = transaction["stats"]
+        return {
+            "page": page_rel,
+            "indexed_chunks": stats["indexed_chunks"],
+            "bytes": stats["bytes"],
+            "over_cap": stats["over_cap"],
+            **_write_sync_result(
+                transaction["commit"],
+                fresh.get("warning"),
+                fm_warning,
+                transaction["specification_warning"],
+            ),
+            "specifications": transaction["specifications"],
+        }
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -1864,6 +3114,18 @@ def _apply_heading_rename(
     old_anchor = slugify_heading(heading)
     new_anchor = slugify_heading(new_heading)
     target_bytes = original_full.encode("utf-8")
+    prepared_specification = _prepare_git_specification(
+        bind,
+        domain,
+        target_slug=slug,
+        candidate_markdown=new_md,
+        original_markdown=original_full,
+    )
+    if (
+        isinstance(prepared_specification, dict)
+        and "error" in prepared_specification
+    ):
+        return prepared_specification
     edits: dict[tuple[str, str], cross_domain.PlannedEdit] = {
         (domain, page_file): cross_domain.PlannedEdit(
             domain,
@@ -1973,6 +3235,94 @@ def _apply_heading_rename(
             bind.base, domain, source, page_file
         )
         edits[(domain, log_edit.file)] = log_edit
+
+    def prepare_specification_extension():
+        if bind.specification_mode == "disabled":
+            return cross_domain.PreparedPlanExtension()
+        planned_by_domain: dict[str, dict[str, str | None]] = {}
+        projected_domains = set()
+        for edit in edits.values():
+            if not edit.file.endswith(".md") or edit.file in RESERVED_OKF:
+                continue
+            markdown = (
+                edit.after.decode("utf-8") if edit.after is not None else None
+            )
+            planned_by_domain.setdefault(edit.domain, {})[
+                edit.file[:-3]
+            ] = markdown
+            if markdown is not None and _is_specification_markdown(markdown):
+                projected_domains.add(edit.domain)
+        if not projected_domains:
+            return cross_domain.PreparedPlanExtension()
+
+        extension_edits = []
+        fail_soft_files = []
+        resolved_by_domain = {}
+        projected_domains = tuple(sorted(projected_domains))
+        response_domain = domain if domain in projected_domains else projected_domains[0]
+        for projected_domain in projected_domains:
+            request = {
+                "binding": bind,
+                "domain": projected_domain,
+                "mode": bind.specification_mode,
+                "target_slug": (
+                    slug
+                    if projected_domain == domain
+                    and prepared_specification is not None
+                    else None
+                ),
+                "candidate_markdown": None,
+                "original_markdown": None,
+                "delete_target": False,
+                "rebuild": False,
+                "planned_markdown": planned_by_domain[projected_domain],
+            }
+            resolved = _resolve_git_specification_locked(request)
+            if isinstance(resolved, dict) and "error" in resolved:
+                return cross_domain.PreparedPlanExtension(error=resolved)
+            resolved_by_domain[projected_domain] = resolved
+            prepared_projection = resolved["prepared"]
+            if prepared_projection is None:
+                continue
+            projection_path = Path(base.specifications_path(
+                bind.base, projected_domain
+            ))
+            projection_before = (
+                projection_path.read_bytes()
+                if projection_path.is_file()
+                else None
+            )
+            projection_after = prepared_projection.temporary_path.read_bytes()
+            prepared_projection.abort()
+            relative = f"{projected_domain}/specifications.jsonl"
+            extension_edits.append(cross_domain.PlannedEdit(
+                projected_domain,
+                "specifications.jsonl",
+                (
+                    sha256(projection_before).hexdigest()
+                    if projection_before is not None
+                    else None
+                ),
+                projection_after,
+            ))
+            if resolved["mode"] == "optional":
+                fail_soft_files.append(relative)
+        response_resolved = resolved_by_domain[response_domain]
+        metadata = {
+            "resolved": response_resolved,
+            "projection_edit": any(
+                edit.domain == response_domain for edit in extension_edits
+            ),
+            "projection_incomplete": any(
+                resolved["prepared"] is None
+                for resolved in resolved_by_domain.values()
+            ),
+        }
+        return cross_domain.PreparedPlanExtension(
+            edits=tuple(extension_edits),
+            fail_soft_files=tuple(fail_soft_files),
+            metadata=metadata,
+        )
     affected_domains = tuple(sorted({edit.domain for edit in edits.values()}))
     plan = cross_domain.MutationPlan(
         operation=f"rename heading in {domain}/{page_file}",
@@ -1984,8 +3334,15 @@ def _apply_heading_rename(
         rewritten_links=rewritten_links,
     )
     evidence = cross_domain.execute_plan(
-        bind.base, bind, plan, _include_index_stats=True
+        bind.base,
+        bind,
+        plan,
+        _include_index_stats=True,
+        _prepare_locked=prepare_specification_extension,
     )
+    if "error" in evidence:
+        return evidence
+    extension = evidence.pop("_extension", {})
     index_stats = evidence.pop("_index_stats")[domain]
     result = {
         "page": f"{domain}/{page_file}",
@@ -1993,11 +3350,45 @@ def _apply_heading_rename(
         **index_stats,
         **evidence,
     }
-    warning = _compose_warnings(result.get("warning"), fresh.get("warning"))
+    resolved_specification = extension.get("resolved")
+    projection_edit_failed = (
+        extension.get("fail_soft_edit_failed", False)
+        or extension.get("projection_incomplete", False)
+    )
+    specification_warning = (
+        _SPECIFICATION_WARNING
+        if projection_edit_failed
+        else (
+            resolved_specification.get("warning")
+            if isinstance(resolved_specification, dict)
+            else None
+        )
+    )
+    warning = _compose_warnings(
+        result.get("warning"), fresh.get("warning"), specification_warning
+    )
     if warning:
         result["warning"] = warning
     else:
         result.pop("warning", None)
+    if resolved_specification is not None:
+        specification_published = (
+            extension.get("projection_edit", False)
+            and not projection_edit_failed
+        )
+        result["specifications"] = _specification_result(
+            resolved_specification["mode"],
+            (
+                "ready"
+                if specification_published
+                else "failed"
+                if resolved_specification["mode"] == "strict"
+                else "stale"
+            ),
+            resolved_specification["projection"],
+        )
+        if specification_warning:
+            result["specifications"]["warning"] = specification_warning
     return result
 
 
@@ -2169,6 +3560,63 @@ def wiki_update_page(
         with open(log_file, "rb") as fh:
             log_before = fh.read()
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    prepared_specification = _prepare_git_specification(
+        bind,
+        valid_domain,
+        target_slug=slug,
+        candidate_markdown=new_md,
+        original_markdown=original_full,
+    )
+    if (
+        isinstance(prepared_specification, dict)
+        and "error" in prepared_specification
+    ):
+        return prepared_specification
+    if prepared_specification is not None:
+        def mutate_specification_page() -> None:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(new_md)
+            if source:
+                indexer.upsert_ingest_log(
+                    bind.base,
+                    valid_domain,
+                    source,
+                    page_file,
+                    indexer.src_hash(source),
+                )
+
+        page_rel = f"{valid_domain}/{page_file}"
+        transaction = _execute_git_specification_transaction(
+            bind,
+            valid_domain,
+            prepared_specification,
+            page_path=path,
+            mutate_page=mutate_specification_page,
+            cfg=cfg,
+            message=f"iwiki: update {page_rel}",
+            after_commit=_after_commit_graph(
+                graph_mutation, refresh_files=(page_file,)
+            ),
+            mutates_log=source is not None,
+        )
+        if "error" in transaction:
+            return transaction
+        stats = transaction["stats"]
+        return {
+            "page": page_rel,
+            "heading": heading.lstrip("#").strip(),
+            "indexed_chunks": stats["indexed_chunks"],
+            "reused": stats["reused"],
+            "embedded": stats["embedded"],
+            "bytes": stats["bytes"],
+            "over_cap": stats["over_cap"],
+            **_write_sync_result(
+                transaction["commit"],
+                fresh.get("warning"),
+                graph_warning=transaction["specification_warning"],
+            ),
+            "specifications": transaction["specifications"],
+        }
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_md)
@@ -2350,6 +3798,43 @@ def wiki_insert_section(
         with open(log_file, "rb") as fh:
             log_before = fh.read()
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    page_rel = f"{valid_domain}/{page_file}"
+
+    def mutate_specification_section_insert() -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+        if source:
+            indexer.upsert_ingest_log(
+                bind.base,
+                valid_domain,
+                source,
+                page_file,
+                indexer.src_hash(source),
+            )
+
+    specification_result = _maybe_execute_specification_page_transaction(
+        bind,
+        valid_domain,
+        slug=slug,
+        candidate_markdown=new_md,
+        original_markdown=original_full,
+        delete_target=False,
+        path=path,
+        mutate_page=mutate_specification_section_insert,
+        cfg=cfg,
+        message=f"iwiki: insert section into {page_rel}",
+        after_commit=_after_commit_graph(
+            graph_mutation, refresh_files=(page_file,)
+        ),
+        mutates_log=source is not None,
+        freshness_warning=fresh.get("warning"),
+        response_fields={
+            "page": page_rel,
+            "heading": heading.lstrip("#").strip(),
+        },
+    )
+    if specification_result is not None:
+        return specification_result
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_md)
@@ -2364,7 +3849,6 @@ def wiki_insert_section(
         if source:            # mirrors the upsert gate above
             _restore_log(log_file, log_before)
         raise
-    page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(bind.base, f"iwiki: insert section into {page_rel}",
                                   pathspec=valid_domain,
                                   _after_commit=_after_commit_graph(
@@ -2489,6 +3973,35 @@ def wiki_delete_section(
     else:
         new_md = new_body
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    page_rel = f"{valid_domain}/{page_file}"
+
+    def mutate_specification_section_delete() -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+
+    specification_result = _maybe_execute_specification_page_transaction(
+        bind,
+        valid_domain,
+        slug=slug,
+        candidate_markdown=new_md,
+        original_markdown=original_full,
+        delete_target=False,
+        path=path,
+        mutate_page=mutate_specification_section_delete,
+        cfg=cfg,
+        message=f"iwiki: delete section from {page_rel}",
+        after_commit=_after_commit_graph(
+            graph_mutation, refresh_files=(page_file,)
+        ),
+        mutates_log=False,
+        freshness_warning=fresh.get("warning"),
+        response_fields={
+            "page": page_rel,
+            "heading": heading.lstrip("#").strip(),
+        },
+    )
+    if specification_result is not None:
+        return specification_result
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_md)
@@ -2497,7 +4010,6 @@ def wiki_delete_section(
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(original_full)
         raise
-    page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(
         bind.base, f"iwiki: delete section from {page_rel}", pathspec=valid_domain,
         _after_commit=_after_commit_graph(graph_mutation, refresh_files=(page_file,)),
@@ -2625,6 +4137,35 @@ def wiki_move_section(
     else:
         new_md = new_body
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    page_rel = f"{valid_domain}/{page_file}"
+
+    def mutate_specification_section_move() -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_md)
+
+    specification_result = _maybe_execute_specification_page_transaction(
+        bind,
+        valid_domain,
+        slug=slug,
+        candidate_markdown=new_md,
+        original_markdown=original_full,
+        delete_target=False,
+        path=path,
+        mutate_page=mutate_specification_section_move,
+        cfg=cfg,
+        message=f"iwiki: move section in {page_rel}",
+        after_commit=_after_commit_graph(
+            graph_mutation, refresh_files=(page_file,)
+        ),
+        mutates_log=False,
+        freshness_warning=fresh.get("warning"),
+        response_fields={
+            "page": page_rel,
+            "heading": heading.lstrip("#").strip(),
+        },
+    )
+    if specification_result is not None:
+        return specification_result
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_md)
@@ -2633,7 +4174,6 @@ def wiki_move_section(
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(original_full)
         raise
-    page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(
         bind.base, f"iwiki: move section in {page_rel}", pathspec=valid_domain,
         _after_commit=_after_commit_graph(graph_mutation, refresh_files=(page_file,)),
@@ -2690,6 +4230,34 @@ def wiki_delete_page(
         content = fh.read()
     log_appended = False
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    page_rel = f"{valid_domain}/{page_file}"
+
+    def mutate_specification_page_delete() -> None:
+        os.remove(path)
+        indexer.append_log(
+            bind.base, valid_domain, "delete", "", page_file, None
+        )
+
+    specification_result = _maybe_execute_specification_page_transaction(
+        bind,
+        valid_domain,
+        slug=slug,
+        candidate_markdown=None,
+        original_markdown=content,
+        delete_target=True,
+        path=path,
+        mutate_page=mutate_specification_page_delete,
+        cfg=cfg,
+        message=f"iwiki: delete {page_rel}",
+        after_commit=_after_commit_graph(
+            graph_mutation, delete_files=(page_file,)
+        ),
+        mutates_log=True,
+        freshness_warning=fresh.get("warning"),
+        response_fields={"deleted": page_rel},
+    )
+    if specification_result is not None:
+        return specification_result
     os.remove(path)
     try:
         indexer.append_log(bind.base, valid_domain, "delete", "", page_file, None)
@@ -2702,7 +4270,6 @@ def wiki_delete_page(
         if log_appended:
             _rollback_last_log(bind.base, valid_domain, "delete", page_file, "", None)
         raise
-    page_rel = f"{valid_domain}/{page_file}"
     commit = sync.commit_and_push(bind.base, f"iwiki: delete {page_rel}",
                                   pathspec=valid_domain,
                                   _after_commit=_after_commit_graph(
@@ -2747,17 +4314,62 @@ def wiki_index(domain: str | None = None) -> dict:
     graph_mutation = indexer.prepare_graph_mutation(
         bind.base, valid_domain, whole_domain=True
     )
+    try:
+        prepared_specification = _prepare_git_specification(
+            bind, valid_domain, rebuild=True
+        )
+    except Exception:
+        prepared_specification = None
+        specification_warning = _SPECIFICATION_WARNING
+    else:
+        specification_warning = None
+    if prepared_specification is not None:
+        transaction = _execute_git_specification_transaction(
+            bind,
+            valid_domain,
+            prepared_specification,
+            page_path=None,
+            mutate_page=lambda: None,
+            cfg=cfg,
+            message=f"iwiki: reindex {valid_domain}",
+            after_commit=_after_commit_graph(graph_mutation, rebuild=True),
+            mutates_log=False,
+        )
+        if "error" in transaction:
+            return transaction
+        result = {
+            "domain": valid_domain,
+            **transaction["stats"],
+            **_write_sync_result(
+                transaction["commit"],
+                fresh.get("warning"),
+                graph_warning=transaction["specification_warning"],
+            ),
+        }
+        if transaction["specifications"] is not None:
+            result["specifications"] = transaction["specifications"]
+        return result
     stats = indexer.index_domain(cfg, bind.base, valid_domain)
     commit = sync.commit_and_push(bind.base, f"iwiki: reindex {valid_domain}",
                                   pathspec=valid_domain,
                                   _after_commit=_after_commit_graph(
                                       graph_mutation, rebuild=True
                                   ))
-    return {
+    result = {
         "domain": valid_domain,
         **stats,
-        **_write_sync_result(commit, fresh.get("warning")),
+        **_write_sync_result(
+            commit, fresh.get("warning"), graph_warning=specification_warning
+        ),
     }
+    if specification_warning:
+        result["specifications"] = {
+            "mode": bind.specification_mode,
+            "state": "failed" if bind.specification_mode == "strict" else "stale",
+            "findings": [],
+            "warning": specification_warning,
+        }
+    return result
 
 
 @_safe
@@ -2970,6 +4582,10 @@ def wiki_lint(domain: str | None = None) -> dict:
             target: store.lint_domain(target, list(bind.read))
             for target in valid_targets
         }
+        for target, report in reports.items():
+            report["specifications"] = _specification_lint_report(
+                bind, target
+            )
         return {"domains": list(reports), "reports": reports}
     targets = [domain] if domain else base.resolve_scope(bind, "project", None)
     valid_targets = [_validate_domain(target) for target in targets]
@@ -3012,6 +4628,7 @@ def wiki_lint(domain: str | None = None) -> dict:
                 "hint": "inspect wiki_code_status and retry",
             }
         report["code_graph"] = code_report
+        report["specifications"] = _specification_lint_report(bind, target)
         reports[target] = report
     return {"domains": list(reports.keys()), "reports": reports}
 
@@ -3602,6 +5219,9 @@ mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)
 mcp.tool()(wiki_search)
+mcp.tool()(wiki_spec_search)
+mcp.tool()(wiki_spec_context)
+mcp.tool()(wiki_spec_resolve)
 mcp.tool()(wiki_related)
 mcp.tool()(wiki_write_page)
 mcp.tool()(wiki_update_page)
@@ -3666,7 +5286,9 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     binding = base.resolve_storage_binding(project_dir)
     if not _is_postgres(binding):
         return
-    _postgres_migrations.require_schema_version(binding.connection_dsn())
+    _postgres_migrations.require_schema_version(
+        binding.connection_dsn(), expected_version=7
+    )
 
 
 def main() -> None:

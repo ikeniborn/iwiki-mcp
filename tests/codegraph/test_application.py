@@ -7,6 +7,7 @@ from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.publication import PublicationSession, SnapshotHeader
 from iwiki_mcp.storage import GitBinding, PostgresBinding
+from iwiki_mcp.specifications import UnavailableSpecificationGraphResolver
 
 
 _LOCAL_REVISION = "sha256:" + "c" * 64
@@ -170,6 +171,44 @@ def test_git_source_context_keeps_the_wiki_cache_and_selector(tmp_path):
     assert source.project_dir == str(project)
     assert source.primary == "docs"
     assert source.wiki_base == str(wiki)
+
+
+def test_specification_resolver_selects_ready_local_sqlite_reader(monkeypatch):
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(publish_mode="sqlite", max_file_bytes=1024),
+        paths=SimpleNamespace(database=Path("graph.sqlite"), lock=Path("graph.lock")),
+        _store=object(),
+        _context_root=Path("/tmp/project"),
+        binding=SimpleNamespace(primary="docs", base="/tmp/wiki"),
+        status=lambda: {"state": "ready", "revision": _LOCAL_REVISION},
+    )
+    sentinel = object()
+    monkeypatch.setattr(application, "SqliteCodeGraphReader", lambda **_kwargs: sentinel)
+
+    assert application.specification_graph_resolver(runtime) is sentinel
+
+
+@pytest.mark.parametrize(
+    "publish_mode,status,reason",
+    [
+        ("mcp", {"state": "ready", "revision": _REMOTE_REVISION}, "source_unavailable"),
+        ("sqlite", {"state": "missing", "code": "not_configured"}, "not_configured"),
+    ],
+)
+def test_specification_resolver_fails_soft_without_local_ready_snapshot(
+    publish_mode, status, reason
+):
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(publish_mode=publish_mode),
+        paths=None,
+        _store=None,
+        status=lambda: status,
+    )
+
+    resolver = application.specification_graph_resolver(runtime)
+
+    assert isinstance(resolver, UnavailableSpecificationGraphResolver)
+    assert resolver.status()["reason"] == reason
 
 
 def test_postgres_source_context_uses_project_cache_and_local_exclude(

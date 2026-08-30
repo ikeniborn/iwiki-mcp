@@ -24,3 +24,9 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
 - Cross-domain page moves and heading renames rewrite exact links automatically only
   when all visible referrers are writable; a read-only visible referrer blocks before
   the mutation. Hidden domains are not inspected or rewritten.
+- **GWT maintenance:** before editing an existing `type: specification` scenario, call
+  `wiki_spec_context`. After code or test changes, call `wiki_spec_resolve` when a ready
+  code graph exists. If the graph is unavailable, preserve declared selectors, record
+  that evidence, and continue with repository search and executable tests. Record the
+  test command, exit status, and repository revision in the task ledger; review the
+  scenario, implementation bindings, executable test, and evidence as one unit.

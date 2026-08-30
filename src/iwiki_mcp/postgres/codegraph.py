@@ -1309,6 +1309,41 @@ class PostgresCodeGraphReader:
         except (ValueError, psycopg.Error):
             return {"domain": self.domain, **MISSING_READ_RESULT}
 
+    def specification_snapshot(self):
+        """Capture private selector rows inside one read-only transaction."""
+        from ..specifications import SpecificationGraphSnapshot
+
+        try:
+            with self._read() as cursor:
+                cursor.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                )
+                status, scope = self._status(cursor)
+                revision = status.get("revision")
+                if scope is None or not isinstance(revision, str):
+                    return None
+                cursor.execute(
+                    "SELECT row_data FROM iwiki.code_graph_files "
+                    "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
+                    "ORDER BY row_data->>'file_id'",
+                    scope,
+                )
+                files = tuple(dict(row[0]) for row in cursor.fetchall())
+                cursor.execute(
+                    "SELECT row_data FROM iwiki.code_graph_symbols "
+                    "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
+                    "ORDER BY row_data->>'symbol_id'",
+                    scope,
+                )
+                symbols = tuple(dict(row[0]) for row in cursor.fetchall())
+                return SpecificationGraphSnapshot(
+                    revision=revision,
+                    files=files,
+                    symbols=symbols,
+                )
+        except (ValueError, TypeError, psycopg.Error):
+            return None
+
     def _snapshot_header(self, cursor, scope: tuple):
         cursor.execute(
             "SELECT header FROM iwiki.code_graph_snapshots "

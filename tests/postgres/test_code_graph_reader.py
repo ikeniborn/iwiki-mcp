@@ -81,6 +81,23 @@ def test_ready_status_reports_stored_revisions_and_declared_counts(
     assert status["warnings"] == []
 
 
+def test_specification_snapshot_uses_one_active_ready_postgres_revision(
+    pg_ready_graph,
+):
+    reader = pg_ready_graph.reader()
+
+    snapshot = reader.specification_snapshot()
+
+    assert snapshot is not None
+    assert snapshot.revision == reader.status()["snapshot_revision"]
+    assert tuple(row["file_id"] for row in snapshot.files) == tuple(sorted(
+        row["file_id"] for row in pg_ready_graph.rows["files"]
+    ))
+    assert tuple(row["symbol_id"] for row in snapshot.symbols) == tuple(sorted(
+        row["symbol_id"] for row in pg_ready_graph.rows["symbols"]
+    ))
+
+
 def test_postgres_reader_rejects_age_but_zero_disables_rejection(
     pg_ready_graph
 ):

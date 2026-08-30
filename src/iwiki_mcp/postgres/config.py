@@ -5,8 +5,11 @@ import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit
+
+from .auth import validate_domain_identifier
 
 try:
     import tomllib
@@ -84,12 +87,106 @@ class HostedCodeGraphConfig:
         return cls(**dict(config))
 
 
+SpecificationMode = Literal["disabled", "optional", "strict"]
+
+
+def _specification_mode(value: Any) -> SpecificationMode:
+    if not isinstance(value, str) or value not in {
+        "disabled",
+        "optional",
+        "strict",
+    }:
+        raise ConfigError("specification mode is invalid")
+    return value
+
+
+@dataclass(frozen=True)
+class SpecificationOverride:
+    iwiki_id: str
+    domain: str
+    mode: SpecificationMode
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.iwiki_id, str) or not self.iwiki_id.strip():
+            raise ConfigError("specification override iwiki_id is invalid")
+        try:
+            valid_domain = validate_domain_identifier(self.domain)
+        except ValueError as exc:
+            raise ConfigError("specification override domain is invalid") from exc
+        object.__setattr__(self, "iwiki_id", self.iwiki_id.strip())
+        object.__setattr__(self, "domain", valid_domain)
+        object.__setattr__(self, "mode", _specification_mode(self.mode))
+
+
+@dataclass(frozen=True)
+class HostedSpecificationsConfig:
+    default_mode: SpecificationMode = "optional"
+    overrides: tuple[SpecificationOverride, ...] | list[SpecificationOverride] = ()
+    _mode_by_pair: Mapping[tuple[str, str], SpecificationMode] = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        default_mode = _specification_mode(self.default_mode)
+        if not isinstance(self.overrides, (tuple, list)):
+            raise ConfigError("specification overrides must be an array")
+        overrides = tuple(self.overrides)
+        if any(not isinstance(item, SpecificationOverride) for item in overrides):
+            raise ConfigError("specification overrides must contain override records")
+
+        modes: dict[tuple[str, str], SpecificationMode] = {}
+        for override in overrides:
+            pair = (override.iwiki_id, override.domain)
+            if pair in modes:
+                raise ConfigError("specification overrides contain a duplicate pair")
+            modes[pair] = override.mode
+        object.__setattr__(self, "default_mode", default_mode)
+        object.__setattr__(self, "overrides", overrides)
+        object.__setattr__(self, "_mode_by_pair", MappingProxyType(modes))
+
+    def mode_for(self, iwiki_id: str, domain: str) -> SpecificationMode:
+        return self._mode_by_pair.get((iwiki_id, domain), self.default_mode)
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> "HostedSpecificationsConfig":
+        if not isinstance(config, Mapping):
+            raise ConfigError("specification configuration must be a table")
+        if set(config) - {"default_mode", "overrides"}:
+            raise ConfigError(
+                "specification configuration contains keys that are not allowed"
+            )
+        default_mode = _specification_mode(config.get("default_mode", "optional"))
+        raw_overrides = config.get("overrides", [])
+        if not isinstance(raw_overrides, list):
+            raise ConfigError("specification overrides must be an array")
+
+        overrides: list[SpecificationOverride] = []
+        for raw_override in raw_overrides:
+            if not isinstance(raw_override, Mapping) or set(raw_override) != {
+                "iwiki_id",
+                "domain",
+                "mode",
+            }:
+                raise ConfigError("specification override fields are invalid")
+            overrides.append(
+                SpecificationOverride(
+                    iwiki_id=raw_override.get("iwiki_id"),
+                    domain=raw_override.get("domain"),
+                    mode=raw_override.get("mode"),
+                )
+            )
+        return cls(default_mode=default_mode, overrides=tuple(overrides))
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     storage: PostgresConfig
     models: ModelConfig
     server: HostedServerConfig
     code_graph: HostedCodeGraphConfig = field(default_factory=HostedCodeGraphConfig)
+    specifications: HostedSpecificationsConfig = field(
+        default_factory=HostedSpecificationsConfig
+    )
 
 
 _SSLMODES = {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
@@ -127,7 +224,7 @@ _HOSTED_CODE_GRAPH_FIELDS = {
     "staging_retention_seconds",
     "staging_cleanup_limit",
 }
-_SERVER_TOP_LEVEL_FIELDS = {"storage", "server", "code_graph"}
+_SERVER_TOP_LEVEL_FIELDS = {"storage", "server", "code_graph", "specifications"}
 
 
 def _required_string(config: Mapping[str, Any], name: str) -> str:
@@ -333,9 +430,13 @@ def load_server_config(
     code_graph = data.get("code_graph", {})
     if not isinstance(code_graph, dict):
         raise ConfigError("top-level storage, server, and code_graph must be tables")
+    specifications = data.get("specifications", {})
+    if not isinstance(specifications, dict):
+        raise ConfigError("specification configuration must be a table")
     return ServerConfig(
         storage=load_postgres_config(storage, environ),
         models=load_model_config(environ),
         server=hosted,
         code_graph=HostedCodeGraphConfig.from_mapping(code_graph),
+        specifications=HostedSpecificationsConfig.from_mapping(specifications),
     )

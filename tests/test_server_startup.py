@@ -85,7 +85,9 @@ def test_main_checks_postgres_schema_before_embedding_probe(monkeypatch):
     monkeypatch.setattr(
         server._postgres_migrations,
         "require_schema_version",
-        lambda dsn: calls.append(("require-schema", dsn)),
+        lambda dsn, *, expected_version: calls.append(
+            ("require-schema", dsn, expected_version)
+        ),
     )
     monkeypatch.setattr(
         server,
@@ -98,7 +100,7 @@ def test_main_checks_postgres_schema_before_embedding_probe(monkeypatch):
 
     assert calls == [
         "load",
-        ("require-schema", binding.connection_dsn()),
+        ("require-schema", binding.connection_dsn(), 7),
         ("probe", cfg),
         "run",
     ]
@@ -134,9 +136,10 @@ def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, caps
         server.base, "resolve_storage_binding", lambda _project: binding
     )
 
-    def reject(dsn):
+    def reject(dsn, *, expected_version):
+        assert expected_version == 7
         raise server._postgres_migrations.MigrationError(
-            "PostgreSQL schema version 5 is required"
+            "PostgreSQL schema version 7 is required"
         )
 
     monkeypatch.setattr(
@@ -159,7 +162,7 @@ def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, caps
 
     captured = capsys.readouterr()
     assert exc.value.code == 1
-    assert "Reason: PostgreSQL schema version 5 is required" in captured.err
+    assert "Reason: PostgreSQL schema version 7 is required" in captured.err
     assert "fixture-secret" not in captured.err
 
 

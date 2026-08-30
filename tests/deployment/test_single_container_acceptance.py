@@ -875,7 +875,7 @@ def test_hosted_mcp_rejects_incompatible_schema(
     result = hosted_startup_probe(role, password)
 
     assert result["exit_code"] != 0
-    assert "schema version 5 is required" in result["logs"]
+    assert "schema version 7 is required" in result["logs"]
     assert password not in result["logs"]
 
 
