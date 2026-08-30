@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tests.deployment.conftest import _generate_ogg_voice
+
 
 REPOSITORY = Path(__file__).parents[2]
 FORBIDDEN_COMPONENTS = ("postgres", "gost", "stunnel")
@@ -103,7 +105,7 @@ def test_built_image_has_exact_runtime_executable_inventory(
             "/bin/sh",
             acceptance_image,
             "-c",
-            "for x in iwiki-mcp iwiki-telegram-bot nginx supervisord "
+            "for x in iwiki-mcp iwiki-telegram-bot nginx supervisord ffmpeg "
             "postgres gost stunnel; do command -v \"$x\" >/dev/null "
             "&& echo \"$x\"; done; true",
         ],
@@ -117,4 +119,18 @@ def test_built_image_has_exact_runtime_executable_inventory(
         "iwiki-telegram-bot",
         "nginx",
         "supervisord",
+        "ffmpeg",
     }
+
+
+def test_built_image_generates_marker_bearing_ogg_voice(
+    docker_command, acceptance_image
+):
+    marker = "audio-privacy-marker"
+
+    audio = _generate_ogg_voice(
+        acceptance_image, docker_command, marker
+    )
+
+    assert audio.startswith(b"OggS")
+    assert marker.encode() in audio
