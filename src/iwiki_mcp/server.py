@@ -2355,8 +2355,8 @@ def _resolve_git_specification_locked(request: dict):
         _is_specification_markdown(page.markdown) for page in pages
     ):
         return None
-    store = _git_specification_store_factory(binding.base, mode)
     try:
+        store = _git_specification_store_factory(binding.base, mode)
         previous = store._load(domain)
         projection = _assemble_specification_projection(
             domain,

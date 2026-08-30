@@ -1,6 +1,6 @@
 [project]
 name = "iwiki-mcp"
-version = "0.7.215"
+version = "0.7.216"
 description = "MCP server for a shared Git or PostgreSQL wiki split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -50,4 +50,5 @@ asyncio_mode = "auto"
 markers = [
     "postgres_integration: requires an explicit disposable PostgreSQL database",
     "slow: generated 20,000-file publication evidence",
+    "measurement: deterministic path measurements without timing thresholds",
 ]

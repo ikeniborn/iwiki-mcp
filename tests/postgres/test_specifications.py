@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from hashlib import sha256
 from types import SimpleNamespace
 import pytest
 
@@ -18,7 +19,12 @@ from iwiki_mcp.specification_store import (
     ResolutionAttempt,
     ScenarioLocation,
 )
-from iwiki_mcp.specifications import PageSnapshot, assemble_projection
+from iwiki_mcp.specifications import (
+    PageSnapshot,
+    UnavailableSpecificationGraphResolver,
+    assemble_projection,
+    graph_state_fingerprint,
+)
 
 
 def _cfg():
@@ -94,6 +100,82 @@ def _specification_markdown(scenario_id="stable-id", heading="Stable behavior"):
         '  { relation = "verifies", symbol = "tests.test_run" }\n'
         "]\n"
         "```\n"
+    )
+
+
+def _golden_markdown(
+    scenario_id, title, given, when, then, code, *, heading=None,
+):
+    return (
+        "---\n"
+        "type: specification\n"
+        f"title: {title}\n"
+        "---\n"
+        f"# {title}\n\n"
+        f"## {heading or title}\n\n"
+        "```iwiki-gwt\n"
+        f'id = "{scenario_id}"\n'
+        f'title = "{title}"\n'
+        f"given = {given}\n"
+        f"when = {when}\n"
+        f"then = {then}\n"
+        "code = [\n"
+        + "".join(f"  {item},\n" for item in code)
+        + "]\n"
+        "```\n"
+    )
+
+
+def _complete_golden_pages():
+    aggregate = _golden_markdown(
+        "confirm-account",
+        "Aggregate behavior",
+        '[{ role = "event", name = "AccountRequested" }]',
+        '{ role = "command", name = "ConfirmAccount" }',
+        '[{ role = "event", name = "AccountConfirmed" }]',
+        (
+            '{ relation = "implements", phase = "when", symbol = "accounts.confirm" }',
+            '{ relation = "verifies", file = "tests/test_accounts.py" }',
+        ),
+    )
+    boundary = _golden_markdown(
+        "accept-payment",
+        "Boundary behavior",
+        '[{ role = "fact", name = "Customer active" }]',
+        '{ role = "request", name = "POST /payments" }',
+        '[{ role = "response", name = "202 Accepted" }, '
+        '{ role = "event", name = "PaymentAccepted" }]',
+        (
+            '{ relation = "implements", source_glob = "src/payments/**" }',
+            '{ relation = "verifies", symbol = "tests.test_accept_payment" }',
+            '{ relation = "verifies", file = "tests/test_payments.py" }',
+        ),
+    )
+    duplicate = _golden_markdown(
+        "duplicate-behavior",
+        "Duplicate behavior",
+        "[]",
+        '{ role = "action", name = "Duplicate" }',
+        '[{ role = "outcome", name = "Duplicated" }]',
+        (
+            '{ relation = "implements", symbol = "duplicate.run" }',
+            '{ relation = "verifies", file = "tests/test_duplicate.py" }',
+        ),
+    )
+    incomplete = _golden_markdown(
+        "incomplete-behavior",
+        "Incomplete behavior",
+        "[]",
+        '{ role = "command", name = "Incomplete" }',
+        '[{ role = "event", name = "IncompleteRan" }]',
+        ('{ relation = "implements", symbol = "incomplete.run" }',),
+    )
+    return (
+        ("specification/aggregate", aggregate),
+        ("specification/boundary", boundary),
+        ("specification/duplicate-a", duplicate),
+        ("specification/duplicate-b", duplicate),
+        ("specification/incomplete", incomplete),
     )
 
 
@@ -649,49 +731,147 @@ def test_projection_round_trip_search_context_status_and_restart(store_factory):
 
 
 @pytest.mark.postgres_integration
-def test_git_and_postgres_specification_records_have_golden_parity(
-    store_factory, tmp_path,
+def test_git_and_postgres_complete_specification_outputs_have_golden_parity(
+    store_factory, tmp_path, monkeypatch,
 ):
     postgres = store_factory()
-    markdown = _specification_markdown()
-    created = postgres.write_page("docs", "specification/stable", markdown)
-    projection = assemble_projection(
-        "docs",
-        [PageSnapshot("specification/stable", markdown, created["revision"])],
+    snapshots = []
+    for slug, markdown in _complete_golden_pages():
+        created = postgres.write_page("docs", slug, markdown)
+        snapshots.append(PageSnapshot(slug, markdown, created["revision"]))
+    postgres_projection = assemble_projection(
+        "docs", tuple(snapshots),
     )
-    postgres.replace_specification_projection(projection)
+    assert postgres_projection.scenario_count == 2
+    assert postgres_projection.binding_count == 5
+    assert {item.type for item in postgres_projection.findings} == {
+        "duplicate_scenario_id", "incomplete_bindings",
+    }
+
+    ready_fingerprint = graph_state_fingerprint({
+        "state": "ready", "reason": None, "revision": "graph-r1",
+    })
+    unavailable_fingerprint = graph_state_fingerprint({
+        "state": "source_unavailable",
+        "reason": "source_unavailable",
+        "revision": None,
+    })
+    scenarios = {
+        item.scenario_id: item for item in postgres_projection.scenarios
+    }
+    attempts = []
+    states = ("resolved", "ambiguous", "unresolved", "graph_unavailable")
+    for binding, state in zip(postgres_projection.bindings, states):
+        unavailable = state == "graph_unavailable"
+        targets = {
+            "resolved": ("symbol:one",),
+            "ambiguous": ("symbol:one", "symbol:two"),
+        }.get(state, ())
+        attempts.append(ResolutionAttempt(
+            binding_id=binding.binding_id,
+            domain=binding.domain,
+            scenario_id=binding.scenario_id,
+            state=state,
+            targets=targets,
+            unresolved_reference=(
+                binding.selector if state in {"unresolved", "graph_unavailable"}
+                else None
+            ),
+            graph_revision=None if unavailable else "graph-r1",
+            graph_state_fingerprint=(
+                unavailable_fingerprint if unavailable else ready_fingerprint
+            ),
+            specification_source_hash=(
+                scenarios[binding.scenario_id].source_hash
+            ),
+            checked_at="2026-08-29T12:00:00Z",
+            reason="source_unavailable" if unavailable else None,
+        ))
+    postgres_projection = postgres_projection.with_evidence(tuple(attempts))
+    postgres.replace_specification_projection(postgres_projection)
 
     git_base = tmp_path / "wiki"
     (git_base / "docs").mkdir(parents=True)
+    git_snapshots = []
+    for slug, markdown in _complete_golden_pages():
+        path = git_base / "docs" / f"{slug}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(markdown, encoding="utf-8")
+        revision = "sha256:" + sha256(markdown.encode("utf-8")).hexdigest()
+        git_snapshots.append(PageSnapshot(slug, markdown, revision))
+    git_projection = assemble_projection("docs", tuple(git_snapshots))
+    assert git_projection.bindings == postgres_projection.bindings
+    git_projection = git_projection.with_evidence(tuple(attempts))
     git = GitSpecificationStore(str(git_base))
-    git.replace_projection(projection)
-    binding = projection.bindings[0]
-    attempt = ResolutionAttempt(
-        binding_id=binding.binding_id,
-        domain="docs",
-        scenario_id="stable-id",
-        state="unresolved",
-        targets=(),
-        unresolved_reference=binding.selector,
-        graph_revision="graph-1",
-        graph_state_fingerprint="sha256:" + "1" * 64,
-        specification_source_hash=projection.scenarios[0].source_hash,
-        checked_at="2026-08-29T14:00:00+02:00",
-        reason=None,
-    )
-    postgres.record_specification_resolution(attempt)
-    git.record_resolution(attempt)
+    git.replace_projection(git_projection)
 
-    def normalize(context):
+    def normalize_scenario(item):
+        value = asdict(item)
+        value.pop("page_revision")
+        return value
+
+    assert tuple(normalize_scenario(item) for item in postgres.search_specifications(
+        ("docs",), "behavior", 100
+    )) == tuple(normalize_scenario(item) for item in git.search(
+        ("docs",), "behavior", 100
+    ))
+
+    def normalize_context(context):
         value = asdict(context)
         value["scenario"].pop("page_revision")
         value.pop("projection_revision")
         return value
 
-    assert normalize(postgres.specification_context("docs", "stable-id")) == (
-        normalize(git.context("docs", "stable-id"))
+    for scenario_id in ("accept-payment", "confirm-account"):
+        assert normalize_context(postgres.specification_context(
+            "docs", scenario_id
+        )) == normalize_context(git.context("docs", scenario_id))
+
+    def normalize_status(status):
+        value = asdict(status)
+        value.pop("markdown_revision")
+        return value
+
+    assert normalize_status(
+        postgres.specification_status("docs")
+    ) == normalize_status(git.status("docs"))
+
+    binding = SimpleNamespace(
+        base=str(git_base),
+        specification_mode="optional",
+        primary="docs",
+        project_dir=str(tmp_path / "project"),
     )
-    assert attempt.checked_at == "2026-08-29T12:00:00Z"
+    resolver = UnavailableSpecificationGraphResolver("not_configured")
+    monkeypatch.setattr(
+        server, "_specification_graph_resolver", lambda *_args: resolver
+    )
+    monkeypatch.setattr(
+        server,
+        "_specification_store",
+        lambda _binding: server._PostgresSpecificationQueryStore(postgres),
+    )
+    postgres_lint = server._specification_lint_report(binding, "docs")
+    monkeypatch.setattr(
+        server,
+        "_specification_store",
+        lambda _binding: server._GitSpecificationQueryStore(binding),
+    )
+    git_lint = server._specification_lint_report(binding, "docs")
+
+    postgres_lint.pop("projection_revision")
+    git_lint.pop("projection_revision")
+    assert postgres_lint == git_lint
+    assert {item.state for item in attempts} == {
+        "resolved", "ambiguous", "unresolved", "graph_unavailable",
+    }
+    contexts = [
+        postgres.specification_context("docs", scenario_id)
+        for scenario_id in ("accept-payment", "confirm-account")
+    ]
+    assert {item.role for context in contexts for item in context.scenario.items} >= {
+        "event", "command", "fact", "request", "response",
+    }
 
 
 @pytest.mark.postgres_integration
