@@ -133,7 +133,7 @@ class InferenceClient:
             payload = await self._post_json(
                 "/audio/transcriptions",
                 data={"model": self._transcription_model},
-                files={"file": (filename, audio, "audio/ogg")},
+                files={"file": (filename, audio, "audio/wav")},
             )
             text = payload.get("text")
             if not isinstance(text, str) or not text.strip():

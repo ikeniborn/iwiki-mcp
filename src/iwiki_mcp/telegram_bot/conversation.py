@@ -2,15 +2,21 @@
 
 from pathlib import Path
 import secrets
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable
 from typing import Any
 
+import anyio
+
 from .access import AccessPolicy
 from .inference import InferenceError
 from .iwiki import RemoteIwikiError
 from .models import BotReply, PageTarget, PendingWrite, WritePreview
+
+
+_TRANSCRIPTION_MAX_BYTES = 50 * 1024 * 1024
 
 
 class ConversationService:
@@ -129,17 +135,49 @@ class ConversationService:
         if domain is None:
             return BotReply("Select a domain first.")
 
-        safe_name = Path(filename).name or "voice.ogg"
-        suffix = Path(safe_name).suffix or ".ogg"
         try:
-            with tempfile.NamedTemporaryFile(
-                suffix=suffix, dir=self._temporary_directory
+            with tempfile.TemporaryDirectory(
+                dir=self._temporary_directory
             ) as temporary:
-                temporary.write(audio)
-                temporary.flush()
-                transient_audio = Path(temporary.name).read_bytes()
-                question = await self._inference.transcribe(safe_name, transient_audio)
-        except (InferenceError, OSError):
+                temporary_path = Path(temporary)
+                source_path = temporary_path / "input.ogg"
+                wav_path = temporary_path / "audio.wav"
+                source_path.write_bytes(audio)
+                await anyio.run_process(
+                    [
+                        "ffmpeg",
+                        "-nostdin",
+                        "-loglevel",
+                        "error",
+                        "-y",
+                        "-i",
+                        str(source_path),
+                        "-vn",
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        "-fs",
+                        str(_TRANSCRIPTION_MAX_BYTES),
+                        str(wav_path),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if wav_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+                    return BotReply("Voice transcription is unavailable.")
+                transient_audio = wav_path.read_bytes()
+                if (
+                    not transient_audio.startswith(b"RIFF")
+                    or transient_audio[8:12] != b"WAVE"
+                ):
+                    return BotReply("Voice transcription is unavailable.")
+                question = await self._inference.transcribe(
+                    "audio.wav", transient_audio
+                )
+        except (InferenceError, OSError, subprocess.CalledProcessError):
             return BotReply("Voice transcription is unavailable.")
         return await self._answer_selected(domain, question)
 

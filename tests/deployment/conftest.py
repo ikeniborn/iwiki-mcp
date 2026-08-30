@@ -636,6 +636,39 @@ def _wait_until(predicate, *, timeout, interval=0.1):
     return value
 
 
+def _generate_ogg_voice(image, docker):
+    generated = subprocess.run(
+        [
+            *docker,
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/usr/bin/ffmpeg",
+            image,
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-t",
+            "0.1",
+            "-c:a",
+            "libopus",
+            "-f",
+            "ogg",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    if not generated.stdout.startswith(b"OggS"):
+        raise RuntimeError("ffmpeg did not produce OGG/Opus acceptance audio")
+    return generated.stdout
+
+
 def run_cleanup_steps(steps):
     failures = []
     for name, cleanup in steps:
@@ -750,7 +783,7 @@ class FullStackHarness:
             telegram_cert,
             token=self.markers["telegram_token"],
             updates=[],
-            audio=self.markers["audio"].encode(),
+            audio=_generate_ogg_voice(self.image, self.docker),
             voice_path=f"voice/{self.markers['filename']}.ogg",
             proxy_authorization=proxy_authorization,
             poll_delay=0.05,

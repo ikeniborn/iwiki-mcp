@@ -995,8 +995,10 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         and request["path"] == "/v1/audio/transcriptions"
     ]
     assert any(
-        full_stack.markers["filename"].encode() in body
-        and full_stack.markers["audio"].encode() in body
+        b'filename="audio.wav"' in body
+        and b"Content-Type: audio/wav" in body
+        and b"RIFF" in body
+        and b"WAVE" in body
         for body in transcription_requests
     )
     assert any(

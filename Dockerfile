@@ -6,7 +6,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates nginx supervisor \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg nginx supervisor \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 iwiki \
     && useradd --uid 10001 --gid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin iwiki

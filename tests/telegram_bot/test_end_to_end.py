@@ -1,3 +1,7 @@
+from pathlib import Path
+import subprocess
+
+import anyio
 import pytest
 
 from iwiki_mcp.telegram_bot.access import AccessPolicy
@@ -115,7 +119,13 @@ class BotHarness(TelegramTransport):
 
 
 @pytest.fixture
-def bot(tmp_path):
+def bot(tmp_path, monkeypatch):
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(
+            b"RIFF\x24\x00\x00\x00WAVEconverted-audio"
+        )
+
+    monkeypatch.setattr(anyio, "run_process", convert)
     access = AccessPolicy(frozenset({1001}))
     remote = FakeRemote()
     inference = FakeInference()
@@ -147,6 +157,25 @@ async def test_authorized_text_voice_and_confirmed_write_path(bot):
     assert {call[1] for call in bot.remote.calls if call[0] == "search"} == {
         "team"
     }
+
+
+@pytest.mark.asyncio
+async def test_text_update_is_processed_after_voice_conversion_failure(
+    bot, monkeypatch
+):
+    async def fail_conversion(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(anyio, "run_process", fail_conversion)
+
+    await bot.text(1001, "/domains")
+    await bot.callback(1001, "domain:team")
+    await bot.voice(1001)
+    await bot.text(1001, "How do I deploy?")
+
+    assert bot.sent[-2]["text"] == "Voice transcription is unavailable."
+    assert bot.sent[-1]["text"] == "Grounded answer"
+    assert bot.inference.answers == 1
 
 
 @pytest.mark.asyncio

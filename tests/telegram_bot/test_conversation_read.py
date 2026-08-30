@@ -1,7 +1,11 @@
+import asyncio
 from pathlib import Path
+import subprocess
 
+import anyio
 import pytest
 
+from iwiki_mcp.telegram_bot import conversation as conversation_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.conversation import ConversationService
 from iwiki_mcp.telegram_bot.inference import InferenceError
@@ -106,29 +110,162 @@ async def test_question_requires_selected_domain_before_outbound_calls(service):
 
 
 @pytest.mark.asyncio
-async def test_voice_file_is_removed_after_transcription(service, tmp_path):
+async def test_voice_is_converted_to_wav_before_transcription(
+    service, tmp_path, monkeypatch
+):
     await service.select_domain(1001, "team")
+    wav = b"RIFF\x24\x00\x00\x00WAVEconverted-audio"
+    commands = []
+
+    async def convert(command, **kwargs):
+        commands.append((command, kwargs))
+        Path(command[-1]).write_bytes(wav)
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    reply = await service.answer_voice(1001, "voice.ogg", b"opus-audio")
+
+    assert reply.text == "Answer"
+    assert service.inference.calls[0] == ("transcribe", "audio.wav", wav)
+    assert commands[0][0][0] == "ffmpeg"
+    size_limit_index = commands[0][0].index("-fs")
+    assert commands[0][0][size_limit_index + 1] == str(
+        conversation_module._TRANSCRIPTION_MAX_BYTES
+    )
+    assert commands[0][1] == {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+
+
+@pytest.mark.asyncio
+async def test_voice_rejects_converter_output_without_wav_signature(
+    service, monkeypatch
+):
+    await service.select_domain(1001, "team")
+
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(b"not-a-wav-file")
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    reply = await service.answer_voice(1001, "voice.ogg", b"opus-audio")
+
+    assert reply.text == "Voice transcription is unavailable."
+    assert service.inference.calls == []
+
+
+@pytest.mark.asyncio
+async def test_voice_rejects_wav_larger_than_framework_limit(
+    service, monkeypatch
+):
+    await service.select_domain(1001, "team")
+    monkeypatch.setattr(
+        conversation_module, "_TRANSCRIPTION_MAX_BYTES", 16, raising=False
+    )
+
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(b"RIFF\x24\x00\x00\x00WAVEoversized")
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    reply = await service.answer_voice(1001, "voice.ogg", b"opus-audio")
+
+    assert reply.text == "Voice transcription is unavailable."
+    assert service.inference.calls == []
+
+
+@pytest.mark.asyncio
+async def test_voice_conversion_failure_is_sanitized_and_temp_files_are_removed(
+    service, tmp_path, monkeypatch
+):
+    await service.select_domain(1001, "team")
+    observed_paths = []
+
+    async def convert(command, **kwargs):
+        observed_paths.extend(Path(command[-1]).parent.iterdir())
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    reply = await service.answer_voice(1001, "voice.ogg", b"opus-audio")
+
+    assert reply.text == "Voice transcription is unavailable."
+    assert service.inference.calls == []
+    assert observed_paths
+    assert all(path.exists() is False for path in observed_paths)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_voice_cancellation_removes_temp_files(
+    service, tmp_path, monkeypatch
+):
+    await service.select_domain(1001, "team")
+    conversion_started = asyncio.Event()
+    observed_paths = []
+
+    async def convert(command, **kwargs):
+        observed_paths.extend(Path(command[-1]).parent.iterdir())
+        conversion_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    task = asyncio.create_task(
+        service.answer_voice(1001, "voice.ogg", b"opus-audio")
+    )
+    await conversion_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert observed_paths
+    assert all(path.exists() is False for path in observed_paths)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_voice_file_is_removed_after_transcription(
+    service, tmp_path, monkeypatch
+):
+    await service.select_domain(1001, "team")
+    wav = b"RIFF\x24\x00\x00\x00WAVEconverted-audio"
+
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(wav)
+
+    monkeypatch.setattr(anyio, "run_process", convert)
 
     reply = await service.answer_voice(1001, "voice.ogg", b"audio")
 
     assert reply.text == "Answer"
-    assert ("transcribe", "voice.ogg", b"audio") in service.inference.calls
+    assert ("transcribe", "audio.wav", wav) in service.inference.calls
     assert list(Path(tmp_path).iterdir()) == []
 
 
 @pytest.mark.asyncio
-async def test_voice_file_is_removed_when_transcription_fails(tmp_path, clock):
+async def test_voice_file_is_removed_when_transcription_fails(
+    tmp_path, clock, monkeypatch
+):
     temporary_directory = tmp_path / "transient"
     temporary_directory.mkdir()
     outside_directory = tmp_path / "outside"
     outside_directory.mkdir()
     observed_paths = []
+    wav = b"RIFF\x24\x00\x00\x00WAVEconverted-audio"
+
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(wav)
+
+    monkeypatch.setattr(anyio, "run_process", convert)
 
     class FailingInference(FakeInference):
         async def transcribe(self, filename, audio):
             observed_paths.extend(temporary_directory.iterdir())
-            assert filename == "filename-marker.ogg"
-            assert audio == b"audio-content-marker"
+            assert filename == "audio.wav"
+            assert audio == wav
             raise InferenceError("inference_failed")
 
     remote = FakeRemote()

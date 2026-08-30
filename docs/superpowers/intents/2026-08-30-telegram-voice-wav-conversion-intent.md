@@ -12,6 +12,13 @@ review:
 workflow:
   route: chain
   continuation: execute
+result_check:
+  verdict: OK
+  source: intent
+  intent_hash: 103b5ff0a075352b
+  last_run: 2026-08-30
+  reviewed: true
+  docs_checked: true
 ---
 # Intent: telegram-voice-wav-conversion
 

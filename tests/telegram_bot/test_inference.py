@@ -228,7 +228,7 @@ async def test_draft_markdown_uses_same_chat_contract():
 
 
 @pytest.mark.asyncio
-async def test_transcription_posts_ogg_multipart_contract():
+async def test_transcription_posts_wav_multipart_contract():
     seen = {}
 
     def handler(request):
@@ -242,13 +242,15 @@ async def test_transcription_posts_ogg_multipart_contract():
         "https://models.example/v1", "key", "chat-model", "audio-model", http
     )
 
-    assert await client.transcribe("voice.ogg", b"audio-bytes") == "spoken question"
+    wav = b"RIFF\x24\x00\x00\x00WAVEaudio-bytes"
+
+    assert await client.transcribe("audio.wav", wav) == "spoken question"
     assert seen["url"] == "https://models.example/v1/audio/transcriptions"
     assert seen["content_type"].startswith("multipart/form-data;")
     assert b'audio-model' in seen["body"]
-    assert b'filename="voice.ogg"' in seen["body"]
-    assert b"audio/ogg" in seen["body"]
-    assert b"audio-bytes" in seen["body"]
+    assert b'filename="audio.wav"' in seen["body"]
+    assert b"audio/wav" in seen["body"]
+    assert wav in seen["body"]
 
     await http.aclose()
 

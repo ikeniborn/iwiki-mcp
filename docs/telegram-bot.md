@@ -71,11 +71,14 @@ standard proxy environment variables; the inference and remote-iwiki HTTPX clien
 `trust_env=False`, while psycopg connects to PostgreSQL directly.
 
 The inference API must implement `POST /v1/chat/completions` and return
-`choices[0].message.content`. Voice uses `POST /v1/audio/transcriptions` with an OGG
-multipart upload and expects a JSON `text` field. Framework currently publishes chat
-completions but not audio transcriptions, so text workflows can be configured there
-only after the credential/audit boundary above is fixed; live voice remains
-unavailable until the transcription endpoint and model route exist.
+`choices[0].message.content`. For voice, the bot writes the downloaded Telegram
+OGG/Opus bytes to tmpfs, invokes the image-provided `ffmpeg`, and produces mono 16 kHz
+PCM WAV. The converter stops writing at the 50 MiB Framework boundary; the bot also
+rejects output above that boundary or without a valid RIFF/WAVE signature. It then sends
+`audio.wav` with media type
+`audio/wav` to `POST /v1/audio/transcriptions` and expects a JSON `text` field.
+Framework endpoint availability, model activation, and authentication remain external
+deployment prerequisites rather than bot responsibilities.
 
 ## Bot commands
 
@@ -96,13 +99,14 @@ Use the one-service `compose.yaml` path documented in the
 `/opt/iwiki-mcp/runtime.env`; do not run a separate bot unit.
 
 Supervisor runs exactly one bot process per Telegram token together with hosted MCP and
-nginx. Compose uses `restart: unless-stopped`, a 60-second graceful stop, a read-only
-root filesystem, and tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every
-unexpected child exit, including exit status zero; an explicit `supervisorctl stop`
-remains stopped until an explicit start. Each child receives `TERM` and has 55 seconds
-to stop before Supervisor can force its process group, inside the Compose 60-second
-window. Health covers all three children, loopback MCP, nginx ingress, and the Telegram
-polling heartbeat within the configured liveness window.
+nginx. The runtime image includes `ffmpeg` for local voice conversion. Compose uses
+`restart: unless-stopped`, a 60-second graceful stop, a read-only root filesystem, and
+tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every unexpected child exit,
+including exit status zero; an explicit `supervisorctl stop` remains stopped until an
+explicit start. Each child receives `TERM` and has 55 seconds to stop before Supervisor
+can force its process group, inside the Compose 60-second window. Health covers all
+three children, loopback MCP, nginx ingress, and the Telegram polling heartbeat within
+the configured liveness window.
 
 The application runtime creates no PostgreSQL database or schema objects and runs no
 migrations. It requires the exact compatible schema prepared out of band by the
@@ -126,11 +130,14 @@ revision/section-hash compare-and-swap remain unchanged.
 ## Failure behavior
 
 Missing configuration stops startup. Remote iwiki, inference, Telegram download, and
-malformed-response failures never expose dependency details. After a retryable MCP
-session failure, the running bot closes only that session, reconnects and initializes a
-new one with bounded backoff, then replays only the failed Telegram update; already
-completed updates keep their committed offsets. Conversation selection and pending
-confirmation state remain in memory during this reconnect. An unavailable domain is
-not selected. Empty retrieval produces no model answer. An expired, replayed, or
-wrong-user confirmation performs no mutation. A write conflict requires a new preview,
-and single-use confirmation consumption still prevents ambiguous writes from replaying.
+audio conversion, oversize WAV, malformed-response failures never expose dependency
+details. Source OGG/Opus, converted WAV, and their temporary directory are removed on
+success, failure, and cancellation. A failed voice update returns a sanitized message
+without stopping polling. After a retryable MCP session failure, the running bot closes
+only that session, reconnects and initializes a new one with bounded backoff, then
+replays only the failed Telegram update; already completed updates keep their committed
+offsets. Conversation selection and pending confirmation state remain in memory during
+this reconnect. An unavailable domain is not selected. Empty retrieval produces no
+model answer. An expired, replayed, or wrong-user confirmation performs no mutation. A
+write conflict requires a new preview, and single-use confirmation consumption still
+prevents ambiguous writes from replaying.

@@ -103,7 +103,7 @@ def test_built_image_has_exact_runtime_executable_inventory(
             "/bin/sh",
             acceptance_image,
             "-c",
-            "for x in iwiki-mcp iwiki-telegram-bot nginx supervisord "
+            "for x in iwiki-mcp iwiki-telegram-bot nginx supervisord ffmpeg "
             "postgres gost stunnel; do command -v \"$x\" >/dev/null "
             "&& echo \"$x\"; done; true",
         ],
@@ -117,4 +117,5 @@ def test_built_image_has_exact_runtime_executable_inventory(
         "iwiki-telegram-bot",
         "nginx",
         "supervisord",
+        "ffmpeg",
     }
