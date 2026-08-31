@@ -83,6 +83,7 @@ class PostgresBinding:
     rerank_model: str
     password: str = field(repr=False)
     specification_mode: Literal["disabled", "optional", "strict"] = "optional"
+    project_specification_mode: Literal["disabled", "optional", "strict"] | None = None
 
     @property
     def storage(self) -> str:

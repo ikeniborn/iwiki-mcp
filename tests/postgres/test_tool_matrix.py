@@ -170,6 +170,20 @@ def test_registered_tools_match_complete_mode_matrix():
     assert registered == set(TOOLS)
 
 
+def test_bind_schema_exposes_optional_specification_mode_enum():
+    tool = next(
+        item for item in server.mcp._tool_manager.list_tools()
+        if item.name == "wiki_bind"
+    )
+
+    schema = tool.parameters["properties"]["specification_mode"]
+
+    assert {"type": "string", "enum": ["disabled", "optional", "strict"]} in schema[
+        "anyOf"
+    ]
+    assert "specification_mode" not in tool.parameters.get("required", [])
+
+
 def test_grant_tool_schemas_expose_content_authority_only():
     protected = {
         "wiki_list_domain_grants",
@@ -396,6 +410,115 @@ def test_postgres_bind_can_only_narrow_session_scope(
     assert narrowed["read"] == ["docs"]
     assert narrowed["write"] == ["docs"]
     assert expanded["error"] == "read scope is protected"
+
+
+def test_hosted_bind_persists_project_specification_mode(postgres_server):
+    binding, _fake = postgres_server
+    state = server._HostedBindingState(binding)
+    token = server._SESSION_BINDING.set(state)
+    try:
+        result = server.wiki_bind(specification_mode="strict")
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert "error" not in result
+    assert state.selected_state().get().project_specification_mode == "strict"
+
+
+def test_local_postgres_bind_rejects_project_specification_mode(postgres_server):
+    token = server._SESSION_BINDING.set(None)
+    previous_local = server._LOCAL_POSTGRES_BINDING
+    server._LOCAL_POSTGRES_BINDING = None
+    try:
+        result = server.wiki_bind(specification_mode="strict")
+    finally:
+        server._SESSION_BINDING.reset(token)
+        server._LOCAL_POSTGRES_BINDING = previous_local
+
+    assert result["error"] == "specification mode requires a hosted session"
+
+
+def test_hosted_bind_rejects_invalid_project_mode_without_mutating_session(
+    postgres_server, monkeypatch,
+):
+    binding, fake = postgres_server
+    state = server._HostedBindingState(binding)
+    token = server._SESSION_BINDING.set(state)
+    try:
+        assert "error" not in server.wiki_bind(specification_mode="strict")
+        monkeypatch.setattr(
+            fake,
+            "list_domains",
+            lambda: (_ for _ in ()).throw(AssertionError("domain lookup reached")),
+        )
+        result = server.wiki_bind(specification_mode="required")
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert result["error"] == "specification mode is invalid"
+    assert state.selected_state().get().project_specification_mode == "strict"
+
+
+def test_hosted_project_mode_is_isolated_between_sessions(postgres_server):
+    binding, _fake = postgres_server
+    first = server._HostedBindingState(binding)
+    second = server._HostedBindingState(binding)
+
+    token = server._SESSION_BINDING.set(first)
+    try:
+        assert "error" not in server.wiki_bind(specification_mode="strict")
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert first.selected_state().get().project_specification_mode == "strict"
+    assert second.selected_state().get().project_specification_mode is None
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda: server.wiki_write_page(
+            "docs", "concept/new", "# New\n\n## Body\ntext\n"
+        ),
+        lambda: server.wiki_update_page(
+            "docs", "concept/page", "Body", "changed", expected_revision=4
+        ),
+        lambda: server.wiki_insert_section(
+            "docs", "concept/page", "Added", "text", expected_revision=4
+        ),
+        lambda: server.wiki_delete_section(
+            "docs", "concept/page", "Body", expected_revision=4
+        ),
+        lambda: server.wiki_move_section(
+            "docs", "concept/page", "Body", before_heading="Body", expected_revision=4
+        ),
+        lambda: server.wiki_delete_page(
+            "docs", "concept/page", expected_revision=4
+        ),
+        lambda: server.wiki_index("docs"),
+    ],
+)
+def test_hosted_project_mode_scopes_postgres_mutation_store(
+    operation,
+    postgres_server, monkeypatch,
+):
+    binding, fake = postgres_server
+    state = server._HostedBindingState(binding)
+    token = server._SESSION_BINDING.set(state)
+    try:
+        assert "error" not in server.wiki_bind(specification_mode="strict")
+        captured = []
+
+        def store_for(scoped_binding):
+            captured.append(scoped_binding)
+            return fake
+
+        monkeypatch.setattr(server, "_postgres_store_for_binding", store_for)
+        operation()
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert captured[-1].specification_mode == "strict"
 
 
 def test_hosted_concurrent_bind_narrowing_is_atomic(

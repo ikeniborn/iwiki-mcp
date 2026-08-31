@@ -12,6 +12,13 @@ review:
 workflow:
   route: chain
   continuation: execute
+result_check:
+  verdict: OK
+  source: intent
+  intent_hash: d7d7ae6ed589ff4a
+  last_run: 2026-08-31
+  reviewed: true
+  docs_checked: true
 ---
 # Intent: specification-mode-gwt-parameters
 

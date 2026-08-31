@@ -911,8 +911,10 @@ primary = "backend"
 {"error":"project configuration cannot be changed automatically","code":"project_config_manual_edit_required","hint":"edit .iwiki.toml manually; populated configuration is never rewritten automatically"}
 ```
 
-Для PostgreSQL `wiki_bind` по-прежнему только сужает область текущей сессии и
-никогда не меняет `.iwiki.toml`. `wiki_create_domain` может bootstrap-нуть пустой
+Для PostgreSQL `wiki_bind` по-прежнему действует только в текущей сессии: он сужает
+область. В hosted HTTP-сессии он также передаёт проектный `[specifications].mode` как
+`specification_mode`; local PostgreSQL stdio отклоняет этот параметр. Он никогда не
+меняет `.iwiki.toml` и не сохраняет режим. `wiki_create_domain` может bootstrap-нуть пустой
 отсутствующий Git-домен вне текущего списка write; он не создаёт страницу, индекс
 или лог. Перед первой записью добавьте домен в `.iwiki.toml` вручную.
 
@@ -934,6 +936,7 @@ Hosted PostgreSQL читает операторскую политику из se
 ```toml
 [specifications]
 default_mode = "optional"
+allow_project_mode = true
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
@@ -941,9 +944,13 @@ domain = "payments"
 mode = "strict"
 ```
 
-Локальная политика действует для всех видимых доменов. Hosted precedence: точный
-override `(iwiki_id, domain)`, затем hosted default, затем встроенный `optional`;
-MCP-вызовы и `wiki_bind` не могут изменить политику. `disabled` хранит specification
+Локальная политика действует для всех видимых доменов. Hosted-клиент передаёт значение
+проекта через опциональный `wiki_bind.specification_mode`. Hosted precedence: точный
+override `(iwiki_id, domain)`, проектный режим, hosted default, затем встроенный
+`optional`. Проектный tier применяется только когда он не слабее hosted default и
+`allow_project_mode` равен `true`; иначе `wiki_status` возвращает
+`project_mode_suppressed: true`. Значение ограничено сессией и разрешается отдельно для
+каждого bound domain. `disabled` хранит specification
 как обычный Markdown и отключает semantic-инструменты. `optional` хранит Markdown,
 выдаёт advisory-находки и проецирует только валидные, полные, уникальные сценарии.
 `strict` отклоняет невалидное изменение целевой specification до изменения страницы
@@ -1017,8 +1024,10 @@ resolution-находки остаются advisory; обычные Wiki-стр�
 PostgreSQL транзакционно хранит ту же логическую projection под tenant/domain
 authorization. В обоих backend каноническим остаётся Markdown.
 
-Specification-запись `wiki_status` содержит ровно `domain`, `mode`, `source`,
-`projection_state`, `scenarios` и `bindings`. Значения source:
+Specification-запись `wiki_status` содержит `domain`, `mode`, `source`,
+`projection_state`, `scenarios` и `bindings`, а также
+`project_mode_suppressed: true`, если server switch отключил полученный проектный режим
+или tighten-only guard его отклонил. Значения source:
 `project | hosted_default | hosted_override | built_in_default`; значения projection
 state: `disabled | absent | ready | stale | failed`. Полный перечень типов находок
 `wiki_lint`: `missing_scenario`, `invalid_scenario`, `duplicate_scenario_id`,
@@ -1130,7 +1139,7 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 | `wiki_index` | Пересобрать индекс одного домена; по умолчанию использует привязанный домен write, если опущено. |
 | `wiki_list_domains` | Перечислить видимые каталоги доменов в базе с размерами индексов. |
 | `wiki_create_domain` | Создать пустой каталог домена и вернуть, удался ли авто-коммит базы; `index.jsonl` / `log.jsonl` домена создаются лениво в его корне при первой записи или переиндексации. |
-| `wiki_bind` | Сузить PostgreSQL-область текущей сессии; для Git вернуть `project_config_manual_edit_required`, изменения выполняются вручную. |
+| `wiki_bind` | Сузить PostgreSQL-область и в hosted HTTP-сессии опционально передать проектный `specification_mode` (`disabled`, `optional` или `strict`) для этой сессии; local PostgreSQL stdio отклоняет этот параметр, а для Git возвращается `project_config_manual_edit_required`, изменения выполняются вручную. |
 | `wiki_status` | Показать разрешённую базу, каталог проекта, домены read, домен write и доступные домены. |
 | `wiki_lint` | Read-only Markdown-authoritative отчёт: битые/reserved/unavailable-domain ссылки, сироты, stale-страницы, `missing_source` и пробелы секций, а также независимый per-domain SQLite graph parity (`state`, fingerprint, страницы, рёбра, anchors). Он не создаёт и не пересобирает кэш; non-ready или mismatch добавляет подсказку `wiki_index`. |
 | `wiki_remediation_plan` | Сгруппировать текущие lint-находки в read-only план update/delete действий. |
