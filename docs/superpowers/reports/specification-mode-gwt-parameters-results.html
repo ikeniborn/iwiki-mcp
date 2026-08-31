@@ -163,7 +163,7 @@
           <div class="card"><b>Тема</b><code>specification-mode-gwt-parameters</code></div>
           <div class="card"><b>Ветка</b><code>dev-specification-mode-gwt-parameters</code></div>
           <div class="card"><b>Коммит реализации</b><code>2f6036b</code></div>
-          <div class="card"><b>Версия отчёта</b><code>0.7.224</code></div>
+          <div class="card"><b>Версия отчёта</b><code>0.7.225</code></div>
           <div class="card"><b>Intent hash</b><code>d7d7ae6ed589ff4a</code></div>
           <div class="card"><b>Результат</b><span class="metric">OK</span></div>
         </div>
@@ -181,6 +181,7 @@
           <tr><td><code>reference/tasks/specification-mode-gwt-parameters</code></td><td>Авторитетный lifecycle, evidence и changelog</td><td><span class="badge ok">done</span></td></tr>
           <tr><td><code>reference/task-history/specification-mode-gwt-parameters-001</code></td><td>Ограниченный журнал событий задачи</td><td><span class="badge ok">актуален</span></td></tr>
           <tr><td><code>2f6036bc70cd0c84edeb7b07178cf60fb0f1fd61</code></td><td>Изменения реализации</td><td><span class="badge ok">зафиксирован</span></td></tr>
+          <tr><td><code>34b579f</code></td><td>Выбор проектного режима и пример project config</td><td><span class="badge ok">зафиксирован</span></td></tr>
         </tbody>
       </table>
     </section>
@@ -267,7 +268,7 @@
 
       <h3>Карта лишнего и пропусков</h3>
       <div class="two-col">
-        <div class="card"><b>Лишние изменения</b><span class="badge ok">нет</span><p>Task diff ограничен carrier, policy, enforcement, tests, docs и обязательным version bump.</p></div>
+        <div class="card"><b>Лишние изменения</b><span class="badge ok">нет</span><p>Task diff ограничен project config, carrier, policy, enforcement, tests, docs и обязательным version bump.</p></div>
         <div class="card"><b>Пропуски intent</b><span class="badge ok">нет</span><p>Результаты, ограничения, статус, совместимость и откат покрыты.</p></div>
       </div>
       <div class="note warn"><b>Независимые исключения:</b> полный pytest выявил inotify budget, 20k codegraph scale runtime и order-sensitive codegraph failures. Production codegraph файлы не менялись; ограничения сохранены в task evidence, а не скрыты.</div>
@@ -299,9 +300,11 @@
           <tr><td><code>docs/architecture.md</code></td><td>Зафиксирована runtime policy boundary и per-domain resolution.</td><td>Архитектурное решение документировано.</td></tr>
           <tr><td><code>docs/superpowers/intents/2026-08-31-specification-mode-gwt-parameters-intent.md</code></td><td>Утверждены chain/execute и persisted <code>result_check</code>.</td><td>Intent и result verdict трассируемы.</td></tr>
           <tr><td><code>docs/profiles/specification-mode-gwt-parameters.yaml</code></td><td>Создан topic profile маршрута <code>engineering</code>.</td><td>Chain execution profile зафиксирован.</td></tr>
-          <tr><td><code>pyproject.toml</code></td><td>Patch version обновлён до <code>0.7.224</code>.</td><td>Repository change versioned.</td></tr>
+          <tr><td><code>.iwiki.toml</code></td><td>Проектный specification mode выбран на уровне проекта.</td><td>Hosted bind получает значение без global server change.</td></tr>
+          <tr><td><code>.iwiki.toml.example</code></td><td>Добавлен безопасный пример project binding, GWT policy и codegraph settings без секретов.</td><td>Проектный параметр доступен пользователям как явный шаблон.</td></tr>
+          <tr><td><code>pyproject.toml</code></td><td>Patch version обновлён до <code>0.7.225</code>.</td><td>Repository change versioned.</td></tr>
           <tr><td><code>src/iwiki_mcp/__init__.py</code></td><td>Версия runtime синхронизирована с метаданными пакета.</td><td>Version API согласован.</td></tr>
-          <tr><td><code>tests/test_package.py</code></td><td>Version assertion обновлён до <code>0.7.224</code>.</td><td>Version drift проверяется тестом.</td></tr>
+          <tr><td><code>tests/test_package.py</code></td><td>Version assertion обновлён до <code>0.7.225</code>.</td><td>Version drift проверяется тестом.</td></tr>
           <tr><td><code>uv.lock</code></td><td>Locked editable package version синхронизирован.</td><td>Reproducible metadata согласована.</td></tr>
           <tr><td><code>docs/superpowers/reports/specification-mode-gwt-parameters-results.html</code></td><td>Добавлен этот автономный итоговый chain-отчёт.</td><td>Offline-просмотр доступен одним файлом.</td></tr>
           <tr><td><code>base-binding</code> и <code>concept/bdd-event-sourcing-specifications</code></td><td>Wiki обновлена через CAS: hosted-only, precedence, guard, per-domain behavior.</td><td>Wiki lint по task страницам чист.</td></tr>
