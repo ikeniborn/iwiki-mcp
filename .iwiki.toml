@@ -9,7 +9,7 @@ primary = "iwiki-mcp"
 # - "strict": reject invalid specification mutations atomically.
 # Ordinary Wiki pages work in every mode and never require the code graph.
 [specifications]
-mode = "disabled"
+mode = "strict"
 
 [code_graph]
 enabled = true

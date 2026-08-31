@@ -1,0 +1,49 @@
+read = ["iwiki-mcp", "personal-ai-wiki", "obsidian-ai-wiki", "icodex", "iclaude", "okf"]
+write = ["iwiki-mcp"]
+primary = "iwiki-mcp"
+
+# GWT specification policy for every visible local domain.
+# Choose one value:
+# - "disabled": keep specification pages as ordinary Markdown; semantic tools are off.
+# - "optional": report advisory findings and project only valid scenarios (recommended).
+# - "strict": reject invalid specification mutations atomically.
+# Ordinary Wiki pages work in every mode and never require the code graph.
+[specifications]
+mode = "disabled"
+
+[code_graph]
+enabled = true
+languages = ["python", "typescript"]
+auto_rebuild = "bounded"
+max_rebuild_seconds = 10
+max_full_rebuild_seconds = 10
+max_file_bytes = 1000000
+max_total_files = 20000
+include_tests = true
+exclude = [
+  "tests/fixtures/",
+  "build/",
+  "dist/",
+  "*.generated.py",
+  "*.generated.ts",
+  "vendor/",
+  "node_modules/",
+]
+# typescript_type_boost (default false) opts into an isolated, best-effort
+# TypeScript Compiler API subprocess for type resolution; its absence or
+# failure never blocks indexing -- the Tree-sitter baseline always runs.
+typescript_type_boost = false
+
+# Distributed publication (only if reading the graph from a remote server)
+publish_mode = "mcp"      # sqlite | postgres | mcp
+read_mode = "mcp"         # sqlite | postgres | mcp
+max_snapshot_age_seconds = 86400
+max_batch_rows = 1000
+max_batch_bytes = 1000000
+publication_session_ttl_seconds = 900
+staging_retention_seconds = 86400
+staging_cleanup_limit = 100
+
+# read_mode = "mcp" needs env vars (not in toml, secrets):
+# IWIKI_CODE_GRAPH_MCP_URL
+# IWIKI_CODE_GRAPH_MCP_TOKEN
