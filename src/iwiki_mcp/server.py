@@ -958,18 +958,50 @@ def _specification_store(binding):
     return _GitSpecificationQueryStore(binding)
 
 
-def _specification_policy(binding, domain: str) -> tuple[str, str]:
+_SPECIFICATION_MODE_RANK = {
+    "disabled": 0,
+    "optional": 1,
+    "strict": 2,
+}
+
+
+def _specification_policy_details(
+    binding, domain: str
+) -> tuple[str, str, bool]:
     if _is_postgres(binding) and _SESSION_BINDING.get() is not None:
         policy = _HOSTED_SPECIFICATIONS
-        if policy is None:
-            return "optional", "built_in_default"
-        exact = any(
-            item.iwiki_id == binding.iwiki_id and item.domain == domain
-            for item in policy.overrides
+        exact = (
+            None
+            if policy is None
+            else next(
+                (
+                    item
+                    for item in policy.overrides
+                    if item.iwiki_id == binding.iwiki_id and item.domain == domain
+                ),
+                None,
+            )
         )
-        return policy.mode_for(binding.iwiki_id, domain), (
-            "hosted_override" if exact else "hosted_default"
+        if exact is not None:
+            return exact.mode, "hosted_override", False
+        default_mode = "optional" if policy is None else policy.default_mode
+        project_mode = binding.project_specification_mode
+        allow_project_mode = policy is None or policy.allow_project_mode
+        if (
+            project_mode is not None
+            and allow_project_mode
+            and _SPECIFICATION_MODE_RANK[project_mode]
+            >= _SPECIFICATION_MODE_RANK[default_mode]
+        ):
+            return project_mode, "project", False
+        suppressed = project_mode is not None and (
+            not allow_project_mode
+            or _SPECIFICATION_MODE_RANK[project_mode]
+            < _SPECIFICATION_MODE_RANK[default_mode]
         )
+        return default_mode, (
+            "built_in_default" if policy is None else "hosted_default"
+        ), suppressed
     source = "built_in_default"
     config_path = Path(binding.project_dir) / ".iwiki.toml"
     try:
@@ -982,7 +1014,12 @@ def _specification_policy(binding, domain: str) -> tuple[str, str]:
         pass
     if binding.specification_mode != "optional":
         source = "project"
-    return binding.specification_mode, source
+    return binding.specification_mode, source, False
+
+
+def _specification_policy(binding, domain: str) -> tuple[str, str]:
+    mode, source, _suppressed = _specification_policy_details(binding, domain)
+    return mode, source
 
 
 def _specification_binding(binding, domain: str):
@@ -991,7 +1028,7 @@ def _specification_binding(binding, domain: str):
 
 
 def _specification_status_domain(binding, domain: str) -> dict[str, object]:
-    mode, source = _specification_policy(binding, domain)
+    mode, source, suppressed = _specification_policy_details(binding, domain)
     result: dict[str, object] = {
         "domain": domain,
         "mode": mode,
@@ -1000,6 +1037,8 @@ def _specification_status_domain(binding, domain: str) -> dict[str, object]:
         "scenarios": 0,
         "bindings": 0,
     }
+    if suppressed:
+        result["project_mode_suppressed"] = True
     if mode == "disabled":
         return result
     try:
@@ -2847,6 +2886,7 @@ def wiki_write_page(
         scope_error = base.write_scope_error(bind, valid_domain)
         if scope_error:
             return scope_error
+        bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         if valid_domain not in store.list_domains():
             return {
@@ -3409,6 +3449,7 @@ def wiki_update_page(
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
+        bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         page = store.read_page(valid_domain, slug)
         if page is None:
@@ -3666,6 +3707,7 @@ def wiki_insert_section(
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
+        bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         page = store.read_page(valid_domain, slug)
         if page is None:
@@ -3882,6 +3924,7 @@ def wiki_delete_section(
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
+        bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         page = store.read_page(valid_domain, slug)
         if page is None:
@@ -4042,6 +4085,7 @@ def wiki_move_section(
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
+        bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         page = store.read_page(valid_domain, slug)
         if page is None:
@@ -4203,7 +4247,9 @@ def wiki_delete_page(
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
-        return _postgres_store_for_binding(bind).delete_page(
+        return _postgres_store_for_binding(
+            _specification_binding(bind, valid_domain)
+        ).delete_page(
             valid_domain, slug, expected_revision
         )
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
@@ -4298,7 +4344,9 @@ def wiki_index(domain: str | None = None) -> dict:
         scope_error = base.write_scope_error(bind, valid_domain)
         if scope_error:
             return scope_error
-        return _postgres_store_for_binding(bind).index_domain(valid_domain)
+        return _postgres_store_for_binding(
+            _specification_binding(bind, valid_domain)
+        ).index_domain(valid_domain)
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
         return scope_error
@@ -4467,10 +4515,27 @@ def _wiki_bind(
     read: list[str] | None = None,
     write: list[str] | None = None,
     primary: str | None = None,
+    specification_mode: Literal["disabled", "optional", "strict"] | None = None,
 ) -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
         global _LOCAL_POSTGRES_BINDING
+        if specification_mode is not None and (
+            type(specification_mode) is not str
+            or specification_mode not in _SPECIFICATION_MODE_RANK
+        ):
+            return {
+                "error": "specification mode is invalid",
+                "hint": "use disabled, optional, or strict",
+            }
+        session = _SESSION_BINDING.get()
+        if specification_mode is not None and not isinstance(
+            session, _HostedBindingState
+        ):
+            return {
+                "error": "specification mode requires a hosted session",
+                "hint": "omit specification_mode for local PostgreSQL stdio",
+            }
         valid_read = (
             list(bind.read)
             if read is None
@@ -4528,8 +4593,12 @@ def _wiki_bind(
             read=tuple(dict.fromkeys(valid_read)),
             write=tuple(dict.fromkeys(valid_write)),
             primary=valid_primary,
+            project_specification_mode=(
+                bind.project_specification_mode
+                if specification_mode is None
+                else specification_mode
+            ),
         )
-        session = _SESSION_BINDING.get()
         if isinstance(session, _HostedBindingState):
             session.set(narrowed)
         elif session is not None:
@@ -4559,12 +4628,23 @@ def wiki_bind(
     read: list[str] | None = None,
     write: list[str] | None = None,
     primary: str | None = None,
+    specification_mode: Literal["disabled", "optional", "strict"] | None = None,
 ) -> dict:
     session = _SESSION_BINDING.get()
     if isinstance(session, _HostedBindingState):
         with session.locked():
-            return _wiki_bind(read=read, write=write, primary=primary)
-    return _wiki_bind(read=read, write=write, primary=primary)
+            return _wiki_bind(
+                read=read,
+                write=write,
+                primary=primary,
+                specification_mode=specification_mode,
+            )
+    return _wiki_bind(
+        read=read,
+        write=write,
+        primary=primary,
+        specification_mode=specification_mode,
+    )
 
 
 @_safe

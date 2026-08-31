@@ -38,6 +38,27 @@ def _binding(tmp_path, mode="optional"):
     )
 
 
+def _hosted_binding(tmp_path, project_mode=None):
+    local = _binding(tmp_path)
+    return server.base.PostgresBinding(
+        host="db.invalid",
+        port=5432,
+        database="wiki",
+        user="iwiki",
+        sslmode="require",
+        password="secret",
+        iwiki_id="wiki-a",
+        read=("docs", "shared"),
+        write=("docs", "shared"),
+        primary="docs",
+        project_dir=local.project_dir,
+        embed_model="fixture",
+        embed_dimensions=3,
+        rerank_model="",
+        project_specification_mode=project_mode,
+    )
+
+
 def _projection():
     page = PageSnapshot(
         slug="specification/status",
@@ -438,5 +459,83 @@ def test_hosted_policy_uses_exact_override_then_default_without_mutation(
             "optional", "hosted_default"
         )
         assert policy.default_mode == "optional"
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+
+def test_hosted_project_mode_tightens_default_per_domain(tmp_path, monkeypatch):
+    from iwiki_mcp.postgres.config import (
+        HostedSpecificationsConfig,
+        SpecificationOverride,
+    )
+
+    binding = _hosted_binding(tmp_path, project_mode="strict")
+    policy = HostedSpecificationsConfig(
+        default_mode="optional",
+        overrides=(SpecificationOverride("wiki-a", "docs", "disabled"),),
+    )
+    monkeypatch.setattr(server, "_HOSTED_SPECIFICATIONS", policy, raising=False)
+    token = server._SESSION_BINDING.set(binding)
+    try:
+        assert server._specification_policy(binding, "docs") == (
+            "disabled", "hosted_override"
+        )
+        assert server._specification_policy(binding, "shared") == (
+            "strict", "project"
+        )
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+
+def test_hosted_project_mode_cannot_weaken_default(tmp_path, monkeypatch):
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig
+
+    binding = _hosted_binding(tmp_path, project_mode="disabled")
+    monkeypatch.setattr(
+        server,
+        "_HOSTED_SPECIFICATIONS",
+        HostedSpecificationsConfig(default_mode="strict"),
+        raising=False,
+    )
+    token = server._SESSION_BINDING.set(binding)
+    try:
+        status = server._specification_status_domain(binding, "docs")
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert status["mode"] == "strict"
+    assert status["source"] == "hosted_default"
+    assert status["project_mode_suppressed"] is True
+
+
+def test_hosted_server_switch_suppresses_project_mode(tmp_path, monkeypatch):
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig
+
+    binding = _hosted_binding(tmp_path, project_mode="strict")
+    monkeypatch.setattr(
+        server,
+        "_HOSTED_SPECIFICATIONS",
+        HostedSpecificationsConfig(allow_project_mode=False),
+        raising=False,
+    )
+    token = server._SESSION_BINDING.set(binding)
+    try:
+        status = server._specification_status_domain(binding, "shared")
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert status["mode"] == "optional"
+    assert status["source"] == "hosted_default"
+    assert status["project_mode_suppressed"] is True
+
+
+def test_hosted_project_mode_precedes_built_in_default(tmp_path, monkeypatch):
+    binding = _hosted_binding(tmp_path, project_mode="strict")
+    monkeypatch.setattr(server, "_HOSTED_SPECIFICATIONS", None, raising=False)
+    token = server._SESSION_BINDING.set(binding)
+    try:
+        assert server._specification_policy(binding, "docs") == (
+            "strict", "project"
+        )
     finally:
         server._SESSION_BINDING.reset(token)

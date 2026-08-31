@@ -121,6 +121,7 @@ class SpecificationOverride:
 @dataclass(frozen=True)
 class HostedSpecificationsConfig:
     default_mode: SpecificationMode = "optional"
+    allow_project_mode: bool = True
     overrides: tuple[SpecificationOverride, ...] | list[SpecificationOverride] = ()
     _mode_by_pair: Mapping[tuple[str, str], SpecificationMode] = field(
         init=False, repr=False, compare=False
@@ -128,6 +129,8 @@ class HostedSpecificationsConfig:
 
     def __post_init__(self) -> None:
         default_mode = _specification_mode(self.default_mode)
+        if type(self.allow_project_mode) is not bool:
+            raise ConfigError("specification allow_project_mode is invalid")
         if not isinstance(self.overrides, (tuple, list)):
             raise ConfigError("specification overrides must be an array")
         overrides = tuple(self.overrides)
@@ -151,11 +154,12 @@ class HostedSpecificationsConfig:
     def from_mapping(cls, config: Mapping[str, Any]) -> "HostedSpecificationsConfig":
         if not isinstance(config, Mapping):
             raise ConfigError("specification configuration must be a table")
-        if set(config) - {"default_mode", "overrides"}:
+        if set(config) - {"default_mode", "allow_project_mode", "overrides"}:
             raise ConfigError(
                 "specification configuration contains keys that are not allowed"
             )
         default_mode = _specification_mode(config.get("default_mode", "optional"))
+        allow_project_mode = config.get("allow_project_mode", True)
         raw_overrides = config.get("overrides", [])
         if not isinstance(raw_overrides, list):
             raise ConfigError("specification overrides must be an array")
@@ -175,7 +179,11 @@ class HostedSpecificationsConfig:
                     mode=raw_override.get("mode"),
                 )
             )
-        return cls(default_mode=default_mode, overrides=tuple(overrides))
+        return cls(
+            default_mode=default_mode,
+            allow_project_mode=allow_project_mode,
+            overrides=tuple(overrides),
+        )
 
 
 @dataclass(frozen=True)

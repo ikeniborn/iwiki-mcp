@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Итог chain: specification-mode-gwt-parameters</title>
+  <style>
+    :root {
+      --bg: #f6f7fb; --surface: #ffffff; --fg: #2b2b3a; --muted: #6b6b80;
+      --accent: #5c6bc0; --accent-2: #3949ab; --border: #d6d8e6;
+      --line: #9aa0b4; --zebra: #eef0f8; --ok: #43a047; --ok-2: #2e7d32;
+      --warn: #fb8c00; --warn-2: #ef6c00; --danger: #e53935;
+      --danger-2: #c62828; --shadow: rgba(40, 40, 80, .18);
+    }
+    body:has(#theme-toggle:checked) {
+      --bg: #181825; --surface: #262637; --fg: #cdd6f4; --muted: #a6adc8;
+      --accent: #89b4fa; --accent-2: #5e95f0; --border: #3a3b52;
+      --line: #6c7086; --zebra: #21222f; --ok: #a6e3a1; --ok-2: #74c46e;
+      --warn: #f9e2af; --warn-2: #f5c95b; --danger: #f38ba8;
+      --danger-2: #e8638a; --shadow: rgba(0, 0, 0, .45);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0 auto; padding: 1.5rem 2rem 4rem; max-width: 1180px;
+      font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent),
+        var(--bg);
+      color: var(--fg); transition: background .3s, color .3s;
+    }
+    h1, h2, h3 { line-height: 1.2; }
+    h1 { margin-bottom: .35rem; font-size: clamp(1.8rem, 4vw, 3rem); }
+    h2 { margin-top: 2.4rem; padding-bottom: .35rem; border-bottom: 1px solid var(--border); }
+    h3 { margin-top: 1.6rem; color: var(--accent-2); }
+    code {
+      padding: .08rem .3rem; border-radius: 4px;
+      background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+      color: var(--fg); overflow-wrap: anywhere;
+    }
+    a { color: var(--accent-2); }
+    .theme-btn {
+      position: sticky; top: .5rem; z-index: 10; float: right; cursor: pointer;
+      user-select: none; padding: .35rem .7rem; border: 1px solid var(--border);
+      border-radius: 8px; background: var(--surface); box-shadow: 0 2px 10px var(--shadow);
+    }
+    .lead { font-size: 1.1rem; max-width: 850px; }
+    .sub { color: var(--muted); font-size: .93rem; }
+    .toc { display: flex; flex-wrap: wrap; gap: .45rem; margin: 1.2rem 0; }
+    .toc a {
+      text-decoration: none; padding: .3rem .65rem; border: 1px solid var(--border);
+      border-radius: 999px; background: var(--surface);
+    }
+    .hero, .card, .note, details {
+      background: var(--surface); border: 1px solid var(--border);
+      box-shadow: 0 2px 12px var(--shadow);
+    }
+    .hero { padding: 1.2rem 1.4rem; border-radius: 14px; margin: 1.25rem 0; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: .8rem; }
+    .card { padding: .85rem 1rem; border-radius: 10px; }
+    .card b { display: block; color: var(--accent-2); margin-bottom: .25rem; }
+    .metric { font-size: 1.45rem; font-weight: 750; color: var(--ok-2); }
+    .note {
+      border-left: 4px solid var(--accent); padding: .7rem 1rem; margin: 1rem 0;
+      border-radius: 0 8px 8px 0;
+      background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+    }
+    .warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 9%, var(--surface)); }
+    .ok { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 9%, var(--surface)); }
+    .badge {
+      display: inline-block; font-size: .75rem; font-weight: 700; padding: .1rem .55rem;
+      border-radius: 999px; border: 1px solid var(--border); white-space: nowrap;
+    }
+    .badge.ok { color: var(--ok-2); border-color: var(--ok); background: transparent; }
+    .badge.warn { color: var(--warn-2); border-color: var(--warn); background: transparent; }
+    .badge.na { color: var(--muted); }
+    .rpt-table {
+      border-collapse: separate; border-spacing: 0; width: 100%; background: var(--surface);
+      margin: 1rem 0; font-size: .91rem; border: 1px solid var(--border);
+      border-radius: 10px; overflow: hidden; box-shadow: 0 2px 12px var(--shadow);
+    }
+    .rpt-table th, .rpt-table td {
+      border-bottom: 1px solid var(--border); padding: .55rem .7rem; text-align: left; vertical-align: top;
+    }
+    .rpt-table tbody tr:last-child td { border-bottom: none; }
+    .rpt-table thead th { background: var(--accent); color: var(--bg); }
+    .rpt-table tbody tr:nth-child(even) { background: var(--zebra); }
+    .rpt-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+    .rpt-flow { display: flex; align-items: stretch; margin: 1rem 0; flex-wrap: wrap; }
+    .rpt-flow .node {
+      flex: 1 1 145px; min-width: 130px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 9px; padding: .7rem .8rem; box-shadow: 0 1px 7px var(--shadow);
+    }
+    .rpt-flow .node b { display: block; color: var(--accent-2); }
+    .rpt-flow .arrow { flex: 0 0 2.2rem; align-self: center; height: 2px; background: var(--line); position: relative; }
+    .rpt-flow .arrow::after {
+      content: ""; position: absolute; right: 0; top: -4px; border: 5px solid transparent;
+      border-left-color: var(--line);
+    }
+    .rpt-c4 .boundary {
+      border: 1.6px dashed var(--accent); border-radius: 12px; padding: 1.8rem 1rem 1rem;
+      margin: .8rem 0; position: relative; display: flex; flex-wrap: wrap; gap: .7rem;
+      background: color-mix(in srgb, var(--accent) 5%, transparent);
+    }
+    .rpt-c4 .boundary::before {
+      content: attr(data-label); position: absolute; top: -.7rem; left: .9rem;
+      background: var(--bg); padding: 0 .45rem; font-size: .8rem;
+      color: var(--accent); font-weight: 650;
+    }
+    .rpt-c4 .comp {
+      flex: 1 1 180px; background: var(--surface); border: 1px solid var(--border);
+      border-left: 4px solid var(--accent); border-radius: 8px; padding: .65rem .85rem;
+      box-shadow: 0 1px 6px var(--shadow);
+    }
+    .rpt-c4 .comp b { color: var(--accent-2); }
+    details { border-radius: 9px; padding: .75rem 1rem; margin: .7rem 0; }
+    details summary { cursor: pointer; font-weight: 650; color: var(--accent-2); }
+    details[open] summary { margin-bottom: .6rem; }
+    .rpt-target:target { outline: 2px solid var(--accent); animation: flash .8s ease-out; }
+    @keyframes flash { from { background: var(--accent); } to { background: transparent; } }
+    .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: .9rem; }
+    .status-line { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    .tight { margin: .4rem 0; padding-left: 1.25rem; }
+    .tight li { margin: .25rem 0; }
+    footer { margin-top: 2.5rem; color: var(--muted); font-size: .88rem; }
+    @media (max-width: 720px) {
+      body { padding: 1rem 1rem 3rem; }
+      .rpt-flow { gap: .45rem; }
+      .rpt-flow .arrow { flex-basis: 1rem; }
+      .rpt-table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <input type="checkbox" id="theme-toggle" hidden>
+  <label for="theme-toggle" class="theme-btn" title="Переключить тёмную или светлую тему">🌙 / ☀️</label>
+
+  <header>
+    <p class="sub">Финальный отчёт IDD→SDD · режим <code>chain</code> · источник <code>intent</code></p>
+    <h1>Проектные GWT-параметры specification mode</h1>
+    <p class="lead">Проектный режим теперь действует только в текущей hosted HTTP-сессии, разрешается отдельно для каждого домена и не меняет политику других проектов.</p>
+    <div class="status-line">
+      <span class="badge ok">result: OK</span>
+      <span class="badge ok">проверка кода: без блокеров</span>
+      <span class="badge ok">lifecycle: done</span>
+      <span class="badge na">spec: n/a</span>
+      <span class="badge na">plan: n/a</span>
+    </div>
+    <nav class="toc" aria-label="Разделы отчёта">
+      <a href="#summary">Обзор</a><a href="#sources">Источники</a><a href="#intent">intent</a>
+      <a href="#spec">spec</a><a href="#plan">plan</a><a href="#result">result</a>
+      <a href="#inventory">Изменения</a><a href="#review">Проверка кода</a>
+      <a href="#verification">Проверки</a><a href="#documentation">Документация</a>
+      <a href="#verdict">Вердикт</a>
+    </nav>
+  </header>
+
+  <main>
+    <section id="summary" class="rpt-target">
+      <h2>Итоговый обзор</h2>
+      <div class="hero">
+        <div class="cards">
+          <div class="card"><b>Тема</b><code>specification-mode-gwt-parameters</code></div>
+          <div class="card"><b>Ветка</b><code>dev-specification-mode-gwt-parameters</code></div>
+          <div class="card"><b>Коммит реализации</b><code>2f6036b</code></div>
+          <div class="card"><b>Версия отчёта</b><code>0.7.225</code></div>
+          <div class="card"><b>Intent hash</b><code>d7d7ae6ed589ff4a</code></div>
+          <div class="card"><b>Результат</b><span class="metric">OK</span></div>
+        </div>
+      </div>
+      <div class="note ok"><b>Главный эффект:</b> оператору больше не нужно менять одно server-side значение для всех доменов, чтобы включить более строгий режим одного проекта.</div>
+    </section>
+
+    <section id="sources" class="rpt-target">
+      <h2>Якоря источников</h2>
+      <table class="rpt-table">
+        <thead><tr><th>Источник</th><th>Роль</th><th>Состояние</th></tr></thead>
+        <tbody>
+          <tr><td><code>docs/superpowers/intents/2026-08-31-specification-mode-gwt-parameters-intent.md</code></td><td>Выбранный источник требований и <code>result_check</code></td><td><span class="badge ok">approved / OK</span></td></tr>
+          <tr><td><code>reference/specification-mode-project-precedence</code></td><td>Исходная Wiki-спецификация precedence и GWT-сценариев</td><td><span class="badge ok">учтён</span></td></tr>
+          <tr><td><code>reference/tasks/specification-mode-gwt-parameters</code></td><td>Авторитетный lifecycle, evidence и changelog</td><td><span class="badge ok">done</span></td></tr>
+          <tr><td><code>reference/task-history/specification-mode-gwt-parameters-001</code></td><td>Ограниченный журнал событий задачи</td><td><span class="badge ok">актуален</span></td></tr>
+          <tr><td><code>2f6036bc70cd0c84edeb7b07178cf60fb0f1fd61</code></td><td>Изменения реализации</td><td><span class="badge ok">зафиксирован</span></td></tr>
+          <tr><td><code>34b579f</code></td><td>Выбор проектного режима и пример project config</td><td><span class="badge ok">зафиксирован</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="intent" class="rpt-target">
+      <h2>intent</h2>
+      <h3>Цепочка результатов</h3>
+      <figure class="rpt-flow" aria-label="Цепочка результатов intent">
+        <div class="node"><b>Проблема</b>Проектный режим игнорировался hosted-сервером.</div><div class="arrow"></div>
+        <div class="node"><b>Перенос параметра</b><code>wiki_bind.specification_mode</code> в состоянии сессии.</div><div class="arrow"></div>
+        <div class="node"><b>Политика</b>Приоритеты и tighten-only разрешаются per-domain.</div><div class="arrow"></div>
+        <div class="node"><b>Результат</b>Один проект не меняет режим других сессий.</div>
+      </figure>
+
+      <h3>Матрица ограничений</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Ограничение</th><th>Реализация</th><th>Свидетельство</th></tr></thead>
+        <tbody>
+          <tr><td>Точный override всегда сильнее</td><td>Первый уровень policy resolver</td><td><code>test_hosted_project_mode_tightens_default_per_domain</code></td></tr>
+          <tr><td>Проект не ослабляет default</td><td>Ранжирование <code>disabled &lt; optional &lt; strict</code></td><td><code>project_mode_suppressed: true</code></td></tr>
+          <tr><td>Server может отключить tier</td><td><code>allow_project_mode = false</code></td><td>Config и status tests</td></tr>
+          <tr><td>Нет persistence</td><td>Поле только в <code>_HostedBindingState</code></td><td>Миграция отсутствует</td></tr>
+          <tr><td>Invalid bind не меняет state</td><td>Валидация до lookup и mutation</td><td>Rollback test</td></tr>
+          <tr><td>Локальное поведение неизменно</td><td>Git/SQLite прежние; local PostgreSQL отклоняет hosted-only параметр</td><td>Тесты совместимости и проверка кода</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Карта автономии</h3>
+      <div class="cards">
+        <div class="card"><b>Полная</b>Целевые тесты, узкие изменения кода/документации, patch bump.</div>
+        <div class="card"><b>Контролируемая</b><code>wiki_bind</code>, session state, config и resolver — только внутри intent.</div>
+        <div class="card"><b>Сначала согласование</b>Изменение precedence, accepted values или scope.</div>
+        <div class="card"><b>Запрещено</b>Persistence, global project state, ослабление server policy.</div>
+      </div>
+
+      <h3>Карта контекста</h3>
+      <figure class="rpt-c4" aria-label="Контекст hosted specification policy">
+        <div class="boundary" data-label="Проект и hosted runtime">
+          <div class="comp"><b>.iwiki.toml</b><br><span class="sub">источник project mode у клиента</span></div>
+          <div class="boundary" data-label="Hosted HTTP session">
+            <div class="comp"><b>wiki_bind</b><br><span class="sub">валидация и session carrier</span></div>
+            <div class="comp"><b>policy resolver</b><br><span class="sub">exact / project / default</span></div>
+            <div class="comp"><b>domain store</b><br><span class="sub">effective mode для mutation/index</span></div>
+          </div>
+          <div class="comp"><b>server.toml</b><br><span class="sub">default, switch и exact overrides</span></div>
+          <div class="comp"><b>wiki_status</b><br><span class="sub">источник и подавление</span></div>
+        </div>
+      </figure>
+      <div class="note"><b>Stop rules:</b> реализация не ослабляет server policy, не делит state между сессиями и не добавляет persistent storage.</div>
+    </section>
+
+    <section id="spec" class="rpt-target">
+      <h2>spec <span class="badge na">n/a</span></h2>
+      <p>Продолжение <code>execute</code> выбрано после успешного intent-gate. Отдельный SDD spec не создавался; синтетические требования и диаграммы здесь намеренно отсутствуют.</p>
+    </section>
+
+    <section id="plan" class="rpt-target">
+      <h2>plan <span class="badge na">n/a</span></h2>
+      <p>Формальный plan не создавался: реализация и verification были ограничены утверждённым intent. Синтетические шаги и plan-диаграммы намеренно отсутствуют.</p>
+    </section>
+
+    <section id="result" class="rpt-target">
+      <h2>result</h2>
+      <h3>Граф сверки diff</h3>
+      <figure class="rpt-flow" aria-label="Сверка diff с intent">
+        <div class="node"><b>Intent</b>6 health metrics<br>8 hard constraints</div><div class="arrow"></div>
+        <div class="node"><b>Изменения</b>Hosted-сессия, config, resolver, enforcement, документация, тесты</div><div class="arrow"></div>
+        <div class="node"><b>Проверка кода</b>0 критических<br>0 важных<br>2 мелких исправлено</div><div class="arrow"></div>
+        <div class="node"><b>Проверка результата</b><code>result_check.verdict = OK</code></div>
+      </figure>
+
+      <h3>Карта свидетельств результатов</h3>
+      <table class="rpt-table">
+        <thead><tr><th>Ожидаемый результат</th><th>Полученный результат</th><th>Свидетельство</th></tr></thead>
+        <tbody>
+          <tr><td>Проектный режим действует только в текущей сессии</td><td>Режим хранится в выбранном hosted binding</td><td>Две независимые <code>_HostedBindingState</code></td></tr>
+          <tr><td>Другие проекты не меняются</td><td>Нет global mutation и persistence</td><td>Session isolation test</td></tr>
+          <tr><td>Точный override сохраняет приоритет</td><td>Точная пара проверяется до project tier</td><td>Тест per-domain приоритета</td></tr>
+          <tr><td>Проект не ослабляет политику сервера</td><td>Более слабый режим подавлен</td><td>Тест подавления статуса</td></tr>
+          <tr><td>Strict реально блокирует mutation</td><td>Effective binding передаётся каждому store path</td><td>6 mutations + <code>wiki_index</code> coverage</td></tr>
+          <tr><td>Omitted parameter совместим</td><td>Предыдущее hosted behavior сохранено</td><td>Existing matrix tests</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Карта лишнего и пропусков</h3>
+      <div class="two-col">
+        <div class="card"><b>Лишние изменения</b><span class="badge ok">нет</span><p>Task diff ограничен project config, carrier, policy, enforcement, tests, docs и обязательным version bump.</p></div>
+        <div class="card"><b>Пропуски intent</b><span class="badge ok">нет</span><p>Результаты, ограничения, статус, совместимость и откат покрыты.</p></div>
+      </div>
+      <div class="note warn"><b>Независимые исключения:</b> полный pytest выявил inotify budget, 20k codegraph scale runtime и order-sensitive codegraph failures. Production codegraph файлы не менялись; ограничения сохранены в task evidence, а не скрыты.</div>
+
+      <h3>Карта распространения решений</h3>
+      <figure class="rpt-flow" aria-label="Распространение project specification mode">
+        <div class="node"><b>Агент проекта</b>читает <code>[specifications].mode</code></div><div class="arrow"></div>
+        <div class="node"><b>wiki_bind</b>проверяет enum и hosted context</div><div class="arrow"></div>
+        <div class="node"><b>Session state</b>изолирует project declaration</div><div class="arrow"></div>
+        <div class="node"><b>Per-domain resolver</b>применяет precedence</div><div class="arrow"></div>
+        <div class="node"><b>Хранилище/статус</b>исполняет и показывает effective mode</div>
+      </figure>
+      <p class="sub">Карта процесса delivery не добавлена: workflow, hook order и approval flow продукта не менялись; архитектурная схема выше точнее показывает изменённую runtime-границу.</p>
+    </section>
+
+    <section id="inventory" class="rpt-target">
+      <h2>Карта изменений</h2>
+      <table class="rpt-table">
+        <thead><tr><th>Артефакт</th><th>Конкретное изменение и причина</th><th>Результат и evidence</th></tr></thead>
+        <tbody>
+          <tr><td><code>src/iwiki_mcp/server.py</code></td><td>Добавлены hosted bind parameter, session carrier, детали приоритетов, статус подавления и per-domain scoping хранилища.</td><td>Проектный режим применяется без global mutation; целевые тесты.</td></tr>
+          <tr><td><code>src/iwiki_mcp/storage.py</code></td><td><code>PostgresBinding</code> получил неперсистентное project-mode поле.</td><td>Явный typed carrier только в runtime.</td></tr>
+          <tr><td><code>src/iwiki_mcp/postgres/config.py</code></td><td>Добавлен строгий bool <code>allow_project_mode</code>.</td><td>Оператор может отключить project tier.</td></tr>
+          <tr><td><code>tests/postgres/test_config.py</code></td><td>Проверены default, false и invalid switch values.</td><td>Config contract защищён.</td></tr>
+          <tr><td><code>tests/postgres/test_tool_matrix.py</code></td><td>Проверены schema enum, rollback, hosted/local boundary, две сессии и все mutation/index paths.</td><td>Прямое GWT coverage.</td></tr>
+          <tr><td><code>tests/test_specification_status_lint.py</code></td><td>Проверены приоритеты exact/project/default и подавление.</td><td>Per-domain политика доказана.</td></tr>
+          <tr><td><code>README.md</code></td><td>Описаны hosted-only параметр, приоритеты, switch и статус.</td><td>Контракт для операторов синхронизирован.</td></tr>
+          <tr><td><code>docs/README.ru.md</code></td><td>Русская документация получила тот же контракт.</td><td>Локализованная инструкция синхронизирована.</td></tr>
+          <tr><td><code>docs/architecture.md</code></td><td>Зафиксирована runtime policy boundary и per-domain resolution.</td><td>Архитектурное решение документировано.</td></tr>
+          <tr><td><code>docs/superpowers/intents/2026-08-31-specification-mode-gwt-parameters-intent.md</code></td><td>Утверждены chain/execute и persisted <code>result_check</code>.</td><td>Intent и result verdict трассируемы.</td></tr>
+          <tr><td><code>docs/profiles/specification-mode-gwt-parameters.yaml</code></td><td>Создан topic profile маршрута <code>engineering</code>.</td><td>Chain execution profile зафиксирован.</td></tr>
+          <tr><td><code>.iwiki.toml</code></td><td>Проектный specification mode выбран на уровне проекта.</td><td>Hosted bind получает значение без global server change.</td></tr>
+          <tr><td><code>.iwiki.toml.example</code></td><td>Добавлен безопасный пример project binding, GWT policy и codegraph settings без секретов.</td><td>Проектный параметр доступен пользователям как явный шаблон.</td></tr>
+          <tr><td><code>pyproject.toml</code></td><td>Patch version обновлён до <code>0.7.225</code>.</td><td>Repository change versioned.</td></tr>
+          <tr><td><code>src/iwiki_mcp/__init__.py</code></td><td>Версия runtime синхронизирована с метаданными пакета.</td><td>Version API согласован.</td></tr>
+          <tr><td><code>tests/test_package.py</code></td><td>Version assertion обновлён до <code>0.7.225</code>.</td><td>Version drift проверяется тестом.</td></tr>
+          <tr><td><code>uv.lock</code></td><td>Locked editable package version синхронизирован.</td><td>Reproducible metadata согласована.</td></tr>
+          <tr><td><code>docs/superpowers/reports/specification-mode-gwt-parameters-results.html</code></td><td>Добавлен этот автономный итоговый chain-отчёт.</td><td>Offline-просмотр доступен одним файлом.</td></tr>
+          <tr><td><code>base-binding</code> и <code>concept/bdd-event-sourcing-specifications</code></td><td>Wiki обновлена через CAS: hosted-only, precedence, guard, per-domain behavior.</td><td>Wiki lint по task страницам чист.</td></tr>
+          <tr><td><code>reference/tasks/…</code> и <code>reference/task-history/…</code></td><td>Жизненный цикл, проверка кода, проверки, result и события отчёта сохранены.</td><td>Авторитетный журнал завершён после поставки.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="review" class="rpt-target">
+      <h2>Карта замечаний code review</h2>
+      <table class="rpt-table">
+        <thead><tr><th>Уровень</th><th>Замечание</th><th>Исправление</th><th>Итог</th></tr></thead>
+        <tbody>
+          <tr><td>Критическое</td><td>Нет</td><td>Не требуется</td><td><span class="badge ok">0</span></td></tr>
+          <tr><td>Важное</td><td>Нет</td><td>Не требуется</td><td><span class="badge ok">0</span></td></tr>
+          <tr><td>Мелкое</td><td>Локальный PostgreSQL мог принять неработающий hosted-only параметр.</td><td>Добавлен явный отказ и документация.</td><td><span class="badge ok">исправлено</span></td></tr>
+          <tr><td>Мелкое</td><td>Не хватало прямых тестов всех mutation/index путей и двух сессий.</td><td>Добавлены параметризованные тесты и тесты изоляции.</td><td><span class="badge ok">исправлено</span></td></tr>
+          <tr><td>Повторная проверка</td><td>Повторная проверка только для чтения.</td><td>Новых блокирующих замечаний не найдено.</td><td><span class="badge ok">готово</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="verification" class="rpt-target">
+      <h2>Карта проверок</h2>
+      <div class="cards">
+        <div class="card"><b>Целевой набор</b><span class="metric">190 успешно</span><br><span class="sub">1 исключён</span></div>
+        <div class="card"><b>Широкий набор без codegraph</b><span class="metric">1785 успешно</span><br><span class="sub">214 пропущено</span></div>
+        <div class="card"><b>Первый обычный прогон</b><span class="metric">2905 успешно</span><br><span class="sub">214 пропущено · 1 исключён</span></div>
+        <div class="card"><b>Статика и запуск</b><span class="metric">OK</span><br><span class="sub">compileall · справка CLI · проверка diff</span></div>
+      </div>
+      <details>
+        <summary>Команды и наблюдаемый результат</summary>
+        <ul class="tight">
+          <li><code>uv run python -m compileall -q src/iwiki_mcp</code> — успешно.</li>
+          <li><code>uv run pytest -q -m 'not postgres_integration' …</code> — 190 passed, 1 deselected.</li>
+          <li><code>uv run pytest -q --ignore=tests/codegraph --ignore=tests/eval</code> — 1785 passed, 214 skipped.</li>
+          <li><code>uv run iwiki-mcp --help</code> — console entry point запускается.</li>
+          <li><code>git diff --check</code> — whitespace errors отсутствуют.</li>
+        </ul>
+      </details>
+      <div class="note warn"><b>Полный pytest:</b> не заявлен зелёным. Первый запуск остановлен на независимом 20k scale test после 35 минут; зафиксирован unrelated inotify failure. Повтор показал order-sensitive codegraph failures. Эти ограничения не относятся к изменённым GWT-модулям.</div>
+    </section>
+
+    <section id="documentation" class="rpt-target">
+      <h2>Карта документационных свидетельств</h2>
+      <table class="rpt-table">
+        <thead><tr><th>Поверхность</th><th>Что подтверждено</th><th>Проверка</th></tr></thead>
+        <tbody>
+          <tr><td><code>README.md</code></td><td>Контракт hosted bind, приоритеты, switch, подавление.</td><td>Повторная проверка формулировок</td></tr>
+          <tr><td><code>docs/README.ru.md</code></td><td>Тот же контракт на русском.</td><td>Синхронный diff</td></tr>
+          <tr><td><code>docs/architecture.md</code></td><td>Session carrier и per-domain resolver boundary.</td><td>Architecture inventory</td></tr>
+          <tr><td><code>base-binding</code></td><td>Hosted HTTP-only parameter и local stdio reject.</td><td>CAS revision 9</td></tr>
+          <tr><td><code>concept/bdd-event-sourcing-specifications</code></td><td>Mode matrix, guard и status behavior.</td><td>CAS revision 10</td></tr>
+          <tr><td>Журнал задачи</td><td>Жизненный цикл, проверка кода, свидетельства, result и поставка отчёта.</td><td>Целевой Wiki lint: findings отсутствуют</td></tr>
+        </tbody>
+      </table>
+      <div class="note"><b>Code graph:</b> hosted snapshot доступен read-only, но stale относительно Wiki change token. Hosted server не имеет checkout, поэтому <code>wiki_code_index</code> намеренно не запускался.</div>
+    </section>
+
+    <section id="verdict" class="rpt-target">
+      <h2>Финальный вердикт</h2>
+      <div class="hero">
+        <p class="metric">OK</p>
+        <p>Утверждённый intent выполнен. Проектный specification mode изолирован hosted-сессией, приоритеты сервера сохраняются, mutation enforcement получает effective per-domain mode, некорректный ввод не меняет binding. Блокирующие замечания проверки кода отсутствуют, документация и Wiki синхронизированы.</p>
+        <p class="sub"><code>result_check.intent_hash = d7d7ae6ed589ff4a</code> · <code>reviewed = true</code> · <code>docs_checked = true</code></p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Автономный offline-отчёт · внешние зависимости отсутствуют · тема переключается без JavaScript · сформирован 2026-08-31
+  </footer>
+</body>
+</html>

@@ -908,7 +908,9 @@ unchanged:
 ```
 
 PostgreSQL `wiki_bind` remains session-only: it may narrow the configured maximum
-scope but never changes `.iwiki.toml`. `wiki_create_domain` may bootstrap an empty
+scope. In a hosted HTTP session it can also carry the project's
+`[specifications].mode` as `specification_mode`; local PostgreSQL stdio rejects that
+parameter. It never changes `.iwiki.toml` or persists the mode. `wiki_create_domain` may bootstrap an empty
 missing Git domain outside the current write list; it creates no page, index, or
 log. Add that domain to `.iwiki.toml` manually before writing to it.
 
@@ -930,6 +932,7 @@ Hosted PostgreSQL reads operator policy from server TOML:
 ```toml
 [specifications]
 default_mode = "optional"
+allow_project_mode = true
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
@@ -937,9 +940,13 @@ domain = "payments"
 mode = "strict"
 ```
 
-Local policy applies to all visible domains. Hosted precedence is exact
-`(iwiki_id, domain)` override, then hosted default, then built-in `optional`; MCP calls
-and `wiki_bind` cannot change it. `disabled` stores specification pages as ordinary
+Local policy applies to all visible domains. A hosted client passes the project value
+through optional `wiki_bind.specification_mode`. Hosted precedence is exact
+`(iwiki_id, domain)` override, project mode, hosted default, then built-in `optional`.
+The project tier applies only when it is at least as strict as the hosted default and
+`allow_project_mode` is true; otherwise `wiki_status` reports
+`project_mode_suppressed: true`. The value is session-scoped and resolved separately for
+each bound domain. `disabled` stores specification pages as ordinary
 Markdown and disables semantic tools. `optional` stores Markdown, reports advisory
 findings, and projects only valid, complete, unique scenarios. `strict` rejects an
 invalid target specification mutation before page or projection changes.
@@ -1010,8 +1017,10 @@ Markdown plus tracked, rebuildable `<domain>/specifications.jsonl`; PostgreSQL s
 same logical projection transactionally under tenant/domain authorization. Markdown
 remains canonical in both backends.
 
-The `wiki_status` specification record contains exactly `domain`, `mode`, `source`,
-`projection_state`, `scenarios`, and `bindings`. Source is
+The `wiki_status` specification record contains `domain`, `mode`, `source`,
+`projection_state`, `scenarios`, and `bindings`, plus
+`project_mode_suppressed: true` when a received project mode is disabled by the server
+switch or rejected by the tighten-only guard. Source is
 `project | hosted_default | hosted_override | built_in_default`; projection state is
 `disabled | absent | ready | stale | failed`. The complete `wiki_lint` finding taxonomy
 is `missing_scenario`, `invalid_scenario`, `duplicate_scenario_id`,
@@ -1123,7 +1132,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
 | `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
-| `wiki_bind` | Narrow PostgreSQL scope for the current session; Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
+| `wiki_bind` | Narrow PostgreSQL scope and, in a hosted HTTP session, optionally carry project `specification_mode` (`disabled`, `optional`, or `strict`) for that session; local PostgreSQL stdio rejects this parameter, while Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
 | `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |

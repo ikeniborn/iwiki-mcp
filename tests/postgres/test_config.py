@@ -102,6 +102,19 @@ def test_hosted_specifications_default_to_optional(tmp_path):
     )
 
     assert config.specifications.mode_for("team-wiki", "payments") == "optional"
+    assert config.specifications.allow_project_mode is True
+
+
+def test_hosted_specifications_can_disable_project_mode(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
+    text = "[specifications]\nallow_project_mode = false\n" + _server_toml()
+
+    config = load_server_config(
+        _write_config(tmp_path, text), environ=_runtime_env()
+    )
+
+    assert config.specifications.allow_project_mode is False
 
 
 def test_hosted_specification_exact_pair_overrides_default(tmp_path):
@@ -194,6 +207,7 @@ def test_hosted_specifications_reject_incomplete_or_invalid_overrides(
         'specifications = "invalid"\n',
         "[specifications]\nunknown = true\n",
         "[specifications]\ndefault_mode = true\n",
+        '[specifications]\nallow_project_mode = "false"\n',
         '[specifications]\ndefault_mode = "required"\n',
         '[specifications]\noverrides = "invalid"\n',
     ],
@@ -232,6 +246,16 @@ def test_hosted_specifications_direct_constructor_rejects_invalid_default_mode(
 
     with pytest.raises(ConfigError, match="specification mode"):
         HostedSpecificationsConfig(default_mode=default_mode)
+
+
+@pytest.mark.parametrize("allow_project_mode", ["false", 0, 1, None])
+def test_hosted_specifications_direct_constructor_rejects_invalid_project_switch(
+    allow_project_mode,
+):
+    from iwiki_mcp.postgres.config import ConfigError, HostedSpecificationsConfig
+
+    with pytest.raises(ConfigError, match="allow_project_mode"):
+        HostedSpecificationsConfig(allow_project_mode=allow_project_mode)
 
 
 @pytest.mark.parametrize(

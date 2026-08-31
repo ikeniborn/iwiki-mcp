@@ -254,6 +254,7 @@ Hosted PostgreSQL loads operator policy from server TOML:
 ```toml
 [specifications]
 default_mode = "optional"
+allow_project_mode = true
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
@@ -261,8 +262,11 @@ domain = "payments"
 mode = "strict"
 ```
 
-Hosted precedence is the exact `(iwiki_id, domain)` override, hosted default, then
-built-in `optional`. `wiki_bind` cannot change this policy. Disabled mode bypasses the
+Hosted precedence is the exact `(iwiki_id, domain)` override, session-scoped project
+mode from `wiki_bind.specification_mode`, hosted default, then built-in `optional`.
+The project tier applies only when `allow_project_mode` is true and the project mode is
+at least as strict as the hosted default; resolution runs independently for every bound
+domain. Disabled mode bypasses the
 projection. Optional mode commits Markdown and reports advisory projection findings.
 Strict mode prepares a valid coherent projection before committing a target
 specification mutation; ordinary Wiki mutations bypass specification persistence.
@@ -331,8 +335,9 @@ persists evidence, and cannot expand binding, graph-publication, or tenant autho
 `wiki_status` exposes effective mode and projection state; `wiki_lint` adds independent
 specification findings without suppressing the ordinary Wiki report.
 
-The `wiki_status` specification record contains exactly `domain`, `mode`, `source`,
-`projection_state`, `scenarios`, and `bindings`. Source is
+The `wiki_status` specification record contains `domain`, `mode`, `source`,
+`projection_state`, `scenarios`, and `bindings`. A suppressed project tier adds
+`project_mode_suppressed: true`. Source is
 `project | hosted_default | hosted_override | built_in_default`; projection state is
 `disabled | absent | ready | stale | failed`. The complete `wiki_lint` finding taxonomy
 is `missing_scenario`, `invalid_scenario`, `duplicate_scenario_id`,
