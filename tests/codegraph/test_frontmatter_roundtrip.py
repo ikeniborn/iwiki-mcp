@@ -270,6 +270,13 @@ def test_invalid_code_update_skips_freshness_and_preserves_original_bytes(
     original = _authored_markdown()
     page.write_text(original, encoding="utf-8")
     monkeypatch.setattr(
+        server.cross_domain,
+        "recover_pending_transactions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery called")
+        ),
+    )
+    monkeypatch.setattr(
         server.sync,
         "ensure_fresh",
         lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),

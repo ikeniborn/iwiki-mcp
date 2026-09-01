@@ -102,6 +102,13 @@ def test_update_rejects_invalid_operation_shapes_before_freshness(
 ):
     _seed(tmp_path, monkeypatch)
     monkeypatch.setattr(
+        server.cross_domain,
+        "recover_pending_transactions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery called")
+        ),
+    )
+    monkeypatch.setattr(
         server.sync,
         "ensure_fresh",
         lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
@@ -127,6 +134,13 @@ def test_code_only_update_rejects_section_metadata_before_freshness(
     tmp_path, monkeypatch, reserved
 ):
     _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server.cross_domain,
+        "recover_pending_transactions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery called")
+        ),
+    )
     monkeypatch.setattr(
         server.sync,
         "ensure_fresh",

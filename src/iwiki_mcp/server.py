@@ -548,6 +548,10 @@ def _mutation_guard(fn):
                 if fn.__name__ != "wiki_create_domain":
                     raise
                 bind = _creation_binding()
+            if fn.__name__ == "wiki_update_page":
+                request = _prepare_update_page_call(args, kwargs)
+                if "error" in request:
+                    return request
             if _is_postgres(bind):
                 token = _MUTATION_BINDING.set(bind)
                 try:
@@ -3436,6 +3440,28 @@ _UPDATE_PAGE_OPERATION_HINT = (
     "use heading with new_body for section-only, code for code-only, "
     "or all three for a combined update"
 )
+
+
+def _prepare_update_page_call(args: tuple, kwargs: dict) -> dict:
+    """Validate one public update call before mutation-journal recovery."""
+    names = (
+        "domain", "slug", "heading", "new_body", "source", "description",
+        "status", "new_heading", "expected_revision", "expected_section_hash",
+        "code",
+    )
+    values = {name: kwargs.get(name) for name in names}
+    for name, value in zip(names, args):
+        values[name] = value
+    return _prepare_update_page_request(
+        values["heading"],
+        values["new_body"],
+        source=values["source"],
+        description=values["description"],
+        status=values["status"],
+        new_heading=values["new_heading"],
+        expected_section_hash=values["expected_section_hash"],
+        code=values["code"],
+    )
 
 
 def _prepare_update_page_request(
