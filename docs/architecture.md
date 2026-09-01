@@ -714,7 +714,8 @@ flowchart TD
 `wiki_update_page` supports three modes in the same mutation skeleton: section-only
 requires paired `heading` and `new_body` and edits one `##` section in-place
 (`section.replace_section`, which rejects an ambiguous/missing heading); code-only uses
-`code`; combined atomically performs both. The public root JSON Schema uses `anyOf` to
+`code` and preserves the page body byte-for-byte; combined atomically performs both. The
+public root JSON Schema uses `anyOf` to
 require `heading` + `new_body` or `code`, with `domain` and `slug` root-required; runtime
 validation rejects partial, no-op, or unsafe selectors before mutation. A nonempty valid
 `code` mapping completely replaces `code.symbols`, `code.files`, and `code.source_globs`;

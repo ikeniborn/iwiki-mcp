@@ -33,8 +33,9 @@ AUTHORING_RULES: str = """\
   LiteLLM URL and key. Provider failures are fail-soft and return sanitized metadata.
 - Use `wiki_write_page` for a new page and `wiki_update_page` for an existing page:
   a section-only update requires both `heading` and `new_body`; a code-only update uses
-  `code`; and a combined update atomically applies both. Code-only response omits `heading`
-  and adds no fields; section and combined responses retain `heading`. `new_heading` remains
+  `code`; and a combined update atomically applies both. A code-only update preserves the
+  page body byte-for-byte. Code-only response omits `heading` and adds no fields; section
+  and combined responses retain `heading`. `new_heading` remains
   available only with the section update. Use `wiki_delete_page` only when a source was
   removed. Run `wiki_lint` after changes; use `wiki_remediation_plan` to inspect grouped
   repair actions.

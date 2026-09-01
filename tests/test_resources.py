@@ -81,6 +81,36 @@ def test_update_page_documentation_covers_selector_update_contract():
     assert "anyOf" in russian
 
 
+def test_code_only_selector_updates_preserve_page_body_byte_for_byte():
+    root = Path(__file__).parents[1]
+    english_surfaces = (
+        AUTHORING_RULES,
+        (root / "README.md").read_text(encoding="utf-8"),
+        (root / "docs/architecture.md").read_text(encoding="utf-8"),
+    )
+    for text in english_surfaces:
+        normalized = text.casefold()
+        code_only_positions = (
+            offset for offset in range(len(normalized))
+            if normalized.startswith("code-only", offset)
+        )
+        assert any(
+            "body byte-for-byte" in normalized[offset:offset + 500]
+            for offset in code_only_positions
+    )
+
+    russian = (root / "docs/README.ru.md").read_text(encoding="utf-8")
+    normalized_russian = russian.casefold()
+    code_only_positions = (
+        offset for offset in range(len(normalized_russian))
+        if normalized_russian.startswith("только для code", offset)
+    )
+    assert any(
+        "тело страницы byte-for-byte" in normalized_russian[offset:offset + 500]
+        for offset in code_only_positions
+    )
+
+
 def test_agent_snippets_use_supported_existing_page_update_path():
     root = Path(__file__).parents[1]
     for relative in ("templates/AGENTS.md.snippet", "templates/CLAUDE.md.snippet"):
