@@ -172,7 +172,29 @@ def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
     assert len(TOOLS) == 35
+    assert len(registered) == 35
     assert registered == set(TOOLS)
+
+
+def test_update_page_schema_requires_an_explicit_operation():
+    tool = server.mcp._tool_manager.get_tool("wiki_update_page")
+
+    assert tool is not None
+    assert tool.parameters["required"] == ["domain", "slug"]
+    assert tool.parameters["anyOf"] == [
+        {
+            "required": ["heading", "new_body"],
+            "properties": {
+                "heading": {"type": "string"},
+                "new_body": {"type": "string"},
+            },
+        },
+        {
+            "required": ["code"],
+            "properties": {"code": {"type": "object"}},
+        },
+    ]
+    assert "code" in tool.parameters["properties"]
 
 
 def test_bind_schema_exposes_optional_specification_mode_enum():

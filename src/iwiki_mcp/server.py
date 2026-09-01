@@ -5417,6 +5417,31 @@ mcp.tool()(wiki_spec_resolve)
 mcp.tool()(wiki_related)
 mcp.tool()(wiki_write_page)
 mcp.tool()(wiki_update_page)
+
+
+def _configure_update_page_input_schema() -> None:
+    tool = mcp._tool_manager.get_tool("wiki_update_page")
+    if tool is None:
+        raise RuntimeError("wiki_update_page tool registration missing")
+    parameters = dict(tool.parameters)
+    parameters["required"] = ["domain", "slug"]
+    parameters["anyOf"] = [
+        {
+            "required": ["heading", "new_body"],
+            "properties": {
+                "heading": {"type": "string"},
+                "new_body": {"type": "string"},
+            },
+        },
+        {
+            "required": ["code"],
+            "properties": {"code": {"type": "object"}},
+        },
+    ]
+    tool.parameters = parameters
+
+
+_configure_update_page_input_schema()
 mcp.tool()(wiki_insert_section)
 mcp.tool()(wiki_delete_section)
 mcp.tool()(wiki_move_section)

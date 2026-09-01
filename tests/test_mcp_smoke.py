@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from jsonschema import Draft202012Validator, ValidationError
 import pytest
 
 mcp_client = pytest.importorskip("mcp")
@@ -123,6 +124,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 await session.initialize()
                 listed = (await session.list_tools()).tools
                 tools = {tool.name: tool for tool in listed}
+                assert len(listed) == 35
                 assert set(tools) == EXPECTED_TOOLS
                 search_schema = tools["wiki_search"].inputSchema
                 assert "mode" not in search_schema.get("required", [])
@@ -168,6 +170,53 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 assert "write" in bind_schema["properties"]
                 assert "primary" in bind_schema["properties"]
                 update_schema = tools["wiki_update_page"].inputSchema
+                assert update_schema["required"] == ["domain", "slug"]
+                assert update_schema["anyOf"] == [
+                    {
+                        "required": ["heading", "new_body"],
+                        "properties": {
+                            "heading": {"type": "string"},
+                            "new_body": {"type": "string"},
+                        },
+                    },
+                    {
+                        "required": ["code"],
+                        "properties": {"code": {"type": "object"}},
+                    },
+                ]
+                assert "code" in update_schema["properties"]
+                validator = Draft202012Validator(update_schema)
+                for sample in (
+                    {
+                        "domain": "backend",
+                        "slug": "page",
+                        "heading": "Body",
+                        "new_body": "text",
+                    },
+                    {"domain": "backend", "slug": "page", "code": {}},
+                    {
+                        "domain": "backend",
+                        "slug": "page",
+                        "heading": "Body",
+                        "new_body": "text",
+                        "code": {},
+                    },
+                ):
+                    validator.validate(sample)
+                for sample in (
+                    {"domain": "backend", "slug": "page"},
+                    {"domain": "backend", "slug": "page", "heading": "Body"},
+                    {"domain": "backend", "slug": "page", "new_body": "text"},
+                    {
+                        "domain": "backend",
+                        "slug": "page",
+                        "heading": None,
+                        "new_body": None,
+                        "code": None,
+                    },
+                ):
+                    with pytest.raises(ValidationError):
+                        validator.validate(sample)
                 assert "new_heading" in update_schema["properties"]
                 assert "new_heading" not in update_schema.get("required", [])
                 assert "expected_revision" in update_schema["properties"]
