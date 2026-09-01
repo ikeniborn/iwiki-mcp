@@ -161,6 +161,62 @@ def test_strict_selector_update_preserves_git_specification_evidence(
     assert projection.evidence == (attempt,)
 
 
+def test_strict_crlf_selector_set_and_clear_keep_projection_ready(
+    tmp_path, monkeypatch
+):
+    wiki, domain = _seed(tmp_path, monkeypatch, "strict")
+    created = server.wiki_write_page(
+        "payments", "account", VALID_SPECIFICATION, type="specification"
+    )
+    assert "error" not in created
+    page = domain / "specification" / "account.md"
+    page.write_bytes(
+        page.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8")
+    )
+    original_body = page.read_bytes().split(b"---\r\n", 2)[2]
+    store = GitSpecificationStore(str(wiki), "strict")
+    before = store.context("payments", "open-account")
+    assert before is not None
+    binding = next(
+        item for item in before.bindings if item.relation == "verifies"
+    )
+    attempt = ResolutionAttempt(
+        binding_id=binding.binding_id,
+        domain="payments",
+        scenario_id="open-account",
+        state="resolved",
+        targets=("py:file:tests/test_account.py",),
+        unresolved_reference=None,
+        graph_revision="graph-1",
+        graph_state_fingerprint="sha256:" + "1" * 64,
+        specification_source_hash=before.scenario.source_hash,
+        checked_at="2026-08-29T12:00:00Z",
+        reason=None,
+    )
+    store.record_resolution(attempt)
+    _git(wiki, "add", "payments")
+    _git(wiki, "commit", "-q", "-m", "record CRLF specification evidence")
+    assert GitSpecificationStore(str(wiki), "strict").status(
+        "payments"
+    ).state == "ready"
+
+    for code in ({"files": ["src/account.py"]}, {}):
+        result = server.wiki_update_page(
+            "payments", "specification/account", code=code
+        )
+
+        assert result["specifications"]["state"] == "ready"
+        assert page.read_bytes().endswith(original_body)
+        after = store.context("payments", "open-account")
+        assert after is not None
+        assert after.scenario.source_hash == before.scenario.source_hash
+        assert after.bindings == before.bindings
+        assert after.evidence == (attempt,)
+        status = GitSpecificationStore(str(wiki), "strict").status("payments")
+        assert status.state == "ready"
+        assert status.reason is None
+
+
 def test_strict_invalid_target_rejects_before_visible_change(tmp_path, monkeypatch):
     wiki, domain = _seed(tmp_path, monkeypatch, "strict")
     before = _git(wiki, "rev-parse", "HEAD")

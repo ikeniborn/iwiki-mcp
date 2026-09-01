@@ -3733,11 +3733,16 @@ def wiki_update_page(
         with open(log_file, "rb") as fh:
             log_before = fh.read()
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
+    specification_candidate = (
+        new_md.replace("\r\n", "\n").replace("\r", "\n")
+        if request["mode"] == "code"
+        else new_md
+    )
     prepared_specification = _prepare_git_specification(
         bind,
         valid_domain,
         target_slug=slug,
-        candidate_markdown=new_md,
+        candidate_markdown=specification_candidate,
         original_markdown=original_full,
     )
     if (
