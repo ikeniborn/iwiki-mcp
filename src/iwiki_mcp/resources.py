@@ -31,6 +31,9 @@ AUTHORING_RULES: str = """\
   wins. `vector` is an internal embedding term, not a public mode.
 - `IWIKI_RERANK_MODEL` optionally reranks the fused candidate pool through the shared
   LiteLLM URL and key. Provider failures are fail-soft and return sanitized metadata.
+
+## Existing page updates
+
 - Use `wiki_write_page` for a new page and `wiki_update_page` for an existing page:
   a section-only update requires both `heading` and `new_body`; a code-only update uses
   `code`; and a combined update atomically applies both. A code-only update preserves the
@@ -42,6 +45,13 @@ AUTHORING_RULES: str = """\
 - The public root schema uses `anyOf`: section input requires `heading` plus `new_body`, or
   code input requires `code`; `domain` and `slug` remain root-required. Runtime validation
   rejects partial, no-op, or unsafe selectors before mutation.
+- Optional code selectors use only nested `code.symbols`, `code.files`, and
+  `code.source_globs`. Each symbol item contains exactly `qualified_name`; file and glob
+  items are project-relative strings. `modules`, `module_id`, `aliases`, and import bindings
+  are forbidden selectors. A nonempty valid `code` mapping completely replaces the selectors.
+  An empty `{}` mapping or all-empty lists clears them. Omit `code` (or pass `null`) to
+  preserve selectors during a section update. These fields remain human-authored; derived
+  links never rewrite them.
 - `wiki_read_page(..., heading=...)` returns only that one `##` section (with its
   `section_hash`) instead of the whole page. `wiki_insert_section`, `wiki_delete_section`,
   and `wiki_move_section` add, remove, or reorder one `##` section without rewriting the
@@ -62,14 +72,6 @@ AUTHORING_RULES: str = """\
 - Every page carries a YAML frontmatter block above the `# Title` H1. The write
   tools fill it. Fields: `type` (required), `title`, `description`, `resource`,
   `tags`, `status`, `timestamp`.
-- Optional code selectors use only nested `code.symbols`, `code.files`, and
-  `code.source_globs`. Each symbol item contains exactly `qualified_name`; file
-  and glob items are project-relative strings. `modules`, `module_id`, `aliases`,
-  and import bindings are forbidden selectors. These fields remain human-authored;
-  derived links never rewrite them.
-- A nonempty valid `code` mapping completely replaces the selectors. An empty `{}` mapping
-  or all-empty lists clears them. Omit `code` (or pass `null`) to preserve selectors during
-  a section update.
 - `description` is the authored article summary and the single source of it. It is
   indexed as its own **summary-level vector that seeds retrieval** (two-level:
   summary seed -> graph-expanded pool -> section vectors ranked inside it), NOT

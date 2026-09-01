@@ -32,83 +32,99 @@ def test_authoring_rules_describe_current_search_and_update_tools():
     assert "wiki_remediation_plan" in AUTHORING_RULES
 
 
-def test_update_page_documentation_covers_selector_update_contract():
-    root = Path(__file__).parents[1]
-    english = (root / "README.md").read_text(encoding="utf-8")
-    architecture = (root / "docs/architecture.md").read_text(encoding="utf-8")
-    russian = (root / "docs/README.ru.md").read_text(encoding="utf-8")
+def _section(text, start, end):
+    start_at = text.index(start) + len(start)
+    end_at = text.index(end, start_at)
+    return text[start_at:end_at]
 
-    resource_terms = (
-        "section-only update requires both `heading` and `new_body`",
-        "code-only update uses `code`",
-        "combined update atomically applies both",
-        "code.symbols`, `code.files`, and `code.source_globs",
-        "completely replaces the selectors",
-        "all-empty lists clears them",
-        "Omit `code` (or pass `null`) to preserve",
-        "code-only response omits `heading` and adds no fields",
-        "section and combined responses retain `heading`",
-        "root schema uses `anyOf`",
-        "`domain` and `slug` remain root-required",
-        "partial, no-op, or unsafe selectors before mutation",
-        "current `expected_revision` CAS",
+
+def _update_page_contract_sections():
+    root = Path(__file__).parents[1]
+    return {
+        "resource": _section(
+            AUTHORING_RULES,
+            "## Existing page updates",
+            "## OKF frontmatter",
+        ),
+        "readme": _section(
+            (root / "README.md").read_text(encoding="utf-8"),
+            "## Tools",
+            "## Pareto benchmark",
+        ),
+        "architecture": _section(
+            (root / "docs/architecture.md").read_text(encoding="utf-8"),
+            "### Transaction phase",
+            "### Cross-domain rewrite coordinator",
+        ),
+        "russian": _section(
+            (root / "docs/README.ru.md").read_text(encoding="utf-8"),
+            "## Инструменты",
+            "## Pareto-бенчмарк",
+        ),
+    }
+
+
+def test_update_page_documentation_covers_selector_update_contract():
+    sections = _update_page_contract_sections()
+
+    english_markers = (
+        "section-only",
+        "code-only",
+        "combined",
+        "`heading`",
+        "`new_body`",
+        "`code`",
+        "code.symbols",
+        "code.files",
+        "code.source_globs",
+        "completely replaces",
+        "all-empty lists",
+        "`null`",
+        "omits `heading`",
+        "anyOf",
+        "root-required",
+        "unsafe selectors",
+        "expected_revision",
         "one revision and transaction",
         "unchanged chunks reuse embeddings",
-        "republish makes Code-graph Wiki links current",
+        "Code-graph Wiki links current",
     )
-    normalized_rules = " ".join(AUTHORING_RULES.casefold().split())
-    assert all(term.casefold() in normalized_rules for term in resource_terms)
+    for name in ("resource", "readme", "architecture"):
+        assert all(marker in sections[name] for marker in english_markers), name
 
-    for document in (english, architecture):
-        assert "section-only" in document
-        assert "code-only" in document
-        assert "combined" in document
-        assert "code.source_globs" in document
-        assert "completely replaces" in document
-        assert "all-empty lists" in document
-        assert "expected_revision" in document
-        assert "unchanged chunks reuse embeddings" in document
-        assert "anyOf" in document
-
-    assert "только для секции" in russian
-    assert "только для code" in russian
-    assert "комбинированное" in russian
-    assert "code.source_globs" in russian
-    assert "полностью заменяет selectors" in russian
-    assert "все списки пусты" in russian
-    assert "expected_revision" in russian
-    assert "неизменённые чанки повторно используют embeddings" in russian
-    assert "anyOf" in russian
+    russian_markers = (
+        "обновление только секции",
+        "обновление только метаданных `code`",
+        "совмещённое обновление",
+        "`heading`",
+        "`new_body`",
+        "code.symbols",
+        "code.files",
+        "code.source_globs",
+        "полностью заменяет селекторы",
+        "всеми пустыми списками",
+        "`null`",
+        "опускает `heading`",
+        "anyOf",
+        "обязательными на верхнем уровне",
+        "небезопасные селекторы",
+        "expected_revision",
+        "одной ревизии и одной транзакции",
+        "неизменённые чанки повторно используют embeddings",
+        "Wiki-ссылки в Code Graph актуальными",
+    )
+    assert all(marker in sections["russian"] for marker in russian_markers)
 
 
 def test_code_only_selector_updates_preserve_page_body_byte_for_byte():
-    root = Path(__file__).parents[1]
-    english_surfaces = (
-        AUTHORING_RULES,
-        (root / "README.md").read_text(encoding="utf-8"),
-        (root / "docs/architecture.md").read_text(encoding="utf-8"),
-    )
-    for text in english_surfaces:
-        normalized = text.casefold()
-        code_only_positions = (
-            offset for offset in range(len(normalized))
-            if normalized.startswith("code-only", offset)
-        )
-        assert any(
-            "body byte-for-byte" in normalized[offset:offset + 500]
-            for offset in code_only_positions
-    )
+    sections = _update_page_contract_sections()
+    for name in ("resource", "readme", "architecture"):
+        assert "body byte-for-byte" in sections[name], name
+        assert "code-only uses `new_body`" not in sections[name], name
 
-    russian = (root / "docs/README.ru.md").read_text(encoding="utf-8")
-    normalized_russian = russian.casefold()
-    code_only_positions = (
-        offset for offset in range(len(normalized_russian))
-        if normalized_russian.startswith("только для code", offset)
-    )
-    assert any(
-        "тело страницы byte-for-byte" in normalized_russian[offset:offset + 500]
-        for offset in code_only_positions
-    )
+    russian = sections["russian"]
+    assert "сохраняется байт в байт" in russian
+    assert "только метаданные `code` используют `new_body`" not in russian
 
 
 def test_agent_snippets_use_supported_existing_page_update_path():
