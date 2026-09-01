@@ -31,10 +31,27 @@ AUTHORING_RULES: str = """\
   wins. `vector` is an internal embedding term, not a public mode.
 - `IWIKI_RERANK_MODEL` optionally reranks the fused candidate pool through the shared
   LiteLLM URL and key. Provider failures are fail-soft and return sanitized metadata.
-- Use `wiki_write_page` for a new page, `wiki_update_page` for one existing `##`
-  section (or its `new_heading` rename), and `wiki_delete_page` only when a source was
+
+## Existing page updates
+
+- Use `wiki_write_page` for a new page and `wiki_update_page` for an existing page:
+  a section-only update requires both `heading` and `new_body`; a code-only update uses
+  `code`; and a combined update atomically applies both. A code-only update preserves the
+  page body byte-for-byte. Code-only response omits `heading` and adds no fields; section
+  and combined responses retain `heading`. `new_heading` remains
+  available only with the section update. Use `wiki_delete_page` only when a source was
   removed. Run `wiki_lint` after changes; use `wiki_remediation_plan` to inspect grouped
   repair actions.
+- The public root schema uses `anyOf`: section input requires `heading` plus `new_body`, or
+  code input requires `code`; `domain` and `slug` remain root-required. Runtime validation
+  rejects partial, no-op, or unsafe selectors before mutation.
+- Optional code selectors use only nested `code.symbols`, `code.files`, and
+  `code.source_globs`. Each symbol item contains exactly `qualified_name`; file and glob
+  items are project-relative strings. `modules`, `module_id`, `aliases`, and import bindings
+  are forbidden selectors. A nonempty valid `code` mapping completely replaces the selectors.
+  An empty `{}` mapping or all-empty lists clears them. Omit `code` (or pass `null`) to
+  preserve selectors during a section update. These fields remain human-authored; derived
+  links never rewrite them.
 - `wiki_read_page(..., heading=...)` returns only that one `##` section (with its
   `section_hash`) instead of the whole page. `wiki_insert_section`, `wiki_delete_section`,
   and `wiki_move_section` add, remove, or reorder one `##` section without rewriting the
@@ -42,8 +59,11 @@ AUTHORING_RULES: str = """\
   accept `expected_section_hash` for optimistic concurrency: a stale hash is rejected with
   `section_conflict` instead of silently overwriting a concurrent edit.
 - PostgreSQL reads include a numeric `revision`. Pass it as `expected_revision` to
-  PostgreSQL update/delete calls; omission or a stale value leaves the page unchanged.
-  Git mode keeps its existing mutation contract and does not require a revision.
+  PostgreSQL update/delete calls; omission or a stale value leaves the page unchanged. A
+  selector update uses the current `expected_revision` CAS in one revision and transaction;
+  unchanged chunks reuse embeddings. Git keeps its existing freshness and strict-spec
+  transaction behavior, then reindexes, commits, and refreshes the graph once. Republish
+  makes Code-graph Wiki links current.
 - Code graph, remediation, OKF migration/apply/export, sync, and domain creation tools
   require Git storage. PostgreSQL domains are provisioned by an administrator.
 
@@ -52,11 +72,6 @@ AUTHORING_RULES: str = """\
 - Every page carries a YAML frontmatter block above the `# Title` H1. The write
   tools fill it. Fields: `type` (required), `title`, `description`, `resource`,
   `tags`, `status`, `timestamp`.
-- Optional code selectors use only nested `code.symbols`, `code.files`, and
-  `code.source_globs`. Each symbol item contains exactly `qualified_name`; file
-  and glob items are project-relative strings. `modules`, `module_id`, `aliases`,
-  and import bindings are forbidden selectors. These fields remain human-authored;
-  derived links never rewrite them.
 - `description` is the authored article summary and the single source of it. It is
   indexed as its own **summary-level vector that seeds retrieval** (two-level:
   summary seed -> graph-expanded pool -> section vectors ranked inside it), NOT

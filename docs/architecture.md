@@ -711,11 +711,23 @@ flowchart TD
     class T1,T2,T3 tx
 ```
 
-`wiki_update_page` follows the same skeleton but edits **one** `##` section
-in-place (`section.replace_section`, which rejects an ambiguous/missing heading),
-does a whole-file ingest-log upsert (`upsert_ingest_log` keeps one record per page),
-and rolls back by restoring the original bytes. `wiki_delete_page` removes the file,
-appends a `delete` log op, reindexes, and rolls back by rewriting the file.
+`wiki_update_page` supports three modes in the same mutation skeleton: section-only
+requires paired `heading` and `new_body` and edits one `##` section in-place
+(`section.replace_section`, which rejects an ambiguous/missing heading); code-only uses
+`code` and preserves the page body byte-for-byte; combined atomically performs both. The
+public root JSON Schema uses `anyOf` to
+require `heading` + `new_body` or `code`, with `domain` and `slug` root-required; runtime
+validation rejects partial, no-op, or unsafe selectors before mutation. A nonempty valid
+`code` mapping completely replaces `code.symbols`, `code.files`, and `code.source_globs`;
+`{}` or all-empty lists clears them, while omitted or `null` `code` preserves them during a
+section update. A code-only response omits `heading` and adds no fields; section and
+combined responses retain `heading`. The operation does a whole-file ingest-log upsert
+(`upsert_ingest_log` keeps one record per page) and rolls back by restoring original bytes.
+Git retains existing freshness and strict-spec transaction behavior, then reindexes,
+commits, and refreshes the graph once. PostgreSQL uses current `expected_revision` CAS in
+one revision and transaction; unchanged chunks reuse embeddings. Republish makes
+Code-graph Wiki links current. `wiki_delete_page` removes the file, appends a `delete` log
+op, reindexes, and rolls back by rewriting the file.
 
 `wiki_insert_section`, `wiki_delete_section`, and `wiki_move_section` extend this
 family with section-granular structural edits — add, remove, or reorder a single `##`

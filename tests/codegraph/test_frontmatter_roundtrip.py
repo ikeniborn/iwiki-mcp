@@ -146,6 +146,189 @@ def test_write_update_round_trip_preserves_authored_code_mapping(
     assert updated_meta["code"] == AUTHORED
 
 
+def test_code_only_update_sets_selectors_and_preserves_body_exactly(
+    tmp_path, monkeypatch
+):
+    _patch_server(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_EMBED_DIMENSIONS", "2")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    assert server.sync.is_git_repo(str(tmp_path))
+    page = tmp_path / "d" / "concept" / "service.md"
+    original_body = (
+        "# Service\n\n## Overview\nExact body.  \n\n## Notes\nOriginal.\n"
+    )
+    written = server.wiki_write_page(
+        "d", "service", original_body,
+        type="concept", description="Existing",
+    )
+    assert "error" not in written
+    _meta, original_body = fm.split(page.read_text(encoding="utf-8"))
+    reindexes = []
+    commits = []
+    index_domain = indexer.index_domain
+
+    def reindex_once(*args, **kwargs):
+        reindexes.append((args, kwargs))
+        return index_domain(*args, **kwargs)
+
+    def commit_once(*args, **kwargs):
+        commits.append((args, kwargs))
+        return {"committed": True, "pushed": False}
+
+    monkeypatch.setattr(indexer, "index_domain", reindex_once)
+    monkeypatch.setattr(server.sync, "commit_and_push", commit_once)
+
+    result = server.wiki_update_page(
+        "d", "concept/service", code={"files": ["src/pkg/service.py"]}
+    )
+
+    assert "error" not in result
+    assert "heading" not in result
+    assert result["embedded"] == 0
+    assert result["reused"] > 0
+    assert len(reindexes) == 1
+    assert len(commits) == 1
+    updated_meta, updated_body = fm.split(page.read_text(encoding="utf-8"))
+    assert updated_meta["code"] == {"files": ["src/pkg/service.py"]}
+    assert updated_body == original_body
+
+
+def test_git_code_only_update_preserves_crlf_body_bytes(tmp_path, monkeypatch):
+    _patch_server(monkeypatch, tmp_path)
+    page = tmp_path / "d" / "concept" / "service.md"
+    page.parent.mkdir(parents=True)
+    original_body = (
+        b"# Service\r\n\r\n"
+        b"## Overview\r\nExact body.  \r\n\r\n"
+        b"## Notes\r\nOriginal.\r\n"
+    )
+    page.write_bytes(
+        b"---\r\n"
+        b"type: concept\r\n"
+        b"description: Existing\r\n"
+        b"---\r\n"
+        + original_body
+    )
+
+    result = server.wiki_update_page(
+        "d", "concept/service", code={"files": ["src/pkg/service.py"]}
+    )
+
+    assert "error" not in result
+    updated = page.read_bytes()
+    assert updated.endswith(original_body)
+    updated_meta, updated_body = fm.split(
+        updated.decode("utf-8"), strict_code=True
+    )
+    assert updated_meta["code"] == {"files": ["src/pkg/service.py"]}
+    assert updated_body.encode("utf-8") == original_body
+
+
+def test_code_only_update_replaces_existing_selector_mapping(tmp_path, monkeypatch):
+    _patch_server(monkeypatch, tmp_path)
+    page = tmp_path / "d" / "concept" / "service.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(_authored_markdown(), encoding="utf-8")
+
+    result = server.wiki_update_page(
+        "d", "concept/service", code={"source_globs": ["lib/**"]}
+    )
+
+    assert "error" not in result
+    updated_meta, _ = fm.split(page.read_text(encoding="utf-8"))
+    assert updated_meta["code"] == {"source_globs": ["lib/**"]}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        {},
+        {"symbols": [], "files": [], "source_globs": []},
+    ],
+)
+def test_code_only_update_removes_selectors_when_mapping_is_empty(
+    tmp_path, monkeypatch, code
+):
+    _patch_server(monkeypatch, tmp_path)
+    page = tmp_path / "d" / "concept" / "service.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(_authored_markdown(), encoding="utf-8")
+
+    result = server.wiki_update_page("d", "concept/service", code=code)
+
+    assert "error" not in result
+    updated_meta, _ = fm.split(page.read_text(encoding="utf-8"))
+    assert "code" not in updated_meta
+
+
+def test_invalid_code_update_skips_freshness_and_preserves_original_bytes(
+    tmp_path, monkeypatch
+):
+    _patch_server(monkeypatch, tmp_path)
+    page = tmp_path / "d" / "concept" / "service.md"
+    page.parent.mkdir(parents=True)
+    original = _authored_markdown()
+    page.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        server.cross_domain,
+        "recover_pending_transactions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery called")
+        ),
+    )
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    result = server.wiki_update_page(
+        "d", "concept/service", code={"modules": ["pkg.service"]}
+    )
+
+    assert result == {
+        "error": "unsupported code selector key",
+        "hint": "use only code.symbols, code.files, and code.source_globs",
+    }
+    assert page.read_text(encoding="utf-8") == original
+
+
+def test_combined_update_changes_section_and_selectors_with_one_commit(
+    tmp_path, monkeypatch
+):
+    _patch_server(monkeypatch, tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    assert server.sync.is_git_repo(str(tmp_path))
+    page = tmp_path / "d" / "concept" / "service.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(_authored_markdown(), encoding="utf-8")
+    commits = []
+
+    def commit_once(*args, **kwargs):
+        commits.append((args, kwargs))
+        return {"committed": True, "pushed": False}
+
+    monkeypatch.setattr(server.sync, "commit_and_push", commit_once)
+
+    result = server.wiki_update_page(
+        "d",
+        "concept/service",
+        "Notes",
+        "Combined update.",
+        code={"symbols": [{"qualified_name": "pkg.Service.run"}]},
+    )
+
+    assert "error" not in result
+    assert result["heading"] == "Notes"
+    assert len(commits) == 1
+    updated_meta, updated_body = fm.split(page.read_text(encoding="utf-8"))
+    assert updated_meta["code"] == {
+        "symbols": [{"qualified_name": "pkg.Service.run"}]
+    }
+    assert "Combined update." in updated_body
+    assert "Original." not in updated_body
+
+
 def test_write_rejects_unknown_code_selector_key(tmp_path, monkeypatch):
     _patch_server(monkeypatch, tmp_path)
     markdown = fm.render({"code": {"modules": ["pkg.service"]}}) + (

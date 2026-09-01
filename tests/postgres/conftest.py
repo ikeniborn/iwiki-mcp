@@ -560,12 +560,12 @@ class GraphFixture:
             )[0][0]
         return counts
 
-    def write_markdown_page(self, slug, markdown):
-        """Write one authoritative page through the real Markdown store."""
+    def markdown_store(self):
+        """Return the authoritative Markdown store for this graph domain."""
         from iwiki_mcp.postgres.auth import AuthContext
         from iwiki_mcp.postgres.store import PostgresStore
 
-        store = PostgresStore(
+        return PostgresStore(
             self.admin_dsn,
             self.iwiki_id,
             _cfg(),
@@ -578,7 +578,10 @@ class GraphFixture:
                 primary=self.domain,
             ),
         )
-        return store.write_page(self.domain, slug, markdown)
+
+    def write_markdown_page(self, slug, markdown):
+        """Write one authoritative page through the real Markdown store."""
+        return self.markdown_store().write_page(self.domain, slug, markdown)
 
     def lint(self):
         from iwiki_mcp.postgres.store import PostgresStore
@@ -807,15 +810,26 @@ def _ranked_symbol(identity, file_identity, qualified, local, *, signature="()")
 
 
 def _ranked_alias(
-    identity, alias, *, target_module=None, target_symbol=None, start_byte=0
+    identity,
+    alias,
+    *,
+    source_file="source",
+    source_symbol=None,
+    target_module=None,
+    target_symbol=None,
+    start_byte=0,
 ):
     from iwiki_mcp.codegraph import models
 
     return {
         "relation_id": _ranked_entity_id("symbol", f"relation:{identity}"),
-        "source_file_id": _ranked_entity_id("file", "source"),
+        "source_file_id": _ranked_entity_id("file", source_file),
         "source_module_id": None,
-        "source_symbol_id": None,
+        "source_symbol_id": (
+            None
+            if source_symbol is None
+            else _ranked_entity_id("symbol", source_symbol)
+        ),
         "target_module_id": target_module,
         "target_symbol_id": target_symbol,
         "target_reference": None,
@@ -892,6 +906,14 @@ def _ranked_rows(repository_id):
             "alias_needle",
             target_module=_ranked_entity_id("module", "alias-lexical"),
             start_byte=20,
+        ),
+        _ranked_alias(
+            "documented-symbol",
+            "documented_symbol",
+            source_file="alias-exact",
+            source_symbol="alias-exact",
+            target_symbol=_ranked_entity_id("symbol", "canonical-prefix"),
+            start_byte=30,
         ),
     ]
     repositories = [
