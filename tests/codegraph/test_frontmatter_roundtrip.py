@@ -150,16 +150,33 @@ def test_code_only_update_sets_selectors_and_preserves_body_exactly(
     tmp_path, monkeypatch
 ):
     _patch_server(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_EMBED_DIMENSIONS", "2")
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     assert server.sync.is_git_repo(str(tmp_path))
     page = tmp_path / "d" / "concept" / "service.md"
-    page.parent.mkdir(parents=True)
-    original = (
-        "---\ntype: concept\ndescription: Existing\n---\n"
+    original_body = (
         "# Service\n\n## Overview\nExact body.  \n\n## Notes\nOriginal.\n"
     )
-    page.write_text(original, encoding="utf-8")
-    _meta, original_body = fm.split(original)
+    written = server.wiki_write_page(
+        "d", "service", original_body,
+        type="concept", description="Existing",
+    )
+    assert "error" not in written
+    _meta, original_body = fm.split(page.read_text(encoding="utf-8"))
+    reindexes = []
+    commits = []
+    index_domain = indexer.index_domain
+
+    def reindex_once(*args, **kwargs):
+        reindexes.append((args, kwargs))
+        return index_domain(*args, **kwargs)
+
+    def commit_once(*args, **kwargs):
+        commits.append((args, kwargs))
+        return {"committed": True, "pushed": False}
+
+    monkeypatch.setattr(indexer, "index_domain", reindex_once)
+    monkeypatch.setattr(server.sync, "commit_and_push", commit_once)
 
     result = server.wiki_update_page(
         "d", "concept/service", code={"files": ["src/pkg/service.py"]}
@@ -167,6 +184,10 @@ def test_code_only_update_sets_selectors_and_preserves_body_exactly(
 
     assert "error" not in result
     assert "heading" not in result
+    assert result["embedded"] == 0
+    assert result["reused"] > 0
+    assert len(reindexes) == 1
+    assert len(commits) == 1
     updated_meta, updated_body = fm.split(page.read_text(encoding="utf-8"))
     assert updated_meta["code"] == {"files": ["src/pkg/service.py"]}
     assert updated_body == original_body
