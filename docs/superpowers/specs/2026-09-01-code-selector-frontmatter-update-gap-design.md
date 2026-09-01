@@ -2,7 +2,7 @@
 type: specification
 title: Code selector frontmatter update gap
 review:
-  spec_hash: e210981703a54e45
+  spec_hash: 0d371af6558d8192
   last_run: 2026-09-01
   phases:
     structure: { status: passed }
@@ -263,8 +263,9 @@ R16. Implementation stays surgical:
   `src/iwiki_mcp/resources.py` describe the repository contract. Iwiki pages
   `architecture`, `authoring-and-linting`, and `concept/code-graph-wiki-linking`
   describe the durable architecture and authoring contract.
-- This task branch already bumped the base version from `0.7.225` to `0.7.226` in
-  commit `27d0e16`; all later files in the same change set share that one release bump.
+- The initial implementation bumped the base version from `0.7.225` to `0.7.226` in
+  commit `27d0e16`. Post-result review then required production correctness fixes, so
+  the final branch uses the next patch version, `0.7.227`, across every version surface.
   If another change lands on the target branch first, rebase and select the next free
   patch version.
 

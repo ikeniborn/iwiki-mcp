@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: b5ae669684849954
+  plan_hash: 2d45cd5fbf54b089
   last_run: 2026-09-01
   phases:
     structure: { status: passed }
@@ -15,7 +15,7 @@ chain:
 result_check:
   verdict: OK
   source: plan
-  plan_hash: b5ae669684849954
+  plan_hash: 2d45cd5fbf54b089
   last_run: 2026-09-01
   reviewed: true
   docs_checked: true
@@ -516,8 +516,9 @@ Expected: test-only commit.
 
 **Ownership:** Fresh subagent owns `README.md`, `docs/README.ru.md`,
 `docs/architecture.md`, `src/iwiki_mcp/resources.py`, `tests/test_resources.py`, and
-verification of the already-applied `0.7.226` version bump. Do not bump again for this
-change set.
+verification of the package version. The initial implementation used `0.7.226`; the
+post-result correctness follow-up advances the final branch to `0.7.227`. Do not bump
+again solely for chain reconciliation.
 
 **Files:**
 - Modify: `README.md`
@@ -563,7 +564,7 @@ uv run python - <<'PY'
 from pathlib import Path
 import re
 
-expected = "0.7.226"
+expected = "0.7.227"
 assert f'version = "{expected}"' in Path("pyproject.toml").read_text()
 assert f'__version__ = "{expected}"' in Path("src/iwiki_mcp/__init__.py").read_text()
 assert f'assert iwiki_mcp.__version__ == "{expected}"' in Path("tests/test_package.py").read_text()
@@ -571,7 +572,8 @@ assert re.search(rf'name = "iwiki-mcp"\nversion = "{re.escape(expected)}"', Path
 PY
 ```
 
-Expected: exit 0. Base was `0.7.225`; branch uses one patch bump to `0.7.226`.
+Expected: exit 0. Base was `0.7.225`; initial implementation used `0.7.226`, and the
+post-result correctness follow-up uses `0.7.227`.
 
 - [ ] **Step 5: Run documentation/resource regressions**
 
@@ -588,7 +590,8 @@ git add README.md docs/README.ru.md docs/architecture.md src/iwiki_mcp/resources
 git commit -m "docs: describe selector page updates"
 ```
 
-Expected: docs/resource/version commit; repository version remains `0.7.226`.
+Expected: docs/resource/version commit; final repository version is `0.7.227` after the
+post-result correctness follow-up.
 
 ### Task 6: Parent-owned iwiki and specification reconciliation
 
@@ -683,7 +686,7 @@ assert len(server.mcp._tool_manager._tools) == 35
 assert tool.parameters["required"] == ["domain", "slug"]
 assert tool.parameters["anyOf"][0]["required"] == ["heading", "new_body"]
 assert tool.parameters["anyOf"][1]["required"] == ["code"]
-assert __version__ == "0.7.226"
+assert __version__ == "0.7.227"
 PY
 ```
 
