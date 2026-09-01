@@ -27,6 +27,10 @@ review:
 workflow:
   route: chain
   continuation: execute
+result_check:
+  verdict: OK
+  intent_hash: 6d47e63defa58564
+  last_run: 2026-09-01
 ---
 # Intent: hosted-session-binding-fallback-visibility
 
