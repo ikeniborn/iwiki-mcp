@@ -204,8 +204,11 @@ _MUTATION_BINDING: ContextVar[base.Binding | base.PostgresBinding | None] = Cont
 class _HostedSelectedState:
     """Persist the domain scope explicitly selected for one HTTP session."""
 
-    def __init__(self, binding: base.PostgresBinding) -> None:
+    def __init__(
+        self, binding: base.PostgresBinding, *, source: str = "session"
+    ) -> None:
         self._binding = binding
+        self._source = source
         self._lock = RLock()
 
     def locked(self):
@@ -215,9 +218,15 @@ class _HostedSelectedState:
         with self._lock:
             return self._binding
 
+    def source(self) -> str:
+        """Report which tier chose this scope: `session` or `token_default`."""
+        with self._lock:
+            return self._source
+
     def set(self, binding: base.PostgresBinding) -> None:
         with self._lock:
             self._binding = binding
+            self._source = "session"
 
 
 class _HostedBindingState:
@@ -234,9 +243,27 @@ class _HostedBindingState:
         self._effective = effective or selected.get()
         self._auth_context: _postgres_auth.AuthContext | None = None
         self._request_lock = anyio.Lock()
+        self._session_id: str | None = None
+        self._requested_primary: str | None = None
+        self._primary_substituted = False
 
     def locked(self):
         return self._selected.locked()
+
+    def bind_session(self, session_id: str | None) -> None:
+        self._session_id = session_id
+
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    def binding_source(self) -> str:
+        return self._selected.source()
+
+    def primary_substituted(self) -> bool:
+        return self._primary_substituted
+
+    def requested_primary(self) -> str | None:
+        return self._requested_primary
 
     def get(self) -> base.PostgresBinding:
         return self._effective
@@ -249,13 +276,20 @@ class _HostedBindingState:
         self,
         binding: base.PostgresBinding,
         auth_context: _postgres_auth.AuthContext,
+        *,
+        requested_primary: str | None = None,
+        primary_substituted: bool = False,
     ) -> None:
         self._effective = binding
         self._auth_context = auth_context
+        self._requested_primary = requested_primary
+        self._primary_substituted = primary_substituted
 
     def reset_effective(self) -> None:
         self._effective = self._selected.get()
         self._auth_context = None
+        self._requested_primary = None
+        self._primary_substituted = False
 
     def auth_context(self) -> _postgres_auth.AuthContext | None:
         return self._auth_context
@@ -350,6 +384,26 @@ def _resolved_binding() -> base.Binding | base.PostgresBinding:
 
 def _is_postgres(binding) -> bool:
     return isinstance(binding, base.PostgresBinding)
+
+
+def _hosted_binding_provenance() -> dict:
+    """Name the tier that chose the binding this hosted answer used.
+
+    Empty for stdio and local PostgreSQL, where no session selection exists
+    and the answer therefore carries no provenance fields.
+    """
+    session = _SESSION_BINDING.get()
+    if not isinstance(session, _HostedBindingState):
+        return {}
+    provenance: dict = {"binding_source": session.binding_source()}
+    if session.primary_substituted():
+        provenance["primary_substituted"] = True
+        provenance["requested_primary"] = session.requested_primary()
+    return provenance
+
+
+def _with_binding_provenance(result: dict) -> dict:
+    return {**result, **_hosted_binding_provenance()}
 
 
 def _request_auth_context() -> _postgres_auth.AuthContext | None:
@@ -772,6 +826,7 @@ def wiki_status() -> dict:
         }
         if _SESSION_BINDING.get() is None:
             result["project_dir"] = bind.project_dir
+        result.update(_hosted_binding_provenance())
         result["specifications"] = {
             "domains": [
                 _specification_status_domain(bind, domain)
@@ -822,6 +877,36 @@ _CODE_UNAUTHORIZED = {
     "error": "unauthorized",
     "hint": "publish through a writable bound primary",
 }
+_CODE_BINDING_NOT_SELECTED = {
+    "error": "binding_not_selected",
+    "hint": "call wiki_bind to select a primary domain for this session",
+}
+
+
+def _code_binding_blocked() -> bool:
+    """Refuse a domain-free code read that fell back to the token default.
+
+    Off by default: only a hosted server that opted into
+    `code_graph.require_session_binding` turns the visible fallback into a
+    refusal.
+    """
+    if not _hosted_code_graph_settings().require_session_binding:
+        return False
+    return _hosted_binding_provenance().get("binding_source") == "token_default"
+
+
+def _code_read_answer(result: dict) -> dict:
+    """Carry binding provenance on an answer whose domain is not an argument."""
+    provenance = _hosted_binding_provenance()
+    if not provenance:
+        return result
+    answer = {**result, **provenance}
+    if provenance["binding_source"] == "token_default":
+        warnings = list(answer.get("warnings") or ())
+        if "binding_defaulted" not in warnings:
+            warnings.append("binding_defaulted")
+        answer["warnings"] = warnings
+    return answer
 
 
 def _hosted_code_graph_settings():
@@ -1652,9 +1737,11 @@ def _code_publication_service(binding):
 def wiki_code_status() -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
+        if _code_binding_blocked():
+            return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
-        return _postgres_code_reader(bind).status()
+        return _code_read_answer(_postgres_code_reader(bind).status())
     if bind.primary is None:
         return _missing_code_primary()
     return _codegraph_application.code_runtime(
@@ -1714,6 +1801,8 @@ def wiki_code_search(
     )
     bind = _resolved_binding()
     if _is_postgres(bind):
+        if _code_binding_blocked():
+            return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
         # Hosted reads answer from the published snapshot, so the snapshot
@@ -1721,15 +1810,19 @@ def wiki_code_search(
         # transport is just wherever server.toml lives -- decides which
         # languages a filter may name. The reader resolves the active
         # snapshot and calls back with its declared languages.
-        return _postgres_code_reader(bind).search(
-            lambda snapshot_languages: _codegraph_runtime.validate_search_request(
-                query,
-                kinds=kinds,
-                path=path,
-                languages=languages,
-                configured_languages=snapshot_languages,
-                languages_source="snapshot",
-                limit=limit,
+        return _code_read_answer(
+            _postgres_code_reader(bind).search(
+                lambda snapshot_languages: (
+                    _codegraph_runtime.validate_search_request(
+                        query,
+                        kinds=kinds,
+                        path=path,
+                        languages=languages,
+                        configured_languages=snapshot_languages,
+                        languages_source="snapshot",
+                        limit=limit,
+                    )
+                )
             )
         )
     if bind.primary is None:
@@ -1771,19 +1864,23 @@ def wiki_code_context(
     )
     bind = _resolved_binding()
     if _is_postgres(bind):
+        if _code_binding_blocked():
+            return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
-        return _postgres_code_reader(bind).context(
-            _codegraph_runtime.validate_context_request(
-                seeds,
-                direction=direction,
-                depth=depth,
-                relations=relations,
-                include_source=include_source,
-                include_wiki=include_wiki,
-                max_nodes=max_nodes,
-                max_files=max_files,
-                max_source_bytes=max_source_bytes,
+        return _code_read_answer(
+            _postgres_code_reader(bind).context(
+                _codegraph_runtime.validate_context_request(
+                    seeds,
+                    direction=direction,
+                    depth=depth,
+                    relations=relations,
+                    include_source=include_source,
+                    include_wiki=include_wiki,
+                    max_nodes=max_nodes,
+                    max_files=max_files,
+                    max_source_bytes=max_source_bytes,
+                )
             )
         )
     if bind.primary is None:
@@ -1807,8 +1904,8 @@ def wiki_code_context(
 @_code_safe
 def wiki_code_publish_begin(header: dict) -> dict:
     """Open one owned publication session for the authenticated primary."""
-    return _code_publication_service(_resolved_binding()).begin_from_mapping(
-        header
+    return _with_binding_provenance(
+        _code_publication_service(_resolved_binding()).begin_from_mapping(header)
     )
 
 
@@ -4798,6 +4895,14 @@ def _wiki_bind(
         }
         if session is None:
             result["project_dir"] = narrowed.project_dir
+        if isinstance(session, _HostedBindingState):
+            # The selection is process-local and session-scoped: report the
+            # session it belongs to so a later answer from another session is
+            # recognizable.
+            result.update(_hosted_binding_provenance())
+            session_id = session.session_id()
+            if session_id is not None:
+                result["session_id"] = session_id
         return result
     return {
         "error": "project configuration cannot be changed automatically",

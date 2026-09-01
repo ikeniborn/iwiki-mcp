@@ -301,6 +301,9 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             "write": ["docs"],
             "primary": "docs",
             "domains": ["docs"],
+            # No wiki_bind ran in this session, so the scope comes from the
+            # token's own grants and the answer says so.
+            "binding_source": "token_default",
             "specifications": {"domains": [{
                 "domain": "docs",
                 "mode": "optional",

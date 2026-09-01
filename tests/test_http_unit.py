@@ -319,3 +319,163 @@ def test_protected_authorization_rejects_tenant_override_but_not_validation():
         context,
         {"method": "tools/call", "params": {"name": "unknown"}},
     )
+
+
+def _server_config():
+    from iwiki_mcp.postgres.config import (
+        HostedServerConfig,
+        ModelConfig,
+        PostgresConfig,
+        ServerConfig,
+    )
+
+    return ServerConfig(
+        storage=PostgresConfig(
+            host="127.0.0.1",
+            port=5432,
+            database="iwiki_test",
+            user="iwiki",
+            sslmode="prefer",
+            password="secret",
+        ),
+        models=ModelConfig("fixture-model", 3, ""),
+        server=HostedServerConfig("127.0.0.1", 8765, (), 1, 2, 30_000, 5_000),
+    )
+
+
+async def _dispatch(middleware, session_id, seen):
+    body = b'{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+    messages = iter(
+        [{"type": "http.request", "body": body, "more_body": False}]
+    )
+
+    async def receive():
+        return next(messages)
+
+    async def send(_message):
+        return None
+
+    await middleware(
+        {
+            "type": "http",
+            "path": "/mcp",
+            "method": "POST",
+            "headers": [
+                (b"authorization", b"Bearer opaque"),
+                (b"mcp-session-id", session_id.encode("latin-1")),
+            ],
+        },
+        receive,
+        send,
+    )
+    return seen
+
+
+async def test_middleware_reports_a_defaulted_binding_and_its_session():
+    from iwiki_mcp import http, server
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        "wiki-a", "token-a", ("docs",), ("docs",), "docs"
+    )
+
+    class Auth:
+        def authenticate(self, token):
+            return context
+
+    seen = {}
+
+    async def app(_scope, _receive, send):
+        state = server._SESSION_BINDING.get()
+        seen["source"] = state.binding_source()
+        seen["session_id"] = state.session_id()
+        seen["substituted"] = state.primary_substituted()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    middleware = http.AuthenticatedMCPMiddleware(
+        app,
+        config=_server_config(),
+        auth_store=Auth(),
+        project_dir="/not-used",
+    )
+
+    await _dispatch(middleware, "session-a", seen)
+    assert seen == {
+        "source": "token_default",
+        "session_id": "session-a",
+        "substituted": False,
+    }
+
+    # An explicit selection survives inside the session and is reported as one.
+    persisted = middleware.sessions.resolve("session-a", context)
+    persisted.set(replace(persisted.get(), primary="docs"))
+    await _dispatch(middleware, "session-a", seen)
+    assert seen["source"] == "session"
+
+    # A different session id never inherits that selection.
+    await _dispatch(middleware, "session-b", seen)
+    assert seen["source"] == "token_default"
+    assert seen["session_id"] == "session-b"
+
+
+async def test_middleware_reports_a_primary_substituted_by_the_write_scope():
+    from iwiki_mcp import http, server
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        "wiki-a", "token-a", ("docs",), ("docs",), "docs"
+    )
+
+    class Auth:
+        def authenticate(self, token):
+            return context
+
+    seen = {}
+
+    async def app(_scope, _receive, send):
+        state = server._SESSION_BINDING.get()
+        seen["substituted"] = state.primary_substituted()
+        seen["requested"] = state.requested_primary()
+        seen["primary"] = state.get().primary
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    middleware = http.AuthenticatedMCPMiddleware(
+        app,
+        config=_server_config(),
+        auth_store=Auth(),
+        project_dir="/not-used",
+    )
+    selected = server._HostedSelectedState(
+        _binding(
+            read=("docs", "private"),
+            write=("private", "docs"),
+            primary="private",
+        )
+    )
+    middleware.sessions.store(
+        "session-a",
+        context,
+        server._HostedBindingState(selected, selected.get()),
+    )
+
+    await _dispatch(middleware, "session-a", seen)
+
+    assert seen == {
+        "substituted": True,
+        "requested": "private",
+        "primary": "docs",
+    }

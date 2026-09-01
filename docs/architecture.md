@@ -68,6 +68,18 @@ owns local `.iwiki.toml` and `.iwikiignore`; hosted provisioning never writes th
 Session identifiers used under a different token are indistinguishable from unknown
 sessions and expire after bounded inactivity.
 
+An unknown, expired, or absent session id makes the middleware build the binding from the
+token's own grants. That fallback is marked `token_default` on the selected state, while
+any explicit selection — `wiki_bind` or `wiki_create_domain` expansion — marks it
+`session`. `wiki_status`, `wiki_bind`, and the code tools whose target is `binding.primary`
+rather than an argument carry the mark as `binding_source`; the domain-free code reads add
+`binding_defaulted` to `warnings` under the fallback, and `wiki_bind` returns the
+`session_id` it bound to. When the request's write-scope intersection replaces the selected
+primary, the same answers carry `primary_substituted` with the `requested_primary`. The
+fallback stays permitted by default; `code_graph.require_session_binding` turns it into a
+`binding_not_selected` refusal for `wiki_code_status`, `wiki_code_search`, and
+`wiki_code_context` only.
+
 Hosted `wiki_create_domain` uses the real request AuthContext and an `AuthStore`
 transaction to recheck `can_create_domain`, create the domain, and insert creator
 read/write plus `can_manage_grants` authority atomically. It expands only the creator's
