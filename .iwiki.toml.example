@@ -1,6 +1,31 @@
+# Project binding. Domain names are logical wiki domains, not filesystem paths.
+# Git storage may omit read or use an empty array to search every domain.
+# PostgreSQL storage requires non-empty read/write arrays; write must be a
+# subset of read, and primary must belong to write.
+#
+# Git-only optional base directory. If omitted, set IWIKI_BASE_DIR instead.
+# base = "/absolute/path/to/iwiki-base"
+# Domains used by searches and other reads when no explicit domain is passed.
 read = ["iwiki-mcp", "personal-ai-wiki", "obsidian-ai-wiki", "icodex", "iclaude", "okf"]
+# Domains that mutating tools may change.
 write = ["iwiki-mcp"]
+# Default domain for domain-free code-graph tools and other primary operations.
 primary = "iwiki-mcp"
+
+# Storage defaults to Git when this table is omitted. To use local PostgreSQL,
+# change type to "postgres" and uncomment every field below. PostgreSQL
+# passwords and embedding-model settings belong in environment variables.
+[storage]
+type = "git"  # git | postgres
+# PostgreSQL network address and database identity. All are required in
+# postgres mode; port must be between 1 and 65535.
+# host = "db.internal.example"
+# port = 5432
+# database = "iwiki"
+# user = "iwiki_app"
+# PostgreSQL TLS policy and stable local wiki identifier.
+# sslmode = "verify-full"  # disable | allow | prefer | require | verify-ca | verify-full
+# iwiki_id = "team-wiki"   # stable local PostgreSQL wiki identifier
 
 # GWT specification policy for every visible local domain.
 # Choose one value:
@@ -11,15 +36,30 @@ primary = "iwiki-mcp"
 [specifications]
 mode = "disabled"
 
+# Optional local code graph. Every key in this table is optional; values below
+# show supported defaults or typical settings. Unknown keys are rejected.
 [code_graph]
-enabled = true
-languages = ["python", "typescript"]
-auto_rebuild = "bounded"
+# Master switch. Disabling the graph does not affect ordinary wiki operations.
+enabled = true  # true | false
+
+# Non-empty language list. Bash is opt-in; JavaScript and TypeScript share the
+# ECMAScript parser but remain distinct graph languages.
+languages = ["python", "typescript"]  # python | typescript | javascript | bash
+
+# Query-time rebuild policy. max_rebuild_seconds is its positive deadline.
+auto_rebuild = "bounded"  # bounded | off
 max_rebuild_seconds = 10
+# Full wiki_code_index budget; omit to reuse max_rebuild_seconds.
 max_full_rebuild_seconds = 10
+
+# Positive discovery limits. Oversized files and files after the count cap are
+# skipped with bounded warnings.
 max_file_bytes = 1000000
 max_total_files = 20000
-include_tests = true
+# Include or exclude files under test directories during discovery.
+include_tests = true  # true | false
+
+# Safe project-relative ignore patterns. Absolute paths and ".." are rejected.
 exclude = [
   "tests/fixtures/",
   "build/",
@@ -29,21 +69,34 @@ exclude = [
   "vendor/",
   "node_modules/",
 ]
-# typescript_type_boost (default false) opts into an isolated, best-effort
+
+# Default false. Opts into an isolated, best-effort
 # TypeScript Compiler API subprocess for type resolution; its absence or
 # failure never blocks indexing -- the Tree-sitter baseline always runs.
 typescript_type_boost = false
 
-# Distributed publication (only if reading the graph from a remote server)
-publish_mode = "mcp"      # sqlite | postgres | mcp
-read_mode = "mcp"         # sqlite | postgres | mcp
+# Publication and reads select one backend each; failures never fall back to a
+# different mode. sqlite is local, postgres reuses [storage], and mcp uses the
+# authenticated remote MCP endpoint.
+publish_mode = "mcp"  # sqlite | postgres | mcp
+read_mode = "mcp"     # sqlite | postgres | mcp
+
+# Snapshot freshness in seconds. Zero disables age rejection.
 max_snapshot_age_seconds = 86400
+
+# Positive maximum rows and canonical payload bytes per publication batch. MCP
+# publication also honors lower limits advertised by the remote server.
 max_batch_rows = 1000
 max_batch_bytes = 1000000
+
+# Positive publication-session lease duration in seconds.
 publication_session_ttl_seconds = 900
+# Positive age in seconds before abandoned staging sessions can be removed.
 staging_retention_seconds = 86400
+# Positive maximum staging sessions removed by one cleanup pass.
 staging_cleanup_limit = 100
 
-# read_mode = "mcp" needs env vars (not in toml, secrets):
-# IWIKI_CODE_GRAPH_MCP_URL
-# IWIKI_CODE_GRAPH_MCP_TOKEN
+# MCP mode needs IWIKI_CODE_GRAPH_MCP_URL and IWIKI_CODE_GRAPH_MCP_TOKEN.
+# PostgreSQL mode needs IWIKI_DB_PASSWORD, IWIKI_EMBED_MODEL, and
+# IWIKI_EMBED_DIMENSIONS; IWIKI_RERANK_MODEL is optional. Never store these
+# runtime values or other credentials in this TOML file.
