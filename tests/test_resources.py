@@ -32,6 +32,55 @@ def test_authoring_rules_describe_current_search_and_update_tools():
     assert "wiki_remediation_plan" in AUTHORING_RULES
 
 
+def test_update_page_documentation_covers_selector_update_contract():
+    root = Path(__file__).parents[1]
+    english = (root / "README.md").read_text(encoding="utf-8")
+    architecture = (root / "docs/architecture.md").read_text(encoding="utf-8")
+    russian = (root / "docs/README.ru.md").read_text(encoding="utf-8")
+
+    resource_terms = (
+        "section-only update requires both `heading` and `new_body`",
+        "code-only update uses `code`",
+        "combined update atomically applies both",
+        "code.symbols`, `code.files`, and `code.source_globs",
+        "completely replaces the selectors",
+        "all-empty lists clears them",
+        "Omit `code` (or pass `null`) to preserve",
+        "code-only response omits `heading` and adds no fields",
+        "section and combined responses retain `heading`",
+        "root schema uses `anyOf`",
+        "`domain` and `slug` remain root-required",
+        "partial, no-op, or unsafe selectors before mutation",
+        "current `expected_revision` CAS",
+        "one revision and transaction",
+        "unchanged chunks reuse embeddings",
+        "republish makes Code-graph Wiki links current",
+    )
+    normalized_rules = " ".join(AUTHORING_RULES.casefold().split())
+    assert all(term.casefold() in normalized_rules for term in resource_terms)
+
+    for document in (english, architecture):
+        assert "section-only" in document
+        assert "code-only" in document
+        assert "combined" in document
+        assert "code.source_globs" in document
+        assert "completely replaces" in document
+        assert "all-empty lists" in document
+        assert "expected_revision" in document
+        assert "unchanged chunks reuse embeddings" in document
+        assert "anyOf" in document
+
+    assert "только для секции" in russian
+    assert "только для code" in russian
+    assert "комбинированное" in russian
+    assert "code.source_globs" in russian
+    assert "полностью заменяет selectors" in russian
+    assert "все списки пусты" in russian
+    assert "expected_revision" in russian
+    assert "неизменённые чанки повторно используют embeddings" in russian
+    assert "anyOf" in russian
+
+
 def test_agent_snippets_use_supported_existing_page_update_path():
     root = Path(__file__).parents[1]
     for relative in ("templates/AGENTS.md.snippet", "templates/CLAUDE.md.snippet"):
