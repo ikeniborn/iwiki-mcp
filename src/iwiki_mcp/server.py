@@ -3550,6 +3550,15 @@ def wiki_update_page(
     expected_section_hash: str | None = None,
     code: dict | None = None,
 ) -> dict:
+    """Update one existing page: a section, its code selectors, or both.
+
+    Pass `heading` with `new_body` for a section-only update, `code` for a
+    code-only update, or all three for a combined update. `heading` and
+    `new_body` are only valid together. A code-only update preserves the page
+    body byte-for-byte and cannot pass `source`, `description`, `status`,
+    `new_heading`, or `expected_section_hash`. On PostgreSQL storage
+    `expected_revision` is required.
+    """
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
     if _is_postgres(bind):
@@ -5484,29 +5493,6 @@ mcp.tool()(wiki_write_page)
 mcp.tool()(wiki_update_page)
 
 
-def _configure_update_page_input_schema() -> None:
-    tool = mcp._tool_manager.get_tool("wiki_update_page")
-    if tool is None:
-        raise RuntimeError("wiki_update_page tool registration missing")
-    parameters = dict(tool.parameters)
-    parameters["required"] = ["domain", "slug"]
-    parameters["anyOf"] = [
-        {
-            "required": ["heading", "new_body"],
-            "properties": {
-                "heading": {"type": "string"},
-                "new_body": {"type": "string"},
-            },
-        },
-        {
-            "required": ["code"],
-            "properties": {"code": {"type": "object"}},
-        },
-    ]
-    tool.parameters = parameters
-
-
-_configure_update_page_input_schema()
 mcp.tool()(wiki_insert_section)
 mcp.tool()(wiki_delete_section)
 mcp.tool()(wiki_move_section)

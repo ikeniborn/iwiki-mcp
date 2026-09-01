@@ -42,9 +42,10 @@ AUTHORING_RULES: str = """\
   available only with the section update. Use `wiki_delete_page` only when a source was
   removed. Run `wiki_lint` after changes; use `wiki_remediation_plan` to inspect grouped
   repair actions.
-- The public root schema uses `anyOf`: section input requires `heading` plus `new_body`, or
-  code input requires `code`; `domain` and `slug` remain root-required. Runtime validation
-  rejects partial, no-op, or unsafe selectors before mutation.
+- The public root schema stays a plain object with `domain` and `slug` root-required:
+  client tool validation rejects a root combinator, so a root `anyOf` would drop the whole
+  tool. Runtime validation enforces the mutually exclusive operations instead and rejects
+  partial, no-op, or unsafe selectors before mutation.
 - Optional code selectors use only nested `code.symbols`, `code.files`, and
   `code.source_globs`. Each symbol item contains exactly `qualified_name`; file and glob
   items are project-relative strings. `modules`, `module_id`, `aliases`, and import bindings

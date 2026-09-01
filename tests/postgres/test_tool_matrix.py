@@ -176,25 +176,47 @@ def test_registered_tools_match_complete_mode_matrix():
     assert registered == set(TOOLS)
 
 
-def test_update_page_schema_requires_an_explicit_operation():
+def test_every_tool_schema_root_stays_a_plain_object():
+    # Client tool validation accepts only a plain object schema root; a
+    # combinator there makes the client drop the tool from the session.
+    combinators = {"anyOf", "oneOf", "allOf", "not", "$ref"}
+
+    for tool in server.mcp._tool_manager.list_tools():
+        assert tool.parameters.get("type") == "object", tool.name
+        assert not combinators & set(tool.parameters), tool.name
+
+
+def test_update_page_documents_its_operations_without_a_root_combinator():
     tool = server.mcp._tool_manager.get_tool("wiki_update_page")
 
     assert tool is not None
     assert tool.parameters["required"] == ["domain", "slug"]
-    assert tool.parameters["anyOf"] == [
-        {
-            "required": ["heading", "new_body"],
-            "properties": {
-                "heading": {"type": "string"},
-                "new_body": {"type": "string"},
-            },
-        },
-        {
-            "required": ["code"],
-            "properties": {"code": {"type": "object"}},
-        },
-    ]
     assert "code" in tool.parameters["properties"]
+    assert "code-only" in tool.description
+    assert "combined" in tool.description
+
+
+def test_update_page_runtime_rejects_partial_and_empty_operations():
+    def prepare(**overrides):
+        request = {
+            "heading": None, "new_body": None, "source": None,
+            "description": None, "status": None, "new_heading": None,
+            "expected_section_hash": None, "code": None,
+        }
+        request.update(overrides)
+        heading = request.pop("heading")
+        new_body = request.pop("new_body")
+        return server._prepare_update_page_request(heading, new_body, **request)
+
+    assert "error" in prepare(heading="Body")
+    assert "error" in prepare(new_body="text")
+    assert "error" in prepare()
+    assert "error" in prepare(code={}, source="src.py")
+    assert prepare(heading="Body", new_body="text")["mode"] == "section"
+    assert prepare(code={})["mode"] == "code"
+    assert prepare(
+        heading="Body", new_body="text", code={}
+    )["mode"] == "combined"
 
 
 def test_bind_schema_exposes_optional_specification_mode_enum():

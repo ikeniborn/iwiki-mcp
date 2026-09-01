@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from jsonschema import Draft202012Validator, ValidationError
 import pytest
 
 mcp_client = pytest.importorskip("mcp")
@@ -173,54 +172,19 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 bind_schema = tools["wiki_bind"].inputSchema
                 assert "write" in bind_schema["properties"]
                 assert "primary" in bind_schema["properties"]
+                # Client tool validation accepts only a plain object schema
+                # root: a combinator there makes the client drop the tool.
+                for name, tool in tools.items():
+                    schema = tool.inputSchema
+                    assert schema.get("type") == "object", name
+                    combinators = {"anyOf", "oneOf", "allOf", "not", "$ref"}
+                    assert not combinators & set(schema), name
                 update_schema = tools["wiki_update_page"].inputSchema
                 assert update_schema["required"] == ["domain", "slug"]
-                assert update_schema["anyOf"] == [
-                    {
-                        "required": ["heading", "new_body"],
-                        "properties": {
-                            "heading": {"type": "string"},
-                            "new_body": {"type": "string"},
-                        },
-                    },
-                    {
-                        "required": ["code"],
-                        "properties": {"code": {"type": "object"}},
-                    },
-                ]
                 assert "code" in update_schema["properties"]
-                validator = Draft202012Validator(update_schema)
-                for sample in (
-                    {
-                        "domain": "backend",
-                        "slug": "page",
-                        "heading": "Body",
-                        "new_body": "text",
-                    },
-                    {"domain": "backend", "slug": "page", "code": {}},
-                    {
-                        "domain": "backend",
-                        "slug": "page",
-                        "heading": "Body",
-                        "new_body": "text",
-                        "code": {},
-                    },
-                ):
-                    validator.validate(sample)
-                for sample in (
-                    {"domain": "backend", "slug": "page"},
-                    {"domain": "backend", "slug": "page", "heading": "Body"},
-                    {"domain": "backend", "slug": "page", "new_body": "text"},
-                    {
-                        "domain": "backend",
-                        "slug": "page",
-                        "heading": None,
-                        "new_body": None,
-                        "code": None,
-                    },
-                ):
-                    with pytest.raises(ValidationError):
-                        validator.validate(sample)
+                # The mutually exclusive operations live in the description
+                # and in runtime validation, not in the schema root.
+                assert "code-only" in tools["wiki_update_page"].description
                 assert "new_heading" in update_schema["properties"]
                 assert "new_heading" not in update_schema.get("required", [])
                 assert "expected_revision" in update_schema["properties"]
