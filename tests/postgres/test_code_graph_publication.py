@@ -267,3 +267,100 @@ def test_status_and_lint_report_stale_links_after_markdown_changes(pg_graph):
         "current_markdown_revision"
     ]
     assert report["stored_change_token"] != report["current_change_token"]
+
+
+def test_selector_update_republishes_wiki_context(
+    pg_ranked_graph, hosted_empty_code
+):
+    import json
+
+    from iwiki_mcp import server
+    from iwiki_mcp.codegraph.publication import (
+        header_payload,
+        iter_snapshot_batches,
+    )
+
+    graph = hosted_empty_code.graph
+    assert graph is pg_ranked_graph
+    page_slug = "concept/selector-update-hydration"
+    symbol = graph.rows["symbols"][0]
+    source_relations = [
+        relation
+        for relation in graph.rows["relations"]
+        if relation["source_symbol_id"] == symbol["symbol_id"]
+    ]
+    assert source_relations
+    assert all(
+        relation["source_file_id"] == symbol["file_id"]
+        for relation in source_relations
+    )
+    store = graph.markdown_store()
+    store.write_page(
+        graph.domain,
+        page_slug,
+        "# Selector Update Hydration\n\n## Body\ntext\n",
+    )
+
+    def publish():
+        session = server.wiki_code_publish_begin(header_payload(graph.header))
+        assert set(session) >= {
+            "session_id",
+            "max_batch_rows",
+            "max_batch_bytes",
+        }
+        batches = iter_snapshot_batches(
+            graph.rows,
+            max_rows=session["max_batch_rows"],
+            max_bytes=session["max_batch_bytes"],
+        )
+        for batch in batches:
+            accepted = server.wiki_code_publish_batch(
+                session["session_id"],
+                batch.kind,
+                batch.ordinal,
+                json.loads(bytes(batch.payload).decode("utf-8")),
+                batch.payload_hash,
+            )
+            assert accepted == {"accepted": True}
+        return server.wiki_code_publish_finalize(session["session_id"])
+
+    initial = publish()
+    assert initial["state"] == "ready"
+    assert initial["wiki_links"] == 0
+
+    before = store.read_page(graph.domain, page_slug)
+    updated = server.wiki_update_page(
+        graph.domain,
+        page_slug,
+        code={"symbols": [{"qualified_name": symbol["qualified_name"]}]},
+        expected_revision=before["revision"],
+    )
+
+    assert set(updated) == {"page", "revision", "indexed_chunks"}
+    assert updated["page"] == f"{graph.domain}/{page_slug}.md"
+    assert updated["revision"] == before["revision"] + 1
+    stale = server.wiki_code_status()
+    assert stale["state"] == "ready"
+    assert stale["wiki_links_stale"] is True
+    assert stale["stored_markdown_generation"] != stale[
+        "current_markdown_generation"
+    ]
+    stale_context = server.wiki_code_context(
+        [symbol["symbol_id"]], include_wiki=True
+    )
+    assert stale_context["wiki_pages"] == []
+    assert "wiki_links_stale" in stale_context["warnings"]
+
+    republished = publish()
+    assert republished["state"] == "ready"
+    assert republished["wiki_links"] > 0
+    fresh = server.wiki_code_status()
+    assert fresh["state"] == "ready"
+    assert fresh["wiki_links_stale"] is False
+
+    context = server.wiki_code_context(
+        [symbol["symbol_id"]], include_wiki=True
+    )
+    assert context["state"] == "ready"
+    assert context["wiki_links_stale"] is False
+    assert page_slug in {page["page_id"] for page in context["wiki_pages"]}
