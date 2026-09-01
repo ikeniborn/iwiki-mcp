@@ -466,11 +466,18 @@ class AuthenticatedMCPMiddleware:
 
             state = self.sessions.resolve(session_id, context)
             if state is None:
-                selected = server._HostedSelectedState(initial)
+                # No selection survives for this session: the answer is built
+                # from the token's own grants, and every binding-dependent
+                # answer must say so.
+                selected = server._HostedSelectedState(
+                    initial, source="token_default"
+                )
                 state = server._HostedBindingState(selected, initial)
+            state.bind_session(session_id)
 
             async with state.request_lock():
                 selected = state.selected_state()
+                requested_primary = selected.get().primary
                 current = _effective_binding(selected.get(), context)
                 effective_context = replace(
                     context,
@@ -478,7 +485,15 @@ class AuthenticatedMCPMiddleware:
                     write_domains=tuple(current.write),
                     primary=current.primary,
                 )
-                state.set_effective(current, effective_context)
+                state.set_effective(
+                    current,
+                    effective_context,
+                    requested_primary=requested_primary,
+                    primary_substituted=(
+                        requested_primary is not None
+                        and current.primary != requested_primary
+                    ),
+                )
                 try:
                     messages = await _request_messages(receive)
                     request_json = _request_json(messages)

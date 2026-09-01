@@ -57,8 +57,11 @@ class HostedCodeGraphConfig:
     publication_session_ttl_seconds: int = 900
     staging_retention_seconds: int = 86400
     staging_cleanup_limit: int = 100
+    require_session_binding: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.require_session_binding, bool):
+            raise ConfigError("require_session_binding must be a boolean")
         bounds = {
             "max_snapshot_age_seconds": (0, None),
             "max_batch_rows": (1, 5000),
@@ -231,6 +234,7 @@ _HOSTED_CODE_GRAPH_FIELDS = {
     "publication_session_ttl_seconds",
     "staging_retention_seconds",
     "staging_cleanup_limit",
+    "require_session_binding",
 }
 _SERVER_TOP_LEVEL_FIELDS = {"storage", "server", "code_graph", "specifications"}
 

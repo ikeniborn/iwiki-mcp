@@ -263,3 +263,204 @@ def test_hosted_publication_rejects_a_tampered_batch(hosted_empty_code):
     assert server.wiki_code_publish_abort(session["session_id"]) == {
         "state": "aborted"
     }
+
+
+def _hosted_binding(*, read=("docs",), write=("docs",), primary="docs"):
+    from iwiki_mcp import base
+
+    return base.PostgresBinding(
+        host="127.0.0.1",
+        port=5432,
+        database="iwiki_test",
+        user="iwiki",
+        sslmode="prefer",
+        iwiki_id="wiki-a",
+        read=read,
+        write=write,
+        primary=primary,
+        project_dir="/not-used",
+        embed_model="fixture-model",
+        embed_dimensions=3,
+        rerank_model="",
+        password="secret",
+    )
+
+
+class _FakeReader:
+    """Answer like the hosted PostgreSQL reader without touching a database."""
+
+    def __init__(self, binding):
+        self.domain = binding.primary
+        self.calls = 0
+
+    def _answer(self):
+        self.calls += 1
+        return {
+            "domain": self.domain,
+            "state": "ready",
+            "fresh": True,
+            "counts": {"files": 3, "symbols": 7},
+        }
+
+    def status(self):
+        return self._answer()
+
+    def search(self, _validate):
+        return {**self._answer(), "results": [], "warnings": []}
+
+    def context(self, _request):
+        return {**self._answer(), "nodes": [], "warnings": ["unknown_seed"]}
+
+
+@pytest.fixture
+def hosted_session(monkeypatch):
+    """Install one hosted session state around a fake snapshot reader."""
+    from iwiki_mcp import server
+
+    readers = []
+    tokens = []
+
+    def factory(source, *, binding=None, session_id="session-a"):
+        selected = server._HostedSelectedState(
+            binding or _hosted_binding(), source=source
+        )
+        state = server._HostedBindingState(selected, selected.get())
+        state.bind_session(session_id)
+        tokens.append(server._SESSION_BINDING.set(state))
+
+        def reader(bind):
+            readers.append(_FakeReader(bind))
+            return readers[-1]
+
+        monkeypatch.setattr(server, "_postgres_code_reader", reader)
+        return state
+
+    factory.readers = readers
+    try:
+        yield factory
+    finally:
+        for token in reversed(tokens):
+            server._SESSION_BINDING.reset(token)
+
+
+def test_domain_free_code_read_reports_a_defaulted_binding(hosted_session):
+    from iwiki_mcp import server
+
+    hosted_session("token_default")
+
+    answer = server.wiki_code_search("parse")
+
+    assert answer["binding_source"] == "token_default"
+    assert "binding_defaulted" in answer["warnings"]
+    assert answer["domain"] == "docs"
+
+
+def test_domain_free_code_read_reports_a_selected_binding(hosted_session):
+    from iwiki_mcp import server
+
+    hosted_session("session")
+
+    answer = server.wiki_code_search("parse")
+
+    assert answer["binding_source"] == "session"
+    assert "binding_defaulted" not in answer["warnings"]
+
+
+def test_status_and_context_carry_the_same_binding_source(hosted_session):
+    from iwiki_mcp import server
+
+    hosted_session("token_default")
+
+    status = server.wiki_code_status()
+    context = server.wiki_code_context(["py:module:" + "a" * 64])
+
+    assert status["binding_source"] == "token_default"
+    assert status["warnings"] == ["binding_defaulted"]
+    assert context["binding_source"] == "token_default"
+    assert context["warnings"] == ["unknown_seed", "binding_defaulted"]
+
+
+def test_a_lost_session_answers_as_a_token_default(monkeypatch):
+    from iwiki_mcp import http, server
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext("wiki-a", "token-a", ("docs",), ("docs",), "docs")
+    sessions = http._SessionBindings()
+    selected = server._HostedSelectedState(
+        _hosted_binding(primary="framework"), source="session"
+    )
+    bound = server._HostedBindingState(selected, selected.get())
+    sessions.store("session-a", context, bound)
+
+    restarted = http._SessionBindings()
+    assert restarted.resolve("session-a", context) is None
+
+    fallback = server._HostedBindingState(
+        server._HostedSelectedState(_hosted_binding(), source="token_default")
+    )
+    monkeypatch.setattr(
+        server, "_postgres_code_reader", lambda bind: _FakeReader(bind)
+    )
+    token = server._SESSION_BINDING.set(fallback)
+    try:
+        answer = server.wiki_code_search("parse")
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+    assert answer["binding_source"] == "token_default"
+    assert answer["domain"] == "docs"
+
+
+def test_fail_closed_option_refuses_a_defaulted_code_read(
+    hosted_session, monkeypatch
+):
+    from iwiki_mcp import server
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+
+    state = hosted_session("token_default")
+    monkeypatch.setattr(
+        server,
+        "_HOSTED_CODE_GRAPH",
+        HostedCodeGraphConfig(require_session_binding=True),
+    )
+    refusal = {
+        "error": "binding_not_selected",
+        "hint": "call wiki_bind to select a primary domain for this session",
+    }
+
+    assert server.wiki_code_status() == refusal
+    assert server.wiki_code_search("parse") == refusal
+    assert server.wiki_code_context(["py:module:" + "a" * 64]) == refusal
+    assert hosted_session.readers == []
+
+    state.selected_state().set(_hosted_binding())
+    assert server.wiki_code_search("parse")["binding_source"] == "session"
+
+
+def test_wiki_status_and_bind_report_the_session_binding(
+    hosted_session, monkeypatch
+):
+    from iwiki_mcp import server
+
+    hosted_session("token_default")
+
+    class _Store:
+        def list_domains(self):
+            return ["docs"]
+
+    monkeypatch.setattr(
+        server, "_postgres_store_for_binding", lambda bind: _Store()
+    )
+    monkeypatch.setattr(
+        server,
+        "_specification_status_domain",
+        lambda bind, domain: {"domain": domain, "mode": "optional"},
+    )
+
+    status = server.wiki_status()
+    assert status["binding_source"] == "token_default"
+
+    bound = server.wiki_bind(read=["docs"], write=["docs"], primary="docs")
+    assert bound["binding_source"] == "session"
+    assert bound["session_id"] == "session-a"
+    assert server.wiki_status()["binding_source"] == "session"

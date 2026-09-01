@@ -352,6 +352,7 @@ def test_hosted_code_graph_limits_have_safe_defaults(tmp_path):
     assert config.code_graph.publication_session_ttl_seconds == 900
     assert config.code_graph.staging_retention_seconds == 86400
     assert config.code_graph.staging_cleanup_limit == 100
+    assert config.code_graph.require_session_binding is False
 
 
 def test_hosted_code_graph_limits_accept_valid_values(tmp_path):
@@ -365,6 +366,7 @@ max_batch_bytes = 5000000
 publication_session_ttl_seconds = 3600
 staging_retention_seconds = 604800
 staging_cleanup_limit = 1000
+require_session_binding = true
 """
 
     config = load_server_config(
@@ -378,6 +380,7 @@ staging_cleanup_limit = 1000
     assert config.code_graph.publication_session_ttl_seconds == 3600
     assert config.code_graph.staging_retention_seconds == 604800
     assert config.code_graph.staging_cleanup_limit == 1000
+    assert config.code_graph.require_session_binding is True
 
 
 @pytest.mark.parametrize(
@@ -389,6 +392,7 @@ staging_cleanup_limit = 1000
         ("publication_session_ttl_seconds = 3601", "publication_session_ttl_seconds"),
         ("staging_retention_seconds = 604801", "staging_retention_seconds"),
         ("staging_cleanup_limit = 1001", "staging_cleanup_limit"),
+        ("require_session_binding = 1", "require_session_binding"),
         ('password = "must-not-be-used"', "not allowed"),
         ('dsn = "postgresql://must-not-be-used"', "not allowed"),
         ('token = "must-not-be-used"', "not allowed"),

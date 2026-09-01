@@ -184,6 +184,37 @@ expands the creator's current session. Project initialization still owns local
 `.iwiki.toml` and `.iwikiignore`; the hosted server creates PostgreSQL domain state but
 never writes those project files.
 
+### Session lifetime and binding provenance
+
+A `wiki_bind` selection is **process-local and session-scoped**. It is keyed by
+`mcp-session-id`, expires after 30 minutes of inactivity, and does not survive a server
+restart. When no selection is found the server falls back to the token's own default
+scope and keeps answering — the fallback is permitted, but never silent:
+
+- `wiki_status`, `wiki_bind`, `wiki_code_status`, `wiki_code_search`,
+  `wiki_code_context`, and `wiki_code_publish_begin` carry `binding_source`, either
+  `session` (a selection made by `wiki_bind` in this session) or `token_default` (the
+  fallback built from the token's grants).
+- The domain-free code reads additionally add `binding_defaulted` to their `warnings`
+  under `token_default`, so an answer from another project's snapshot is recognizable
+  even though it reports `state: ready` and `fresh: true`.
+- `wiki_bind` returns the `session_id` it bound to, so an answer belonging to a different
+  session is recognizable.
+- When the write-scope intersection replaces the selected primary, the answer carries
+  `primary_substituted: true` and `requested_primary`.
+
+The client's contract is therefore: re-bind after a reconnect, after an idle period, and
+whenever an answer reports `binding_source: token_default`. A hosted server may turn that
+fallback into a refusal for code reads with `code_graph.require_session_binding = true`;
+those three tools then return `{"error": "binding_not_selected"}` and no snapshot content
+until `wiki_bind` runs. The option is off by default and never affects Markdown tools,
+which name their domain explicitly.
+
+```toml
+[code_graph]
+require_session_binding = false # true refuses defaulted domain-free code reads
+```
+
 ### PostgreSQL provisioning and least privilege
 
 The operator creates the database and installs the `vector` extension. A dedicated
