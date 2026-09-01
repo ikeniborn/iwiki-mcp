@@ -102,6 +102,10 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
     )
     proj = tmp_path / "proj"
     proj.mkdir()
+    (proj / ".iwiki.toml").write_text(
+        'read = ["backend"]\nwrite = ["backend"]\nprimary = "backend"\n',
+        encoding="utf-8",
+    )
     env = dict(os.environ)
     for name in proxy_names:
         env.pop(name, None)
@@ -228,7 +232,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 assert not res.isError
                 assert res.content
                 status_payload = json.loads(res.content[0].text)
-                assert status_payload["write"] == []
+                assert status_payload["write"] == ["backend"]
                 lint_result = await session.call_tool(
                     "wiki_lint", {"domain": "backend"}
                 )
@@ -236,6 +240,43 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 lint_payload = json.loads(lint_result.content[0].text)
                 assert lint_payload["reports"]["backend"]["graph"]["state"] == "missing"
                 assert not (base / ".iwiki" / "graph.sqlite3").exists()
+                invalid_update_cases = (
+                    (
+                        {"domain": "backend", "slug": "page"},
+                        "no update operation requested",
+                    ),
+                    (
+                        {
+                            "domain": "backend",
+                            "slug": "page",
+                            "heading": "Body",
+                        },
+                        "heading and new_body must be provided together",
+                    ),
+                    (
+                        {
+                            "domain": "backend",
+                            "slug": "page",
+                            "heading": None,
+                            "new_body": None,
+                            "code": None,
+                        },
+                        "no update operation requested",
+                    ),
+                )
+                for arguments, expected_error in invalid_update_cases:
+                    invalid = await session.call_tool(
+                        "wiki_update_page", arguments
+                    )
+                    assert not invalid.isError
+                    payload = json.loads(invalid.content[0].text)
+                    assert payload == {
+                        "error": expected_error,
+                        "hint": (
+                            "use heading with new_body for section-only, code for "
+                            "code-only, or all three for a combined update"
+                        ),
+                    }
 
         assert requests == [
             {

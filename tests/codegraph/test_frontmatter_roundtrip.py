@@ -193,6 +193,37 @@ def test_code_only_update_sets_selectors_and_preserves_body_exactly(
     assert updated_body == original_body
 
 
+def test_git_code_only_update_preserves_crlf_body_bytes(tmp_path, monkeypatch):
+    _patch_server(monkeypatch, tmp_path)
+    page = tmp_path / "d" / "concept" / "service.md"
+    page.parent.mkdir(parents=True)
+    original_body = (
+        b"# Service\r\n\r\n"
+        b"## Overview\r\nExact body.  \r\n\r\n"
+        b"## Notes\r\nOriginal.\r\n"
+    )
+    page.write_bytes(
+        b"---\r\n"
+        b"type: concept\r\n"
+        b"description: Existing\r\n"
+        b"---\r\n"
+        + original_body
+    )
+
+    result = server.wiki_update_page(
+        "d", "concept/service", code={"files": ["src/pkg/service.py"]}
+    )
+
+    assert "error" not in result
+    updated = page.read_bytes()
+    assert updated.endswith(original_body)
+    updated_meta, updated_body = fm.split(
+        updated.decode("utf-8"), strict_code=True
+    )
+    assert updated_meta["code"] == {"files": ["src/pkg/service.py"]}
+    assert updated_body.encode("utf-8") == original_body
+
+
 def test_code_only_update_replaces_existing_selector_mapping(tmp_path, monkeypatch):
     _patch_server(monkeypatch, tmp_path)
     page = tmp_path / "d" / "concept" / "service.md"

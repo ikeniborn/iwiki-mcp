@@ -3487,6 +3487,19 @@ def _prepare_update_page_request(
     }
 
 
+def _raw_frontmatter_body(content: bytes) -> bytes:
+    """Return bytes after a complete leading frontmatter block, unchanged."""
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].rstrip(b"\r\n") != b"---":
+        return content
+    offset = len(lines[0])
+    for line in lines[1:]:
+        offset += len(line)
+        if line.rstrip(b"\r\n") == b"---":
+            return content[offset:]
+    return content
+
+
 @_safe
 def wiki_update_page(
     domain: str, slug: str, heading: str | None = None,
@@ -3503,9 +3516,6 @@ def wiki_update_page(
         scope_error = base.write_scope_error(bind, valid_domain)
         if scope_error:
             return scope_error
-        if expected_revision is None:
-            return expected_revision_required()
-        _slug_parts(slug)
         request = _prepare_update_page_request(
             heading,
             new_body,
@@ -3518,6 +3528,9 @@ def wiki_update_page(
         )
         if "error" in request:
             return request
+        if expected_revision is None:
+            return expected_revision_required()
+        _slug_parts(slug)
         bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         page = store.read_page(valid_domain, slug)
@@ -3642,6 +3655,7 @@ def wiki_update_page(
             "hint": "list pages with wiki_list_pages",
         }
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
+    original_bytes = Path(path).read_bytes()
     original_full = open(path, encoding="utf-8").read()
     try:
         meta, original_body = _fm.split(original_full, strict_code=True)
@@ -3689,9 +3703,18 @@ def wiki_update_page(
         if status is not None:
             meta["status"] = _fm.normalize_status(status)
         meta["timestamp"] = _dt.date.today().isoformat()
-        new_md = _fm.render(meta) + updated_body
+        candidate_body = (
+            _raw_frontmatter_body(original_bytes).decode("utf-8")
+            if request["mode"] == "code"
+            else updated_body
+        )
+        new_md = _fm.render(meta) + candidate_body
     else:
-        new_md = updated_body
+        new_md = (
+            _raw_frontmatter_body(original_bytes).decode("utf-8")
+            if request["mode"] == "code"
+            else updated_body
+        )
     if new_heading is not None and sync.is_git_repo(bind.base):
         return _apply_heading_rename(
             bind,
@@ -3724,8 +3747,7 @@ def wiki_update_page(
         return prepared_specification
     if prepared_specification is not None:
         def mutate_specification_page() -> None:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(new_md)
+            Path(path).write_bytes(new_md.encode("utf-8"))
             if source:
                 indexer.upsert_ingest_log(
                     bind.base,
@@ -3770,16 +3792,14 @@ def wiki_update_page(
             result["heading"] = heading.lstrip("#").strip()
         return result
     try:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(new_md)
+        Path(path).write_bytes(new_md.encode("utf-8"))
         if source:
             indexer.upsert_ingest_log(
                 bind.base, valid_domain, source, page_file, indexer.src_hash(source)
             )
         stats = indexer.index_domain(cfg, bind.base, valid_domain)
     except Exception:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(original_full)
+        Path(path).write_bytes(original_bytes)
         if source:            # mirrors the upsert gate above
             _restore_log(log_file, log_before)
         raise

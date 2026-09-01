@@ -10,6 +10,7 @@ from iwiki_mcp import indexer, server
 from iwiki_mcp.specification_store import (
     GitSpecificationStore,
     PreparedProjectionReplace,
+    ResolutionAttempt,
     decode_jsonl,
 )
 
@@ -93,6 +94,71 @@ def test_optional_valid_specification_writes_projection_in_same_commit(
         "payments/specification/account.md",
         "payments/specifications.jsonl",
     ]
+
+
+@pytest.mark.parametrize("operation", ["code_only", "combined"])
+def test_strict_selector_update_preserves_git_specification_evidence(
+    tmp_path, monkeypatch, operation
+):
+    wiki, domain = _seed(tmp_path, monkeypatch, "strict")
+    created = server.wiki_write_page(
+        "payments", "account", VALID_SPECIFICATION, type="specification"
+    )
+    assert "error" not in created
+    store = GitSpecificationStore(str(wiki), "strict")
+    before = store.context("payments", "open-account")
+    assert before is not None
+    binding = next(
+        item for item in before.bindings if item.relation == "verifies"
+    )
+    attempt = ResolutionAttempt(
+        binding_id=binding.binding_id,
+        domain="payments",
+        scenario_id="open-account",
+        state="resolved",
+        targets=("py:file:tests/test_account.py",),
+        unresolved_reference=None,
+        graph_revision="graph-1",
+        graph_state_fingerprint="sha256:" + "1" * 64,
+        specification_source_hash=before.scenario.source_hash,
+        checked_at="2026-08-29T12:00:00Z",
+        reason=None,
+    )
+    store.record_resolution(attempt)
+    _git(wiki, "add", "payments/specifications.jsonl")
+    _git(wiki, "commit", "-q", "-m", "record specification evidence")
+    head_before = _git(wiki, "rev-parse", "HEAD")
+
+    kwargs = {"code": {"files": ["src/account.py"]}}
+    if operation == "combined":
+        kwargs.update({
+            "heading": "Open account",
+            "new_body": (
+                "Updated prose outside the scenario fence.\n\n"
+                + VALID_SPECIFICATION.split("## Open account\n\n", 1)[1]
+            ),
+        })
+    result = server.wiki_update_page(
+        "payments", "specification/account", **kwargs
+    )
+
+    after = store.context("payments", "open-account")
+    assert after is not None
+    assert after.scenario.source_hash == before.scenario.source_hash
+    assert after.bindings == before.bindings
+    assert after.evidence == (attempt,)
+    assert result["specifications"]["state"] == "ready"
+    assert _git(wiki, "rev-parse", "HEAD") != head_before
+    assert _git(wiki, "status", "--porcelain", "-uall") == ""
+    committed = set(
+        _git(wiki, "show", "--name-only", "--pretty=format:", "HEAD").split()
+    )
+    assert {
+        "payments/specification/account.md",
+        "payments/specifications.jsonl",
+    } <= committed
+    projection = decode_jsonl((domain / "specifications.jsonl").read_bytes())
+    assert projection.evidence == (attempt,)
 
 
 def test_strict_invalid_target_rejects_before_visible_change(tmp_path, monkeypatch):

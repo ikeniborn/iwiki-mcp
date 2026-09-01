@@ -387,6 +387,25 @@ def test_postgres_revision_is_required_but_git_schema_remains_optional(postgres_
         assert "expected_revision" not in schema.get("required", [])
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "expected_error"),
+    [
+        ({}, "no update operation requested"),
+        ({"heading": "Body"}, "heading and new_body must be provided together"),
+        ({"code": {"modules": ["pkg.page"]}}, "unsupported code selector key"),
+    ],
+)
+def test_postgres_invalid_update_request_precedes_revision_guard(
+    postgres_server, kwargs, expected_error
+):
+    _binding, fake = postgres_server
+
+    result = server.wiki_update_page("docs", "concept/page", **kwargs)
+
+    assert result["error"] == expected_error
+    assert fake.update_calls == []
+
+
 def test_postgres_code_only_update_builds_one_candidate_and_omits_heading(
     postgres_server,
 ):
