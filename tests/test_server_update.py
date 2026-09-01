@@ -264,6 +264,54 @@ def test_update_rejects_existing_domain_outside_scope_before_freshness(
     assert page.read_text(encoding="utf-8").endswith("old\n")
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"code": {"modules": ["pkg.page"]}},
+    ],
+)
+def test_update_write_scope_precedes_invalid_request_preflight(
+    tmp_path, monkeypatch, kwargs
+):
+    _seed(tmp_path, monkeypatch)
+    other = tmp_path / "wiki" / "other"
+    other.mkdir()
+    (tmp_path / "proj" / ".iwiki.toml").write_text(
+        'read = ["backend", "other"]\nwrite = ["backend"]\n'
+        'primary = "backend"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        server.cross_domain,
+        "recover_pending_transactions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery called")
+        ),
+    )
+
+    result = server.wiki_update_page("other", "page", **kwargs)
+
+    assert "outside bound write scope" in result["error"]
+
+
+def test_update_domain_validation_precedes_invalid_request_preflight(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server.cross_domain,
+        "recover_pending_transactions",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery called")
+        ),
+    )
+
+    result = server.wiki_update_page("../escape", "page")
+
+    assert "invalid domain" in result["error"]
+
+
 def test_update_missing_heading(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     _write(BASE_MD)

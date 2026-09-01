@@ -549,7 +549,14 @@ def _mutation_guard(fn):
                     raise
                 bind = _creation_binding()
             if fn.__name__ == "wiki_update_page":
-                request = _prepare_update_page_call(args, kwargs)
+                try:
+                    request = _prepare_update_page_call(bind, args, kwargs)
+                except ValueError:
+                    token = _MUTATION_BINDING.set(bind)
+                    try:
+                        return fn(*args, **kwargs)
+                    finally:
+                        _MUTATION_BINDING.reset(token)
                 if "error" in request:
                     return request
             if _is_postgres(bind):
@@ -3442,7 +3449,7 @@ _UPDATE_PAGE_OPERATION_HINT = (
 )
 
 
-def _prepare_update_page_call(args: tuple, kwargs: dict) -> dict:
+def _prepare_update_page_call(bind, args: tuple, kwargs: dict) -> dict:
     """Validate one public update call before mutation-journal recovery."""
     names = (
         "domain", "slug", "heading", "new_body", "source", "description",
@@ -3452,6 +3459,13 @@ def _prepare_update_page_call(args: tuple, kwargs: dict) -> dict:
     values = {name: kwargs.get(name) for name in names}
     for name, value in zip(names, args):
         values[name] = value
+    valid_domain = _validate_domain(values["domain"])
+    if _is_postgres(bind):
+        scope_error = base.write_scope_error(bind, valid_domain)
+    else:
+        _domain, scope_error = _existing_domain_write_guard(bind, valid_domain)
+    if scope_error:
+        return scope_error
     return _prepare_update_page_request(
         values["heading"],
         values["new_body"],

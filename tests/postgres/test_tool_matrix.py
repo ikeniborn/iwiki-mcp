@@ -406,6 +406,30 @@ def test_postgres_invalid_update_request_precedes_revision_guard(
     assert fake.update_calls == []
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"code": {"modules": ["pkg.page"]}},
+    ],
+)
+def test_postgres_write_scope_precedes_invalid_update_request(
+    postgres_server, monkeypatch, kwargs
+):
+    binding, fake = postgres_server
+    restricted = replace(
+        binding,
+        read=("docs", "private"),
+        write=("docs",),
+    )
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: restricted)
+
+    result = server.wiki_update_page("private", "concept/page", **kwargs)
+
+    assert "outside bound write scope" in result["error"]
+    assert fake.update_calls == []
+
+
 def test_postgres_code_only_update_builds_one_candidate_and_omits_heading(
     postgres_server,
 ):
