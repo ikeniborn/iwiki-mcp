@@ -3432,13 +3432,70 @@ def _apply_heading_rename(
     return result
 
 
+_UPDATE_PAGE_OPERATION_HINT = (
+    "use heading with new_body for section-only, code for code-only, "
+    "or all three for a combined update"
+)
+
+
+def _prepare_update_page_request(
+    heading: str | None,
+    new_body: str | None,
+    *,
+    source: str | None,
+    description: str | None,
+    status: str | None,
+    new_heading: str | None,
+    expected_section_hash: str | None,
+    code: dict | None,
+) -> dict:
+    """Classify and validate one update request without side effects."""
+    if (heading is None) != (new_body is None):
+        return {
+            "error": "heading and new_body must be provided together",
+            "hint": _UPDATE_PAGE_OPERATION_HINT,
+        }
+    has_section = heading is not None
+    has_code = code is not None
+    if not has_section and not has_code:
+        return {
+            "error": "no update operation requested",
+            "hint": _UPDATE_PAGE_OPERATION_HINT,
+        }
+    if not has_section and any(value is not None for value in (
+        source, description, status, new_heading, expected_section_hash,
+    )):
+        return {
+            "error": "code-only update cannot change section metadata",
+            "hint": _UPDATE_PAGE_OPERATION_HINT,
+        }
+    prepared_code = None
+    if has_code:
+        try:
+            validated = _codegraph_linking.validate_code_mapping(code)
+        except _codegraph_linking.SelectorError as exc:
+            return {
+                "error": str(exc),
+                "hint": "use only code.symbols, code.files, and code.source_globs",
+            }
+        prepared_code = dict(code) if any(validated.values()) else {}
+    return {
+        "mode": "combined" if has_section and has_code else (
+            "section" if has_section else "code"
+        ),
+        "code": prepared_code,
+    }
+
+
 @_safe
 def wiki_update_page(
-    domain: str, slug: str, heading: str, new_body: str, source: str | None = None,
+    domain: str, slug: str, heading: str | None = None,
+    new_body: str | None = None, source: str | None = None,
     description: str | None = None, status: str | None = None,
     new_heading: str | None = None,
     expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
+    code: dict | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -3515,6 +3572,18 @@ def wiki_update_page(
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)
     if scope_error:
         return scope_error
+    request = _prepare_update_page_request(
+        heading,
+        new_body,
+        source=source,
+        description=description,
+        status=status,
+        new_heading=new_heading,
+        expected_section_hash=expected_section_hash,
+        code=code,
+    )
+    if "error" in request:
+        return request
     fresh = sync.ensure_fresh(bind.base)
     if fresh.get("state") == "diverged":
         return dict(_DIVERGED)
@@ -3554,35 +3623,48 @@ def wiki_update_page(
             "error": str(exc),
             "hint": "fix nested code frontmatter before updating",
         }
-    new_body = to_markdown_links(new_body)
-    try:
-        conflict = _check_section_hash(original_body, heading, expected_section_hash)
-        if conflict is not None:
-            return conflict
-        new_body = replace_section(
-            original_body, heading, new_body, new_heading=new_heading
-        )
-    except SectionError as e:
-        if new_heading is not None and "collides with another anchor" in str(e):
-            raise cross_domain.CrossDomainError("heading_collision", str(e))
-        return {"error": str(e), "hint": "check the heading with wiki_read_page"}
-    blocking = [f for f in validate_page(new_body) if f.get("type") in _BLOCKING]
-    if blocking:
-        return {
-            "error": "section structure invalid",
-            "findings": blocking,
-            "hint": "new_body must use only ## headings; no ###+, no pre-## text",
-        }
+    updated_body = original_body
+    if request["mode"] in {"section", "combined"}:
+        normalized_body = to_markdown_links(new_body)
+        try:
+            conflict = _check_section_hash(
+                original_body, heading, expected_section_hash
+            )
+            if conflict is not None:
+                return conflict
+            updated_body = replace_section(
+                original_body, heading, normalized_body,
+                new_heading=new_heading,
+            )
+        except SectionError as e:
+            if new_heading is not None and "collides with another anchor" in str(e):
+                raise cross_domain.CrossDomainError("heading_collision", str(e))
+            return {"error": str(e), "hint": "check the heading with wiki_read_page"}
+        blocking = [
+            finding for finding in validate_page(updated_body)
+            if finding.get("type") in _BLOCKING
+        ]
+        if blocking:
+            return {
+                "error": "section structure invalid",
+                "findings": blocking,
+                "hint": "new_body must use only ## headings; no ###+, no pre-## text",
+            }
     cfg = Config.load()
+    if request["mode"] in {"code", "combined"}:
+        if request["code"]:
+            meta["code"] = request["code"]
+        else:
+            meta.pop("code", None)
     if meta:
         if description is not None:
             meta["description"] = description
         if status is not None:
             meta["status"] = _fm.normalize_status(status)
         meta["timestamp"] = _dt.date.today().isoformat()
-        new_md = _fm.render(meta) + new_body
+        new_md = _fm.render(meta) + updated_body
     else:
-        new_md = new_body
+        new_md = updated_body
     if new_heading is not None and sync.is_git_repo(bind.base):
         return _apply_heading_rename(
             bind,
@@ -3643,9 +3725,8 @@ def wiki_update_page(
         if "error" in transaction:
             return transaction
         stats = transaction["stats"]
-        return {
+        result = {
             "page": page_rel,
-            "heading": heading.lstrip("#").strip(),
             "indexed_chunks": stats["indexed_chunks"],
             "reused": stats["reused"],
             "embedded": stats["embedded"],
@@ -3658,6 +3739,9 @@ def wiki_update_page(
             ),
             "specifications": transaction["specifications"],
         }
+        if request["mode"] in {"section", "combined"}:
+            result["heading"] = heading.lstrip("#").strip()
+        return result
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(new_md)
@@ -3680,7 +3764,6 @@ def wiki_update_page(
                                   ))
     result = {
         "page": page_rel,
-        "heading": heading.lstrip("#").strip(),
         "indexed_chunks": stats["indexed_chunks"],
         "reused": stats["reused"],
         "embedded": stats["embedded"],
@@ -3688,6 +3771,8 @@ def wiki_update_page(
         "over_cap": stats["over_cap"],
         **_write_sync_result(commit, fresh.get("warning")),
     }
+    if request["mode"] in {"section", "combined"}:
+        result["heading"] = heading.lstrip("#").strip()
     return result
 
 

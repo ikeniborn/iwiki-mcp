@@ -4,6 +4,8 @@ import hashlib
 import inspect
 import subprocess
 
+import pytest
+
 from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.graph_store import GraphStore
 
@@ -65,7 +67,7 @@ def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     assert "rewritten_pages" not in out
 
 
-def test_update_public_signature_adds_trailing_optional_new_heading():
+def test_update_public_signature_keeps_section_positionals_and_adds_trailing_code():
     signature = inspect.signature(server.wiki_update_page)
     assert list(signature.parameters) == [
         "domain",
@@ -78,9 +80,65 @@ def test_update_public_signature_adds_trailing_optional_new_heading():
         "new_heading",
         "expected_revision",
         "expected_section_hash",
+        "code",
     ]
+    assert signature.parameters["heading"].default is None
+    assert signature.parameters["new_body"].default is None
     assert signature.parameters["new_heading"].default is None
     assert signature.parameters["expected_section_hash"].default is None
+    assert signature.parameters["code"].default is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_error"),
+    [
+        ({"heading": "Flow"}, "heading and new_body must be provided together"),
+        ({"new_body": "Changed."}, "heading and new_body must be provided together"),
+        ({}, "no update operation requested"),
+    ],
+)
+def test_update_rejects_invalid_operation_shapes_before_freshness(
+    tmp_path, monkeypatch, kwargs, expected_error
+):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    result = server.wiki_update_page("backend", "concept/auth", **kwargs)
+
+    assert result["error"] == expected_error
+    assert all(name in result["hint"] for name in ("heading", "new_body", "code"))
+
+
+@pytest.mark.parametrize(
+    "reserved",
+    [
+        {"source": "source.md"},
+        {"description": "description"},
+        {"status": "stable"},
+        {"new_heading": "Renamed"},
+        {"expected_section_hash": "0123456789abcdef"},
+    ],
+)
+def test_code_only_update_rejects_section_metadata_before_freshness(
+    tmp_path, monkeypatch, reserved
+):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        server.sync,
+        "ensure_fresh",
+        lambda *_: (_ for _ in ()).throw(AssertionError("freshness called")),
+    )
+
+    result = server.wiki_update_page(
+        "backend", "concept/auth", code={"files": ["src/auth.py"]}, **reserved
+    )
+
+    assert result["error"] == "code-only update cannot change section metadata"
+    assert all(name in result["hint"] for name in ("heading", "new_body", "code"))
 
 
 def test_update_page_section_hash_mismatch_returns_conflict(tmp_path, monkeypatch):
