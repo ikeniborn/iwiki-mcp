@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from iwiki_mcp.engine import frontmatter as fm
 from iwiki_mcp.specification_store import ResolutionAttempt
 from iwiki_mcp.storage import PostgresBinding
 
@@ -181,6 +182,127 @@ def test_update_page_section_hash_mismatch_returns_conflict_from_postgres(
     assert "flow body" in read["markdown"]
 
 
+def test_update_page_code_only_sets_and_clears_without_reembedding_body(
+    postgres_section_ops,
+):
+    server, store = postgres_section_ops
+    before = store.read_page("docs", "concept/auth")
+    _meta, original_body = fm.split(before["markdown"], strict_code=True)
+    embedding_inputs = []
+    original_embedder = store._embedder
+
+    def record_embedding_inputs(cfg, texts):
+        embedding_inputs.extend(texts)
+        return original_embedder(cfg, texts)
+
+    store._embedder = record_embedding_inputs
+
+    set_result = server.wiki_update_page(
+        "docs",
+        "concept/auth",
+        code={"files": ["src/auth.py"]},
+        expected_revision=before["revision"],
+    )
+
+    assert set(set_result) == {"page", "revision", "indexed_chunks"}
+    assert set_result["revision"] == before["revision"] + 1
+    after_set = store.read_page("docs", "concept/auth")
+    set_meta, set_body = fm.split(after_set["markdown"], strict_code=True)
+    assert set_meta["code"] == {"files": ["src/auth.py"]}
+    assert set_body == original_body
+    assert embedding_inputs == []
+
+    clear_result = server.wiki_update_page(
+        "docs",
+        "concept/auth",
+        code={"symbols": [], "files": [], "source_globs": []},
+        expected_revision=after_set["revision"],
+    )
+
+    assert set(clear_result) == {"page", "revision", "indexed_chunks"}
+    assert clear_result["revision"] == after_set["revision"] + 1
+    after_clear = store.read_page("docs", "concept/auth")
+    clear_meta, clear_body = fm.split(after_clear["markdown"], strict_code=True)
+    assert "code" not in clear_meta
+    assert clear_body == original_body
+    assert embedding_inputs == []
+
+
+def test_update_page_combines_section_and_code_in_one_revision(
+    postgres_section_ops,
+):
+    server, store = postgres_section_ops
+    before = store.read_page("docs", "concept/auth")
+
+    result = server.wiki_update_page(
+        "docs",
+        "concept/auth",
+        "Flow",
+        "combined body",
+        code={"symbols": [{"qualified_name": "pkg.Auth.run"}]},
+        expected_revision=before["revision"],
+    )
+
+    assert set(result) == {"page", "revision", "indexed_chunks", "heading"}
+    assert result["revision"] == before["revision"] + 1
+    assert result["heading"] == "Flow"
+    after = store.read_page("docs", "concept/auth")
+    meta, body = fm.split(after["markdown"], strict_code=True)
+    assert meta["code"] == {
+        "symbols": [{"qualified_name": "pkg.Auth.run"}]
+    }
+    assert "## Flow\n\ncombined body" in body
+    assert "flow body" not in body
+
+
+def test_update_page_code_only_requires_current_revision_and_valid_selector(
+    postgres_section_ops,
+):
+    server, store = postgres_section_ops
+    before = store.read_page("docs", "concept/auth")
+
+    missing = server.wiki_update_page(
+        "docs", "concept/auth", code={"files": ["src/auth.py"]}
+    )
+    invalid = server.wiki_update_page(
+        "docs",
+        "concept/auth",
+        code={"modules": ["pkg.auth"]},
+        expected_revision=before["revision"],
+    )
+    current = server.wiki_update_page(
+        "docs",
+        "concept/auth",
+        code={"files": ["src/auth.py"]},
+        expected_revision=before["revision"],
+    )
+    stale = server.wiki_update_page(
+        "docs",
+        "concept/auth",
+        code={"source_globs": ["src/**"]},
+        expected_revision=before["revision"],
+    )
+
+    assert missing == {
+        "error": "expected_revision_required",
+        "hint": "read the page and retry with its revision",
+    }
+    assert invalid == {
+        "error": "unsupported code selector key",
+        "hint": "use only code.symbols, code.files, and code.source_globs",
+    }
+    assert current["revision"] == before["revision"] + 1
+    assert stale == {
+        "error": "conflict",
+        "current_revision": before["revision"] + 1,
+        "hint": "read the page and retry against the current revision",
+    }
+    after = store.read_page("docs", "concept/auth")
+    meta, _body = fm.split(after["markdown"], strict_code=True)
+    assert after["revision"] == before["revision"] + 1
+    assert meta["code"] == {"files": ["src/auth.py"]}
+
+
 def test_move_specification_section_preserves_identity_and_evidence(
     postgres_section_ops,
 ):
@@ -219,5 +341,47 @@ def test_move_specification_section_preserves_identity_and_evidence(
     after = store.specification_context("docs", "move-id")
     assert after is not None
     assert after.scenario.scenario_id == before.scenario.scenario_id
+    assert after.bindings == before.bindings
+    assert after.evidence == (attempt,)
+
+
+def test_code_only_selector_update_preserves_specification_source_and_evidence(
+    postgres_section_ops,
+):
+    server, store = postgres_section_ops
+    store.specification_mode = "strict"
+    store.write_page(
+        "docs", "specification/move", _specification_markdown()
+    )
+    before = store.specification_context("docs", "move-id")
+    assert before is not None
+    binding = before.bindings[0]
+    attempt = ResolutionAttempt(
+        binding_id=binding.binding_id,
+        domain="docs",
+        scenario_id="move-id",
+        state="resolved",
+        targets=("py:symbol:app.move",),
+        unresolved_reference=None,
+        graph_revision="graph-1",
+        graph_state_fingerprint="sha256:" + "1" * 64,
+        specification_source_hash=before.scenario.source_hash,
+        checked_at="2026-08-29T12:00:00Z",
+        reason=None,
+    )
+    store.record_specification_resolution(attempt)
+    page_before = store.read_page("docs", "specification/move")
+
+    result = server.wiki_update_page(
+        "docs",
+        "specification/move",
+        code={"files": ["src/app.py"]},
+        expected_revision=page_before["revision"],
+    )
+
+    assert "error" not in result
+    after = store.specification_context("docs", "move-id")
+    assert after is not None
+    assert after.scenario.source_hash == before.scenario.source_hash
     assert after.bindings == before.bindings
     assert after.evidence == (attempt,)

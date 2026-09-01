@@ -3506,6 +3506,18 @@ def wiki_update_page(
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
+        request = _prepare_update_page_request(
+            heading,
+            new_body,
+            source=source,
+            description=description,
+            status=status,
+            new_heading=new_heading,
+            expected_section_hash=expected_section_hash,
+            code=code,
+        )
+        if "error" in request:
+            return request
         bind = _specification_binding(bind, valid_domain)
         store = _postgres_store_for_binding(bind)
         page = store.read_page(valid_domain, slug)
@@ -3523,32 +3535,44 @@ def wiki_update_page(
                 "error": str(exc),
                 "hint": "fix nested code frontmatter before updating",
             }
-        try:
-            conflict = _check_section_hash(original_body, heading, expected_section_hash)
-            if conflict is not None:
-                return conflict
-            updated_body = replace_section(
-                original_body,
-                heading,
-                to_markdown_links(new_body),
-                new_heading=new_heading,
-            )
-        except SectionError as exc:
-            return {
-                "error": str(exc),
-                "hint": "check the heading with wiki_read_page",
-            }
-        blocking = [
-            finding
-            for finding in validate_page(updated_body)
-            if finding.get("type") in _BLOCKING
-        ]
-        if blocking:
-            return {
-                "error": "section structure invalid",
-                "findings": blocking,
-                "hint": "new_body must use only ## headings; no ###+, no pre-## text",
-            }
+        updated_body = original_body
+        if request["mode"] in {"section", "combined"}:
+            try:
+                conflict = _check_section_hash(
+                    original_body, heading, expected_section_hash
+                )
+                if conflict is not None:
+                    return conflict
+                updated_body = replace_section(
+                    original_body,
+                    heading,
+                    to_markdown_links(new_body),
+                    new_heading=new_heading,
+                )
+            except SectionError as exc:
+                return {
+                    "error": str(exc),
+                    "hint": "check the heading with wiki_read_page",
+                }
+            blocking = [
+                finding
+                for finding in validate_page(updated_body)
+                if finding.get("type") in _BLOCKING
+            ]
+            if blocking:
+                return {
+                    "error": "section structure invalid",
+                    "findings": blocking,
+                    "hint": (
+                        "new_body must use only ## headings; "
+                        "no ###+, no pre-## text"
+                    ),
+                }
+        if request["mode"] in {"code", "combined"}:
+            if request["code"]:
+                meta["code"] = request["code"]
+            else:
+                meta.pop("code", None)
         if description is not None:
             meta["description"] = description
         if status is not None:
@@ -3566,7 +3590,10 @@ def wiki_update_page(
             updated_markdown,
             expected_revision,
         )
-        if "error" not in result:
+        if (
+            "error" not in result
+            and request["mode"] in {"section", "combined"}
+        ):
             result["heading"] = heading.lstrip("#").strip()
         return result
     dom_path, scope_error = _existing_domain_write_guard(bind, valid_domain)

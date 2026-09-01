@@ -8,6 +8,7 @@ import pytest
 
 from iwiki_mcp import server
 from iwiki_mcp.engine.config import Config
+from iwiki_mcp.engine import frontmatter as fm
 from iwiki_mcp.specification_store import ProjectionStatus
 from iwiki_mcp.storage import PostgresBinding
 
@@ -72,6 +73,9 @@ def postgres_binding():
 
 
 class FakeStore:
+    def __init__(self):
+        self.update_calls = []
+
     def list_domains(self):
         return ["docs"]
 
@@ -99,7 +103,8 @@ class FakeStore:
     def write_page(self, domain, slug, _markdown):
         return {"page": f"{domain}/{slug}.md", "revision": 1, "indexed_chunks": 1}
 
-    def update_page(self, domain, slug, _markdown, expected_revision):
+    def update_page(self, domain, slug, markdown, expected_revision):
+        self.update_calls.append((domain, slug, markdown, expected_revision))
         return {
             "page": f"{domain}/{slug}.md",
             "revision": expected_revision + 1,
@@ -358,6 +363,75 @@ def test_postgres_revision_is_required_but_git_schema_remains_optional(postgres_
         schema = tools[name].parameters
         assert "expected_revision" in schema["properties"]
         assert "expected_revision" not in schema.get("required", [])
+
+
+def test_postgres_code_only_update_builds_one_candidate_and_omits_heading(
+    postgres_server,
+):
+    _binding, fake = postgres_server
+
+    result = server.wiki_update_page(
+        "docs",
+        "concept/page",
+        code={"files": ["src/page.py"]},
+        expected_revision=4,
+    )
+
+    assert result == {
+        "page": "docs/concept/page.md",
+        "revision": 5,
+        "indexed_chunks": 1,
+    }
+    assert len(fake.update_calls) == 1
+    domain, slug, candidate, revision = fake.update_calls[0]
+    assert (domain, slug, revision) == ("docs", "concept/page", 4)
+    meta, body = fm.split(candidate, strict_code=True)
+    assert meta["code"] == {"files": ["src/page.py"]}
+    assert body == "# Page\n\n## Body\ntext\n"
+
+
+def test_postgres_update_page_combines_section_and_code_in_one_candidate(
+    postgres_server,
+):
+    _binding, fake = postgres_server
+
+    result = server.wiki_update_page(
+        "docs",
+        "concept/page",
+        "Body",
+        "changed",
+        code={"source_globs": ["src/**"]},
+        expected_revision=4,
+    )
+
+    assert result == {
+        "page": "docs/concept/page.md",
+        "revision": 5,
+        "indexed_chunks": 1,
+        "heading": "Body",
+    }
+    assert len(fake.update_calls) == 1
+    _domain, _slug, candidate, _revision = fake.update_calls[0]
+    meta, body = fm.split(candidate, strict_code=True)
+    assert meta["code"] == {"source_globs": ["src/**"]}
+    assert "## Body\n\nchanged" in body
+
+
+def test_postgres_update_page_invalid_code_selector_never_calls_store(postgres_server):
+    _binding, fake = postgres_server
+
+    result = server.wiki_update_page(
+        "docs",
+        "concept/page",
+        code={"modules": ["pkg.page"]},
+        expected_revision=4,
+    )
+
+    assert result == {
+        "error": "unsupported code selector key",
+        "hint": "use only code.symbols, code.files, and code.source_globs",
+    }
+    assert fake.update_calls == []
 
 
 def test_postgres_driver_errors_are_sanitized(postgres_server, monkeypatch):
