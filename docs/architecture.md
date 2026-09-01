@@ -715,9 +715,10 @@ flowchart TD
 requires paired `heading` and `new_body` and edits one `##` section in-place
 (`section.replace_section`, which rejects an ambiguous/missing heading); code-only uses
 `code` and preserves the page body byte-for-byte; combined atomically performs both. The
-public root JSON Schema uses `anyOf` to
-require `heading` + `new_body` or `code`, with `domain` and `slug` root-required; runtime
-validation rejects partial, no-op, or unsafe selectors before mutation. A nonempty valid
+public root JSON Schema stays a plain object with `domain` and `slug` root-required:
+client tool validation rejects a root combinator, so a root `anyOf` would make clients drop
+the tool. Runtime validation enforces the mutually exclusive operations instead and
+rejects partial, no-op, or unsafe selectors before mutation. A nonempty valid
 `code` mapping completely replaces `code.symbols`, `code.files`, and `code.source_globs`;
 `{}` or all-empty lists clears them, while omitted or `null` `code` preserves them during a
 section update. A code-only response omits `heading` and adds no fields; section and
