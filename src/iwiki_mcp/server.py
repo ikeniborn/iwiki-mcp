@@ -1446,7 +1446,7 @@ def wiki_spec_search(
     }
     enabled = tuple(domain for domain in requested if modes[domain] != "disabled")
     if not enabled:
-        return {
+        return _with_binding_provenance({
             "query": query,
             "domains": list(requested),
             "domain_states": [
@@ -1454,7 +1454,7 @@ def wiki_spec_search(
                 for domain in requested
             ],
             "results": [],
-        }
+        })
     stores = {
         domain: _specification_store(_specification_binding(bind, domain))
         for domain in enabled
@@ -1507,7 +1507,7 @@ def wiki_spec_search(
             "projection_state": status.state,
             "mode": modes[scenario.domain],
         })
-    return {
+    return _with_binding_provenance({
         "query": query,
         "domains": list(requested),
         "domain_states": [
@@ -1522,7 +1522,7 @@ def wiki_spec_search(
             for domain in requested
         ],
         "results": results,
-    }
+    })
 
 
 @_safe
@@ -1547,7 +1547,9 @@ def wiki_spec_context(domain: str, scenario_id: str) -> dict:
     value = service.context(valid_domain, valid_scenario)
     if value is None:
         return _spec_missing_context(store, valid_domain, valid_scenario)
-    return _spec_context_result(value, mode=bind.specification_mode)
+    return _with_binding_provenance(
+        _spec_context_result(value, mode=bind.specification_mode)
+    )
 
 
 @_safe
@@ -1585,7 +1587,7 @@ def wiki_spec_resolve(domain: str, scenario_id: str) -> dict:
         "graph_revision": attempt.graph_revision,
         "states": [item.state for item in attempt.evidence],
     }
-    return result
+    return _with_binding_provenance(result)
 
 
 # Bound wait for the domain activation lock. It is deliberately separate from

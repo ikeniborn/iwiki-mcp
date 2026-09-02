@@ -174,10 +174,27 @@ def _request_id(payload: Any) -> Any:
     return payload.get("id") if isinstance(payload, dict) else None
 
 
-async def _send_tool_access_denied(send, request_id: Any) -> None:
+async def _send_tool_access_denied(
+    send,
+    request_id: Any,
+    *,
+    reason: str | None = None,
+    binding_source: str | None = None,
+) -> None:
     """JSON-RPC error for a `tools/call` denied at the authorization gate
     (`_authorize_tool`), matching the `access_denied` code/hint the tool
-    handlers themselves return via `@_safe` for the same condition."""
+    handlers themselves return via `@_safe` for the same condition.
+
+    `reason` and `binding_source` describe the refused caller's own binding
+    and never the wiki's contents, so the hint stays deliberately vague while
+    the caller can still tell a lost session binding from a real refusal."""
+    data: dict[str, Any] = {
+        "hint": "the authenticated context does not allow this operation"
+    }
+    if reason is not None:
+        data["reason"] = reason
+    if binding_source is not None:
+        data["binding_source"] = binding_source
     body = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -185,9 +202,7 @@ async def _send_tool_access_denied(send, request_id: Any) -> None:
             "error": {
                 "code": -32001,
                 "message": "access_denied",
-                "data": {
-                    "hint": "the authenticated context does not allow this operation"
-                },
+                "data": data,
             },
         }
     ).encode("utf-8")
@@ -351,8 +366,17 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
             raise AccessError(403)
         read_domains = (domain,)
     elif name == "wiki_spec_resolve":
-        if type(domain) is not str or domain != context.require_primary_write():
-            raise AccessError(403)
+        # Same three conditions `require_primary_write()` plus the equality
+        # check enforced before; kept apart only so the refusal can name
+        # which one answered.
+        if type(domain) is not str:
+            raise AccessError(403, "invalid_domain")
+        if context.primary is None:
+            raise AccessError(403, "primary_not_selected")
+        if not context.can_write(context.primary):
+            raise AccessError(403, "primary_not_writable")
+        if domain != context.primary:
+            raise AccessError(403, "not_bound_primary")
         write_domains = (domain,)
     elif name in _READ_DOMAIN_TOOLS and isinstance(domain, str):
         read_domains = (domain,)
@@ -499,11 +523,14 @@ class AuthenticatedMCPMiddleware:
                     request_json = _request_json(messages)
                     try:
                         _authorize_tool(effective_context, request_json)
-                    except AccessError:
+                    except AccessError as exc:
                         if not isinstance(request_json, dict):
                             raise
                         await _send_tool_access_denied(
-                            send, _request_id(request_json)
+                            send,
+                            _request_id(request_json),
+                            reason=exc.reason,
+                            binding_source=state.binding_source(),
                         )
                         return
                     iterator = iter(messages)

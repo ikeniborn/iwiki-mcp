@@ -192,9 +192,13 @@ revocation действует на следующем запросе, восст
 самого токена и продолжает отвечать — откат разрешён, но он больше не молчаливый:
 
 - `wiki_status`, `wiki_bind`, `wiki_code_status`, `wiki_code_search`,
-  `wiki_code_context` и `wiki_code_publish_begin` несут `binding_source` со значением
+  `wiki_code_context`, `wiki_code_publish_begin`, `wiki_spec_search`,
+  `wiki_spec_context` и `wiki_spec_resolve` несут `binding_source` со значением
   `session` (выбор сделан `wiki_bind` в этой сессии) или `token_default` (откат,
   построенный из grants токена).
+- `tools/call`, отклонённый на authorization gate, несёт тот же `binding_source` в
+  payload `access_denied`, поэтому отказ из-за потерянного выбора распознаётся без
+  второго вызова.
 - Чтения кодграфа без параметра домена при `token_default` дополнительно добавляют
   `binding_defaulted` в `warnings`, поэтому ответ по снапшоту чужого проекта распознаётся,
   даже когда он сообщает `state: ready` и `fresh: true`.
@@ -400,7 +404,10 @@ Set возвращает `domain`, `token_id`, `can_read`, `can_write`; revoke �
 право, malformed protected arguments или переданный клиентом `iwiki_id`, — возвращает
 HTTP 200 с одной JSON-RPC ошибкой
 `{"code":-32001,"message":"access_denied","data":{"hint":...}}`, чтобы MCP-клиент мог
-сопоставить отказ с id своего запроса. Batch-запрос, отклонённый так же, остаётся на HTTP
+сопоставить отказ с id своего запроса. В этом `data` также приходит собственный
+`binding_source` вызывающего и, когда gate может атрибутировать отказ, `reason`. Hint
+остаётся намеренно неконкретным, и ни одно поле не называет домен, wiki или чужой токен.
+Batch-запрос, отклонённый так же, остаётся на HTTP
 403 `{"error":"access denied"}`, так как у batch нет одного id; отказы аутентификации,
 origin и session тоже остаются на HTTP 401/403/404. Потеря права после dispatch, self-target и
 foreign/missing state внутри транзакции дают HTTP 200 с in-band tool result
@@ -1048,6 +1055,10 @@ resolution-находки остаются advisory; обычные Wiki-стр�
   или мутации.
 - `wiki_spec_resolve` разрешает объявленные bindings и сохраняет очищенное evidence;
   ему нужен write scope, и он не расширяет binding или code-publication authority.
+  В hosted-режиме его `domain` обязан совпадать с bound primary. Отказ называет, какое
+  именно собственное отношение биндинга ответило — `invalid_domain`,
+  `primary_not_selected`, `primary_not_writable` или `not_bound_primary`, — поэтому
+  сценарий, лежащий вне bound primary, не принимается за отсутствующий grant.
 
 `wiki_status` показывает effective mode и projection state. `wiki_lint` добавляет
 независимые specification-находки, не скрывая обычные Wiki-находки. Git хранит

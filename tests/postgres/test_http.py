@@ -112,14 +112,24 @@ def _tool_result(response):
     return json.loads(response.json()["result"]["content"][0]["text"])
 
 
-def _assert_tool_denied(response, *, request_id=2):
+def _assert_tool_denied(
+    response, *, request_id=2, reason=None, binding_source="token_default"
+):
     """Assert the JSON-RPC shape of a `tools/call` refused at the gate.
 
     A single `tools/call` denied by `http._authorize_tool` answers as one
     JSON-RPC error over HTTP 200 -- matching the `access_denied` code the
     tool handlers themselves return for the same condition -- instead of
-    an HTTP status the MCP client cannot correlate with its request.
+    an HTTP status the MCP client cannot correlate with its request. The
+    payload names the refused caller's own binding provenance, and a
+    `reason` whenever the gate can attribute the refusal.
     """
+    data = {
+        "hint": "the authenticated context does not allow this operation",
+        "binding_source": binding_source,
+    }
+    if reason is not None:
+        data["reason"] = reason
     assert response.status_code == 200
     assert response.json() == {
         "jsonrpc": "2.0",
@@ -127,9 +137,7 @@ def _assert_tool_denied(response, *, request_id=2):
         "error": {
             "code": -32001,
             "message": "access_denied",
-            "data": {
-                "hint": "the authenticated context does not allow this operation"
-            },
+            "data": data,
         },
     }
 
@@ -220,6 +228,47 @@ def test_specification_http_authorization_denies_malformed_or_cross_scope(
 
     with pytest.raises(AccessError):
         http._authorize_tool(context, _authorization_request(name, arguments))
+
+
+@pytest.mark.parametrize(
+    ("write_domains", "primary", "domain", "reason"),
+    [
+        (("docs",), "docs", 7, "invalid_domain"),
+        ((), None, "docs", "primary_not_selected"),
+        ((), "docs", "docs", "primary_not_writable"),
+        (("docs", "shared"), "docs", "shared", "not_bound_primary"),
+    ],
+)
+def test_specification_resolve_refusal_names_the_binding_relation(
+    write_domains, primary, domain, reason,
+):
+    """A refused resolve names which of its own binding relations answered.
+
+    The three conditions are exactly the ones `require_primary_write()` plus
+    the primary equality check enforced before, so the refusal set is
+    unchanged -- only its attribution is new.
+    """
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "shared"),
+        write_domains=write_domains,
+        primary=primary,
+    )
+
+    with pytest.raises(AccessError) as denied:
+        http._authorize_tool(
+            context,
+            _authorization_request(
+                "wiki_spec_resolve", {"domain": domain, "scenario_id": "open"}
+            ),
+        )
+
+    assert denied.value.reason == reason
+    assert denied.value.status_code == 403
 
 
 def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
@@ -449,7 +498,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             },
             session_id=session_id,
         )
-        _assert_tool_denied(write_after_narrow)
+        _assert_tool_denied(write_after_narrow, binding_source="session")
 
         auth.set_wiki_active("wiki-a", False)
         disabled_response = _initialize(client, disabled)
@@ -894,6 +943,62 @@ def test_session_refresh_preserves_selection_without_grant_expansion(
         set_private(False)
         set_private(True)
         assert status(client, session_id)["read"] == ["docs"]
+
+
+def test_denied_specification_resolve_reports_reason_and_provenance(
+    hosted_runtime,
+):
+    """A refused resolve tells the caller why, without naming the domain.
+
+    The reason plus the caller's own `binding_source` are what separate a
+    real refusal from a session binding that silently fell back to the
+    token's grants.
+    """
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    token = auth.create_token(
+        "wiki-a",
+        "specification-caller",
+        read_domains=["docs", "private"],
+        write_domains=["docs", "private"],
+    )["token"]
+
+    with TestClient(
+        runtime.app, base_url="http://127.0.0.1:8765"
+    ) as client:
+        initialized = _initialize(client, token)
+        session_id = initialized.headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+        bound = _tool_call(
+            client,
+            token,
+            "wiki_bind",
+            {
+                "read": ["docs", "private"],
+                "write": ["docs", "private"],
+                "primary": "docs",
+            },
+            session_id=session_id,
+        )
+        assert _tool_result(bound)["primary"] == "docs"
+
+        denied = _tool_call(
+            client,
+            token,
+            "wiki_spec_resolve",
+            {"domain": "private", "scenario_id": "open-account"},
+            session_id=session_id,
+        )
+
+        _assert_tool_denied(
+            denied, reason="not_bound_primary", binding_source="session"
+        )
+        assert "private" not in denied.text
 
 
 def test_hosted_domain_creation_and_content_grant_lifecycle(hosted_runtime):
