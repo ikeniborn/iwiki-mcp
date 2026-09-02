@@ -31,6 +31,11 @@ AUTHORING_RULES: str = """\
   wins. `vector` is an internal embedding term, not a public mode.
 - `IWIKI_RERANK_MODEL` optionally reranks the fused candidate pool through the shared
   LiteLLM URL and key. Provider failures are fail-soft and return sanitized metadata.
+- On a hosted server every `wiki_search` answer carries `binding_source`. An answer whose
+  scope came from the binding rather than the call — a read without `domains`, or any
+  `intent="write"` lookup, which prefers the bound primary over a named domain — adds
+  `binding_defaulted` to `warnings` under `token_default`. Re-bind before trusting it, or
+  name `domains`.
 
 ## Existing page updates
 

@@ -72,9 +72,11 @@ An unknown, expired, or absent session id makes the middleware build the binding
 token's own grants. That fallback is marked `token_default` on the selected state, while
 any explicit selection — `wiki_bind` or `wiki_create_domain` expansion — marks it
 `session`. `wiki_status`, `wiki_bind`, and the code tools whose target is `binding.primary`
-rather than an argument carry the mark as `binding_source`; the domain-free code reads add
-`binding_defaulted` to `warnings` under the fallback, as does `wiki_spec_search` called
-without `domains`, whose search set is the bound read list, and `wiki_bind` returns the
+rather than an argument carry the mark as `binding_source`; `_defaulted_scope_answer` adds
+`binding_defaulted` to `warnings` under the fallback for every answer whose scope is not an
+argument — the domain-free code reads, `wiki_spec_search` and `wiki_search` called without
+`domains`, and `wiki_search(intent="write")`, which prefers the bound primary over any named
+domain — and `wiki_bind` returns the
 `session_id` it bound to. When the request's write-scope intersection replaces the selected
 primary, the same answers carry `primary_substituted` with the `requested_primary`. The
 fallback stays permitted by default; `code_graph.require_session_binding` turns it into a
