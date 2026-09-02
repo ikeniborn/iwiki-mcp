@@ -8,6 +8,8 @@ from typing import Any
 import anyio
 import httpx
 
+from .context import ContextBudget
+
 
 LOGGER = logging.getLogger(__name__)
 # Keep in sync with config.BotConfig.max_output_tokens.
@@ -126,6 +128,7 @@ class InferenceClient:
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+        budget: ContextBudget | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -134,6 +137,7 @@ class InferenceClient:
         self._max_output_tokens = max_output_tokens
         self._max_attempts = max_attempts
         self._sleep = sleep
+        self._budget = budget
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -216,13 +220,32 @@ class InferenceClient:
         except (KeyError, IndexError, TypeError):
             self._record_telemetry("chat", "failure", started, {}, prompt_chars)
             invalid_response = True
-        except InferenceError:
+        except InferenceError as error:
             self._record_telemetry("chat", "failure", started, {}, prompt_chars)
+            if str(error) == "context_overflow":
+                self._escalate_budget()
             raise
         if invalid_response:
             raise InferenceError("invalid_inference_response") from None
         self._record_telemetry("chat", "success", started, payload, prompt_chars)
+        self._observe_usage(payload, prompt_chars)
         return content
+
+    def _observe_usage(
+        self, payload: dict[str, object], prompt_chars: int
+    ) -> None:
+        """Calibrate the context budget from the reported prompt usage."""
+        if self._budget is None:
+            return
+        usage = payload.get("usage")
+        tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        if isinstance(tokens, int) and not isinstance(tokens, bool):
+            self._budget.observe(prompt_chars, tokens)
+
+    def _escalate_budget(self) -> None:
+        """Assume a denser prompt after the provider refused this one."""
+        if self._budget is not None:
+            self._budget.escalate()
 
     async def transcribe(self, filename: str, audio: bytes) -> str:
         started = time.monotonic()

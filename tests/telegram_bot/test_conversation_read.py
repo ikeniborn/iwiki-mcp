@@ -502,3 +502,60 @@ async def test_context_overflow_asks_for_a_narrower_question(clock):
     reply = await service.answer_question(1001, "Question")
 
     assert reply.text == "Question context is too large. Ask a narrower question."
+
+
+@pytest.mark.asyncio
+async def test_repeated_hits_for_one_section_are_read_once(clock):
+    remote = SectionRemote(
+        [
+            {"slug": "guide/deploy", "heading": "Rollback", "chunk": 0},
+            {"slug": "guide/deploy", "heading": "Rollback", "chunk": 2},
+        ],
+        {("guide/deploy", "Rollback"): "rollback body"},
+    )
+    inference = FakeInference()
+    service = _section_service(remote, inference, clock)
+    await service.select_domain(1001, "team")
+
+    await service.answer_question(1001, "How do I roll back?")
+
+    reads = [call for call in remote.calls if call[0] == "read_page"]
+    assert len(reads) == 1
+    assert inference.calls == [
+        ("answer", "How do I roll back?", "rollback body")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_retries_once_with_a_halved_budget(clock):
+    class OverflowOnceInference(FakeInference):
+        async def answer(self, question, context):
+            self.calls.append(("answer", question, context))
+            if len(self.calls) == 1:
+                raise InferenceError("context_overflow")
+            return "Answer"
+
+    remote = SectionRemote(
+        [
+            {"slug": "guide/deploy", "heading": "Rollback"},
+            {"slug": "guide/setup", "heading": "Install"},
+        ],
+        {
+            ("guide/deploy", "Rollback"): "a" * 30,
+            ("guide/setup", "Install"): "b" * 30,
+        },
+    )
+    inference = OverflowOnceInference()
+    service = _section_service(
+        remote, inference, clock, context_budget_chars=70
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Answer"
+    assert len(inference.calls) == 2
+    assert inference.calls[0][2] == "a" * 30 + "\n\n" + "b" * 30
+    assert inference.calls[1][2] == "a" * 30
+    assert len([call for call in remote.calls if call[0] == "search"]) == 1
+    assert len([call for call in remote.calls if call[0] == "read_page"]) == 2

@@ -13,6 +13,7 @@ import anyio
 
 from .access import AccessPolicy
 from .config import BotConfig
+from .context import ContextBudget
 from .conversation import ConversationService
 from .inference import InferenceClient, InferenceError
 from .iwiki import RemoteIwikiError, open_remote_iwiki
@@ -86,6 +87,13 @@ async def run_bot(
         Path("/run/iwiki-telegram-bot.heartbeat"), time.monotonic
     )
     backoff = Backoff()
+    # One budget for the process: its calibration must survive a reconnect,
+    # which rebuilds the inference client and the conversation.
+    budget = ContextBudget(
+        window_tokens=config.context_window_tokens,
+        output_tokens=config.max_output_tokens,
+        ceiling_chars=config.context_budget_chars,
+    )
     while True:
         started = clock()
         telegram_http = None
@@ -104,6 +112,7 @@ async def run_bot(
                 config.transcription_model,
                 max_output_tokens=config.max_output_tokens,
                 timeout_seconds=float(config.inference_timeout_seconds),
+                budget=budget,
             )
             await inference.probe()
             remote_context = open_remote_iwiki(
@@ -150,7 +159,7 @@ async def run_bot(
             remote,
             inference,
             confirmation_ttl_seconds=config.confirmation_ttl_seconds,
-            context_budget_chars=config.context_budget_chars,
+            budget=budget,
         )
         transport = TelegramTransport(
             config.telegram_token,
