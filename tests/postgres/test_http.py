@@ -271,6 +271,89 @@ def test_specification_resolve_refusal_names_the_binding_relation(
     assert denied.value.status_code == 403
 
 
+@pytest.mark.parametrize(
+    ("write_domains", "primary", "arguments", "expected"),
+    [
+        (("docs",), "docs", {"query": "q", "intent": "write"}, ("docs",)),
+        (
+            ("docs", "shared"),
+            "docs",
+            {"query": "q", "intent": "write", "domains": ["shared"]},
+            ("docs",),
+        ),
+        (
+            ("shared",),
+            None,
+            {"query": "q", "intent": "write", "domains": ["shared"]},
+            ("shared",),
+        ),
+        ((), None, {"query": "q", "intent": "write"}, ()),
+    ],
+)
+def test_write_intent_search_authorizes_the_target_the_tool_resolves(
+    monkeypatch, write_domains, primary, arguments, expected,
+):
+    """The gate resolves the write target exactly as `wiki_search` does.
+
+    The tool answers about `bind.primary or domains[0]`, so authorizing the
+    first named domain would check a domain the answer never uses.
+    """
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "shared", "private"),
+        write_domains=write_domains,
+        primary=primary,
+    )
+    calls = []
+    monkeypatch.setattr(
+        http,
+        "authorize_domains",
+        lambda _context, **kwargs: calls.append(kwargs),
+    )
+
+    http._authorize_tool(context, _authorization_request("wiki_search", arguments))
+
+    assert calls == [{"read_domains": (), "write_domains": expected}]
+
+
+def test_write_intent_search_is_not_refused_for_an_unused_domain(monkeypatch):
+    """Naming a domain the tool ignores must not refuse the call.
+
+    The old gate authorized `domains[0]`, so a read-only domain there raised
+    403 even though the answer would have been about the writable primary.
+    """
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    context = AuthContext(
+        iwiki_id="wiki-a",
+        token_id="token-a",
+        read_domains=("docs", "private"),
+        write_domains=("docs",),
+        primary="docs",
+    )
+    calls = []
+    monkeypatch.setattr(
+        http,
+        "authorize_domains",
+        lambda _context, **kwargs: calls.append(kwargs),
+    )
+
+    http._authorize_tool(
+        context,
+        _authorization_request(
+            "wiki_search",
+            {"query": "q", "intent": "write", "domains": ["private"]},
+        ),
+    )
+
+    assert calls == [{"read_domains": (), "write_domains": ("docs",)}]
+
+
 def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
     runtime = hosted_runtime.runtime
     auth = hosted_runtime.auth

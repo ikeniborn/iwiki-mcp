@@ -389,7 +389,10 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         raw_intent = arguments.get("intent", "read")
         intent = raw_intent.strip().lower() if isinstance(raw_intent, str) else ""
         if intent == "write":
-            target = requested[0] if requested else context.primary
+            # Mirror the tool exactly: `wiki_search(intent="write")` resolves
+            # `bind.primary or domains[0]`, so authorizing the first named
+            # domain would check a domain the answer never uses.
+            target = context.primary or (requested[0] if requested else None)
             if target is not None:
                 write_domains = (target,)
         else:
