@@ -17,6 +17,9 @@ from .models import BotReply, PageTarget, PendingWrite, WritePreview
 
 
 _TRANSCRIPTION_MAX_BYTES = 50 * 1024 * 1024
+# Keep in sync with config.BotConfig.context_budget_chars.
+_DEFAULT_CONTEXT_BUDGET_CHARS = 48000
+_CONTEXT_SEPARATOR = "\n\n"
 
 
 class ConversationService:
@@ -27,6 +30,7 @@ class ConversationService:
         inference: Any,
         *,
         confirmation_ttl_seconds: int,
+        context_budget_chars: int = _DEFAULT_CONTEXT_BUDGET_CHARS,
         temporary_directory: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -34,6 +38,7 @@ class ConversationService:
         self._remote = remote
         self._inference = inference
         self._confirmation_ttl_seconds = confirmation_ttl_seconds
+        self._context_budget_chars = context_budget_chars
         self._temporary_directory = temporary_directory
         self._clock = clock
         self._selected_domains: dict[int, tuple[str, float]] = {}
@@ -50,6 +55,14 @@ class ConversationService:
         if error.retryable:
             raise error
         return BotReply("Wiki service is unavailable.")
+
+    @staticmethod
+    def _inference_unavailable(error: InferenceError) -> BotReply:
+        if str(error) == "context_overflow":
+            return BotReply(
+                "Question context is too large. Ask a narrower question."
+            )
+        return BotReply("Inference service is unavailable.")
 
     def expire_state(self) -> None:
         now = self._clock()
@@ -76,7 +89,10 @@ class ConversationService:
             domains = await self._remote.list_domains()
         except RemoteIwikiError as error:
             return self._remote_unavailable(error)
-        return BotReply("Available domains:", tuple(f"domain:{item}" for item in domains))
+        return BotReply(
+            "Available domains:",
+            tuple((item, f"domain:{item}") for item in domains),
+        )
 
     async def select_domain(self, telegram_id: int, domain: str) -> BotReply:
         if not self._allowed(telegram_id):
@@ -103,18 +119,7 @@ class ConversationService:
 
     async def _answer_selected(self, domain: str, question: str) -> BotReply:
         try:
-            results = await self._remote.search(domain, question)
-            if not results:
-                return BotReply("No relevant wiki content found.")
-            pages = [
-                await self._remote.read_page(domain, str(result["slug"]))
-                for result in results
-            ]
-            context = "\n\n".join(
-                str(page["markdown"])
-                for page in pages
-                if isinstance(page.get("markdown"), str)
-            )
+            context = await self._retrieve_context(domain, question)
             if not context:
                 return BotReply("No relevant wiki content found.")
             answer = await self._inference.answer(question, context)
@@ -122,9 +127,42 @@ class ConversationService:
             return BotReply("Wiki service is unavailable.")
         except RemoteIwikiError as error:
             return self._remote_unavailable(error)
-        except InferenceError:
-            return BotReply("Inference service is unavailable.")
+        except InferenceError as error:
+            return self._inference_unavailable(error)
         return BotReply(answer)
+
+    async def _read_section(
+        self, domain: str, result: dict[str, object]
+    ) -> str | None:
+        """Read the section a search hit names, or the whole page without one."""
+        slug = str(result["slug"])
+        heading = result.get("heading")
+        if isinstance(heading, str) and heading.strip():
+            page = await self._remote.read_page(domain, slug, heading)
+            body = page.get("body", page.get("markdown"))
+        else:
+            page = await self._remote.read_page(domain, slug)
+            body = page.get("markdown")
+        return body if isinstance(body, str) and body else None
+
+    async def _retrieve_context(self, domain: str, query: str) -> str:
+        """Assemble retrieved sections in result order, within the budget."""
+        results = await self._remote.search(domain, query)
+        budget = self._context_budget_chars
+        sections: list[str] = []
+        used = 0
+        for result in results:
+            section = await self._read_section(domain, result)
+            if section is None:
+                continue
+            if not sections and len(section) > budget:
+                return section[:budget]
+            separator = len(_CONTEXT_SEPARATOR) if sections else 0
+            if used + separator + len(section) > budget:
+                break
+            used += separator + len(section)
+            sections.append(section)
+        return _CONTEXT_SEPARATOR.join(sections)
 
     async def answer_voice(
         self, telegram_id: int, filename: str, audio: bytes
@@ -192,8 +230,8 @@ class ConversationService:
             markdown = await self._inference.draft_markdown(request, context)
         except RemoteIwikiError as error:
             return self._remote_unavailable(error)
-        except InferenceError:
-            return BotReply("Inference service is unavailable.")
+        except InferenceError as error:
+            return self._inference_unavailable(error)
         return self._store_preview(
             telegram_id,
             "create",
@@ -217,8 +255,8 @@ class ConversationService:
             markdown = await self._inference.draft_markdown(request, context)
         except RemoteIwikiError as error:
             return self._remote_unavailable(error)
-        except InferenceError:
-            return BotReply("Inference service is unavailable.")
+        except InferenceError as error:
+            return self._inference_unavailable(error)
         target = PageTarget(domain=domain, slug=slug, heading=heading)
         return self._store_preview(
             telegram_id,
@@ -236,16 +274,7 @@ class ConversationService:
         return domain
 
     async def _draft_context(self, domain: str, request: str) -> str:
-        results = await self._remote.search(domain, request)
-        pages = [
-            await self._remote.read_page(domain, str(result["slug"]))
-            for result in results
-        ]
-        return "\n\n".join(
-            str(page["markdown"])
-            for page in pages
-            if isinstance(page.get("markdown"), str)
-        )
+        return await self._retrieve_context(domain, request)
 
     def _store_preview(
         self,

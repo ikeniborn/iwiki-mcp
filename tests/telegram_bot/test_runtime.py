@@ -127,7 +127,7 @@ async def test_internal_remote_cancel_scope_reconnects_after_scope_closes(
             pass
 
     class Inference:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             pass
 
         async def probe(self):
@@ -158,7 +158,10 @@ async def test_internal_remote_cancel_scope_reconnects_after_scope_closes(
     class Transport:
         calls = 0
 
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
+            pass
+
+        async def publish_commands(self):
             pass
 
         async def poll_forever(self, **kwargs):
@@ -197,7 +200,7 @@ async def test_run_bot_preserves_external_anyio_cancellation(monkeypatch):
             events.append("proxy_close")
 
     class Inference:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             pass
 
         async def probe(self):
@@ -219,7 +222,10 @@ async def test_run_bot_preserves_external_anyio_cancellation(monkeypatch):
             events.append("remote_close")
 
     class Transport:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
+            pass
+
+        async def publish_commands(self):
             pass
 
         async def poll_forever(self, **kwargs):
@@ -357,7 +363,7 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
         return proxy
 
     class Inference:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             self.attempt = len(inferences) + 1
             self.closed = False
             inferences.append(self)
@@ -400,8 +406,11 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
             remote.closed = True
 
     class StoppingTransport:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             events.append("transport_create")
+
+        async def publish_commands(self):
+            pass
 
         async def poll_forever(self, **kwargs):
             events.append("poll")
@@ -503,6 +512,8 @@ async def test_post_start_remote_failure_reconnects_and_replays_only_failed_upda
             if method == "sendMessage":
                 sent.append(payload)
                 return ProxyResponse(200, b'{"ok":true,"result":{}}')
+            if method in ("setMyCommands", "setChatMenuButton"):
+                return ProxyResponse(200, b'{"ok":true,"result":true}')
             raise AssertionError(f"unexpected Telegram method: {method}")
 
         async def get_bytes(self, url):
@@ -514,7 +525,7 @@ async def test_post_start_remote_failure_reconnects_and_replays_only_failed_upda
     class Inference:
         instances = 0
 
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             self.__class__.instances += 1
 
         async def probe(self):
@@ -636,7 +647,9 @@ async def test_non_retryable_startup_failure_does_not_sleep(
         raise AssertionError("fatal startup errors must not sleep")
 
     monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
-    monkeypatch.setattr(main_module, "InferenceClient", lambda *args: Inference())
+    monkeypatch.setattr(
+        main_module, "InferenceClient", lambda *args, **options: Inference()
+    )
     monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
 
     with pytest.raises(failure_type) as captured:
@@ -739,7 +752,9 @@ async def test_run_bot_cleanup_preserves_startup_base_exception(
             raise RuntimeError("remote-cleanup-marker")
 
     monkeypatch.setattr(main_module, "build_proxy_client", lambda config: Proxy())
-    monkeypatch.setattr(main_module, "InferenceClient", lambda *args: Inference())
+    monkeypatch.setattr(
+        main_module, "InferenceClient", lambda *args, **options: Inference()
+    )
     monkeypatch.setattr(main_module, "open_remote_iwiki", remote_context)
 
     with pytest.raises(type(failure)) as captured:

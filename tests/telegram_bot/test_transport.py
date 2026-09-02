@@ -49,7 +49,7 @@ class FakeConversation:
 
     async def list_domains(self, telegram_id):
         self.calls.append(("list_domains", telegram_id))
-        return BotReply("Available domains:", ("domain:team",))
+        return BotReply("Available domains:", (("team", "domain:team"),))
 
     async def select_domain(self, telegram_id, domain):
         self.calls.append(("select_domain", telegram_id, domain))
@@ -528,7 +528,7 @@ async def test_runner_stops_before_remote_when_inference_probe_fails(monkeypatch
             events.append("telegram_close")
 
     class FailingInference:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             pass
 
         async def probe(self):
@@ -572,7 +572,7 @@ async def test_runner_probes_remote_scope_before_polling(monkeypatch):
     events = []
 
     class ReadyInference:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             pass
 
         async def probe(self):
@@ -617,7 +617,7 @@ async def test_runner_cancellation_completes_inference_and_proxy_cleanup(monkeyp
     polling = anyio.Event()
 
     class CancellableInference:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
             pass
 
         async def probe(self):
@@ -633,7 +633,10 @@ async def test_runner_cancellation_completes_inference_and_proxy_cleanup(monkeyp
             return ["team"]
 
     class BlockingTransport:
-        def __init__(self, *arguments):
+        def __init__(self, *arguments, **options):
+            pass
+
+        async def publish_commands(self):
             pass
 
         async def poll_forever(self, **kwargs):
@@ -677,3 +680,105 @@ async def test_runner_cancellation_completes_inference_and_proxy_cleanup(monkeyp
 
     assert events == ["inference_close_started", "inference_close_finished"]
     assert manager.clear_count == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_commands_registers_slash_list_and_menu_button(transport):
+    await transport.publish_commands()
+
+    methods = [method for method, _ in transport.api_calls]
+    assert methods == ["setMyCommands", "setChatMenuButton"]
+    commands = transport.api_calls[0][1]["commands"]
+    assert [entry["command"] for entry in commands] == [
+        "menu",
+        "domains",
+        "create",
+        "update",
+        "help",
+    ]
+    assert all(entry["description"] for entry in commands)
+    assert transport.api_calls[1][1] == {"menu_button": {"type": "commands"}}
+
+
+@pytest.mark.asyncio
+async def test_command_registration_failure_never_stops_the_bot(transport):
+    async def failing(method, data):
+        raise TelegramError("telegram_request_failed")
+
+    transport._api = failing
+
+    await transport.publish_commands()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ("/menu", "/start"))
+async def test_menu_command_renders_the_action_menu(transport, command):
+    await transport.handle_update(
+        {"message": {"from": {"id": 1001}, "chat": {"id": 9}, "text": command}}
+    )
+
+    assert transport.conversation.calls == []
+    method, payload = transport.api_calls[-1]
+    assert method == "sendMessage"
+    assert payload["reply_markup"]["inline_keyboard"] == [
+        [{"text": "Domains", "callback_data": "menu:domains"}],
+        [{"text": "Create page", "callback_data": "menu:create"}],
+        [{"text": "Update section", "callback_data": "menu:update"}],
+        [{"text": "Help", "callback_data": "menu:help"}],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_help_command_documents_every_command(transport):
+    await transport.handle_update(
+        {"message": {"from": {"id": 1001}, "chat": {"id": 9}, "text": "/help"}}
+    )
+
+    text = transport.api_calls[-1][1]["text"]
+    assert all(
+        command in text
+        for command in ("/domains", "/create", "/update", "/menu")
+    )
+
+
+@pytest.mark.asyncio
+async def test_menu_domains_callback_lists_domains(transport):
+    await transport.handle_update(
+        {
+            "callback_query": {
+                "id": "callback-1",
+                "from": {"id": 1001},
+                "message": {"chat": {"id": 9}},
+                "data": "menu:domains",
+            }
+        }
+    )
+
+    assert ("list_domains", 1001) in transport.conversation.calls
+
+
+@pytest.mark.asyncio
+async def test_menu_help_callback_answers_without_the_conversation(transport):
+    await transport.handle_update(
+        {
+            "callback_query": {
+                "id": "callback-1",
+                "from": {"id": 1001},
+                "message": {"chat": {"id": 9}},
+                "data": "menu:help",
+            }
+        }
+    )
+
+    assert transport.conversation.calls == []
+    assert "/create" in transport.api_calls[-1][1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_points_at_the_menu(transport):
+    await transport.handle_update(
+        {"message": {"from": {"id": 1001}, "chat": {"id": 9}, "text": "/nope"}}
+    )
+
+    assert transport.conversation.calls == []
+    assert transport.api_calls[-1][1]["text"] == "Unknown command. Send /menu."

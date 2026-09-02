@@ -325,3 +325,118 @@ async def test_selected_domain_expires_from_memory(service, clock):
     reply = await service.answer_question(1001, "Question")
 
     assert reply.text == "Select a domain first."
+
+
+class SectionRemote:
+    def __init__(self, results, sections):
+        self.calls = []
+        self.results = results
+        self.sections = sections
+
+    async def list_domains(self):
+        self.calls.append(("list_domains",))
+        return ["team"]
+
+    async def search(self, domain, query):
+        self.calls.append(("search", domain, query))
+        return self.results
+
+    async def read_page(self, domain, slug, heading=None):
+        self.calls.append(("read_page", domain, slug, heading))
+        if heading is None:
+            return {"markdown": self.sections[slug, None]}
+        return {"body": self.sections[slug, heading]}
+
+
+def _section_service(remote, inference, clock, **kwargs):
+    return ConversationService(
+        AccessPolicy(frozenset({1001})),
+        remote,
+        inference,
+        confirmation_ttl_seconds=300,
+        clock=clock,
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_question_context_uses_the_section_each_hit_names(clock):
+    remote = SectionRemote(
+        [
+            {"slug": "guide/deploy", "heading": "Rollback"},
+            {"slug": "guide/setup", "heading": ""},
+        ],
+        {
+            ("guide/deploy", "Rollback"): "rollback body",
+            ("guide/setup", None): "setup page",
+        },
+    )
+    inference = FakeInference()
+    service = _section_service(remote, inference, clock)
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "How do I roll back?")
+
+    assert reply.text == "Answer"
+    assert ("read_page", "team", "guide/deploy", "Rollback") in remote.calls
+    assert ("read_page", "team", "guide/setup", None) in remote.calls
+    assert inference.calls == [
+        ("answer", "How do I roll back?", "rollback body\n\nsetup page")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_question_context_stops_before_the_budget_is_exceeded(clock):
+    remote = SectionRemote(
+        [
+            {"slug": "guide/deploy", "heading": "Rollback"},
+            {"slug": "guide/setup", "heading": "Install"},
+        ],
+        {
+            ("guide/deploy", "Rollback"): "a" * 30,
+            ("guide/setup", "Install"): "b" * 30,
+        },
+    )
+    inference = FakeInference()
+    service = _section_service(remote, inference, clock, context_budget_chars=40)
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Answer"
+    assert inference.calls == [("answer", "Question", "a" * 30)]
+    assert "b" not in inference.calls[0][2]
+
+
+@pytest.mark.asyncio
+async def test_question_truncates_a_single_oversized_section(clock):
+    remote = SectionRemote(
+        [{"slug": "guide/deploy", "heading": "Rollback"}],
+        {("guide/deploy", "Rollback"): "a" * 100},
+    )
+    inference = FakeInference()
+    service = _section_service(remote, inference, clock, context_budget_chars=40)
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Answer"
+    assert inference.calls == [("answer", "Question", "a" * 40)]
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_asks_for_a_narrower_question(clock):
+    class OverflowInference(FakeInference):
+        async def answer(self, question, context):
+            raise InferenceError("context_overflow")
+
+    remote = SectionRemote(
+        [{"slug": "guide/deploy", "heading": "Rollback"}],
+        {("guide/deploy", "Rollback"): "rollback body"},
+    )
+    service = _section_service(remote, OverflowInference(), clock)
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Question context is too large. Ask a narrower question."
