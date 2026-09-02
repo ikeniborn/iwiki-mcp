@@ -192,12 +192,18 @@ restart. When no selection is found the server falls back to the token's own def
 scope and keeps answering — the fallback is permitted, but never silent:
 
 - `wiki_status`, `wiki_bind`, `wiki_code_status`, `wiki_code_search`,
-  `wiki_code_context`, and `wiki_code_publish_begin` carry `binding_source`, either
+  `wiki_code_context`, `wiki_code_publish_begin`, `wiki_spec_search`,
+  `wiki_spec_context`, and `wiki_spec_resolve` carry `binding_source`, either
   `session` (a selection made by `wiki_bind` in this session) or `token_default` (the
   fallback built from the token's grants).
+- A `tools/call` refused at the authorization gate carries the same `binding_source` in
+  its `access_denied` payload, so a refusal caused by a lost selection is recognizable
+  without a second call.
 - The domain-free code reads additionally add `binding_defaulted` to their `warnings`
   under `token_default`, so an answer from another project's snapshot is recognizable
-  even though it reports `state: ready` and `fresh: true`.
+  even though it reports `state: ready` and `fresh: true`. `wiki_spec_search` called
+  without `domains` takes its search set from the bound read list and reports the same
+  warning for the same reason; naming `domains` explicitly never carries it.
 - `wiki_bind` returns the `session_id` it bound to, so an answer belonging to a different
   session is recognizable.
 - When the write-scope intersection replaces the selected primary, the answer carries
@@ -402,7 +408,10 @@ the named `domain`, `token_id`, and `revoked` boolean. A single `tools/call` ref
 before dispatch — missing capability, malformed protected arguments, or a client-supplied
 `iwiki_id` — answers HTTP 200 with one JSON-RPC error
 `{"code":-32001,"message":"access_denied","data":{"hint":...}}`, so an MCP client can
-correlate the refusal with its request id. A batch request refused the same way keeps
+correlate the refusal with its request id. That `data` also carries the caller's own
+`binding_source` and, when the gate can attribute the refusal, a `reason`. The hint stays
+deliberately vague and no field ever names a domain, a wiki, or another token.
+A batch request refused the same way keeps
 HTTP 403 `{"error":"access denied"}`, since a batch carries no single id; authentication,
 origin, and session failures likewise stay on HTTP 401/403/404. Authority lost after
 dispatch, self-target, and foreign/missing transactional state return HTTP 200 with the
@@ -1040,7 +1049,11 @@ The exact semantic tool surface is:
 - `wiki_spec_context`: read one scenario plus persisted evidence and freshness without
   resolving or mutating it.
 - `wiki_spec_resolve`: resolve declared bindings and persist sanitized evidence; it
-  requires write scope and never expands binding or code-publication authority.
+  requires write scope and never expands binding or code-publication authority. Hosted,
+  its `domain` must be the bound primary. A refusal names which of the caller's own
+  binding relations answered — `invalid_domain`, `primary_not_selected`,
+  `primary_not_writable`, or `not_bound_primary` — so a scenario living outside the
+  bound primary is not mistaken for a missing grant.
 
 `wiki_status` reports effective mode and projection state. `wiki_lint` adds independent
 specification findings without hiding ordinary Wiki findings. Git stores the canonical

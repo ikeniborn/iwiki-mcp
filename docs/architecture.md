@@ -73,7 +73,8 @@ token's own grants. That fallback is marked `token_default` on the selected stat
 any explicit selection — `wiki_bind` or `wiki_create_domain` expansion — marks it
 `session`. `wiki_status`, `wiki_bind`, and the code tools whose target is `binding.primary`
 rather than an argument carry the mark as `binding_source`; the domain-free code reads add
-`binding_defaulted` to `warnings` under the fallback, and `wiki_bind` returns the
+`binding_defaulted` to `warnings` under the fallback, as does `wiki_spec_search` called
+without `domains`, whose search set is the bound read list, and `wiki_bind` returns the
 `session_id` it bound to. When the request's write-scope intersection replaces the selected
 primary, the same answers carry `primary_substituted` with the `requested_primary`. The
 fallback stays permitted by default; `code_graph.require_session_binding` turns it into a
@@ -344,6 +345,11 @@ commits neither target page nor projection.
 The MCP boundary registers exactly `wiki_spec_search`, `wiki_spec_context`, and
 `wiki_spec_resolve`. Search and context require read scope. Resolve requires write scope,
 persists evidence, and cannot expand binding, graph-publication, or tenant authority.
+Hosted, the gate admits resolve only for the bound primary and attributes a refusal to
+one of `invalid_domain`, `primary_not_selected`, `primary_not_writable`, or
+`not_bound_primary`; the admitted set is unchanged, only its attribution is reported.
+All three answers carry `binding_source`, so a refusal or an answer produced under a
+lapsed session selection is recognizable without a second call.
 `wiki_status` exposes effective mode and projection state; `wiki_lint` adds independent
 specification findings without suppressing the ordinary Wiki report.
 
@@ -623,7 +629,9 @@ grant tools outside hosted PostgreSQL return `unsupported_transport` with actual
 and transport. Missing capabilities or malformed protected envelopes fail before dispatch
 in `http._authorize_tool`: for one `tools/call` the refusal is sent by
 `_send_tool_access_denied` as a JSON-RPC `-32001 access_denied` error over HTTP 200,
-carrying the request's own id; a batch (or any non-object payload) has no single id and
+carrying the request's own id, the caller's own `binding_source`, and the optional
+`AccessError.reason` the gate attributed — never a domain, wiki, or token name; a batch
+(or any non-object payload) has no single id and
 keeps the HTTP 403 `_send_error` path, as do authentication, origin, and session
 failures. Transaction-time authority loss returns in-band `access_denied`.
 

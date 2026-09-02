@@ -102,6 +102,14 @@ storage, search, and lint never depend on GWT parsing or on a code graph. The se
 tool surface is exactly `wiki_spec_search`, `wiki_spec_context`, and
 `wiki_spec_resolve`.
 
+All three answers carry `binding_source` on a hosted server. `wiki_spec_search` called
+without `domains` searches the bound read list, so under `binding_source: token_default`
+it also reports `binding_defaulted` in `warnings` — re-bind before trusting that result,
+or name `domains` explicitly. Hosted `wiki_spec_resolve` accepts only the bound primary
+and attributes a refusal as `invalid_domain`, `primary_not_selected`,
+`primary_not_writable`, or `not_bound_primary`; `not_bound_primary` means the scenario
+lives outside the bound primary, not that a grant is missing.
+
 Use one canonical TOML block in an H2 section:
 
 ```iwiki-gwt

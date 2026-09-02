@@ -18,10 +18,16 @@ _LAST_USED_INTERVAL = timedelta(minutes=5)
 
 
 class AccessError(PermissionError):
-    """Safe authentication or authorization failure for an HTTP boundary."""
+    """Safe authentication or authorization failure for an HTTP boundary.
 
-    def __init__(self, status_code: int) -> None:
+    `reason` is an optional fixed code naming the caller's own binding
+    relation that refused the call. It never names a domain, a wiki, or
+    another token, so it stays safe to return to the refused caller.
+    """
+
+    def __init__(self, status_code: int, reason: str | None = None) -> None:
         self.status_code = status_code
+        self.reason = reason
         message = "authentication required" if status_code == 401 else "access denied"
         super().__init__(message)
 
