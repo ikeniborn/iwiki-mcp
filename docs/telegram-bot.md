@@ -45,19 +45,32 @@ Supply configuration through the owner-only `/opt/iwiki-mcp/runtime.env` file re
 | `IWIKI_BOT_LLM_MODEL` | Public model alias for chat completions. |
 | `IWIKI_BOT_TRANSCRIPTION_MODEL` | Model accepted by `/audio/transcriptions`. |
 | `IWIKI_BOT_CONFIRMATION_TTL_SECONDS` | Optional positive TTL; default `300`. |
-| `IWIKI_BOT_CONTEXT_BUDGET_CHARS` | Optional positive character cap on the assembled wiki context; default `48000`. |
+| `IWIKI_BOT_CONTEXT_BUDGET_CHARS` | Optional positive hard ceiling on the assembled wiki context; default `48000`. |
+| `IWIKI_BOT_CONTEXT_WINDOW_TOKENS` | Optional positive context window of the chat model; default `32768`. |
 | `IWIKI_BOT_MAX_OUTPUT_TOKENS` | Optional positive `max_tokens` for chat completions; default `1024`. |
 | `IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS` | Optional positive read/write timeout for inference requests; default `180`. |
 | `IWIKI_BOT_LOG_LEVEL` | Optional root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`); default `INFO`. |
 | `IWIKI_BOT_TELEGRAM_PROXY_URL` | Required literal HTTPS proxy URL with explicit host and port. |
 
 The chat model's context window is the binding constraint. The bot retrieves the
-section each search hit names rather than whole pages, appends sections in result order,
-and stops before the first one that would exceed `IWIKI_BOT_CONTEXT_BUDGET_CHARS`; only
-when no section fits is the first one truncated to the cap. `IWIKI_BOT_MAX_OUTPUT_TOKENS`
-reserves the completion budget inside the same window. Set the character cap well below
-the window: an unbounded context is what makes a provider answer
-`context_length_exceeded`.
+section each search hit names rather than whole pages, and reads each section once even
+when several search hits name it.
+
+The budget it fills is derived rather than configured. From
+`IWIKI_BOT_CONTEXT_WINDOW_TOKENS` the bot subtracts `IWIKI_BOT_MAX_OUTPUT_TOKENS`, a
+fixed reserve for the chat template, and the question itself, then converts the remaining
+tokens to characters through a tokens-per-character ratio. That ratio starts at the
+dense-Markdown worst case, is calibrated from the `usage.prompt_tokens` every completion
+reports, and is raised immediately whenever a provider refuses a prompt. The result is
+clamped to `IWIKI_BOT_CONTEXT_BUDGET_CHARS`, which is now a hard ceiling rather than the
+budget: lower it to restrict the bot further, never to make it safe.
+
+Sections are appended in result order and assembly stops before the first one that would
+exceed the derived budget; only when no section fits is the first one truncated to it. If
+the provider still answers `context_length_exceeded`, the bot reassembles the sections it
+already read at half the budget and sends exactly one more completion, without any
+further wiki call. Only when that also overflows does the user get
+`Question context is too large. Ask a narrower question.`
 
 ## Telegram HTTPS proxy boundary
 

@@ -11,6 +11,7 @@ from typing import Any
 import anyio
 
 from .access import AccessPolicy
+from .context import ContextBudget
 from .inference import InferenceError
 from .iwiki import RemoteIwikiError
 from .models import BotReply, PageTarget, PendingWrite, WritePreview
@@ -45,6 +46,7 @@ class ConversationService:
         *,
         confirmation_ttl_seconds: int,
         context_budget_chars: int = _DEFAULT_CONTEXT_BUDGET_CHARS,
+        budget: ContextBudget | None = None,
         temporary_directory: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -52,7 +54,9 @@ class ConversationService:
         self._remote = remote
         self._inference = inference
         self._confirmation_ttl_seconds = confirmation_ttl_seconds
-        self._context_budget_chars = context_budget_chars
+        # `context_budget_chars` is the operator's hard ceiling; the budget
+        # actually spent is derived from the model window on every question.
+        self._budget = budget or ContextBudget(ceiling_chars=context_budget_chars)
         self._temporary_directory = temporary_directory
         self._clock = clock
         # A selected domain is sticky for the process lifetime: it is a session
@@ -181,11 +185,15 @@ class ConversationService:
     ) -> BotReply:
         try:
             await _report(progress, _STAGE_SEARCHING)
-            context = await self._retrieve_context(domain, question)
+            sections = await self._collect_sections(domain, question)
+            budget = self._budget.chars(len(question))
+            context = self._assemble(sections, budget)
             if not context:
                 return BotReply("No relevant wiki content found.")
             await _report(progress, _STAGE_ANSWERING)
-            answer = await self._inference.answer(question, context)
+            answer = await self._answer_within_budget(
+                question, context, sections, budget
+            )
         except KeyError:
             return BotReply("Wiki service is unavailable.", failed=True)
         except RemoteIwikiError as error:
@@ -208,24 +216,74 @@ class ConversationService:
             body = page.get("markdown")
         return body if isinstance(body, str) and body else None
 
-    async def _retrieve_context(self, domain: str, query: str) -> str:
-        """Assemble retrieved sections in result order, within the budget."""
-        results = await self._remote.search(domain, query)
-        budget = self._context_budget_chars
-        sections: list[str] = []
-        used = 0
+    @staticmethod
+    def _unique_hits(
+        results: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        """Keep the highest-ranked hit for each page section."""
+        seen: set[tuple[str, str]] = set()
+        unique: list[dict[str, object]] = []
         for result in results:
-            section = await self._read_section(domain, result)
-            if section is None:
+            heading = result.get("heading")
+            key = (
+                str(result.get("slug", "")),
+                heading.strip() if isinstance(heading, str) else "",
+            )
+            if key in seen:
                 continue
-            if not sections and len(section) > budget:
+            seen.add(key)
+            unique.append(result)
+        return unique
+
+    async def _collect_sections(self, domain: str, query: str) -> list[str]:
+        """Read the section each deduplicated hit names, in result order."""
+        results = await self._remote.search(domain, query)
+        sections: list[str] = []
+        for result in self._unique_hits(results):
+            section = await self._read_section(domain, result)
+            if section is not None:
+                sections.append(section)
+        return sections
+
+    @staticmethod
+    def _assemble(sections: list[str], budget: int) -> str:
+        """Append sections in order and stop before the budget is exceeded."""
+        chosen: list[str] = []
+        used = 0
+        for section in sections:
+            if not chosen and len(section) > budget:
                 return section[:budget]
-            separator = len(_CONTEXT_SEPARATOR) if sections else 0
+            separator = len(_CONTEXT_SEPARATOR) if chosen else 0
             if used + separator + len(section) > budget:
                 break
             used += separator + len(section)
-            sections.append(section)
-        return _CONTEXT_SEPARATOR.join(sections)
+            chosen.append(section)
+        return _CONTEXT_SEPARATOR.join(chosen)
+
+    async def _answer_within_budget(
+        self,
+        question: str,
+        context: str,
+        sections: list[str],
+        budget: int,
+    ) -> str:
+        """Answer, retrying once with a halved budget on a context overflow."""
+        try:
+            return await self._inference.answer(question, context)
+        except InferenceError as error:
+            if str(error) != "context_overflow":
+                raise
+        # The provider refused the assembled prompt. Retry once with half the
+        # budget, reusing the sections already read: no further wiki call.
+        halved = max(budget // 2, 1)
+        return await self._inference.answer(
+            question, self._assemble(sections, halved)
+        )
+
+    async def _retrieve_context(self, domain: str, query: str) -> str:
+        """Assemble retrieved sections in result order, within the budget."""
+        sections = await self._collect_sections(domain, query)
+        return self._assemble(sections, self._budget.chars(len(query)))
 
     async def answer_voice(
         self,
