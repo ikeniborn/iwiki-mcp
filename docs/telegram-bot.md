@@ -65,8 +65,16 @@ reports, and is raised immediately whenever a provider refuses a prompt. The res
 clamped to `IWIKI_BOT_CONTEXT_BUDGET_CHARS`, which is now a hard ceiling rather than the
 budget: lower it to restrict the bot further, never to make it safe.
 
-Sections are appended in result order and assembly stops before the first one that would
-exceed the derived budget; only when no section fits is the first one truncated to it. If
+Sections are then fitted in rank order, each offered an even split of the budget still
+unspent. A short section hands its remainder to the sections behind it and a long one
+cannot starve them, so every retrieved section is represented. Each block is prefixed
+with `## <page> - <heading>`, so the model can attribute a statement to a page.
+
+A section larger than its share is trimmed rather than cut: its lead is always kept, the
+remaining paragraphs are selected by their word overlap with the question, and the kept
+paragraphs are restored to document order with `[...]` marking each gap. When the share
+is smaller than an authored lead, the section degrades to a card — its label and the
+start of its lead — so the model still learns the section exists. If
 the provider still answers `context_length_exceeded`, the bot reassembles the sections it
 already read at half the budget and sends exactly one more completion, without any
 further wiki call. Only when that also overflows does the user get
