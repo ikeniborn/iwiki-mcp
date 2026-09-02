@@ -103,6 +103,7 @@ async def run_bot(
                 config.llm_model,
                 config.transcription_model,
                 max_output_tokens=config.max_output_tokens,
+                timeout_seconds=float(config.inference_timeout_seconds),
             )
             await inference.probe()
             remote_context = open_remote_iwiki(

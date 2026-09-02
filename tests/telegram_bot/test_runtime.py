@@ -512,7 +512,13 @@ async def test_post_start_remote_failure_reconnects_and_replays_only_failed_upda
             if method == "sendMessage":
                 sent.append(payload)
                 return ProxyResponse(200, b'{"ok":true,"result":{}}')
-            if method in ("setMyCommands", "setChatMenuButton"):
+            if method in (
+                "setMyCommands",
+                "setChatMenuButton",
+                "sendChatAction",
+                "setMessageReaction",
+                "editMessageText",
+            ):
                 return ProxyResponse(200, b'{"ok":true,"result":true}')
             raise AssertionError(f"unexpected Telegram method: {method}")
 

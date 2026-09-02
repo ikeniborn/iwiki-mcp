@@ -34,3 +34,5 @@ class BotReply:
     text: str
     # Each button is a (label, callback_data) pair.
     buttons: tuple[tuple[str, str], ...] = ()
+    # True when a dependency failed, so the transport marks the update failed.
+    failed: bool = False

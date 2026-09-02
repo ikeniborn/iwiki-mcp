@@ -23,7 +23,9 @@ production requires an inference-only credential or gateway.
 Unknown Telegram IDs receive no domain metadata and trigger no iwiki or inference
 call. Page creation and section updates always show a preview with Confirm and Reject
 buttons. Confirmation tokens are random, bound to one Telegram ID, kept only in
-memory, expire after the configured TTL, and are consumed before one mutation.
+memory, expire after the configured TTL, and are consumed before one mutation. A
+deferred question is held under the same TTL; a selected domain is a preference rather
+than a secret and carries no TTL at all.
 Section updates re-read the target and send its fresh revision and section hash; a
 conflict is never overwritten or retried.
 
@@ -45,6 +47,7 @@ Supply configuration through the owner-only `/opt/iwiki-mcp/runtime.env` file re
 | `IWIKI_BOT_CONFIRMATION_TTL_SECONDS` | Optional positive TTL; default `300`. |
 | `IWIKI_BOT_CONTEXT_BUDGET_CHARS` | Optional positive character cap on the assembled wiki context; default `48000`. |
 | `IWIKI_BOT_MAX_OUTPUT_TOKENS` | Optional positive `max_tokens` for chat completions; default `1024`. |
+| `IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS` | Optional positive read/write timeout for inference requests; default `180`. |
 | `IWIKI_BOT_LOG_LEVEL` | Optional root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`); default `INFO`. |
 | `IWIKI_BOT_TELEGRAM_PROXY_URL` | Required literal HTTPS proxy URL with explicit host and port. |
 
@@ -101,10 +104,37 @@ opens the same list. A failed registration is logged and never stops polling.
   Help buttons.
 - `/help` prints the same command reference as the Help button.
 - `/domains` lists domains visible to the iwiki service token.
-- A domain button selects the domain for later questions and changes.
+- A domain button selects the domain for later questions and changes. The selection is
+  sticky: it lasts for the life of the bot process and is unrelated to the confirmation
+  TTL.
 - Any non-command text asks a question using only retrieved content from that domain.
+  With no domain selected yet, the bot keeps the question, offers the domain buttons,
+  and answers it as soon as a domain is chosen. A deferred question expires with the
+  confirmation TTL. `/create` and `/update` are not deferred: they offer the same
+  buttons and ask for the command again.
 - A Telegram voice message is downloaded, transcribed, processed as a question, and
-  removed after processing.
+  removed after processing. Transcription happens before the domain check, so a voice
+  message sent without a selected domain is deferred as text rather than discarded.
+
+## Processing feedback
+
+Every update that reaches iwiki or inference shows its progress, so a slow answer is
+never a silent one.
+
+- The incoming message gets the 👀 reaction, replaced by 👍 when the reply is delivered
+  and 🤨 when it reports a dependency failure. A callback button carries no user
+  message, so it gets no reaction.
+- A `typing` chat action is sent immediately and refreshed every four seconds while the
+  work runs; the same loop refreshes the liveness heartbeat, so a long transcription or
+  completion cannot make the container look unhealthy.
+- The first stage posts a status message — `⏳ Transcribing voice…`, `⏳ Searching
+  wiki…`, `⏳ Generating answer…`, `⏳ Reading section…`, `⏳ Drafting Markdown…`, or
+  `⏳ Saving page…` — and every later stage edits that same message. The final answer
+  replaces it, so one update produces one message.
+- All feedback is best-effort. A failed reaction, chat action, or status edit is logged
+  and never fails the update; if the status message cannot be posted, the stages stay
+  silent and the answer is sent as a new message. Static replies (`/menu`, `/start`,
+  `/help`) skip the feedback entirely.
 - `/create <slug>: <request>` drafts a new Markdown page and requests confirmation.
 - `/update <slug>#<heading>: <request>` drafts one `##` section replacement and
   requests confirmation.
@@ -148,13 +178,31 @@ revision/section-hash compare-and-swap remain unchanged.
 ## Failure behavior
 
 An inference failure is recorded as one WARNING carrying the HTTP status, the request
-path, the provider error code, and the elapsed time — never the prompt, the wiki context,
-the transcript, a response body, or a credential. A provider `context_length_exceeded`,
-or any message naming an exceeded context, is treated as a client error whatever HTTP
-status carried it: it is never retried, and the user is told
-`Question context is too large. Ask a narrower question.` Startup verifies that both the
-chat model and the transcription model are present in `GET /models` and names the missing
-role in the log.
+path, the provider error code, whether it was retryable, and the elapsed time — never
+the prompt, the wiki context, the transcript, a response body, or a credential. A
+completed chat request also logs the assembled prompt size in characters, which is what
+makes a context refusal diagnosable without logging the prompt.
+
+Context refusals are recognized by code (`context_length_exceeded`,
+`string_above_max_length`) and by provider wording, including the vLLM and llama.cpp
+phrasing that never says "exceeded": `maximum context length`, `context window`,
+`reduce the length`, `too many tokens`, `input is too long`, and `prompt is too long`.
+Whatever HTTP status carried it, the refusal is a client error, is never retried, and
+the user is told `Question context is too large. Ask a narrower question.`
+
+A transient failure — a timeout, a network error, a connection the provider closed
+between requests, HTTP 429, or a 5xx — is retried once after 0.5 seconds before the user
+sees anything. This is what a voice question needs most: the large multipart upload
+often leaves a keep-alive connection the provider has already closed, and the following
+completion used to surface as an outright outage. If the retry also fails the user is
+told `Inference service is busy or too slow. Send the question again.`, which is
+distinct from the permanent `Inference service is unavailable.` The HTTP client uses a
+10-second connect timeout and an `IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS` read/write
+timeout (default 180), so a slow completion over a large context is not mistaken for an
+outage.
+
+Startup verifies that both the chat model and the transcription model are present in
+`GET /models` and names the missing role in the log.
 
 Missing configuration stops startup. Remote iwiki, inference, Telegram download, and
 audio conversion, oversize WAV, malformed-response failures never expose dependency

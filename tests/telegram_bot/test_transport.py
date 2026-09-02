@@ -41,8 +41,13 @@ class RecordingHttp:
 
 
 class FakeConversation:
-    def __init__(self):
+    def __init__(self, stages=()):
         self.calls = []
+        self.stages = list(stages)
+
+    async def _report(self, progress):
+        for stage in self.stages:
+            await progress(stage)
 
     def expire_state(self):
         self.calls.append(("expire_state",))
@@ -51,29 +56,33 @@ class FakeConversation:
         self.calls.append(("list_domains", telegram_id))
         return BotReply("Available domains:", (("team", "domain:team"),))
 
-    async def select_domain(self, telegram_id, domain):
+    async def select_domain(self, telegram_id, domain, progress=None):
         self.calls.append(("select_domain", telegram_id, domain))
         return BotReply(f"Selected domain: {domain}")
 
-    async def answer_question(self, telegram_id, text):
+    async def answer_question(self, telegram_id, text, progress=None):
         self.calls.append(("answer_question", telegram_id, text))
+        if progress is not None:
+            await self._report(progress)
         return BotReply("Answer")
 
-    async def answer_voice(self, telegram_id, filename, audio):
+    async def answer_voice(self, telegram_id, filename, audio, progress=None):
         self.calls.append(("answer_voice", telegram_id, filename, audio))
         return BotReply("Voice answer")
 
-    async def propose_create(self, telegram_id, slug, request):
+    async def propose_create(self, telegram_id, slug, request, progress=None):
         self.calls.append(("propose_create", telegram_id, slug, request))
         return WritePreview("nonce", "# Draft")
 
-    async def propose_update(self, telegram_id, slug, heading, request):
+    async def propose_update(
+        self, telegram_id, slug, heading, request, progress=None
+    ):
         self.calls.append(
             ("propose_update", telegram_id, slug, heading, request)
         )
         return WritePreview("nonce", "Updated section")
 
-    async def confirm_write(self, telegram_id, token):
+    async def confirm_write(self, telegram_id, token, progress=None):
         self.calls.append(("confirm_write", telegram_id, token))
         return BotReply("Page change saved.")
 
@@ -91,10 +100,16 @@ class FakeTransport(TelegramTransport):
             RecordingHttp(),
         )
         self.api_calls = []
+        self.messages = 0
 
     async def _api(self, method, data):
         self.api_calls.append((method, data))
-        return [] if method == "getUpdates" else {}
+        if method == "getUpdates":
+            return []
+        if method == "sendMessage":
+            self.messages += 1
+            return {"message_id": self.messages}
+        return {}
 
     async def _download_voice(self, file_id):
         self.api_calls.append(("downloadVoice", {"file_id": file_id}))
@@ -209,6 +224,94 @@ async def test_voice_message_is_downloaded_and_dispatched(transport):
 
 
 @pytest.mark.asyncio
+async def test_question_reports_reaction_typing_and_edited_stages():
+    conversation = FakeConversation(stages=("Searching wiki", "Generating answer"))
+    transport = FakeTransport(conversation)
+
+    await transport.handle_update(
+        {
+            "message": {
+                "message_id": 55,
+                "from": {"id": 1001},
+                "chat": {"id": 9},
+                "text": "How do I deploy?",
+            }
+        }
+    )
+
+    assert transport.api_calls == [
+        (
+            "setMessageReaction",
+            {
+                "chat_id": 9,
+                "message_id": 55,
+                "reaction": [{"type": "emoji", "emoji": "👀"}],
+            },
+        ),
+        ("sendChatAction", {"chat_id": 9, "action": "typing"}),
+        ("sendMessage", {"chat_id": 9, "text": "⏳ Searching wiki…"}),
+        (
+            "editMessageText",
+            {"chat_id": 9, "message_id": 1, "text": "⏳ Generating answer…"},
+        ),
+        ("editMessageText", {"chat_id": 9, "message_id": 1, "text": "Answer"}),
+        (
+            "setMessageReaction",
+            {
+                "chat_id": 9,
+                "message_id": 55,
+                "reaction": [{"type": "emoji", "emoji": "👍"}],
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_reply_ends_with_the_failure_reaction():
+    class FailingConversation(FakeConversation):
+        async def answer_question(self, telegram_id, text, progress=None):
+            return BotReply("Inference service is unavailable.", failed=True)
+
+    transport = FakeTransport(FailingConversation())
+
+    await transport.handle_update(
+        {
+            "message": {
+                "message_id": 55,
+                "from": {"id": 1001},
+                "chat": {"id": 9},
+                "text": "How do I deploy?",
+            }
+        }
+    )
+
+    assert transport.api_calls[-1] == (
+        "setMessageReaction",
+        {
+            "chat_id": 9,
+            "message_id": 55,
+            "reaction": [{"type": "emoji", "emoji": "🤨"}],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_static_commands_skip_the_progress_feedback(transport):
+    await transport.handle_update(
+        {
+            "message": {
+                "message_id": 55,
+                "from": {"id": 1001},
+                "chat": {"id": 9},
+                "text": "/help",
+            }
+        }
+    )
+
+    assert [method for method, _ in transport.api_calls] == ["sendMessage"]
+
+
+@pytest.mark.asyncio
 async def test_poll_once_advances_offset(transport):
     async def updates(method, data):
         assert method == "getUpdates"
@@ -235,11 +338,13 @@ async def test_all_telegram_request_classes_use_injected_adapter_and_fixed_origi
     voice_update = {
         "update_id": 41,
         "message": {
+            "message_id": 77,
             "from": {"id": 1001},
             "chat": {"id": 9},
             "voice": {"file_id": "voice-file"},
         },
     }
+    accepted = ProxyResponse(200, b'{"ok":true,"result":{}}')
     http = RecordingHttp(
         post_results=(
             ProxyResponse(
@@ -248,15 +353,22 @@ async def test_all_telegram_request_classes_use_injected_adapter_and_fixed_origi
                     {"ok": True, "result": [callback_update, voice_update]}
                 ).encode(),
             ),
-            ProxyResponse(200, b'{"ok":true,"result":{}}'),
-            ProxyResponse(200, b'{"ok":true,"result":{}}'),
+            # answerCallbackQuery, chat action, selection reply.
+            accepted,
+            accepted,
+            accepted,
+            # Voice: reaction, chat action, file metadata.
+            accepted,
+            accepted,
             ProxyResponse(
                 200,
                 json.dumps(
                     {"ok": True, "result": {"file_path": "voice/file.ogg"}}
                 ).encode(),
             ),
-            ProxyResponse(200, b'{"ok":true,"result":{}}'),
+            # Voice answer and the final reaction.
+            accepted,
+            accepted,
         ),
         get_results=(ProxyResponse(200, b"audio"),),
     )
@@ -283,8 +395,27 @@ async def test_all_telegram_request_classes_use_injected_adapter_and_fixed_origi
         ),
         (
             "POST",
+            f"https://api.telegram.org/bot{token}/sendChatAction",
+            {"chat_id": 9, "action": "typing"},
+        ),
+        (
+            "POST",
             f"https://api.telegram.org/bot{token}/sendMessage",
             {"chat_id": 9, "text": "Selected domain: team"},
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/setMessageReaction",
+            {
+                "chat_id": 9,
+                "message_id": 77,
+                "reaction": [{"type": "emoji", "emoji": "👀"}],
+            },
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/sendChatAction",
+            {"chat_id": 9, "action": "typing"},
         ),
         (
             "POST",
@@ -299,6 +430,15 @@ async def test_all_telegram_request_classes_use_injected_adapter_and_fixed_origi
             "POST",
             f"https://api.telegram.org/bot{token}/sendMessage",
             {"chat_id": 9, "text": "Voice answer"},
+        ),
+        (
+            "POST",
+            f"https://api.telegram.org/bot{token}/setMessageReaction",
+            {
+                "chat_id": 9,
+                "message_id": 77,
+                "reaction": [{"type": "emoji", "emoji": "👍"}],
+            },
         ),
     ]
     assert all("api.telegram.org" in call[1] for call in http.calls)
@@ -416,7 +556,7 @@ async def test_ambiguous_send_message_failure_is_not_retried():
     )
 
     with pytest.raises(TelegramError, match="^telegram_request_failed$"):
-        await transport._send(9, BotReply("One send only"))
+        await transport.send(9, BotReply("One send only"))
 
     assert len(http.calls) == 1
     assert http.calls[0][1].endswith("/sendMessage")
@@ -424,7 +564,7 @@ async def test_ambiguous_send_message_failure_is_not_retried():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("update", "state_changing_method"),
+    ("update", "state_changing_method", "feedback_methods"),
     (
         (
             {
@@ -435,7 +575,9 @@ async def test_ambiguous_send_message_failure_is_not_retried():
                     "text": "question",
                 },
             },
+            # No message_id in this update, so no reaction is attempted.
             "sendMessage",
+            ("sendChatAction",),
         ),
         (
             {
@@ -448,24 +590,21 @@ async def test_ambiguous_send_message_failure_is_not_retried():
                 },
             },
             "answerCallbackQuery",
+            (),
         ),
     ),
 )
 async def test_polling_does_not_repeat_ambiguous_state_changing_call(
-    update, state_changing_method
+    update, state_changing_method, feedback_methods
 ):
     fetched = ProxyResponse(
         200,
         json.dumps({"ok": True, "result": [update]}).encode(),
     )
-    http = RecordingHttp(
-        post_results=(
-            fetched,
-            urllib3.exceptions.ProtocolError("ambiguous state change"),
-            fetched,
-            urllib3.exceptions.ProtocolError("ambiguous state change"),
-        )
-    )
+    accepted = ProxyResponse(200, b'{"ok":true,"result":{}}')
+    ambiguous = urllib3.exceptions.ProtocolError("ambiguous state change")
+    attempt = [fetched, *([accepted] * len(feedback_methods)), ambiguous]
+    http = RecordingHttp(post_results=(*attempt, *attempt))
     transport = TelegramTransport(
         "telegram-token",
         AccessPolicy(frozenset({1001})),
@@ -498,6 +637,7 @@ async def test_polling_does_not_repeat_ambiguous_state_changing_call(
 
     assert [call[1].rsplit("/", 1)[-1] for call in http.calls] == [
         "getUpdates",
+        *feedback_methods,
         state_changing_method,
     ]
     assert sleeps == []

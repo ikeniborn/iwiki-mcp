@@ -296,9 +296,11 @@ async def test_recreated_bot_service_has_no_confirmation_or_selection_state(tmp_
     assert (await restarted.confirm_write(1001, preview.token)).text == (
         "Confirmation is invalid."
     )
-    assert (await restarted.answer_question(1001, "question")).text == (
-        "Select a domain first."
-    )
+    # A sticky selection lives only in the process, so the restarted service
+    # must ask for the domain again instead of answering.
+    reselect = await restarted.answer_question(1001, "question")
+    assert reselect.text.startswith("Select a domain and I will answer this question:")
+    assert reselect.buttons == (("docs", "domain:docs"),)
     assert list(tmp_path.iterdir()) == []
 
 

@@ -1,15 +1,25 @@
 """OpenAI-compatible text and audio inference client."""
 
+from collections.abc import Awaitable, Callable
 import logging
 import time
 from typing import Any
 
+import anyio
 import httpx
 
 
 LOGGER = logging.getLogger(__name__)
 # Keep in sync with config.BotConfig.max_output_tokens.
 _DEFAULT_MAX_OUTPUT_TOKENS = 1024
+# Keep in sync with config.BotConfig.inference_timeout_seconds.
+_DEFAULT_TIMEOUT_SECONDS = 180.0
+_CONNECT_TIMEOUT_SECONDS = 10.0
+# One retry covers the two transient failures this bot actually sees: a read
+# timeout on a long completion and a keep-alive connection the provider closed
+# between requests.
+_DEFAULT_MAX_ATTEMPTS = 2
+_RETRY_BASE_DELAY_SECONDS = 0.5
 _USAGE_FIELDS = frozenset({
     "prompt_tokens",
     "completion_tokens",
@@ -64,11 +74,30 @@ def _provider_error_fields(
     return code, message if isinstance(message, str) else None
 
 
+_CONTEXT_OVERFLOW_CODES = frozenset({
+    "context_length_exceeded",
+    "string_above_max_length",
+})
+# Providers word the same refusal differently: OpenAI says the request exceeds
+# the context, vLLM and llama.cpp say the maximum context length is N tokens and
+# ask for a shorter prompt.
+_CONTEXT_OVERFLOW_PHRASES = (
+    "maximum context length",
+    "context window",
+    "reduce the length",
+    "too many tokens",
+    "input is too long",
+    "prompt is too long",
+)
+
+
 def _is_context_overflow(code: str | None, message: str | None) -> bool:
-    if code == "context_length_exceeded":
+    if code in _CONTEXT_OVERFLOW_CODES:
         return True
     lowered = (message or "").lower()
-    return "context" in lowered and "exceed" in lowered
+    if "context" in lowered and "exceed" in lowered:
+        return True
+    return any(phrase in lowered for phrase in _CONTEXT_OVERFLOW_PHRASES)
 
 
 def _retryable_http_error(error: httpx.HTTPError) -> bool:
@@ -94,14 +123,27 @@ class InferenceClient:
         transcription_model: str,
         http: httpx.AsyncClient | None = None,
         max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._chat_model = chat_model
         self._transcription_model = transcription_model
         self._max_output_tokens = max_output_tokens
+        self._max_attempts = max_attempts
+        self._sleep = sleep
         self._owns_http = http is None
-        self._http = http or httpx.AsyncClient(timeout=60, trust_env=False)
+        self._http = http or httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=_CONNECT_TIMEOUT_SECONDS,
+                read=timeout_seconds,
+                write=timeout_seconds,
+                pool=_CONNECT_TIMEOUT_SECONDS,
+            ),
+            trust_env=False,
+        )
 
     async def close(self) -> None:
         if self._owns_http:
@@ -151,6 +193,7 @@ class InferenceClient:
     async def _complete(self, instruction: str, request: str, context: str) -> str:
         started = time.monotonic()
         invalid_response = False
+        prompt_chars = len(instruction) + len(request) + len(context)
         try:
             payload = await self._post_json(
                 "/chat/completions",
@@ -171,14 +214,14 @@ class InferenceClient:
             if not isinstance(content, str) or not content.strip():
                 raise InferenceError("invalid_inference_response")
         except (KeyError, IndexError, TypeError):
-            self._record_telemetry("chat", "failure", started, {})
+            self._record_telemetry("chat", "failure", started, {}, prompt_chars)
             invalid_response = True
         except InferenceError:
-            self._record_telemetry("chat", "failure", started, {})
+            self._record_telemetry("chat", "failure", started, {}, prompt_chars)
             raise
         if invalid_response:
             raise InferenceError("invalid_inference_response") from None
-        self._record_telemetry("chat", "success", started, payload)
+        self._record_telemetry("chat", "success", started, payload, prompt_chars)
         return content
 
     async def transcribe(self, filename: str, audio: bytes) -> str:
@@ -204,6 +247,7 @@ class InferenceClient:
         outcome: str,
         started: float,
         payload: dict[str, object],
+        prompt_chars: int | None = None,
     ) -> None:
         raw_usage = payload.get("usage")
         usage = {}
@@ -222,6 +266,7 @@ class InferenceClient:
                 "outcome": outcome,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "usage": usage,
+                "prompt_chars": prompt_chars,
             },
         )
 
@@ -242,10 +287,12 @@ class InferenceClient:
             code = "inference_failed"
             retryable = error is not None and _retryable_http_error(error)
         LOGGER.warning(
-            "inference request failed status=%s path=%s code=%s elapsed_ms=%s",
+            "inference request failed status=%s path=%s code=%s retryable=%s "
+            "elapsed_ms=%s",
             status,
             path,
             provider_code or code,
+            retryable,
             int((time.monotonic() - started) * 1000),
         )
         return InferenceError(
@@ -257,22 +304,35 @@ class InferenceClient:
         )
 
     async def _post_json(self, path: str, **kwargs: Any) -> dict[str, object]:
-        started = time.monotonic()
-        failure = None
-        try:
-            response = await self._http.post(
-                f"{self._base_url}{path}",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                **kwargs,
+        """Post one inference request, retrying only transient failures."""
+        attempt = 0
+        while True:
+            started = time.monotonic()
+            failure = None
+            try:
+                response = await self._http.post(
+                    f"{self._base_url}{path}",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    **kwargs,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPError as error:
+                failure = self._request_failure(error, path, started)
+            except (httpx.InvalidURL, ValueError):
+                failure = self._request_failure(None, path, started)
+            if failure is None:
+                break
+            attempt += 1
+            if not failure.retryable or attempt >= self._max_attempts:
+                raise failure from None
+            LOGGER.warning(
+                "inference request retry path=%s attempt=%s status=%s",
+                path,
+                attempt,
+                failure.status,
             )
-            response.raise_for_status()
-            payload = response.json()
-        except httpx.HTTPError as error:
-            failure = self._request_failure(error, path, started)
-        except (httpx.InvalidURL, ValueError):
-            failure = self._request_failure(None, path, started)
-        if failure is not None:
-            raise failure from None
+            await self._sleep(_RETRY_BASE_DELAY_SECONDS * attempt)
         if not isinstance(payload, dict):
             raise InferenceError("invalid_inference_response")
         return payload
