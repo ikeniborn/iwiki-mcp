@@ -540,3 +540,18 @@ async def test_remote_startup_cancellation_group_is_not_converted(monkeypatch):
             pass
 
     assert captured.value is failure
+
+
+@pytest.mark.asyncio
+async def test_search_sends_the_configured_result_count():
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append((name, arguments))
+        return {"results": []}
+
+    await RemoteIwikiClient(call_tool, search_k=8).search("team", "question")
+
+    assert calls == [
+        ("wiki_search", {"domains": ["team"], "query": "question", "k": 8})
+    ]

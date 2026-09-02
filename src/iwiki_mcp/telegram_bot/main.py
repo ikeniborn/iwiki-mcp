@@ -116,7 +116,7 @@ async def run_bot(
             )
             await inference.probe()
             remote_context = open_remote_iwiki(
-                config.iwiki_url, config.iwiki_token
+                config.iwiki_url, config.iwiki_token, config.search_k
             )
             remote = await remote_context.__aenter__()
             remote_entered = True
@@ -221,7 +221,7 @@ async def run_bot(
                     )
                     await sleep(retry_delay)
                     candidate_context = open_remote_iwiki(
-                        config.iwiki_url, config.iwiki_token
+                        config.iwiki_url, config.iwiki_token, config.search_k
                     )
                     candidate_entered = False
                     candidate_ready = False

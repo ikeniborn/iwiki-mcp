@@ -473,7 +473,7 @@ async def test_fair_share_keeps_every_section_present(clock):
 
     reply = await service.answer_question(1001, "Question")
 
-    assert reply.text == "Answer"
+    assert reply.text == "Answer\n\nContext: 0 of 2 sections used in full."
     context = inference.calls[0][2]
     assert len(context) <= 1200
     assert "## guide/deploy - Rollback" in context
@@ -494,7 +494,7 @@ async def test_a_single_oversized_section_is_trimmed_to_the_budget(clock):
 
     reply = await service.answer_question(1001, "Question")
 
-    assert reply.text == "Answer"
+    assert reply.text == "Answer\n\nContext: 0 of 1 sections used in full."
     context = inference.calls[0][2]
     assert len(context) == 600
     assert context.startswith("## guide/deploy - Rollback\n")
@@ -567,7 +567,7 @@ async def test_context_overflow_retries_once_with_a_halved_budget(clock):
 
     reply = await service.answer_question(1001, "Question")
 
-    assert reply.text == "Answer"
+    assert reply.text.startswith("Answer")
     assert len(inference.calls) == 2
     first, second = inference.calls[0][2], inference.calls[1][2]
     assert len(first) <= 4000
@@ -576,3 +576,41 @@ async def test_context_overflow_retries_once_with_a_halved_budget(clock):
     assert "## guide/setup - Install" in second
     assert len([call for call in remote.calls if call[0] == "search"]) == 1
     assert len([call for call in remote.calls if call[0] == "read_page"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_complete_context_adds_no_truncation_line(clock):
+    remote = SectionRemote(
+        [{"slug": "guide/deploy", "heading": "Rollback"}],
+        {("guide/deploy", "Rollback"): "rollback body"},
+    )
+    inference = FakeInference()
+    service = _section_service(remote, inference, clock)
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Answer"
+
+
+@pytest.mark.asyncio
+async def test_a_partial_context_reports_how_much_was_used(clock):
+    remote = SectionRemote(
+        [
+            {"slug": "guide/deploy", "heading": "Rollback"},
+            {"slug": "guide/setup", "heading": "Install"},
+        ],
+        {
+            ("guide/deploy", "Rollback"): "short body",
+            ("guide/setup", "Install"): "install. " * 400,
+        },
+    )
+    inference = FakeInference()
+    service = _section_service(
+        remote, inference, clock, context_budget_chars=1200
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == "Answer\n\nContext: 1 of 2 sections used in full."

@@ -148,6 +148,7 @@ class BotConfig:
     telegram_proxy: TelegramProxyConfig = field(repr=False)
     context_budget_chars: int = 48000
     context_window_tokens: int = 32768
+    search_k: int = 5
     max_output_tokens: int = 1024
     inference_timeout_seconds: int = 180
     log_level: str = "INFO"
@@ -214,6 +215,7 @@ class BotConfig:
             context_window_tokens=_positive_int(
                 "IWIKI_BOT_CONTEXT_WINDOW_TOKENS", 32768
             ),
+            search_k=_positive_int("IWIKI_BOT_SEARCH_K", 5),
             max_output_tokens=_positive_int("IWIKI_BOT_MAX_OUTPUT_TOKENS", 1024),
             inference_timeout_seconds=_positive_int(
                 "IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS", 180

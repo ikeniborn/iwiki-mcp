@@ -11,7 +11,7 @@ from typing import Any
 import anyio
 
 from .access import AccessPolicy
-from .context import ContextBudget, Section, select_context
+from .context import ContextBudget, Section, Selection, select_context
 from .inference import InferenceError
 from .iwiki import RemoteIwikiError
 from .models import BotReply, PageTarget, PendingWrite, WritePreview
@@ -34,6 +34,16 @@ _STAGE_SAVING = "Saving page"
 async def _report(progress: ProgressCallback | None, stage: str) -> None:
     if progress is not None:
         await progress(stage)
+
+
+def _context_note(selection: Selection) -> str:
+    """Tell the user when the answer rests on less than everything found."""
+    if not selection.truncated:
+        return ""
+    return (
+        f"\n\nContext: {selection.full} of {selection.total} "
+        "sections used in full."
+    )
 
 
 class ConversationService:
@@ -186,12 +196,12 @@ class ConversationService:
             await _report(progress, _STAGE_SEARCHING)
             sections = await self._collect_sections(domain, question)
             budget = self._budget.chars(len(question))
-            context = select_context(sections, budget, question)
-            if not context:
+            selection = select_context(sections, budget, question)
+            if not selection.text:
                 return BotReply("No relevant wiki content found.")
             await _report(progress, _STAGE_ANSWERING)
-            answer = await self._answer_within_budget(
-                question, context, sections, budget
+            answer, selection = await self._answer_within_budget(
+                question, selection, sections, budget
             )
         except KeyError:
             return BotReply("Wiki service is unavailable.", failed=True)
@@ -199,7 +209,7 @@ class ConversationService:
             return self._remote_unavailable(error)
         except InferenceError as error:
             return self._inference_unavailable(error)
-        return BotReply(answer)
+        return BotReply(answer + _context_note(selection))
 
     async def _read_section(
         self, domain: str, result: dict[str, object]
@@ -252,29 +262,32 @@ class ConversationService:
     async def _answer_within_budget(
         self,
         question: str,
-        context: str,
+        selection: Selection,
         sections: list[Section],
         budget: int,
-    ) -> str:
-        """Answer, retrying once with a halved budget on a context overflow."""
+    ) -> tuple[str, Selection]:
+        """Answer, retrying once with a halved budget on a context overflow.
+
+        Returns the selection the answer was actually built from, so the reply
+        reports the context that reached the model rather than the first try.
+        """
         try:
-            return await self._inference.answer(question, context)
+            return await self._inference.answer(question, selection.text), selection
         except InferenceError as error:
             if str(error) != "context_overflow":
                 raise
         # The provider refused the assembled prompt. Retry once with half the
         # budget, reusing the sections already read: no further wiki call.
         halved = max(budget // 2, 1)
-        return await self._inference.answer(
-            question, select_context(sections, halved, question)
-        )
+        retried = select_context(sections, halved, question)
+        return await self._inference.answer(question, retried.text), retried
 
     async def _retrieve_context(self, domain: str, query: str) -> str:
         """Assemble retrieved sections in result order, within the budget."""
         sections = await self._collect_sections(domain, query)
         return select_context(
             sections, self._budget.chars(len(query)), query
-        )
+        ).text
 
     async def answer_voice(
         self,

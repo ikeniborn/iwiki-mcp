@@ -41,6 +41,19 @@ class Section:
     body: str
 
 
+@dataclass(frozen=True)
+class Selection:
+    """The assembled context and how much of the retrieval reached it."""
+
+    text: str
+    total: int
+    full: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.full < self.total
+
+
 class ContextBudget:
     """Derive the retrieval budget from the window, calibrated by usage."""
 
@@ -144,23 +157,27 @@ def _trim(body: str, terms: frozenset[str], limit: int) -> str:
     return _SEPARATOR.join(parts)[:limit]
 
 
-def _render(section: Section, share: int, terms: frozenset[str]) -> str | None:
-    """Fit one labelled section into its share, or report that none fits."""
+def _render(
+    section: Section, share: int, terms: frozenset[str]
+) -> tuple[str, bool] | None:
+    """Fit one labelled section into its share, and say whether it fit whole."""
     label = _label(section)
     body_budget = share - len(label) - 1
     if body_budget <= 0:
         return None
     if len(section.body) <= body_budget:
-        return f"{label}\n{section.body}"
+        return f"{label}\n{section.body}", True
     if body_budget < _MIN_EXCERPT_CHARS:
         # Too little room for an excerpt: contribute a card, so the model
         # still learns the section exists.
         lead = _paragraphs(section.body)[:1] or [section.body]
-        return f"{label}\n{lead[0][:body_budget]}"
-    return f"{label}\n{_trim(section.body, terms, body_budget)}"
+        return f"{label}\n{lead[0][:body_budget]}", False
+    return f"{label}\n{_trim(section.body, terms, body_budget)}", False
 
 
-def select_context(sections: list[Section], budget: int, query: str) -> str:
+def select_context(
+    sections: list[Section], budget: int, query: str
+) -> Selection:
     """Assemble labelled sections in rank order within an even share each.
 
     Each section is offered an even split of the budget still unspent, so a
@@ -170,12 +187,17 @@ def select_context(sections: list[Section], budget: int, query: str) -> str:
     terms = _terms(query)
     blocks: list[str] = []
     remaining = budget
+    full = 0
     for index, section in enumerate(sections):
         separator = len(_SEPARATOR) if blocks else 0
         share = (remaining - separator) // (len(sections) - index)
-        block = _render(section, share, terms)
-        if block is None:
+        rendered = _render(section, share, terms)
+        if rendered is None:
             continue
+        block, complete = rendered
         blocks.append(block)
+        full += 1 if complete else 0
         remaining -= separator + len(block)
-    return _SEPARATOR.join(blocks)
+    return Selection(
+        text=_SEPARATOR.join(blocks), total=len(sections), full=full
+    )

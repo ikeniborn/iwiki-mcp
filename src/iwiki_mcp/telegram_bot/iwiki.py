@@ -24,6 +24,8 @@ class RemoteIwikiError(RuntimeError):
 
 
 ToolCaller = Callable[[str, dict[str, object]], Awaitable[object]]
+# Keep in sync with config.BotConfig.search_k.
+_DEFAULT_SEARCH_K = 5
 _SAFE_REMOTE_ERROR_CODES = frozenset({"conflict", "section_conflict"})
 
 
@@ -98,8 +100,9 @@ def _decode_result(result: object) -> dict[str, object]:
 
 
 class RemoteIwikiClient:
-    def __init__(self, call_tool: ToolCaller):
+    def __init__(self, call_tool: ToolCaller, search_k: int = _DEFAULT_SEARCH_K):
         self._call_tool = call_tool
+        self._search_k = search_k
 
     async def _call(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         retryable = None
@@ -137,7 +140,8 @@ class RemoteIwikiClient:
 
     async def search(self, domain: str, query: str) -> list[dict[str, object]]:
         payload = await self._call(
-            "wiki_search", {"domains": [domain], "query": query, "k": 5}
+            "wiki_search",
+            {"domains": [domain], "query": query, "k": self._search_k},
         )
         results = payload.get("results")
         if not isinstance(results, list) or not all(
@@ -203,7 +207,7 @@ class RemoteIwikiClient:
 
 @asynccontextmanager
 async def open_remote_iwiki(
-    url: str, token: str
+    url: str, token: str, search_k: int = _DEFAULT_SEARCH_K
 ) -> AsyncIterator[RemoteIwikiClient]:
     headers = {"Authorization": f"Bearer {token}"}
     started = False
@@ -225,7 +229,7 @@ async def open_remote_iwiki(
                     return await session.call_tool(name, arguments=arguments)
 
                 started = True
-                yield RemoteIwikiClient(call_tool)
+                yield RemoteIwikiClient(call_tool, search_k)
     except RemoteIwikiError:
         raise
     except Exception as error:

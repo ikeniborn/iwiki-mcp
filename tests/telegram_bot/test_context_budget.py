@@ -82,13 +82,15 @@ def _section(slug="guide/deploy", heading="Rollback", body="body"):
 
 
 def test_a_section_is_labelled_with_its_page_and_heading():
-    text = select_context([_section()], 1000, "rollback")
+    text = select_context([_section()], 1000, "rollback").text
 
     assert text == "## guide/deploy - Rollback\nbody"
 
 
 def test_a_hit_without_a_heading_is_labelled_with_its_page_alone():
-    text = select_context([_section(heading="", body="page")], 1000, "page")
+    text = select_context(
+        [_section(heading="", body="page")], 1000, "page"
+    ).text
 
     assert text == "## guide/deploy\npage"
 
@@ -100,7 +102,7 @@ def test_every_section_gets_an_even_share_of_the_budget():
         _section(slug="c", heading="C", body="gamma. " * 500),
     ]
 
-    text = select_context(sections, 1800, "alpha")
+    text = select_context(sections, 1800, "alpha").text
 
     assert len(text) <= 1800
     assert "## a - A" in text
@@ -114,7 +116,7 @@ def test_a_short_section_hands_its_remainder_to_the_next_one():
         _section(slug="b", heading="B", body="long. " * 400),
     ]
 
-    text = select_context(sections, 1200, "long")
+    text = select_context(sections, 1200, "long").text
 
     assert len(text) <= 1200
     # The second section receives far more than a naive half of the budget.
@@ -131,7 +133,9 @@ def test_trimming_keeps_the_lead_and_the_paragraphs_that_match_the_query():
         ]
     )
 
-    text = select_context([_section(body=body)], 500, "rollback procedure")
+    text = select_context(
+        [_section(body=body)], 500, "rollback procedure"
+    ).text
 
     assert len(text) <= 500
     assert "Lead paragraph." in text
@@ -142,7 +146,7 @@ def test_trimming_keeps_the_lead_and_the_paragraphs_that_match_the_query():
 def test_a_tiny_allocation_degrades_the_section_to_a_card():
     body = "Lead paragraph about rollback.\n\n" + "filler. " * 200
 
-    text = select_context([_section(body=body)], 120, "rollback")
+    text = select_context([_section(body=body)], 120, "rollback").text
 
     assert len(text) <= 120
     assert text.startswith("## guide/deploy - Rollback\n")
@@ -156,8 +160,11 @@ def test_selection_never_exceeds_the_budget():
     ]
 
     for budget in (60, 200, 1000, 4000):
-        assert len(select_context(sections, budget, "x")) <= budget
+        assert len(select_context(sections, budget, "x").text) <= budget
 
 
 def test_an_empty_result_produces_no_context():
-    assert select_context([], 1000, "anything") == ""
+    selection = select_context([], 1000, "anything")
+
+    assert selection.text == ""
+    assert not selection.truncated

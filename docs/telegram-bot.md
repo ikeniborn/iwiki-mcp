@@ -47,6 +47,7 @@ Supply configuration through the owner-only `/opt/iwiki-mcp/runtime.env` file re
 | `IWIKI_BOT_CONFIRMATION_TTL_SECONDS` | Optional positive TTL; default `300`. |
 | `IWIKI_BOT_CONTEXT_BUDGET_CHARS` | Optional positive hard ceiling on the assembled wiki context; default `48000`. |
 | `IWIKI_BOT_CONTEXT_WINDOW_TOKENS` | Optional positive context window of the chat model; default `32768`. |
+| `IWIKI_BOT_SEARCH_K` | Optional positive number of search hits retrieved per question; default `5`. |
 | `IWIKI_BOT_MAX_OUTPUT_TOKENS` | Optional positive `max_tokens` for chat completions; default `1024`. |
 | `IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS` | Optional positive read/write timeout for inference requests; default `180`. |
 | `IWIKI_BOT_LOG_LEVEL` | Optional root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`); default `INFO`. |
@@ -74,8 +75,13 @@ A section larger than its share is trimmed rather than cut: its lead is always k
 remaining paragraphs are selected by their word overlap with the question, and the kept
 paragraphs are restored to document order with `[...]` marking each gap. When the share
 is smaller than an authored lead, the section degrades to a card — its label and the
-start of its lead — so the model still learns the section exists. If
-the provider still answers `context_length_exceeded`, the bot reassembles the sections it
+start of its lead — so the model still learns the section exists.
+
+When any retrieved section did not fit whole, the reply ends with one line,
+`Context: <n> of <m> sections used in full.` A reply built from everything found carries
+no such line, so the absence of the line is itself the signal that nothing was left out.
+
+If the provider still answers `context_length_exceeded`, the bot reassembles the sections it
 already read at half the budget and sends exactly one more completion, without any
 further wiki call. Only when that also overflows does the user get
 `Question context is too large. Ask a narrower question.`
