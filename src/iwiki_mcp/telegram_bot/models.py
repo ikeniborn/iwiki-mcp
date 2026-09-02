@@ -32,4 +32,5 @@ class WritePreview:
 @dataclass(frozen=True)
 class BotReply:
     text: str
-    buttons: tuple[str, ...] = ()
+    # Each button is a (label, callback_data) pair.
+    buttons: tuple[tuple[str, str], ...] = ()

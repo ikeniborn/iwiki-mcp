@@ -102,6 +102,7 @@ async def run_bot(
                 config.llm_key,
                 config.llm_model,
                 config.transcription_model,
+                max_output_tokens=config.max_output_tokens,
             )
             await inference.probe()
             remote_context = open_remote_iwiki(
@@ -148,6 +149,7 @@ async def run_bot(
             remote,
             inference,
             confirmation_ttl_seconds=config.confirmation_ttl_seconds,
+            context_budget_chars=config.context_budget_chars,
         )
         transport = TelegramTransport(
             config.telegram_token,
@@ -155,6 +157,7 @@ async def run_bot(
             conversation,
             telegram_http,
         )
+        await transport.publish_commands()
         try:
             while True:
                 try:
@@ -256,4 +259,9 @@ def main() -> None:
     )
     parser.parse_args()
     config = BotConfig.load()
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=config.log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     anyio.run(run_bot, config)

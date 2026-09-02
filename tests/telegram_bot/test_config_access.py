@@ -247,3 +247,49 @@ def test_allowlist_denies_unknown_id():
 
     assert policy.allows(1001) is True
     assert policy.allows(2002) is False
+
+
+def test_config_defaults_the_context_output_and_log_budgets(monkeypatch):
+    configure(monkeypatch)
+    for name in (
+        "IWIKI_BOT_CONTEXT_BUDGET_CHARS",
+        "IWIKI_BOT_MAX_OUTPUT_TOKENS",
+        "IWIKI_BOT_LOG_LEVEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    config = BotConfig.load()
+
+    assert config.context_budget_chars == 48000
+    assert config.max_output_tokens == 1024
+    assert config.log_level == "INFO"
+
+
+def test_config_reads_the_context_output_and_log_budgets(monkeypatch):
+    configure(monkeypatch)
+    monkeypatch.setenv("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "12000")
+    monkeypatch.setenv("IWIKI_BOT_MAX_OUTPUT_TOKENS", "512")
+    monkeypatch.setenv("IWIKI_BOT_LOG_LEVEL", "debug")
+
+    config = BotConfig.load()
+
+    assert config.context_budget_chars == 12000
+    assert config.max_output_tokens == 512
+    assert config.log_level == "DEBUG"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "0"),
+        ("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "not-a-number"),
+        ("IWIKI_BOT_MAX_OUTPUT_TOKENS", "-1"),
+        ("IWIKI_BOT_LOG_LEVEL", "chatty"),
+    ),
+)
+def test_config_rejects_invalid_budgets(monkeypatch, name, value):
+    configure(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(BotConfigError, match=name):
+        BotConfig.load()

@@ -19,13 +19,15 @@ def assert_sanitized_error(captured, marker):
 
 
 @pytest.mark.asyncio
-async def test_probe_requires_configured_chat_model():
+async def test_probe_requires_both_configured_models():
     seen = {}
 
     def handler(request):
         seen["method"] = request.method
         seen["url"] = str(request.url)
-        return httpx.Response(200, json={"data": [{"id": "chat-model"}]})
+        return httpx.Response(
+            200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
+        )
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = InferenceClient(
@@ -379,3 +381,136 @@ def test_injected_http_client_is_used_without_constructing_another(monkeypatch):
     )
 
     assert client._http is injected
+
+
+@pytest.mark.asyncio
+async def test_probe_requires_configured_transcription_model(caplog):
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "chat-model"}]})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.inference"):
+        with pytest.raises(InferenceError) as captured:
+            await client.probe()
+
+    assert str(captured.value) == "configured_model_unavailable"
+    assert "transcription" in caplog.records[-1].getMessage()
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completion_bounds_the_output_budget():
+    seen = {}
+
+    def handler(request):
+        seen["json"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "Answer"}}]}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        http,
+        max_output_tokens=256,
+    )
+
+    await client.answer("Question", "Context")
+
+    assert seen["json"]["max_tokens"] == 256
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_behind_a_gateway_status_is_not_retryable(caplog):
+    attempts = []
+
+    def handler(request):
+        attempts.append(str(request.url))
+        return httpx.Response(
+            502,
+            json={
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": "request (41839 tokens) exceeds private-context",
+                }
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.inference"):
+        with pytest.raises(InferenceError) as captured:
+            await client.answer("private question", "private context")
+
+    assert str(captured.value) == "context_overflow"
+    assert captured.value.retryable is False
+    assert captured.value.status == 502
+    assert captured.value.path == "/chat/completions"
+    assert captured.value.provider_code == "context_length_exceeded"
+    assert len(attempts) == 1
+    message = caplog.records[0].getMessage()
+    assert "502" in message
+    assert "/chat/completions" in message
+    assert "context_length_exceeded" in message
+    assert "private" not in message
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_overflow_named_only_by_the_provider_message_is_not_retryable():
+    def handler(request):
+        return httpx.Response(
+            500,
+            json={
+                "error": {
+                    "message": "This model's maximum context length is exceeded"
+                }
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.answer("Question", "Context")
+
+    assert str(captured.value) == "context_overflow"
+    assert captured.value.retryable is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_server_failure_stays_retryable_and_is_recorded(caplog):
+    def handler(request):
+        return httpx.Response(500, text="provider secret detail")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with caplog.at_level(logging.WARNING, logger="iwiki_mcp.telegram_bot.inference"):
+        with pytest.raises(InferenceError) as captured:
+            await client.answer("Question", "Context")
+
+    assert str(captured.value) == "inference_failed"
+    assert captured.value.retryable is True
+    assert captured.value.status == 500
+    assert captured.value.provider_code is None
+    message = caplog.records[0].getMessage()
+    assert "500" in message
+    assert "secret" not in message
+    await http.aclose()

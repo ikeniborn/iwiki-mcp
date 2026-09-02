@@ -18,6 +18,33 @@ from .runtime import Backoff, Heartbeat
 
 
 LOGGER = logging.getLogger(__name__)
+_COMMANDS = (
+    ("menu", "Open the action menu"),
+    ("domains", "List the domains this bot can read"),
+    ("create", "Draft a new page: /create <slug>: <request>"),
+    ("update", "Draft one section: /update <slug>#<heading>: <request>"),
+    ("help", "Show the command reference"),
+)
+_MENU_BUTTONS = (
+    ("Domains", "menu:domains"),
+    ("Create page", "menu:create"),
+    ("Update section", "menu:update"),
+    ("Help", "menu:help"),
+)
+_MENU_TEXT = "Choose an action:"
+_HELP_TEXT = (
+    "/menu opens this menu.\n"
+    "/domains lists domains; a domain button selects one.\n"
+    "Plain text asks a question about the selected domain.\n"
+    "A voice message is transcribed and asked the same way.\n"
+    "/create <slug>: <request> drafts a new page.\n"
+    "/update <slug>#<heading>: <request> drafts one section."
+)
+_MENU_HINTS = {
+    "create": "Use /create <slug>: <request>.",
+    "update": "Use /update <slug>#<heading>: <request>.",
+    "help": _HELP_TEXT,
+}
 
 
 class TelegramError(RuntimeError):
@@ -97,16 +124,32 @@ class TelegramTransport:
         elif reply.buttons:
             payload["reply_markup"] = {
                 "inline_keyboard": [
-                    [
-                        {
-                            "text": button.split(":", 1)[-1],
-                            "callback_data": button,
-                        }
-                    ]
-                    for button in reply.buttons
+                    [{"text": label, "callback_data": data}]
+                    for label, data in reply.buttons
                 ]
             }
         await self._api("sendMessage", payload)
+
+    async def publish_commands(self) -> None:
+        """Register the '/' command list and point the menu button at it."""
+        try:
+            await self._api(
+                "setMyCommands",
+                {
+                    "commands": [
+                        {"command": name, "description": description}
+                        for name, description in _COMMANDS
+                    ]
+                },
+            )
+            await self._api(
+                "setChatMenuButton", {"menu_button": {"type": "commands"}}
+            )
+        except TelegramError:
+            LOGGER.warning(
+                "telegram command registration failed",
+                extra={"operation": "set_commands", "outcome": "failure"},
+            )
 
     async def handle_update(self, update: dict[str, object]) -> None:
         callback = update.get("callback_query")
@@ -160,6 +203,10 @@ class TelegramTransport:
     async def _dispatch_text(
         self, telegram_id: int, text: str
     ) -> BotReply | WritePreview:
+        if text in ("/menu", "/start"):
+            return BotReply(_MENU_TEXT, _MENU_BUTTONS)
+        if text == "/help":
+            return BotReply(_HELP_TEXT)
         if text == "/domains":
             return await self._conversation.list_domains(telegram_id)
         if text.startswith("/create "):
@@ -182,7 +229,7 @@ class TelegramTransport:
                 telegram_id, slug, heading, request
             )
         if text.startswith("/"):
-            return BotReply("Unknown command.")
+            return BotReply("Unknown command. Send /menu.")
         if not text:
             return BotReply("Send a question.")
         return await self._conversation.answer_question(telegram_id, text)
@@ -212,7 +259,14 @@ class TelegramTransport:
             await self._send(chat_id, BotReply("Invalid action."))
             return
         action, value = data.split(":", 1)
-        if action == "domain":
+        if action == "menu":
+            if value == "domains":
+                reply = await self._conversation.list_domains(telegram_id)
+            elif value in _MENU_HINTS:
+                reply = BotReply(_MENU_HINTS[value])
+            else:
+                reply = BotReply("Invalid action.")
+        elif action == "domain":
             reply = await self._conversation.select_domain(telegram_id, value)
         elif action == "confirm":
             reply = await self._conversation.confirm_write(telegram_id, value)

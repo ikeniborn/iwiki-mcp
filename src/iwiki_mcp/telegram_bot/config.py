@@ -7,8 +7,29 @@ from dataclasses import dataclass, field
 from urllib.parse import unquote_to_bytes, urlsplit
 
 
+_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"})
+
+
 class BotConfigError(RuntimeError):
     """The service configuration is incomplete or invalid."""
+
+
+def _positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip() or str(default)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise BotConfigError(f"invalid {name}") from None
+    if value <= 0:
+        raise BotConfigError(f"invalid {name}")
+    return value
+
+
+def _log_level(name: str, default: str) -> str:
+    value = (os.environ.get(name, "").strip() or default).upper()
+    if value not in _LOG_LEVELS:
+        raise BotConfigError(f"invalid {name}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -125,6 +146,9 @@ class BotConfig:
     transcription_model: str
     confirmation_ttl_seconds: int
     telegram_proxy: TelegramProxyConfig = field(repr=False)
+    context_budget_chars: int = 48000
+    max_output_tokens: int = 1024
+    log_level: str = "INFO"
 
     @classmethod
     def load(cls) -> "BotConfig":
@@ -182,4 +206,9 @@ class BotConfig:
             transcription_model=required["IWIKI_BOT_TRANSCRIPTION_MODEL"],
             confirmation_ttl_seconds=ttl,
             telegram_proxy=telegram_proxy,
+            context_budget_chars=_positive_int(
+                "IWIKI_BOT_CONTEXT_BUDGET_CHARS", 48000
+            ),
+            max_output_tokens=_positive_int("IWIKI_BOT_MAX_OUTPUT_TOKENS", 1024),
+            log_level=_log_level("IWIKI_BOT_LOG_LEVEL", "INFO"),
         )

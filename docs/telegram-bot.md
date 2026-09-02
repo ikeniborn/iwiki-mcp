@@ -43,7 +43,18 @@ Supply configuration through the owner-only `/opt/iwiki-mcp/runtime.env` file re
 | `IWIKI_BOT_LLM_MODEL` | Public model alias for chat completions. |
 | `IWIKI_BOT_TRANSCRIPTION_MODEL` | Model accepted by `/audio/transcriptions`. |
 | `IWIKI_BOT_CONFIRMATION_TTL_SECONDS` | Optional positive TTL; default `300`. |
+| `IWIKI_BOT_CONTEXT_BUDGET_CHARS` | Optional positive character cap on the assembled wiki context; default `48000`. |
+| `IWIKI_BOT_MAX_OUTPUT_TOKENS` | Optional positive `max_tokens` for chat completions; default `1024`. |
+| `IWIKI_BOT_LOG_LEVEL` | Optional root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`); default `INFO`. |
 | `IWIKI_BOT_TELEGRAM_PROXY_URL` | Required literal HTTPS proxy URL with explicit host and port. |
+
+The chat model's context window is the binding constraint. The bot retrieves the
+section each search hit names rather than whole pages, appends sections in result order,
+and stops before the first one that would exceed `IWIKI_BOT_CONTEXT_BUDGET_CHARS`; only
+when no section fits is the first one truncated to the cap. `IWIKI_BOT_MAX_OUTPUT_TOKENS`
+reserves the completion budget inside the same window. Set the character cap well below
+the window: an unbounded context is what makes a provider answer
+`context_length_exceeded`.
 
 ## Telegram HTTPS proxy boundary
 
@@ -82,6 +93,13 @@ deployment prerequisites rather than bot responsibilities.
 
 ## Bot commands
 
+At startup the bot registers its command list with `setMyCommands` and points the chat
+menu button at that list, so typing `/` offers the commands below and the menu button
+opens the same list. A failed registration is logged and never stops polling.
+
+- `/menu` and `/start` open an inline menu with Domains, Create page, Update section, and
+  Help buttons.
+- `/help` prints the same command reference as the Help button.
 - `/domains` lists domains visible to the iwiki service token.
 - A domain button selects the domain for later questions and changes.
 - Any non-command text asks a question using only retrieved content from that domain.
@@ -128,6 +146,15 @@ external durable service. Existing user-bound, single-use confirmation consumpti
 revision/section-hash compare-and-swap remain unchanged.
 
 ## Failure behavior
+
+An inference failure is recorded as one WARNING carrying the HTTP status, the request
+path, the provider error code, and the elapsed time — never the prompt, the wiki context,
+the transcript, a response body, or a credential. A provider `context_length_exceeded`,
+or any message naming an exceeded context, is treated as a client error whatever HTTP
+status carried it: it is never retried, and the user is told
+`Question context is too large. Ask a narrower question.` Startup verifies that both the
+chat model and the transcription model are present in `GET /models` and names the missing
+role in the log.
 
 Missing configuration stops startup. Remote iwiki, inference, Telegram download, and
 audio conversion, oversize WAV, malformed-response failures never expose dependency
