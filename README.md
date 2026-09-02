@@ -201,9 +201,11 @@ scope and keeps answering — the fallback is permitted, but never silent:
   without a second call.
 - The domain-free code reads additionally add `binding_defaulted` to their `warnings`
   under `token_default`, so an answer from another project's snapshot is recognizable
-  even though it reports `state: ready` and `fresh: true`. `wiki_spec_search` called
-  without `domains` takes its search set from the bound read list and reports the same
-  warning for the same reason; naming `domains` explicitly never carries it.
+  even though it reports `state: ready` and `fresh: true`. `wiki_spec_search` and
+  `wiki_search` called without `domains` take their search set from the bound read list
+  and report the same warning for the same reason; naming `domains` explicitly never
+  carries it. `wiki_search(intent="write")` prefers the bound primary over any named
+  domain, so it always reports the warning under the fallback.
 - `wiki_bind` returns the `session_id` it bound to, so an answer belonging to a different
   session is recognizable.
 - When the write-scope intersection replaces the selected primary, the answer carries
@@ -1163,7 +1165,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Tool | What it does |
 |---|---|
-| `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch, while provider `top_n` is limited to requested final `k`; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. |
+| `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch, while provider `top_n` is limited to requested final `k`; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking. On a hosted server every answer additionally carries `binding_source`, and one whose scope came from the binding rather than the call — a read without `domains`, or any write-intent lookup — adds `binding_defaulted` to `warnings`. |
 | `wiki_read_page` | Read one Markdown page by domain and slug. With `heading`, return only that one `##` section (including its `section_hash`) instead of the whole page. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain; its `{"vector": [], "graph": []}` shape and domain-local fallback stay unchanged. |

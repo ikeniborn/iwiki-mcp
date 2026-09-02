@@ -2102,20 +2102,33 @@ def wiki_search(
 ) -> dict:
     bind = _resolved_binding()
     cfg = Config.load()
-    if intent.strip().lower() == "write":
+    write_intent = intent.strip().lower() == "write"
+    # The scope is an argument only on a read that named `domains`. A write
+    # intent prefers `binding.primary` even when `domains` is given, so it is
+    # always answered from the binding.
+    answer = (
+        _with_binding_provenance
+        if domains is not None and not write_intent
+        else _defaulted_scope_answer
+    )
+    if write_intent:
         target = bind.primary or (domains[0] if domains else None)
         if not target:
-            return {"target": {"exists": False}, "hint": "no write-target domain in scope"}
+            return answer(
+                {"target": {"exists": False}, "hint": "no write-target domain in scope"}
+            )
         target = _validate_domain(target)      # path guards are load-bearing
         if _is_postgres(bind):
             if target not in bind.write:
-                return {"target": {"domain": target, "exists": False}}
-            return {
+                return answer({"target": {"domain": target, "exists": False}})
+            return answer({
                 "target": _postgres_store_for_binding(bind).locate_target(
                     target, query, heading
                 )
-            }
-        return {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
+            })
+        return answer(
+            {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
+        )
     resolved_mode = cfg.search_mode if mode is None else mode.strip().lower()
     allowed_modes = ("hybrid", "lexical", "semantic")
     if resolved_mode not in allowed_modes:
@@ -2130,7 +2143,7 @@ def wiki_search(
     else:
         doms = [_validate_domain(d) for d in base.resolve_scope(bind, scope, domains)]
     if not doms:
-        return {"results": [], "hint": "no domains in scope"}
+        return answer({"results": [], "hint": "no domains in scope"})
     q_type = (type.strip().lower() or None) if type else None
     q_tags = _fm.normalize_tags(tags) if tags else None
     q_tags = q_tags or None
@@ -2168,7 +2181,7 @@ def wiki_search(
             }
         return {"error": str(exc)}
     results = candidates[:requested_top_k]
-    response = {"results": results}
+    response = answer({"results": results})
     if cfg.rerank_model:
         if _is_postgres(bind):
             hydrated = _postgres_store_for_binding(bind).hydrate_candidates(candidates)
@@ -2192,7 +2205,7 @@ def wiki_search(
                 not in scored_keys
             ]
             results = (scored + unscored)[:requested_top_k]
-        response = {"results": results, "rerank": metadata}
+        response = answer({"results": results, "rerank": metadata})
     return response
 
 

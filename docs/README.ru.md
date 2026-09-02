@@ -201,9 +201,11 @@ revocation действует на следующем запросе, восст
   второго вызова.
 - Чтения кодграфа без параметра домена при `token_default` дополнительно добавляют
   `binding_defaulted` в `warnings`, поэтому ответ по снапшоту чужого проекта распознаётся,
-  даже когда он сообщает `state: ready` и `fresh: true`. `wiki_spec_search`, вызванный
-  без `domains`, берёт множество поиска из bound read list и сообщает то же
-  предупреждение по той же причине; при явном `domains` оно не появляется.
+  даже когда он сообщает `state: ready` и `fresh: true`. `wiki_spec_search` и
+  `wiki_search`, вызванные без `domains`, берут множество поиска из bound read list и
+  сообщают то же предупреждение по той же причине; при явном `domains` оно не
+  появляется. `wiki_search(intent="write")` предпочитает bound primary любому названному
+  домену, поэтому при откате предупреждение приходит всегда.
 - `wiki_bind` возвращает `session_id`, к которому привязался выбор, — так виден ответ,
   принадлежащий другой сессии.
 - Если пересечение со scope записи заменило выбранный primary, ответ несёт
@@ -1170,7 +1172,7 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 
 | Инструмент | Что делает |
 |---|---|
-| `wiki_search` | Режимы чтения — только `hybrid`, `lexical` и `semantic`; явный режим переопределяет `IWIKI_SEARCH_MODE` (по умолчанию `hybrid`), а публичный `vector` отклоняется. Summary-семантика страниц, lexical-совпадения страниц, graph-страницы, глобальные semantic-чанки и lexical-секции ранжируются независимо и объединяются RRF до финального top-k. Результаты содержат `hit` (`semantic`/`lexical`/`both`) и `source` (`seed`/`graph`/`global`/`lexical`). При заданном `IWIKI_RERANK_MODEL` точные актуальные чанки полного пула отправляются одним аутентифицированным LiteLLM batch с timeout 60 секунд, а provider `top_n` ограничивается запрошенным финальным `k`; сбой сохраняет предварительный порядок и возвращает только очищенные метаданные `rerank`. `scope`, `domains`, `k`, `threshold`, `type` и `tags` ограничивают read-поиск. `intent="write"` остаётся изолированным summary-vector поиском write-target и игнорирует read-режим/reranking. |
+| `wiki_search` | Режимы чтения — только `hybrid`, `lexical` и `semantic`; явный режим переопределяет `IWIKI_SEARCH_MODE` (по умолчанию `hybrid`), а публичный `vector` отклоняется. Summary-семантика страниц, lexical-совпадения страниц, graph-страницы, глобальные semantic-чанки и lexical-секции ранжируются независимо и объединяются RRF до финального top-k. Результаты содержат `hit` (`semantic`/`lexical`/`both`) и `source` (`seed`/`graph`/`global`/`lexical`). При заданном `IWIKI_RERANK_MODEL` точные актуальные чанки полного пула отправляются одним аутентифицированным LiteLLM batch с timeout 60 секунд, а provider `top_n` ограничивается запрошенным финальным `k`; сбой сохраняет предварительный порядок и возвращает только очищенные метаданные `rerank`. `scope`, `domains`, `k`, `threshold`, `type` и `tags` ограничивают read-поиск. `intent="write"` остаётся изолированным summary-vector поиском write-target и игнорирует read-режим/reranking. На hosted-сервере каждый ответ дополнительно несёт `binding_source`, а ответ, чей scope пришёл из биндинга, а не из вызова — read без `domains` или любой write-intent lookup, — добавляет `binding_defaulted` в `warnings`. |
 | `wiki_read_page` | Прочитать одну Markdown-страницу по домену и slug. С `heading` вернуть только одну секцию `##` (вместе с её `section_hash`) вместо всей страницы. |
 | `wiki_list_pages` | Перечислить slug-и и файлы страниц в домене. |
 | `wiki_related` | Вернуть связанные секции для id секции в пределах одного домена; форма `{"vector": [], "graph": []}` и domain-local fallback не меняются. |
