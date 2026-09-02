@@ -347,3 +347,68 @@ def test_specification_answers_carry_no_provenance_outside_a_hosted_session(
     answer = server.wiki_spec_context("payments", "open-account")
 
     assert "binding_source" not in answer
+
+
+def test_domain_free_specification_search_names_a_defaulted_scope(
+    bound, hosted_session
+):
+    """Without `domains` the search set comes from the binding, not the call.
+
+    A lapsed session selection therefore answers for the token's own grants
+    instead of the project's, so the fallback is named in `warnings` the same
+    way the domain-free code reads name it.
+    """
+    hosted_session("token_default")
+
+    answer = server.wiki_spec_search("account")
+
+    assert answer["binding_source"] == "token_default"
+    assert "binding_defaulted" in answer["warnings"]
+
+
+def test_explicit_specification_search_domains_are_never_defaulted(
+    bound, hosted_session
+):
+    """A caller that named its domains chose the scope itself."""
+    hosted_session("token_default")
+
+    answer = server.wiki_spec_search("account", domains=["payments"])
+
+    assert answer["binding_source"] == "token_default"
+    assert "warnings" not in answer
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: server.wiki_spec_search("account"),
+        lambda: server.wiki_spec_search("account", domains=["payments"]),
+        lambda: server.wiki_spec_context("payments", "open-account"),
+        lambda: server.wiki_spec_resolve("payments", "open-account"),
+    ],
+)
+def test_selected_specification_answers_carry_no_fallback_warning(
+    bound, hosted_session, call
+):
+    """A selection made in this session is not a fallback."""
+    hosted_session("session")
+
+    assert "warnings" not in call()
+
+
+def test_disabled_specification_search_still_names_a_defaulted_scope(
+    bound, hosted_session, monkeypatch
+):
+    """The short-circuit answer reports the same provenance as a full search."""
+    binding, _store = bound
+    monkeypatch.setattr(
+        server,
+        "_resolved_binding",
+        lambda: replace(binding, specification_mode="disabled"),
+    )
+    hosted_session("token_default")
+
+    answer = server.wiki_spec_search("account")
+
+    assert answer["results"] == []
+    assert "binding_defaulted" in answer["warnings"]

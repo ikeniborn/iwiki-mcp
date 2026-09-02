@@ -895,8 +895,15 @@ def _code_binding_blocked() -> bool:
     return _hosted_binding_provenance().get("binding_source") == "token_default"
 
 
-def _code_read_answer(result: dict) -> dict:
-    """Carry binding provenance on an answer whose domain is not an argument."""
+def _defaulted_scope_answer(result: dict) -> dict:
+    """Carry binding provenance on an answer whose scope is not an argument.
+
+    Used by the domain-free code reads, whose target is `binding.primary`,
+    and by `wiki_spec_search` called without `domains`, whose search set is
+    the bound read list. Under `token_default` both silently answer for the
+    token's own grants rather than the project's selection, so the fallback
+    is named in `warnings` as well as in `binding_source`.
+    """
     provenance = _hosted_binding_provenance()
     if not provenance:
         return result
@@ -1424,6 +1431,9 @@ def wiki_spec_search(
     ):
         return _spec_error("invalid_domains", "provide an array of domain names")
     bind = _resolved_binding()
+    # Without `domains` the search set is the bound read list, so a lapsed
+    # session selection silently widens it to the token's own grants.
+    answer = _defaulted_scope_answer if domains is None else _with_binding_provenance
     try:
         if domains is None:
             requested_values = bind.read
@@ -1446,7 +1456,7 @@ def wiki_spec_search(
     }
     enabled = tuple(domain for domain in requested if modes[domain] != "disabled")
     if not enabled:
-        return _with_binding_provenance({
+        return answer({
             "query": query,
             "domains": list(requested),
             "domain_states": [
@@ -1507,7 +1517,7 @@ def wiki_spec_search(
             "projection_state": status.state,
             "mode": modes[scenario.domain],
         })
-    return _with_binding_provenance({
+    return answer({
         "query": query,
         "domains": list(requested),
         "domain_states": [
@@ -1743,7 +1753,7 @@ def wiki_code_status() -> dict:
             return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
-        return _code_read_answer(_postgres_code_reader(bind).status())
+        return _defaulted_scope_answer(_postgres_code_reader(bind).status())
     if bind.primary is None:
         return _missing_code_primary()
     return _codegraph_application.code_runtime(
@@ -1812,7 +1822,7 @@ def wiki_code_search(
         # transport is just wherever server.toml lives -- decides which
         # languages a filter may name. The reader resolves the active
         # snapshot and calls back with its declared languages.
-        return _code_read_answer(
+        return _defaulted_scope_answer(
             _postgres_code_reader(bind).search(
                 lambda snapshot_languages: (
                     _codegraph_runtime.validate_search_request(
@@ -1870,7 +1880,7 @@ def wiki_code_context(
             return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
-        return _code_read_answer(
+        return _defaulted_scope_answer(
             _postgres_code_reader(bind).context(
                 _codegraph_runtime.validate_context_request(
                     seeds,

@@ -73,7 +73,8 @@ token's own grants. That fallback is marked `token_default` on the selected stat
 any explicit selection — `wiki_bind` or `wiki_create_domain` expansion — marks it
 `session`. `wiki_status`, `wiki_bind`, and the code tools whose target is `binding.primary`
 rather than an argument carry the mark as `binding_source`; the domain-free code reads add
-`binding_defaulted` to `warnings` under the fallback, and `wiki_bind` returns the
+`binding_defaulted` to `warnings` under the fallback, as does `wiki_spec_search` called
+without `domains`, whose search set is the bound read list, and `wiki_bind` returns the
 `session_id` it bound to. When the request's write-scope intersection replaces the selected
 primary, the same answers carry `primary_substituted` with the `requested_primary`. The
 fallback stays permitted by default; `code_graph.require_session_binding` turns it into a

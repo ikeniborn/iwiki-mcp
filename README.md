@@ -201,7 +201,9 @@ scope and keeps answering — the fallback is permitted, but never silent:
   without a second call.
 - The domain-free code reads additionally add `binding_defaulted` to their `warnings`
   under `token_default`, so an answer from another project's snapshot is recognizable
-  even though it reports `state: ready` and `fresh: true`.
+  even though it reports `state: ready` and `fresh: true`. `wiki_spec_search` called
+  without `domains` takes its search set from the bound read list and reports the same
+  warning for the same reason; naming `domains` explicitly never carries it.
 - `wiki_bind` returns the `session_id` it bound to, so an answer belonging to a different
   session is recognizable.
 - When the write-scope intersection replaces the selected primary, the answer carries
