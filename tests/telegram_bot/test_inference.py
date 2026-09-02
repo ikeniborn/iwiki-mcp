@@ -361,7 +361,10 @@ def test_internal_http_client_ignores_environment_proxies(monkeypatch):
         "https://models.example/v1", "key", "chat-model", "audio-model"
     )
 
-    assert seen == {"timeout": 60, "trust_env": False}
+    assert seen["trust_env"] is False
+    assert seen["timeout"] == httpx.Timeout(
+        connect=10.0, read=180.0, write=180.0, pool=10.0
+    )
 
 
 def test_injected_http_client_is_used_without_constructing_another(monkeypatch):
@@ -489,6 +492,113 @@ async def test_overflow_named_only_by_the_provider_message_is_not_retryable():
 
     assert str(captured.value) == "context_overflow"
     assert captured.value.retryable is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    (
+        "This model's maximum context length is 32768 tokens. However, you "
+        "requested 40100 tokens. Please reduce the length of the messages.",
+        "the prompt is too long for the context window",
+    ),
+)
+async def test_provider_wording_without_exceed_is_still_context_overflow(message):
+    def handler(request):
+        return httpx.Response(400, json={"error": {"message": message}})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.answer("Question", "Context")
+
+    assert str(captured.value) == "context_overflow"
+    assert captured.value.retryable is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_is_retried_once_before_the_answer():
+    attempts = []
+    delays = []
+
+    def handler(request):
+        attempts.append(str(request.url))
+        if len(attempts) == 1:
+            raise httpx.RemoteProtocolError("server disconnected")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "Answer"}}]}
+        )
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        http,
+        sleep=sleep,
+    )
+
+    assert await client.answer("Question", "Context") == "Answer"
+    assert len(attempts) == 2
+    assert delays == [0.5]
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_transcription_retry_stops_at_the_attempt_budget():
+    attempts = []
+
+    def handler(request):
+        attempts.append(str(request.url))
+        return httpx.Response(503, text="provider unavailable")
+
+    async def sleep(delay):
+        pass
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1",
+        "key",
+        "chat-model",
+        "audio-model",
+        http,
+        sleep=sleep,
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.transcribe("audio.wav", b"RIFF")
+
+    assert str(captured.value) == "inference_failed"
+    assert len(attempts) == 2
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_is_not_retried():
+    attempts = []
+
+    def handler(request):
+        attempts.append(str(request.url))
+        return httpx.Response(401, text="unauthorized")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError):
+        await client.answer("Question", "Context")
+
+    assert len(attempts) == 1
     await http.aclose()
 
 

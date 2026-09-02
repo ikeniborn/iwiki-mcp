@@ -77,7 +77,13 @@ class BotHarness(TelegramTransport):
 
     async def _api(self, method, data):
         if method == "sendMessage":
-            self.sent.append(data)
+            self.sent.append(dict(data))
+            return {"message_id": len(self.sent)}
+        if method == "editMessageText":
+            edited = dict(data)
+            index = edited.pop("message_id") - 1
+            self.sent[index] = edited
+            return {}
         return [] if method == "getUpdates" else {}
 
     async def _download_voice(self, file_id):

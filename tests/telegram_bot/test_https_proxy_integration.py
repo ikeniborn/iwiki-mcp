@@ -304,6 +304,8 @@ class _HttpsConnectProxy:
             ).encode()
         if path == f"/file/bot{self.token}/{self.voice_path}":
             return self.audio
+        if path == f"/bot{self.token}/sendChatAction":
+            return b'{"ok":true,"result":true}'
         if path in {
             f"/bot{self.token}/sendMessage",
             f"/bot{self.token}/answerCallbackQuery",
@@ -520,11 +522,11 @@ class _Conversation:
     def expire_state(self):
         self.calls.append(("expire_state",))
 
-    async def answer_question(self, telegram_id, text):
+    async def answer_question(self, telegram_id, text, progress=None):
         self.calls.append(("answer_question", telegram_id, text))
         return BotReply("text reply")
 
-    async def answer_voice(self, telegram_id, filename, audio):
+    async def answer_voice(self, telegram_id, filename, audio, progress=None):
         self.calls.append(("answer_voice", telegram_id, filename, audio))
         return BotReply("voice reply")
 
@@ -578,7 +580,9 @@ async def test_poll_text_and_voice_use_one_https_connect_tunnel_without_fallback
         assert proxy.errors == []
         assert proxy.observed == [
             ("POST", f"/bot{TOKEN}/getUpdates"),
+            ("POST", f"/bot{TOKEN}/sendChatAction"),
             ("POST", f"/bot{TOKEN}/sendMessage"),
+            ("POST", f"/bot{TOKEN}/sendChatAction"),
             ("POST", f"/bot{TOKEN}/getFile"),
             ("GET", f"/file/bot{TOKEN}/voice/file_1.ogg"),
             ("POST", f"/bot{TOKEN}/sendMessage"),

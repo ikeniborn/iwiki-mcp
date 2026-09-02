@@ -11,7 +11,10 @@ over stdio or hosted Streamable HTTP as described below.
 The supported container deployment runs hosted iwiki MCP, nginx, and the
 [Telegram bot service](docs/telegram-bot.md) together. Allowlisted employees can
 select domains, ask text or voice questions, and confirm page changes; typing `/` lists
-the bot commands and `/menu` opens an inline action menu. See the
+the bot commands and `/menu` opens an inline action menu. A domain selection is sticky
+for the life of the bot process, a question sent before any domain is chosen is answered
+as soon as one is, and each request reports its progress with a reaction, a typing
+action, and a status message edited per stage. See the
 [deployment runbook](docs/deployment.md) for the operator path and migration steps.
 
 ## Install

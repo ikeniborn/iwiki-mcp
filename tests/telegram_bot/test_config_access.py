@@ -254,6 +254,7 @@ def test_config_defaults_the_context_output_and_log_budgets(monkeypatch):
     for name in (
         "IWIKI_BOT_CONTEXT_BUDGET_CHARS",
         "IWIKI_BOT_MAX_OUTPUT_TOKENS",
+        "IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS",
         "IWIKI_BOT_LOG_LEVEL",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -262,6 +263,7 @@ def test_config_defaults_the_context_output_and_log_budgets(monkeypatch):
 
     assert config.context_budget_chars == 48000
     assert config.max_output_tokens == 1024
+    assert config.inference_timeout_seconds == 180
     assert config.log_level == "INFO"
 
 
@@ -269,12 +271,14 @@ def test_config_reads_the_context_output_and_log_budgets(monkeypatch):
     configure(monkeypatch)
     monkeypatch.setenv("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "12000")
     monkeypatch.setenv("IWIKI_BOT_MAX_OUTPUT_TOKENS", "512")
+    monkeypatch.setenv("IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS", "45")
     monkeypatch.setenv("IWIKI_BOT_LOG_LEVEL", "debug")
 
     config = BotConfig.load()
 
     assert config.context_budget_chars == 12000
     assert config.max_output_tokens == 512
+    assert config.inference_timeout_seconds == 45
     assert config.log_level == "DEBUG"
 
 
@@ -284,6 +288,7 @@ def test_config_reads_the_context_output_and_log_budgets(monkeypatch):
         ("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "0"),
         ("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "not-a-number"),
         ("IWIKI_BOT_MAX_OUTPUT_TOKENS", "-1"),
+        ("IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS", "0"),
         ("IWIKI_BOT_LOG_LEVEL", "chatty"),
     ),
 )

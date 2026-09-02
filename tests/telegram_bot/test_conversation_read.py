@@ -101,12 +101,21 @@ async def test_question_uses_only_selected_domain_context(service):
 
 
 @pytest.mark.asyncio
-async def test_question_requires_selected_domain_before_outbound_calls(service):
+async def test_question_without_domain_offers_domains_and_defers_the_question(
+    service,
+):
     reply = await service.answer_question(1001, "Question")
 
-    assert reply.text == "Select a domain first."
-    assert service.remote.calls == []
+    assert reply.text.startswith("Select a domain and I will answer this question:")
+    assert "Question" in reply.text
+    assert reply.buttons == (("team", "domain:team"), ("public", "domain:public"))
+    assert service.remote.calls == [("list_domains",)]
     assert service.inference.calls == []
+
+    answered = await service.select_domain(1001, "team")
+
+    assert answered.text.endswith("Answer")
+    assert service.inference.calls[-1][0] == "answer"
 
 
 @pytest.mark.asyncio
@@ -317,14 +326,67 @@ async def test_voice_file_is_removed_when_transcription_fails(
 
 
 @pytest.mark.asyncio
-async def test_selected_domain_expires_from_memory(service, clock):
+async def test_voice_without_domain_is_transcribed_then_deferred(
+    service, monkeypatch
+):
+    wav = b"RIFF\x24\x00\x00\x00WAVEconverted-audio"
+
+    async def convert(command, **kwargs):
+        Path(command[-1]).write_bytes(wav)
+
+    monkeypatch.setattr(anyio, "run_process", convert)
+
+    reply = await service.answer_voice(1001, "voice.ogg", b"opus-audio")
+
+    assert "Spoken question" in reply.text
+    assert service.inference.calls == [("transcribe", "audio.wav", wav)]
+
+    answered = await service.select_domain(1001, "team")
+
+    assert answered.text == "Selected domain: team\n\nAnswer"
+    assert ("search", "team", "Spoken question") in service.remote.calls
+
+
+@pytest.mark.asyncio
+async def test_transient_inference_failure_asks_for_a_retry(service):
+    await service.select_domain(1001, "team")
+
+    async def busy(question, context):
+        raise InferenceError("inference_failed", retryable=True)
+
+    service.inference.answer = busy
+
+    reply = await service.answer_question(1001, "Question")
+
+    assert reply.text == (
+        "Inference service is busy or too slow. Send the question again."
+    )
+    assert reply.failed is True
+
+
+@pytest.mark.asyncio
+async def test_progress_stages_are_reported_for_a_question(service):
+    await service.select_domain(1001, "team")
+    stages = []
+
+    async def record(stage):
+        stages.append(stage)
+
+    await service.answer_question(1001, "Question", record)
+
+    assert stages == ["Searching wiki", "Generating answer"]
+
+
+@pytest.mark.asyncio
+async def test_selected_domain_outlives_the_confirmation_ttl(service, clock):
     await service.select_domain(1001, "team")
     clock.value[0] = 401.0
 
     service.expire_state()
     reply = await service.answer_question(1001, "Question")
 
-    assert reply.text == "Select a domain first."
+    assert reply.text == "Answer"
+    assert ("search", "team", "Question") in service.remote.calls
 
 
 class SectionRemote:
