@@ -629,7 +629,10 @@ PostgreSQL driver errors are caught separately and become a stable
 tools under PostgreSQL return `unsupported_storage` before touching local paths. Domain
 grant tools outside hosted PostgreSQL return `unsupported_transport` with actual storage
 and transport. Missing capabilities or malformed protected envelopes fail before dispatch
-in `http._authorize_tool`: for one `tools/call` the refusal is sent by
+in `http._authorize_tool`. That gate resolves each call's target the way the tool does —
+a write-intent `wiki_search` is authorized against `context.primary` first and the first
+named domain only without a primary, matching `bind.primary or domains[0]` — so it never
+checks a domain the answer does not use. For one `tools/call` the refusal is sent by
 `_send_tool_access_denied` as a JSON-RPC `-32001 access_denied` error over HTTP 200,
 carrying the request's own id, the caller's own `binding_source`, and the optional
 `AccessError.reason` the gate attributed — never a domain, wiki, or token name; a batch
