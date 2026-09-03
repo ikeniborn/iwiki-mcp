@@ -1,3 +1,21 @@
+---
+review:
+  spec_hash: edf17d653fd6c53b
+  last_run: 2026-09-03
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
+  findings: []
+chain:
+  intent: docs/superpowers/intents/2026-09-03-telegram-bot-agentic-retrieval-intent.md
+---
+
 # Design: telegram-bot-agentic-retrieval
 
 **Date:** 2026-09-03
