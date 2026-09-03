@@ -2,6 +2,7 @@ import pytest
 
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.conversation import ConversationService
+from iwiki_mcp.telegram_bot.inference import ToolResponse
 from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiError
 
 
@@ -67,14 +68,16 @@ def clock():
 @pytest.fixture
 async def service(clock):
     remote = FakeRemote()
+    inference = FakeInference()
     value = ConversationService(
         AccessPolicy(frozenset({1001, 2002})),
         remote,
-        FakeInference(),
+        inference,
         confirmation_ttl_seconds=60,
         clock=clock,
     )
     value.remote = remote
+    value.inference = inference
     await value.select_domain(1001, "team")
     await value.select_domain(2002, "team")
     return value
@@ -207,3 +210,21 @@ async def test_a_read_only_domain_is_refused_before_drafting(clock):
 
     assert reply.text == "Selected domain is read-only."
     assert drafted == []
+
+
+@pytest.mark.asyncio
+async def test_agentic_create_drafts_through_the_loop(service):
+    inference = service.inference
+    inference.tools_supported = True
+    calls = []
+
+    async def complete_with_tools(messages, tools, tool_choice="auto"):
+        calls.append(("complete_with_tools", tool_choice))
+        return ToolResponse("# Page\n\n## Overview\n\nDrafted.", ())
+
+    inference.complete_with_tools = complete_with_tools
+
+    preview = await service.propose_create(1001, "guide/new", "write a page")
+
+    assert preview.text == "# Page\n\n## Overview\n\nDrafted."
+    assert ("complete_with_tools", "auto") in calls
