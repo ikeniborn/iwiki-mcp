@@ -624,3 +624,83 @@ async def test_ordinary_server_failure_stays_retryable_and_is_recorded(caplog):
     assert "500" in message
     assert "secret" not in message
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_returns_tool_calls():
+    seen = {}
+
+    def handler(request):
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_wiki",
+                        "arguments": "{\"query\": \"deploy\"}",
+                    },
+                }],
+            }}],
+            "usage": {"prompt_tokens": 50},
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+    messages = [{"role": "user", "content": "q"}]
+    tools = [{"type": "function", "function": {"name": "search_wiki"}}]
+
+    response = await client.complete_with_tools(messages, tools)
+
+    assert response.content is None
+    assert response.tool_calls[0].name == "search_wiki"
+    assert response.tool_calls[0].arguments == "{\"query\": \"deploy\"}"
+    assert seen["payload"]["tools"] == tools
+    assert seen["payload"]["tool_choice"] == "auto"
+    assert seen["payload"]["temperature"] == 0
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_returns_final_content():
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "Answer."}}],
+            "usage": {"prompt_tokens": 30},
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    response = await client.complete_with_tools(
+        [{"role": "user", "content": "q"}], [], tool_choice="none"
+    )
+
+    assert response.content == "Answer."
+    assert response.tool_calls == ()
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_rejects_empty_message():
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "", "tool_calls": []}}],
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError, match="invalid_inference_response"):
+        await client.complete_with_tools(
+            [{"role": "user", "content": "q"}], []
+        )
+    await http.aclose()

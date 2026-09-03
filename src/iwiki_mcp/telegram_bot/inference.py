@@ -1,6 +1,7 @@
 """OpenAI-compatible text and audio inference client."""
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 import logging
 import time
 from typing import Any
@@ -9,6 +10,23 @@ import anyio
 import httpx
 
 from .context import ContextBudget
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """One tool invocation the model requested."""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class ToolResponse:
+    """One chat completion: either tool calls to run or the final content."""
+
+    content: str | None
+    tool_calls: tuple[ToolCall, ...]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -230,6 +248,67 @@ class InferenceClient:
         self._record_telemetry("chat", "success", started, payload, prompt_chars)
         self._observe_usage(payload, prompt_chars)
         return content
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        tool_choice: str = "auto",
+    ) -> ToolResponse:
+        started = time.monotonic()
+        prompt_chars = sum(
+            len(str(message.get("content") or "")) for message in messages
+        )
+        try:
+            payload = await self._post_json(
+                "/chat/completions",
+                json={
+                    "model": self._chat_model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
+                    "temperature": 0,
+                    "max_tokens": self._max_output_tokens,
+                },
+            )
+            response = self._parse_tool_response(payload)
+        except InferenceError as error:
+            self._record_telemetry("chat", "failure", started, {}, prompt_chars)
+            if str(error) == "context_overflow":
+                self._escalate_budget()
+            raise
+        self._record_telemetry("chat", "success", started, payload, prompt_chars)
+        self._observe_usage(payload, prompt_chars)
+        return response
+
+    @staticmethod
+    def _parse_tool_response(payload: dict[str, object]) -> ToolResponse:
+        try:
+            message = payload["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            raise InferenceError("invalid_inference_response") from None
+        if not isinstance(message, dict):
+            raise InferenceError("invalid_inference_response")
+        raw_calls = message.get("tool_calls")
+        calls: list[ToolCall] = []
+        if isinstance(raw_calls, list):
+            for raw in raw_calls:
+                function = raw.get("function") if isinstance(raw, dict) else None
+                if not isinstance(function, dict):
+                    continue
+                name = function.get("name")
+                arguments = function.get("arguments")
+                if isinstance(name, str) and isinstance(arguments, str):
+                    calls.append(ToolCall(
+                        id=str(raw.get("id", "")),
+                        name=name,
+                        arguments=arguments,
+                    ))
+        content = message.get("content")
+        content = content if isinstance(content, str) and content.strip() else None
+        if content is None and not calls:
+            raise InferenceError("invalid_inference_response")
+        return ToolResponse(content=content, tool_calls=tuple(calls))
 
     def _observe_usage(
         self, payload: dict[str, object], prompt_chars: int
