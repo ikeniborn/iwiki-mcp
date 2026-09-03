@@ -1,3 +1,36 @@
+---
+review:
+  intent_hash: 99fc2e63c324a3c3
+  last_run: 2026-09-03
+  phases:
+    structure: passed
+    completeness: passed
+    clarity: passed
+    consistency: passed
+    alignment: passed
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: Desired Outcomes
+      section_hash: a87313049d2d1ef6
+      fragment: "answers more completely and accurately than the current single-pass pipeline (manual comparison)"
+      text: "No explicit criterion for 'better' on the benchmark set"
+      fix: "Fix the benchmark question list and a simple comparison rubric before recording implementation evidence"
+      verdict: open
+      verdict_at: null
+    - id: F-002
+      phase: clarity
+      severity: WARNING
+      section: Health Metrics
+      section_hash: d04b1dab97ddb9ee
+      fragment: "must not become noticeably slower"
+      text: "'noticeably' has no threshold"
+      fix: "Anchor to an observable bound, e.g. a simple question costs at most one extra completion round trip"
+      verdict: open
+      verdict_at: null
+---
+
 # Intent: telegram-bot-agentic-retrieval
 
 **Date:** 2026-09-03
