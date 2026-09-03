@@ -3,11 +3,16 @@ review:
   intent_hash: 99fc2e63c324a3c3
   last_run: 2026-09-03
   phases:
-    structure: passed
-    completeness: passed
-    clarity: passed
-    consistency: passed
-    alignment: passed
+    structure:
+      status: passed
+    completeness:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
+    alignment:
+      status: passed
   findings:
     - id: F-001
       phase: clarity
