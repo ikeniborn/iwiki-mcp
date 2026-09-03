@@ -20,11 +20,10 @@ def assert_sanitized_error(captured, marker):
 
 @pytest.mark.asyncio
 async def test_probe_requires_both_configured_models():
-    seen = {}
+    requests = []
 
     def handler(request):
-        seen["method"] = request.method
-        seen["url"] = str(request.url)
+        requests.append((request.method, str(request.url)))
         if request.url.path.endswith("/models"):
             return httpx.Response(
                 200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
@@ -40,8 +39,10 @@ async def test_probe_requires_both_configured_models():
 
     await client.probe()
 
-    assert seen["method"] == "POST"
-    assert "chat/completions" in seen["url"]
+    assert requests[0] == ("GET", "https://models.example/v1/models")
+    assert len(requests) > 1
+    assert requests[-1][0] == "POST"
+    assert "chat/completions" in requests[-1][1]
     await http.aclose()
 
 
