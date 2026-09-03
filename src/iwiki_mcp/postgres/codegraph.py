@@ -20,6 +20,7 @@ from ..codegraph.context import (
 )
 from ..codegraph.linking import (
     MarkdownPageSnapshot,
+    links_stale,
     markdown_revision,
     resolve_selectors,
 )
@@ -76,6 +77,21 @@ _REVISION_MISMATCH = _error(
 _INVALID_BATCH = _error(
     "invalid_batch", "send batches that match the declared header"
 )
+
+
+def _current_markdown_revision(cursor, iwiki_id, domain_id: int) -> str:
+    """Hash the domain's current Markdown exactly as a publication does."""
+    cursor.execute(
+        "SELECT slug, markdown FROM iwiki.pages "
+        "WHERE iwiki_id = %s AND domain_id = %s ORDER BY slug",
+        (iwiki_id, domain_id),
+    )
+    return markdown_revision(
+        tuple(
+            MarkdownPageSnapshot(slug=slug, markdown=markdown)
+            for slug, markdown in cursor.fetchall()
+        )
+    )
 
 
 class PostgresCodeGraphStore:
@@ -455,12 +471,22 @@ class PostgresCodeGraphStore:
                 (self.iwiki_id, domain_id),
             )
             row = cursor.fetchone()
-        if row is None:
-            return {
-                "domain": self.domain,
-                "state": "missing",
-                "snapshot_revision": None,
-            }
+            if row is None:
+                return {
+                    "domain": self.domain,
+                    "state": "missing",
+                    "snapshot_revision": None,
+                }
+            # Decided inside the transaction: the predicate may still have to
+            # read the pages through this cursor.
+            stale = links_stale(
+                row[4],
+                lambda: _current_markdown_revision(
+                    cursor, self.iwiki_id, domain_id
+                ),
+                stored_generation=row[5],
+                current_generation=generation,
+            )
         return {
             "domain": self.domain,
             "state": "ready",
@@ -471,7 +497,7 @@ class PostgresCodeGraphStore:
             "markdown_revision": row[4],
             "stored_markdown_generation": row[5],
             "current_markdown_generation": generation,
-            "wiki_links_stale": row[5] != generation,
+            "wiki_links_stale": stale,
         }
 
     # -- helpers --------------------------------------------------------
@@ -1288,7 +1314,14 @@ class PostgresCodeGraphReader:
             "stored_markdown_revision": row[5],
             "stored_markdown_generation": row[6],
             "current_markdown_generation": row[7],
-            "wiki_links_stale": row[6] != row[7],
+            "wiki_links_stale": links_stale(
+                row[5],
+                lambda: _current_markdown_revision(
+                    cursor, self.iwiki_id, domain_id
+                ),
+                stored_generation=row[6],
+                current_generation=row[7],
+            ),
             "counts": row[4],
             "age_seconds": age,
             "max_snapshot_age_seconds": limit,

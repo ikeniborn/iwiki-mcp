@@ -76,6 +76,33 @@ def markdown_revision(pages: Sequence[MarkdownPageSnapshot]) -> str:
     return canonical_sha256(payload, prefix=True)
 
 
+def links_stale(
+    stored_revision: str | None,
+    current_revision: Callable[[], str],
+    *,
+    stored_generation: int | None = None,
+    current_generation: int | None = None,
+) -> bool:
+    """Report whether derived Wiki links no longer match the Markdown.
+
+    The one predicate every storage answers `wiki_links_stale` with. Content
+    decides: a snapshot whose stored revision still describes the current
+    Markdown carries current links, whatever happened in between.
+
+    The change-token counter advances on every page mutation, so equal
+    generations imply equal content. A caller that has both counters passes
+    them and skips the hash entirely; `current_revision` is called only when
+    the counters already disagree, or when the storage keeps no counter.
+    """
+    if (
+        stored_generation is not None
+        and current_generation is not None
+        and stored_generation == current_generation
+    ):
+        return False
+    return stored_revision != current_revision()
+
+
 class SelectorError(ValueError):
     """Raised when authored ``code`` frontmatter is outside MVP grammar."""
 
