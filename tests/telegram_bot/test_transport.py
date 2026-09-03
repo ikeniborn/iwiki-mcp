@@ -722,6 +722,12 @@ async def test_runner_probes_remote_scope_before_polling(monkeypatch):
             events.append("inference_close")
 
     class EmptyRemote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             events.append("remote_probe")
             raise RuntimeError("no_remote_domains")
@@ -769,6 +775,12 @@ async def test_runner_cancellation_completes_inference_and_proxy_cleanup(monkeyp
             events.append("inference_close_finished")
 
     class ReadyRemote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             return ["team"]
 

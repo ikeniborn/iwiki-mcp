@@ -120,7 +120,7 @@ async def run_bot(
             )
             remote = await remote_context.__aenter__()
             remote_entered = True
-            await remote.list_domains()
+            await remote.bind()
             startup_ready = True
         except (InferenceError, RemoteIwikiError) as error:
             startup_exc_info = sys.exc_info()
@@ -229,7 +229,9 @@ async def run_bot(
                     try:
                         candidate_remote = await candidate_context.__aenter__()
                         candidate_entered = True
-                        await candidate_remote.list_domains()
+                        # A reconnect starts a new MCP session, so the previous
+                        # selection is gone and must be made again.
+                        await candidate_remote.bind()
                         candidate_ready = True
                     except RemoteIwikiError as error:
                         candidate_exc_info = sys.exc_info()

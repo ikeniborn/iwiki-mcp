@@ -13,6 +13,12 @@ class FakeRemote:
         self.revision = 7
         self.section_hash = "fresh-hash"
 
+    async def bind(self):
+        await self.list_domains()
+
+    def writable(self, domain):
+        return True
+
     async def list_domains(self):
         return ["team"]
 
@@ -171,3 +177,33 @@ async def test_update_conflict_is_not_retried(service):
 
     assert reply.text == "Page changed; request a new preview."
     assert len(service.remote.update_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_domain_is_refused_before_drafting(clock):
+    class ReadOnlyRemote(FakeRemote):
+        def writable(self, domain):
+            return False
+
+    drafted = []
+
+    class RecordingInference(FakeInference):
+        async def draft_markdown(self, request, context):
+            drafted.append(request)
+            return await super().draft_markdown(request, context)
+
+    remote = ReadOnlyRemote()
+    inference = RecordingInference()
+    service = ConversationService(
+        AccessPolicy(frozenset({1001})),
+        remote,
+        inference,
+        confirmation_ttl_seconds=300,
+        clock=clock,
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.propose_create(1001, "guide/new", "write it")
+
+    assert reply.text == "Selected domain is read-only."
+    assert drafted == []

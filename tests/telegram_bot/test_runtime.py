@@ -137,6 +137,12 @@ async def test_internal_remote_cancel_scope_reconnects_after_scope_closes(
             pass
 
     class Remote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             return ["team"]
 
@@ -210,6 +216,12 @@ async def test_run_bot_preserves_external_anyio_cancellation(monkeypatch):
             events.append("inference_close")
 
     class Remote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             return ["team"]
 
@@ -388,6 +400,12 @@ async def test_startup_retries_close_each_attempt_before_sleep_and_log_no_secret
             self.attempt = attempt
             self.closed = False
 
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             events.append(f"remote_{self.attempt}_probe")
             if self.attempt == 1:
@@ -547,6 +565,12 @@ async def test_post_start_remote_failure_reconnects_and_replays_only_failed_upda
             self.attempt = attempt
             self.calls = 0
 
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             self.calls += 1
             if self.attempt == 1 and self.calls == 3:
@@ -637,6 +661,12 @@ async def test_non_retryable_startup_failure_does_not_sleep(
             events.append("inference_close")
 
     class Remote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             events.append("remote_probe")
             raise failure
@@ -745,6 +775,12 @@ async def test_run_bot_cleanup_preserves_startup_base_exception(
             raise RuntimeError("inference-cleanup-marker")
 
     class Remote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             events.append("remote_probe")
             raise failure

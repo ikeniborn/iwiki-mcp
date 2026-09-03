@@ -99,10 +99,21 @@ def _decode_result(result: object) -> dict[str, object]:
     return payload
 
 
+def _string_list(value: object) -> list[str] | None:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        return None
+    return list(value)
+
+
 class RemoteIwikiClient:
     def __init__(self, call_tool: ToolCaller, search_k: int = _DEFAULT_SEARCH_K):
         self._call_tool = call_tool
         self._search_k = search_k
+        # None means the write scope has not been observed yet. The server
+        # remains the authority; this only saves a doomed round trip.
+        self._writable: frozenset[str] | None = None
 
     async def _call(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         retryable = None
@@ -127,22 +138,53 @@ class RemoteIwikiClient:
             raise RemoteIwikiError(code)
         return payload
 
-    async def list_domains(self) -> list[str]:
+    async def _status(self) -> list[str]:
+        """Read the scope the service token reports, and remember what it may write."""
         payload = await self._call("wiki_status", {})
-        domains = payload.get("domains")
-        if not isinstance(domains, list) or not all(
-            isinstance(domain, str) for domain in domains
-        ):
+        domains = _string_list(payload.get("domains"))
+        if domains is None:
             raise RemoteIwikiError("invalid_remote_response")
         if not domains:
             raise RemoteIwikiError("no_remote_domains")
+        writable = _string_list(payload.get("write"))
+        if writable is not None:
+            self._writable = frozenset(writable)
         return domains
 
-    async def search(self, domain: str, query: str) -> list[dict[str, object]]:
-        payload = await self._call(
+    async def list_domains(self) -> list[str]:
+        return await self._status()
+
+    def writable(self, domain: str) -> bool:
+        """Report whether the token is known to be unable to write this domain."""
+        return self._writable is None or domain in self._writable
+
+    async def bind(self) -> None:
+        """Select the scope the token itself reports, so answers are session-bound.
+
+        Binding to the server's own answer cannot widen the scope. Without it
+        every answer is served under `token_default`, and a lapsed selection is
+        indistinguishable from a deliberate one.
+        """
+        domains = await self._status()
+        writable = sorted(self._writable) if self._writable is not None else []
+        await self._call(
+            "wiki_bind", {"read": domains, "write": writable}
+        )
+
+    async def _search_once(self, domain: str, query: str) -> dict[str, object]:
+        # `intent` is never sent: a write intent prefers the bound primary over
+        # the domains argument and would retarget a Telegram-originated change.
+        return await self._call(
             "wiki_search",
             {"domains": [domain], "query": query, "k": self._search_k},
         )
+
+    async def search(self, domain: str, query: str) -> list[dict[str, object]]:
+        payload = await self._search_once(domain, query)
+        if payload.get("binding_source") == "token_default":
+            # The session selection lapsed. Re-bind once and ask again.
+            await self.bind()
+            payload = await self._search_once(domain, query)
         results = payload.get("results")
         if not isinstance(results, list) or not all(
             isinstance(result, dict) for result in results

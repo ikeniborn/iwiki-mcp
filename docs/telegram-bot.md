@@ -53,6 +53,19 @@ Supply configuration through the owner-only `/opt/iwiki-mcp/runtime.env` file re
 | `IWIKI_BOT_LOG_LEVEL` | Optional root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`); default `INFO`. |
 | `IWIKI_BOT_TELEGRAM_PROXY_URL` | Required literal HTTPS proxy URL with explicit host and port. |
 
+The bot selects its iwiki scope explicitly. After the MCP session is established, and
+again after every reconnect, it calls `wiki_bind` with exactly the domains and write list
+that `wiki_status` reported, so binding to the server's own answer cannot widen the
+scope. Without that call every answer is served under `binding_source: "token_default"`,
+where a lapsed selection is indistinguishable from a deliberate one. A search answer that
+still reports `token_default` triggers one re-bind and one repeat of the same search,
+never a second. `wiki_search` is never called with `intent="write"`: that form prefers the
+bound primary over the `domains` argument and would retarget a Telegram-originated change
+away from the domain the user selected. Before drafting Markdown for `/create` or
+`/update`, the bot checks the selected domain against the reported write list and answers
+`Selected domain is read-only.` rather than spending an inference call on a change the
+server would refuse.
+
 The chat model's context window is the binding constraint. The bot retrieves the
 section each search hit names rather than whole pages, and reads each section once even
 when several search hits name it.

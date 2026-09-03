@@ -14,6 +14,12 @@ class FakeRemote:
         self.calls = []
         self.writes = 0
 
+    async def bind(self):
+        await self.list_domains()
+
+    def writable(self, domain):
+        return True
+
     async def list_domains(self):
         self.calls.append(("list_domains",))
         return ["team"]
