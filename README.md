@@ -191,7 +191,7 @@ never writes those project files.
 ### Session lifetime and binding provenance
 
 A `wiki_bind` selection is **process-local and session-scoped**. It is keyed by
-`mcp-session-id`, expires after 30 minutes of inactivity, and does not survive a server
+`mcp-session-id`, expires after 24 hours of inactivity, and does not survive a server
 restart. When no selection is found the server falls back to the token's own default
 scope and keeps answering — the fallback is permitted, but never silent:
 

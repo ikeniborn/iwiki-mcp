@@ -323,7 +323,7 @@ wheels = [
 
 [[package]]
 name = "iwiki-mcp"
-version = "0.7.240"
+version = "0.7.241"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

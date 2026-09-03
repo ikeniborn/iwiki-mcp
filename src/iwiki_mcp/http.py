@@ -66,7 +66,7 @@ _DOMAIN_GRANT_TOOLS = {
     "wiki_set_domain_grant",
     "wiki_revoke_domain_grant",
 }
-_SESSION_IDLE_SECONDS = 1800.0
+_SESSION_IDLE_SECONDS = 86400.0
 
 
 @dataclass(frozen=True)

@@ -24,7 +24,7 @@ def test_package_metadata_rejects_mcp_v2():
 
 
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.240"
+    assert iwiki_mcp.__version__ == "0.7.241"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
