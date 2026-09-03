@@ -667,3 +667,44 @@ async def test_fallback_inference_keeps_single_pass(service):
 
     assert reply.text.startswith("Answer")
     assert any(call[0] == "answer" for call in service.inference.calls)
+
+
+class DemotingFakeInference(FakeInference):
+    """Refuses the first tool completion the way a live provider would."""
+
+    def __init__(self):
+        super().__init__()
+        self.tools_supported = True
+
+    async def complete_with_tools(self, messages, tools, tool_choice="auto"):
+        self.tools_supported = False
+        raise InferenceError("tools_unsupported")
+
+
+@pytest.mark.asyncio
+async def test_runtime_demotion_falls_back_within_the_same_request(
+    tmp_path, clock
+):
+    remote = FakeRemote()
+    inference = DemotingFakeInference()
+    service = ConversationService(
+        AccessPolicy(frozenset({1001})),
+        remote,
+        inference,
+        confirmation_ttl_seconds=300,
+        temporary_directory=tmp_path,
+        clock=clock,
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "How do we deploy?")
+
+    # The user gets a normal answer from the fallback path, no error.
+    assert reply.failed is False
+    assert any(call[0] == "answer" for call in inference.calls)
+    # The next question skips the loop entirely.
+    inference.calls.clear()
+    await service.answer_question(1001, "Second question?")
+    assert not any(
+        call[0] == "complete_with_tools" for call in inference.calls
+    )

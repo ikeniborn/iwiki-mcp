@@ -326,6 +326,17 @@ class InferenceClient:
             self._record_telemetry("chat", "failure", started, {}, prompt_chars)
             if str(error) == "context_overflow":
                 self._escalate_budget()
+                raise
+            if _tools_refusal(
+                error.status, error.provider_code, error.provider_message
+            ):
+                LOGGER.warning(
+                    "agent demoted status=%s code=%s",
+                    error.status,
+                    error.provider_code,
+                )
+                self.tools_supported = False
+                raise InferenceError("tools_unsupported") from None
             raise
         self._record_telemetry("chat", "success", started, payload, prompt_chars)
         self._observe_usage(payload, prompt_chars)

@@ -202,10 +202,15 @@ class ConversationService:
         try:
             if self._agentic():
                 await _report(progress, _STAGE_SEARCHING)
-                answer = await self._agent_loop().run(
-                    domain, question, progress
-                )
-                return BotReply(answer)
+                try:
+                    answer = await self._agent_loop().run(
+                        domain, question, progress
+                    )
+                    return BotReply(answer)
+                except InferenceError as error:
+                    if str(error) != "tools_unsupported":
+                        raise
+                    # Demoted mid-request: serve this question single-pass.
             await _report(progress, _STAGE_SEARCHING)
             sections = await self._collect_sections(domain, question)
             budget = self._budget.chars(len(question))
@@ -386,11 +391,17 @@ class ConversationService:
             return domain
         try:
             await _report(progress, _STAGE_SEARCHING)
+            markdown = None
             if self._agentic():
-                markdown = await self._agent_loop().run(
-                    domain, request, progress, drafting=True
-                )
-            else:
+                try:
+                    markdown = await self._agent_loop().run(
+                        domain, request, progress, drafting=True
+                    )
+                except InferenceError as error:
+                    if str(error) != "tools_unsupported":
+                        raise
+                    # Demoted mid-request: draft this request single-pass.
+            if markdown is None:
                 context = await self._draft_context(domain, request)
                 await _report(progress, _STAGE_DRAFTING)
                 markdown = await self._inference.draft_markdown(
