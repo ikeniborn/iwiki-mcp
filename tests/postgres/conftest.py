@@ -352,6 +352,7 @@ class GraphFixture:
 
     session_ttl_seconds = 30
     staging_retention_seconds = 60
+    superseded_retention_seconds = 60
     staging_cleanup_limit = 2
     lock_timeout_ms = 500
 
@@ -405,6 +406,7 @@ class GraphFixture:
             session_ttl_seconds=self.session_ttl_seconds,
             staging_retention_seconds=self.staging_retention_seconds,
             staging_cleanup_limit=self.staging_cleanup_limit,
+            superseded_retention_seconds=self.superseded_retention_seconds,
             clock=self._now,
         )
 

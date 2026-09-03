@@ -108,6 +108,7 @@ class PostgresCodeGraphStore:
         session_ttl_seconds: int,
         staging_retention_seconds: int,
         staging_cleanup_limit: int,
+        superseded_retention_seconds: int = 86400,
         connection_factory: Callable[[], psycopg.Connection] | None = None,
         require_database_principal: bool = False,
         clock: Callable[[], datetime.datetime] | None = None,
@@ -119,6 +120,7 @@ class PostgresCodeGraphStore:
         self._lock_timeout_ms = lock_timeout_ms
         self._session_ttl_seconds = session_ttl_seconds
         self._staging_retention_seconds = staging_retention_seconds
+        self._superseded_retention_seconds = superseded_retention_seconds
         self._staging_cleanup_limit = staging_cleanup_limit
         self._connection_factory = connection_factory or (
             lambda: psycopg.connect(dsn)
@@ -245,6 +247,7 @@ class PostgresCodeGraphStore:
             domain_id = self._domain_id(cursor)
             self._domain_state(cursor, domain_id)
             self._cleanup_staging(cursor, domain_id, now)
+            self._prune_superseded(cursor, domain_id, now)
             generation = self._markdown_generation(cursor, domain_id)
             base_revision = self._active_revision(cursor, domain_id)
             cursor.execute(
@@ -634,6 +637,53 @@ class PostgresCodeGraphStore:
             )
             self._discard_snapshot(cursor, domain_id, snapshot_id)
         return len(expired)
+
+    def _prune_superseded(self, cursor, domain_id: int, now) -> int:
+        """Drop ready snapshots no longer active and older than the retention.
+
+        Nothing reads a superseded snapshot: every query joins
+        `code_graph_domain_state.active_snapshot_id`. Retaining one past the
+        window buys only a manual revert, while retaining every one of them
+        forever is what let a deleted page stay pinned. The active snapshot is
+        excluded by the query, not by an ordering assumption.
+        """
+        threshold = now - datetime.timedelta(
+            seconds=self._superseded_retention_seconds
+        )
+        cursor.execute(
+            "SELECT s.snapshot_id FROM iwiki.code_graph_snapshots s "
+            "JOIN iwiki.code_graph_domain_state d "
+            "ON d.iwiki_id = s.iwiki_id AND d.domain_id = s.domain_id "
+            "WHERE s.iwiki_id = %s AND s.domain_id = %s "
+            "AND s.state = 'ready' AND s.ready_at <= %s "
+            "AND s.snapshot_id IS DISTINCT FROM d.active_snapshot_id "
+            "ORDER BY s.ready_at LIMIT %s",
+            (
+                self.iwiki_id,
+                domain_id,
+                threshold,
+                self._staging_cleanup_limit,
+            ),
+        )
+        superseded = [row[0] for row in cursor.fetchall()]
+        for snapshot_id in superseded:
+            cursor.execute(
+                "DELETE FROM iwiki.code_graph_snapshots "
+                "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
+                "AND state = 'ready' "
+                "AND snapshot_id NOT IN ("
+                "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
+                "WHERE iwiki_id = %s AND domain_id = %s "
+                "AND active_snapshot_id IS NOT NULL)",
+                (
+                    self.iwiki_id,
+                    domain_id,
+                    snapshot_id,
+                    self.iwiki_id,
+                    domain_id,
+                ),
+            )
+        return len(superseded)
 
     def _fail_snapshot(self, cursor, domain_id: int, snapshot_id: str):
         cursor.execute(

@@ -605,8 +605,15 @@ max_batch_rows = 1000
 max_batch_bytes = 1000000
 publication_session_ttl_seconds = 900
 staging_retention_seconds = 86400
+superseded_retention_seconds = 86400
 staging_cleanup_limit = 100
 ```
+
+`superseded_retention_seconds` задаёт, сколько держится снапшот, переставший быть
+активным, прежде чем публикация его удалит — не более `staging_cleanup_limit` за вызов
+и никогда активный. Вытесненный снапшот не читает ничто: все запросы идут через
+`code_graph_domain_state.active_snapshot_id`, поэтому окно существует только чтобы
+оставить оператору цель для ручного возврата.
 
 Опубликованный снапшот — а не конфигурация читающего сервера — определяет, какие языки
 может вернуть hosted-чтение. `wiki_code_search` на хранилище PostgreSQL берёт языковой

@@ -38,6 +38,7 @@ _FIELDS = {
     "max_batch_bytes",
     "publication_session_ttl_seconds",
     "staging_retention_seconds",
+    "superseded_retention_seconds",
     "staging_cleanup_limit",
     "typescript_type_boost",
 }
@@ -134,6 +135,7 @@ class CodeGraphConfig:
     max_batch_bytes: int = 1_000_000
     publication_session_ttl_seconds: int = 900
     staging_retention_seconds: int = 86400
+    superseded_retention_seconds: int = 86400
     staging_cleanup_limit: int = 100
 
     def __post_init__(self) -> None:

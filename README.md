@@ -602,8 +602,15 @@ max_batch_rows = 1000
 max_batch_bytes = 1000000
 publication_session_ttl_seconds = 900
 staging_retention_seconds = 86400
+superseded_retention_seconds = 86400
 staging_cleanup_limit = 100
 ```
+
+`superseded_retention_seconds` bounds how long a snapshot that is no longer active is
+kept before publication prunes it, at most `staging_cleanup_limit` per call and never
+the active one. Nothing reads a superseded snapshot — every query joins
+`code_graph_domain_state.active_snapshot_id` — so the window exists only to leave an
+operator a manual revert target.
 
 The published snapshot — not the reading server's own configuration — decides which
 languages a hosted read may return. `wiki_code_search` on PostgreSQL storage derives its

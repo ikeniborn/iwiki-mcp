@@ -679,6 +679,30 @@ SPECIFICATION_METADATA_MIGRATION = Migration(
 )
 
 
+# Derived links must not outrank the Markdown they were derived from. The two
+# sibling keys of this table already cascade; this one pointed out of the graph
+# into authored pages and refused their deletion instead.
+WIKI_LINK_CASCADE_MIGRATION_STATEMENTS = (
+    """
+    ALTER TABLE iwiki.code_graph_wiki_links
+        DROP CONSTRAINT IF EXISTS code_graph_wiki_links_page_fk
+    """,
+    """
+    ALTER TABLE iwiki.code_graph_wiki_links
+        ADD CONSTRAINT code_graph_wiki_links_page_fk
+        FOREIGN KEY (iwiki_id, domain_id, page_id)
+        REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+        ON DELETE CASCADE
+    """,
+)
+
+
+WIKI_LINK_CASCADE_MIGRATION = Migration(
+    version=8,
+    statements=WIKI_LINK_CASCADE_MIGRATION_STATEMENTS,
+)
+
+
 SCHEMA6_COMPATIBILITY_ROLLBACK_SQL = f"""
 SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
 DROP TABLE iwiki.specification_evidence;
@@ -709,6 +733,22 @@ ALTER TABLE iwiki.specification_scenarios
     ON DELETE CASCADE;
 ALTER TABLE iwiki.specification_scenarios DROP COLUMN page_slug;
 DELETE FROM iwiki.schema_migrations WHERE version = 7;
+"""
+
+
+# Restoring v7 restores the defect v8 removes: derived links pin their page
+# again. Offered only so an operator can step back to the version the
+# previous runtime pins, never as a repair.
+SCHEMA8_COMPATIBILITY_ROLLBACK_SQL = f"""
+SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
+ALTER TABLE iwiki.code_graph_wiki_links
+    DROP CONSTRAINT code_graph_wiki_links_page_fk;
+ALTER TABLE iwiki.code_graph_wiki_links
+    ADD CONSTRAINT code_graph_wiki_links_page_fk
+    FOREIGN KEY (iwiki_id, domain_id, page_id)
+    REFERENCES iwiki.pages (iwiki_id, domain_id, page_id)
+    ON DELETE NO ACTION;
+DELETE FROM iwiki.schema_migrations WHERE version = 8;
 """
 
 
@@ -925,6 +965,7 @@ MIGRATIONS = (
     Migration(version=5, statements=GRAPH_MIGRATION_STATEMENTS),
     Migration(version=6, statements=SPECIFICATION_MIGRATION_STATEMENTS),
     SPECIFICATION_METADATA_MIGRATION,
+    WIKI_LINK_CASCADE_MIGRATION,
 )
 
 
@@ -1063,7 +1104,7 @@ def run_migrations(
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 7,
+    expected_version: int = 8,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -1303,4 +1344,71 @@ def rollback_v7_compatibility(
         "dry_run": False,
         "schema_version": 6,
         "removed_marker": 7,
+    }
+
+
+def rollback_v8_compatibility(
+    settings: MigrationSettings,
+    *,
+    confirm: bool,
+) -> dict[str, int | bool]:
+    """Restore schema v7, and with it the delete rule v8 replaced.
+
+    Stepping back reinstates `ON DELETE NO ACTION`, so a page referenced by a
+    retained snapshot becomes undeletable again. This exists to reach the
+    version an older runtime pins, not to repair anything.
+    """
+    if confirm is not True:
+        raise ValueError("confirmation must be literal true")
+    try:
+        with psycopg.connect(
+            settings.dsn,
+            connect_timeout=settings.connect_timeout_s,
+        ) as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(settings.statement_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)",
+                        (str(settings.lock_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,)
+                    )
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(version), 0) "
+                        "FROM iwiki.schema_migrations"
+                    )
+                    current = cursor.fetchone()[0]
+                    if current != 8:
+                        raise MigrationError(
+                            "schema version 8 compatibility rollback is unavailable"
+                        )
+                    cursor.execute(
+                        "ALTER TABLE iwiki.code_graph_wiki_links "
+                        "DROP CONSTRAINT code_graph_wiki_links_page_fk"
+                    )
+                    cursor.execute(
+                        "ALTER TABLE iwiki.code_graph_wiki_links "
+                        "ADD CONSTRAINT code_graph_wiki_links_page_fk "
+                        "FOREIGN KEY (iwiki_id, domain_id, page_id) "
+                        "REFERENCES iwiki.pages (iwiki_id, domain_id, page_id) "
+                        "ON DELETE NO ACTION"
+                    )
+                    cursor.execute(
+                        "DELETE FROM iwiki.schema_migrations WHERE version = 8"
+                    )
+                    if cursor.rowcount != 1:
+                        raise MigrationError("migration marker removal failed")
+    except MigrationError:
+        raise
+    except psycopg.Error as exc:
+        raise MigrationError("compatibility rollback failed") from exc
+    return {
+        "dry_run": False,
+        "schema_version": 7,
+        "removed_marker": 8,
     }

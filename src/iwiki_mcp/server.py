@@ -5714,7 +5714,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     if not _is_postgres(binding):
         return
     _postgres_migrations.require_schema_version(
-        binding.connection_dsn(), expected_version=7
+        binding.connection_dsn(), expected_version=8
     )
 
 

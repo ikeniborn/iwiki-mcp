@@ -660,7 +660,7 @@ def test_hosted_runtime_rejects_git_before_listener(
     assert listener_started is False
 
 
-def test_hosted_runtime_pins_v7_guard_before_install_without_database(
+def test_hosted_runtime_pins_the_schema_guard_before_install_without_database(
     tmp_path, monkeypatch
 ):
     from iwiki_mcp import http, server
@@ -728,12 +728,12 @@ def test_hosted_runtime_pins_v7_guard_before_install_without_database(
         str(config_path), environ=environ, probe=lambda _cfg: calls.append("probe")
     )
 
-    assert calls[:5] == ["probe", ("schema", 7), "principal", "pool", "install"]
+    assert calls[:5] == ["probe", ("schema", 8), "principal", "pool", "install"]
     runtime.close()
 
 
-@pytest.mark.parametrize("installed_version", [6, 7])
-def test_hosted_runtime_requires_exact_v7_before_installing_runtime(
+@pytest.mark.parametrize("installed_version", [7, 8])
+def test_hosted_runtime_requires_the_exact_schema_before_installing_runtime(
     clean_postgres, tmp_path, monkeypatch, installed_version
 ):
     from psycopg.conninfo import conninfo_to_dict
@@ -796,10 +796,10 @@ def test_hosted_runtime_requires_exact_v7_before_installing_runtime(
     )
     monkeypatch.setattr(server.mcp, "streamable_http_app", lambda: object())
 
-    if installed_version == 6:
+    if installed_version == 7:
         with pytest.raises(
             migrations.MigrationError,
-            match="schema version 7 is required",
+            match="schema version 8 is required",
         ):
             http.prepare_runtime(
                 str(config_path), environ=environ, probe=lambda _cfg: None
@@ -873,8 +873,8 @@ def test_hosted_runtime_rejects_an_unprovisioned_session_user(
         drop_runtime_role(clean_postgres, role)
 
 
-@pytest.mark.parametrize("installed_version", [6, 7])
-def test_stdio_runtime_requires_exact_v7_without_running_migrations(
+@pytest.mark.parametrize("installed_version", [7, 8])
+def test_stdio_runtime_requires_the_exact_schema_without_running_migrations(
     clean_postgres, monkeypatch, installed_version
 ):
     from iwiki_mcp import server
@@ -928,10 +928,10 @@ def test_stdio_runtime_requires_exact_v7_without_running_migrations(
         seed_threshold=0.0,
     )
 
-    if installed_version == 6:
+    if installed_version == 7:
         with pytest.raises(
             migrations.MigrationError,
-            match="schema version 7 is required",
+            match="schema version 8 is required",
         ):
             server._initialize_postgres_storage(cfg)
     else:
