@@ -22,6 +22,16 @@ iwiki-mcp --help             # after `uv tool install .` / `pipx install .`
 - `flake8` is configured (`.flake8`, `max-line-length = 100`) and kept clean; no formatter (black/ruff) — match surrounding style by hand.
 - `pyproject.toml` sets `pythonpath = ["src"]` and `asyncio_mode = "auto"`, so tests import `iwiki_mcp` directly and async tests need no `@pytest.mark.asyncio`.
 - Tests never hit the network: they `monkeypatch` `indexer.embed_texts` and set dummy `IWIKI_*` env vars. Follow that pattern — see `tests/test_server_write.py::_seed`.
+- **`tests/postgres` skips itself without a database, so a change to a PostgreSQL path is unverified by the default run.** When you touch `postgres/`, start a disposable database and run the suite against it rather than relying on the skips. The DSN database name must end in `_test` and the `vector` extension must exist.
+
+```bash
+docker run -d --name iwiki-pgtest -e POSTGRES_PASSWORD=pgtest -e POSTGRES_DB=iwiki_test -p 127.0.0.1:55432:5432 pgvector/pgvector:pg16
+docker exec iwiki-pgtest psql -U postgres -d iwiki_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55432/iwiki_test" uv run pytest -q tests/postgres
+docker rm -f iwiki-pgtest
+```
+
+  A loopback DSN additionally errors the `tests/deployment` container tests at their own fixture precondition (`IWIKI_TEST_POSTGRES_DSN must use a non-loopback host`); that is an environment limit, not a regression.
 
 ## Architecture
 

@@ -454,6 +454,117 @@ class PostgresCodeGraphStore:
             domain_id = self._domain_id(cursor)
             return self._cleanup_staging(cursor, domain_id, now)
 
+    def _snapshot_rows(self, cursor, domain_id: int, snapshot_id: str) -> dict:
+        """Rehydrate an activated snapshot into the shape derivation expects.
+
+        `row_data` holds the canonical row a publication sent, so the rows read
+        back here are the rows that were derived from originally. Reading them
+        keeps one derivation implementation instead of a second one written in
+        SQL.
+        """
+        rows: dict[str, list[dict]] = {}
+        for kind, table in (
+            ("files", "code_graph_files"),
+            ("symbols", "code_graph_symbols"),
+            ("relations", "code_graph_relations"),
+        ):
+            cursor.execute(
+                f"SELECT row_data FROM iwiki.{table} "
+                "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
+                (self.iwiki_id, domain_id, snapshot_id),
+            )
+            rows[kind] = [row[0] for row in cursor.fetchall()]
+        return rows
+
+    def refresh_wiki_links(self) -> dict[str, object]:
+        """Re-derive the active snapshot's Wiki links from current Markdown.
+
+        Parses no source and resolves no symbol: the graph is taken as it
+        stands and only `code_graph_wiki_links` and the stored Markdown
+        revision change. Either the whole link set is replaced and the revision
+        advances, or the transaction leaves everything untouched.
+        """
+        with self._transaction() as cursor:
+            domain_id = self._domain_id(cursor)
+            cursor.execute(
+                "SELECT s.snapshot_id, s.snapshot_revision, "
+                "s.markdown_revision, s.markdown_generation "
+                "FROM iwiki.code_graph_domain_state d "
+                "JOIN iwiki.code_graph_snapshots s "
+                "ON s.iwiki_id = d.iwiki_id AND s.domain_id = d.domain_id "
+                "AND s.snapshot_id = d.active_snapshot_id "
+                "WHERE d.iwiki_id = %s AND d.domain_id = %s "
+                "AND s.state = 'ready'",
+                (self.iwiki_id, domain_id),
+            )
+            active = cursor.fetchone()
+            if active is None:
+                return {
+                    "domain": self.domain,
+                    "state": "missing_snapshot",
+                    "hint": "publish a code graph snapshot for this domain",
+                }
+            snapshot_id, snapshot_revision, stored_revision, stored_token = active
+            pages = self._markdown_pages(cursor, domain_id)
+            if pages is None:
+                return {"domain": self.domain, **dict(_MARKDOWN_UNAVAILABLE)}
+            generation = self._markdown_generation(cursor, domain_id)
+            revision = markdown_revision(
+                tuple(
+                    MarkdownPageSnapshot(slug=slug, markdown=markdown)
+                    for _page_id, slug, markdown in pages
+                )
+            )
+            links = _derive_links(
+                pages, self._snapshot_rows(cursor, domain_id, snapshot_id),
+                self.domain,
+            )
+            cursor.execute(
+                "DELETE FROM iwiki.code_graph_wiki_links "
+                "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
+                (self.iwiki_id, domain_id, snapshot_id),
+            )
+            for link in links:
+                cursor.execute(
+                    "INSERT INTO iwiki.code_graph_wiki_links "
+                    "(iwiki_id, domain_id, snapshot_id, relation_id, page_id, "
+                    "selector, provenance) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT DO NOTHING",
+                    (
+                        self.iwiki_id,
+                        domain_id,
+                        snapshot_id,
+                        link["relation_id"],
+                        link["page_id"],
+                        Jsonb(link["selector"]),
+                        Jsonb(link["provenance"]),
+                    ),
+                )
+            cursor.execute(
+                "UPDATE iwiki.code_graph_snapshots "
+                "SET markdown_revision = %s, markdown_generation = %s "
+                "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
+                (
+                    revision,
+                    generation,
+                    self.iwiki_id,
+                    domain_id,
+                    snapshot_id,
+                ),
+            )
+        return {
+            "domain": self.domain,
+            "state": "ready",
+            "snapshot_id": snapshot_id,
+            "snapshot_revision": snapshot_revision,
+            "markdown_revision": revision,
+            "previous_markdown_revision": stored_revision,
+            "stored_markdown_generation": generation,
+            "previous_markdown_generation": stored_token,
+            "wiki_links": len(links),
+            "wiki_links_stale": False,
+        }
+
     def status(self) -> dict[str, object]:
         """Report the active ready snapshot without exposing staged rows."""
         with self._transaction() as cursor:

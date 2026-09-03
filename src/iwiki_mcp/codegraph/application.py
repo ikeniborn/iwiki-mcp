@@ -305,13 +305,15 @@ def create_postgres_publisher(
     settings,
     *,
     lock_timeout_ms: int = 5000,
+    domain: str | None = None,
 ) -> PostgresCodeGraphStore:
-    if binding.primary is None:
+    target = domain or binding.primary
+    if target is None:
         raise CodeGraphApplicationError("primary domain is required")
     return PostgresCodeGraphStore(
         binding.connection_dsn(),
         binding.iwiki_id,
-        binding.primary,
+        target,
         owner_id,
         lock_timeout_ms=lock_timeout_ms,
         session_ttl_seconds=settings.publication_session_ttl_seconds,

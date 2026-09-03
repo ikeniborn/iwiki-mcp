@@ -1947,6 +1947,34 @@ def wiki_code_publish_finalize(session_id: str) -> dict:
 
 @_safe
 @_code_safe
+def wiki_code_refresh_links(domain: str) -> dict:
+    """Re-derive one domain's Wiki links against its active snapshot.
+
+    Parses no source and resolves no symbol. The domain is named explicitly
+    rather than taken from the binding, because this call mutates and a lapsed
+    session binding would otherwise retarget it at another primary.
+    """
+    bind = _resolved_binding()
+    if not _is_postgres(bind):
+        return _unsupported_storage()
+    context = _request_auth_context()
+    if context is None or not context.token_id:
+        return _unsupported_hosted_transport(bind)
+    valid_domain = _validate_domain(domain)
+    scope_error = base.write_scope_error(bind, valid_domain)
+    if scope_error:
+        return scope_error
+    return _codegraph_application.create_postgres_publisher(
+        bind,
+        context.token_id,
+        _hosted_code_graph_settings(),
+        lock_timeout_ms=_CODE_PUBLICATION_LOCK_TIMEOUT_MS,
+        domain=valid_domain,
+    ).refresh_wiki_links()
+
+
+@_safe
+@_code_safe
 def wiki_code_publish_abort(session_id: str) -> dict:
     """Discard one owned staging session without touching the active snapshot."""
     return _code_publication_service(_resolved_binding()).abort_from_mapping(
@@ -5611,6 +5639,7 @@ mcp.tool()(wiki_code_publish_begin)
 mcp.tool()(wiki_code_publish_batch)
 mcp.tool()(wiki_code_publish_finalize)
 mcp.tool()(wiki_code_publish_abort)
+mcp.tool()(wiki_code_refresh_links)
 mcp.tool()(wiki_list_domains)
 mcp.tool()(wiki_list_pages)
 mcp.tool()(wiki_read_page)

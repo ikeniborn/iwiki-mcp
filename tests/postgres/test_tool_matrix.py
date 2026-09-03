@@ -23,6 +23,7 @@ TOOLS = {
     "wiki_code_publish_batch": "supported",
     "wiki_code_publish_finalize": "supported",
     "wiki_code_publish_abort": "supported",
+    "wiki_code_refresh_links": "supported",
     "wiki_list_domains": "supported",
     "wiki_list_pages": "supported",
     "wiki_read_page": "supported",
@@ -171,8 +172,8 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 35
-    assert len(registered) == 35
+    assert len(TOOLS) == 36
+    assert len(registered) == 36
     assert registered == set(TOOLS)
 
 

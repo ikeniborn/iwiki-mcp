@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "wiki_code_status", "wiki_code_index", "wiki_code_search",
     "wiki_code_context", "wiki_code_publish_begin", "wiki_code_publish_batch",
     "wiki_code_publish_finalize", "wiki_code_publish_abort",
+    "wiki_code_refresh_links",
     "wiki_spec_search", "wiki_spec_context", "wiki_spec_resolve",
 }
 
@@ -127,7 +128,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 await session.initialize()
                 listed = (await session.list_tools()).tools
                 tools = {tool.name: tool for tool in listed}
-                assert len(listed) == 35
+                assert len(listed) == 36
                 assert set(tools) == EXPECTED_TOOLS
                 search_schema = tools["wiki_search"].inputSchema
                 assert "mode" not in search_schema.get("required", [])
@@ -148,11 +149,18 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                     "wiki_code_publish_batch",
                     "wiki_code_publish_finalize",
                     "wiki_code_publish_abort",
+                    "wiki_code_refresh_links",
                 }
+                # The refresh names its domain because it mutates; every other
+                # code tool takes its target from the binding.
                 assert all(
                     "domain" not in tool.inputSchema.get("properties", {})
-                    for tool in code_tools.values()
+                    for name, tool in code_tools.items()
+                    if name != "wiki_code_refresh_links"
                 )
+                assert set(
+                    tools["wiki_code_refresh_links"].inputSchema["properties"]
+                ) == {"domain"}
                 context_schema = tools["wiki_code_context"].inputSchema
                 context_properties = context_schema["properties"]
                 assert "seeds" in context_properties
