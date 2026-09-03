@@ -1,3 +1,62 @@
+---
+review:
+  intent_hash: 3bf59b121a60ac41
+  last_run: 2026-09-03
+  phases:
+    structure: { status: passed }
+    completeness: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+    alignment: { status: passed }
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: Desired Outcomes
+      section_hash: 8487550d70860331
+      fragment: "The operation is available on the hosted transport"
+      text: >-
+        The fifth outcome names an availability rather than an observed
+        result. The other four state what is seen after the call; this one
+        states that a capability exists.
+      fix: >-
+        Phrase it as the observation: on a hosted server with no checkout,
+        one call clears the flag and the answer reports it.
+      verdict: accepted
+      verdict_at: 2026-09-03
+    - id: F-002
+      phase: alignment
+      severity: WARNING
+      section: Constraints
+      section_hash: 2dccd9f357b2b10e
+      fragment: "Derivation reuses the existing `_derive_links`"
+      text: >-
+        `concept/code-graph-wiki-linking` states that PostgreSQL derives
+        `code_graph_wiki_links` inside the same transaction that activates
+        the snapshot. A standalone refresh derives them outside any
+        activation, which extends that documented decision rather than
+        contradicting it, but leaves the page inaccurate once shipped.
+      fix: >-
+        Update `concept/code-graph-wiki-linking` in the same change, so the
+        page names activation and refresh as the two derivation paths.
+      verdict: accepted
+      verdict_at: 2026-09-03
+    - id: F-003
+      phase: consistency
+      severity: INFO
+      section: Health Metrics
+      section_hash: 4c7e6ea634aa4155
+      fragment: "Publication remains the only writer of graph rows"
+      text: >-
+        Read alone the metric contradicts the feature, since the refresh
+        writes `code_graph_wiki_links`. The carve-out that follows resolves
+        it, but the metric's opening clause is broader than what it means.
+      fix: >-
+        Narrow the opening clause to the snapshot tables it actually
+        protects.
+      verdict: accepted
+      verdict_at: 2026-09-03
+---
 # Intent: wiki-links-staleness-precision
 
 **Date:** 2026-09-03
