@@ -317,6 +317,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
     from iwiki_mcp.postgres.migrations import (
         rollback_v6_compatibility,
         rollback_v7_compatibility,
+        rollback_v8_compatibility,
         rollback_v5_compatibility,
         run_migrations,
     )
@@ -354,6 +355,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
                 write_domains=["docs"],
                 runtime=name,
             )
+        rollback_v8_compatibility(settings, confirm=True)
         rollback_v7_compatibility(settings, confirm=True)
         rollback_v6_compatibility(settings, confirm=True)
         with psycopg.connect(clean_postgres) as connection:
@@ -448,7 +450,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
                 assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4]
 
         reapplied = run_migrations(settings)
-        assert reapplied.applied_versions == (5, 6, 7)
+        assert reapplied.applied_versions == (5, 6, 7, 8)
     finally:
         with psycopg.connect(clean_postgres, autocommit=True) as connection:
             with connection.cursor() as cursor:

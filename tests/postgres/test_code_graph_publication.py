@@ -457,3 +457,59 @@ def test_refresh_advances_the_revision_when_no_link_changed(pg_graph):
     assert pg_graph.wiki_links() == before
     assert result["markdown_revision"] != result["previous_markdown_revision"]
     assert pg_graph.reader_status()["wiki_links_stale"] is False
+
+
+def test_a_page_pinned_by_a_superseded_snapshot_still_deletes(pg_graph):
+    """The derived links of an old snapshot must not outrank the page.
+
+    Publishing twice leaves the first snapshot superseded but retained, and
+    nothing ever removes it, so its `DOCUMENTED_BY` rows used to refuse the
+    delete for the rest of the page's life.
+    """
+    store = pg_graph.markdown_store()
+    store.write_page(
+        pg_graph.domain, "architecture", _selector_page("pkg.module_0.run")
+    )
+    pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.finalize(pg_graph.complete_session())
+    assert pg_graph.wiki_links()
+    before_rows = pg_graph.active_rows()
+    before_active = pg_graph.reader_status()["snapshot_id"]
+
+    page = store.read_page(pg_graph.domain, "architecture")
+    result = store.delete_page(
+        pg_graph.domain, "architecture", page["revision"]
+    )
+
+    assert "error" not in result
+    assert store.read_page(pg_graph.domain, "architecture") is None
+    assert pg_graph.wiki_links() == []
+    assert pg_graph.active_rows() == before_rows
+    assert pg_graph.reader_status()["snapshot_id"] == before_active
+
+
+def test_deleting_a_page_leaves_the_links_of_other_pages(pg_graph):
+    """The cascade is scoped to the deleted page, not to the relation.
+
+    Both pages select the one symbol the fixture graph gives a relation, so
+    each holds its own row for `relation-0` and the surviving page must keep
+    its row when the other page goes.
+    """
+    store = pg_graph.markdown_store()
+    store.write_page(
+        pg_graph.domain, "architecture", _selector_page("pkg.module_0.run")
+    )
+    store.write_page(
+        pg_graph.domain, "guide", _selector_page("pkg.module_0.run")
+    )
+    pg_graph.finalize(pg_graph.complete_session())
+    before = pg_graph.wiki_links()
+    assert len(before) == 2
+    before_rows = pg_graph.active_rows()
+
+    page = store.read_page(pg_graph.domain, "architecture")
+    store.delete_page(pg_graph.domain, "architecture", page["revision"])
+
+    assert len(pg_graph.wiki_links()) == 1
+    assert pg_graph.active_rows() == before_rows
+    assert store.read_page(pg_graph.domain, "guide") is not None

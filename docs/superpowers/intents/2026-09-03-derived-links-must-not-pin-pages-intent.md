@@ -1,3 +1,48 @@
+---
+review:
+  intent_hash: dbaabd8b8f38782a
+  last_run: 2026-09-03
+  phases:
+    structure: { status: passed }
+    completeness: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+    alignment: { status: passed }
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: Stop Rules
+      section_hash: 234bd79bd0f42eaf
+      fragment: "the cost of rollout must be decidable rather than judged"
+      text: >-
+        The halt condition names no bound, so it cannot be decided
+        mechanically. Whether a lock is unbounded is a judgement at
+        implementation time rather than a criterion the rule states.
+      fix: >-
+        Either name the acceptable lock class, or state the observation that
+        settles it: the constraint is added without a table rewrite and
+        validates in one pass over the disposable database.
+      verdict: fixed
+      verdict_at: 2026-09-03
+    - id: F-002
+      phase: alignment
+      severity: INFO
+      section: Objective
+      section_hash: 1a6baadd7cf81fb7
+      fragment: "lose their derived links through rebuilding or schema cascades"
+      text: >-
+        `concept/code-graph-wiki-linking` states the cascade as present fact.
+        It is false today and stays false in any deployment until the schema
+        owner runs the migration, so the page describes an intended state
+        rather than the running one.
+      fix: >-
+        Say on that page that the cascade is the schema's rule and that a
+        deployment gains it with the migration, so a reader on an unmigrated
+        database is not misled.
+      verdict: accepted
+      verdict_at: 2026-09-03
+---
 # Intent: derived-links-must-not-pin-pages
 
 **Date:** 2026-09-03
@@ -123,9 +168,10 @@ a pinned page.
 ## Stop Rules
 
 - Halt if: the `ALTER` cannot be expressed without touching another constraint.
-- Halt if: recreating the key requires a table rewrite, or takes a lock on `iwiki.pages` of
-  unbounded duration. This runs over production data and the cost of rollout must be
-  predictable.
+- Halt if: recreating the key requires a table rewrite. The observation that settles it is
+  that on the disposable database the constraint is added and validated in one pass, with
+  `pg_constraint.convalidated` reading true immediately after the migration returns. This
+  runs over production data, so the cost of rollout must be decidable rather than judged.
 - Halt if: a cascade on this key could remove graph rows beyond the deleted page's links.
 - Escalate if: the disposable database holds rows the new constraint rejects, or validation
   does not complete.

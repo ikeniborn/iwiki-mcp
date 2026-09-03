@@ -165,6 +165,15 @@ Application Compose and runtime create no PostgreSQL service, database, or schem
 objects and run no migrations. Runtime calls `require_schema_version`, validates its
 least-privilege principal, and refuses startup on a mismatch.
 
+The runtime pins one exact schema version, currently 8. An image is therefore not
+deployable against a database the operator has not migrated to that version, and an older
+image is not deployable against a newer database. Version 8 releases the foreign key that
+let derived code-graph links block deletion of the Markdown page they were derived from:
+before it, a page that carried a `code` selector at publication time could never be
+deleted again. Stepping back is `rollback_v8_compatibility`, which restores version 7 and
+with it that behaviour; it exists to reach the version an older runtime pins, not to
+repair anything.
+
 Create a separate admin configuration by copying `server.toml`, then replace only
 `storage.user` with the administration-only schema-owner/migrator role. Give a dedicated
 operator group read access as `root:<admin-group> 0640`; the operator running the CLI

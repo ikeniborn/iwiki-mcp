@@ -157,8 +157,8 @@ def test_graph_migration_creates_v5_objects_and_composite_integrity(clean_postgr
     from iwiki_mcp.postgres.migrations import run_migrations
 
     result = run_migrations(_settings(clean_postgres))
-    assert result.schema_version == 7
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7)
+    assert result.schema_version == 8
+    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8)
     assert {
         "code_graph_domain_state",
         "code_graph_publication_sessions",
@@ -196,6 +196,26 @@ def test_graph_migration_creates_v5_objects_and_composite_integrity(clean_postgr
                 "code_graph_wiki_links_page_fk",
                 "code_graph_domain_state_active_ready_fk",
             } <= constraints
+            # The delete rule, not just the name: derived links must not pin
+            # the authored page, while the guards inside the graph must.
+            cursor.execute(
+                "SELECT conname, confdeltype FROM pg_constraint c "
+                "JOIN pg_class t ON t.oid = c.conrelid "
+                "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                "WHERE n.nspname = 'iwiki' AND c.conname IN ("
+                "'code_graph_wiki_links_page_fk', "
+                "'code_graph_domain_state_active_ready_fk', "
+                "'code_graph_relations_target_symbol_fk')"
+            )
+            delete_rules = dict(cursor.fetchall())
+            assert delete_rules["code_graph_wiki_links_page_fk"] == "c"
+            assert delete_rules["code_graph_domain_state_active_ready_fk"] == "a"
+            assert delete_rules["code_graph_relations_target_symbol_fk"] == "a"
+            cursor.execute(
+                "SELECT convalidated FROM pg_constraint "
+                "WHERE conname = 'code_graph_wiki_links_page_fk'"
+            )
+            assert cursor.fetchone()[0] is True
 
 
 def test_active_pointer_rejects_staging_and_cross_domain_snapshot(clean_postgres):
