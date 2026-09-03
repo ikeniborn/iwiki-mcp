@@ -262,6 +262,8 @@ def test_config_defaults_the_context_output_and_log_budgets(monkeypatch):
     config = BotConfig.load()
 
     assert config.context_budget_chars == 48000
+    assert config.context_window_tokens == 32768
+    assert config.search_k == 5
     assert config.max_output_tokens == 1024
     assert config.inference_timeout_seconds == 180
     assert config.log_level == "INFO"
@@ -270,6 +272,8 @@ def test_config_defaults_the_context_output_and_log_budgets(monkeypatch):
 def test_config_reads_the_context_output_and_log_budgets(monkeypatch):
     configure(monkeypatch)
     monkeypatch.setenv("IWIKI_BOT_CONTEXT_BUDGET_CHARS", "12000")
+    monkeypatch.setenv("IWIKI_BOT_CONTEXT_WINDOW_TOKENS", "8192")
+    monkeypatch.setenv("IWIKI_BOT_SEARCH_K", "8")
     monkeypatch.setenv("IWIKI_BOT_MAX_OUTPUT_TOKENS", "512")
     monkeypatch.setenv("IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS", "45")
     monkeypatch.setenv("IWIKI_BOT_LOG_LEVEL", "debug")
@@ -277,6 +281,8 @@ def test_config_reads_the_context_output_and_log_budgets(monkeypatch):
     config = BotConfig.load()
 
     assert config.context_budget_chars == 12000
+    assert config.context_window_tokens == 8192
+    assert config.search_k == 8
     assert config.max_output_tokens == 512
     assert config.inference_timeout_seconds == 45
     assert config.log_level == "DEBUG"

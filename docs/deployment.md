@@ -104,6 +104,7 @@ IWIKI_BOT_TRANSCRIPTION_MODEL=<transcription-model-id>
 IWIKI_BOT_CONFIRMATION_TTL_SECONDS=<positive-seconds>
 IWIKI_BOT_CONTEXT_BUDGET_CHARS=<positive-characters>
 IWIKI_BOT_CONTEXT_WINDOW_TOKENS=<positive-tokens>
+IWIKI_BOT_SEARCH_K=<positive-count>
 IWIKI_BOT_MAX_OUTPUT_TOKENS=<positive-tokens>
 IWIKI_BOT_INFERENCE_TIMEOUT_SECONDS=<positive-seconds>
 IWIKI_BOT_LOG_LEVEL=<log-level>
