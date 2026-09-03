@@ -709,6 +709,48 @@ async def test_complete_with_tools_rejects_empty_message():
     await http.aclose()
 
 
+@pytest.mark.asyncio
+async def test_complete_with_tools_demotes_on_provider_tools_refusal():
+    def handler(request):
+        return httpx.Response(400, json={"error": {
+            "message": "unknown parameter: tools",
+            "type": "invalid_request_error",
+        }})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+    client.tools_supported = True
+
+    with pytest.raises(InferenceError, match="tools_unsupported"):
+        await client.complete_with_tools([{"role": "user", "content": "q"}], [])
+
+    assert client.tools_supported is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_overflow_still_raises_context_overflow():
+    def handler(request):
+        return httpx.Response(400, json={"error": {
+            "message": "This model's maximum context length is 4096 tokens",
+            "code": "context_length_exceeded",
+        }})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+    client.tools_supported = True
+
+    with pytest.raises(InferenceError, match="context_overflow"):
+        await client.complete_with_tools([{"role": "user", "content": "q"}], [])
+
+    assert client.tools_supported is True
+    await http.aclose()
+
+
 def _models_ok():
     return httpx.Response(
         200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
