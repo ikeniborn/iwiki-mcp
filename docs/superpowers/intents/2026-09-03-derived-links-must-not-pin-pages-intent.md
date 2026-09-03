@@ -75,7 +75,7 @@ result_check:
       verdict: accepted
       verdict_at: 2026-09-03
 review:
-  intent_hash: dbaabd8b8f38782a
+  intent_hash: a42470fc324335c0
   last_run: 2026-09-03
   phases:
     structure: { status: passed }
@@ -88,7 +88,7 @@ review:
       phase: clarity
       severity: WARNING
       section: Stop Rules
-      section_hash: 234bd79bd0f42eaf
+      section_hash: 4016cd3f4c4611c6
       fragment: "the cost of rollout must be decidable rather than judged"
       text: >-
         The halt condition names no bound, so it cannot be decided
@@ -104,7 +104,7 @@ review:
       phase: alignment
       severity: INFO
       section: Objective
-      section_hash: 1a6baadd7cf81fb7
+      section_hash: 47c46625dfbc2ab8
       fragment: "lose their derived links through rebuilding or schema cascades"
       text: >-
         `concept/code-graph-wiki-linking` states the cascade as present fact.
@@ -115,6 +115,20 @@ review:
         Say on that page that the cascade is the schema's rule and that a
         deployment gains it with the migration, so a reader on an unmigrated
         database is not misled.
+      verdict: accepted
+      verdict_at: 2026-09-03
+    - id: F-003
+      phase: clarity
+      severity: INFO
+      section: Desired Outcomes
+      section_hash: 0d924c140cf6884c
+      fragment: "older than the configured retention"
+      text: >-
+        The retention is named as configured but no key is named, so the
+        outcome reads against a value the document does not identify.
+      fix: >-
+        Name the setting once the implementation adds it, or leave it as the
+        deliberate implementation detail it is.
       verdict: accepted
       verdict_at: 2026-09-03
 ---
@@ -143,6 +157,15 @@ undeletable set, and nothing repairs it after the fact: neither clearing the sel
 republishing, nor the link refresh delivered in `wiki-links-staleness-precision` releases
 a pinned page.
 
+The same discovery found what makes the consequence permanent. `DELETE FROM
+iwiki.code_graph_snapshots` appears once in the package, in `_discard_snapshot`, and only
+for `state = 'staging'`. A superseded ready snapshot is never removed, so snapshots and
+all their rows accumulate without bound, and every one of them keeps holding the pages it
+referenced. No read path joins a superseded snapshot — every query goes through
+`code_graph_domain_state.active_snapshot_id` — so retaining them indefinitely buys nothing
+programmatic. This intent covers both halves: the cascade releases the page, and bounded
+pruning stops the pile that made the pin permanent.
+
 ## Desired Outcomes
 
 - A page that carried a `code` selector at publication time deletes through
@@ -158,6 +181,9 @@ a pinned page.
   migration ran.
 - The repair arrives through the ordinary migration path the schema owner already runs. No
   separate data-repair operation is required of anyone.
+- A superseded ready snapshot no longer accumulates without bound. After a publication older
+  than the configured retention, the snapshot and its rows are gone, while the active
+  snapshot and the most recent supersessions inside the retention window are still there.
 
 ## Health Metrics
 
@@ -173,6 +199,9 @@ a pinned page.
   widened.
 - The snapshot contract is unchanged: publication writes what it wrote, and
   `snapshot_revision`, `markdown_revision` and the counts are unaffected.
+- Pruning never touches the active snapshot, and never removes a snapshot inside the
+  retention window. A publication that fails or aborts leaves the previously active snapshot
+  in place.
 - The existing runs stay green: 3050 in the default configuration and 530 in
   `tests/postgres` against a disposable database.
 
@@ -221,7 +250,9 @@ a pinned page.
 - No data-repair step ships with the fix: no manual `DELETE` is part of it.
 - Publication and refresh semantics are unchanged — neither what activation writes nor what
   `wiki_code_refresh_links` rewrites.
-- Retention of superseded snapshots is out of scope: nothing here deletes a ready snapshot.
+- A superseded ready snapshot is pruned by age only, never the active one, and never more
+  than the configured limit in a single call. Pruning mirrors the existing staging cleanup
+  rather than inventing a second retention mechanism.
 
 ## Autonomy Zones
 
@@ -248,6 +279,7 @@ a pinned page.
   `pg_constraint.convalidated` reading true immediately after the migration returns. This
   runs over production data, so the cost of rollout must be decidable rather than judged.
 - Halt if: a cascade on this key could remove graph rows beyond the deleted page's links.
+- Halt if: pruning could remove the active snapshot, or a snapshot a read path still joins.
 - Escalate if: the disposable database holds rows the new constraint rejects, or validation
   does not complete.
 - Escalate if: re-running the migration against an already-migrated schema is not idempotent.
@@ -256,4 +288,6 @@ a pinned page.
   through the real store succeeds; `code_graph_wiki_links` holds no row for it in any
   snapshot; the file, symbol and relation counts and the active snapshot pointer are
   unchanged; and `pg_constraint.confdeltype` for the key reads `c` on both a freshly migrated
-  database and an upgraded one.
+  database and an upgraded one. And, on the same database, a snapshot superseded longer ago
+  than the retention is gone after the next publication while the active one and a snapshot
+  superseded inside the window remain.

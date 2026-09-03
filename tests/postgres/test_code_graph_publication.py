@@ -513,3 +513,52 @@ def test_deleting_a_page_leaves_the_links_of_other_pages(pg_graph):
     assert len(pg_graph.wiki_links()) == 1
     assert pg_graph.active_rows() == before_rows
     assert store.read_page(pg_graph.domain, "guide") is not None
+
+
+def _snapshot_states(graph):
+    return graph._query(
+        "SELECT snapshot_id, state FROM iwiki.code_graph_snapshots "
+        "WHERE iwiki_id = %s AND domain_id = %s ORDER BY ready_at",
+        (graph.iwiki_id, graph._domain_id()),
+        admin=True,
+    )
+
+
+def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
+    """Nothing reads a superseded snapshot, so keeping every one is a leak."""
+    pg_graph.finalize(pg_graph.complete_session())
+    first = pg_graph.reader_status()["snapshot_id"]
+    pg_graph.finalize(pg_graph.complete_session())
+    second = pg_graph.reader_status()["snapshot_id"]
+    assert {row[0] for row in _snapshot_states(pg_graph)} == {first, second}
+
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+    pg_graph.finalize(pg_graph.complete_session())
+    third = pg_graph.reader_status()["snapshot_id"]
+
+    remaining = {row[0] for row in _snapshot_states(pg_graph)}
+    assert first not in remaining
+    assert third in remaining
+    assert pg_graph.reader_status()["snapshot_id"] == third
+
+
+def test_pruning_never_removes_the_active_snapshot(pg_graph):
+    pg_graph.finalize(pg_graph.complete_session())
+    active = pg_graph.reader_status()["snapshot_id"]
+
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds * 10)
+    pg_graph.store.begin(pg_graph.header)
+
+    remaining = {row[0] for row in _snapshot_states(pg_graph)}
+    assert active in remaining
+    assert pg_graph.reader_status()["snapshot_id"] == active
+
+
+def test_a_recent_supersession_survives_inside_the_window(pg_graph):
+    pg_graph.finalize(pg_graph.complete_session())
+    first = pg_graph.reader_status()["snapshot_id"]
+    pg_graph.finalize(pg_graph.complete_session())
+
+    pg_graph.store.begin(pg_graph.header)
+
+    assert first in {row[0] for row in _snapshot_states(pg_graph)}
