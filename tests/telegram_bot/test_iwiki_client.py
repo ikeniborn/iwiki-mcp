@@ -555,3 +555,82 @@ async def test_search_sends_the_configured_result_count():
     assert calls == [
         ("wiki_search", {"domains": ["team"], "query": "question", "k": 8})
     ]
+
+
+@pytest.mark.asyncio
+async def test_bind_selects_the_scope_the_token_reports():
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append((name, arguments))
+        if name == "wiki_status":
+            return {"domains": ["team", "public"], "write": ["team"]}
+        return {}
+
+    await RemoteIwikiClient(call_tool).bind()
+
+    assert calls == [
+        ("wiki_status", {}),
+        ("wiki_bind", {"read": ["team", "public"], "write": ["team"]}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_defaulted_binding_is_rebound_once_and_the_search_repeated():
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append(name)
+        if name == "wiki_status":
+            return {"domains": ["team"], "write": ["team"]}
+        if name == "wiki_search":
+            return {"results": [], "binding_source": "token_default"}
+        return {}
+
+    await RemoteIwikiClient(call_tool).search("team", "question")
+
+    assert calls == [
+        "wiki_search",
+        "wiki_status",
+        "wiki_bind",
+        "wiki_search",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_session_binding_repeats_nothing():
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append(name)
+        return {"results": [], "binding_source": "session"}
+
+    await RemoteIwikiClient(call_tool).search("team", "question")
+
+    assert calls == ["wiki_search"]
+
+
+@pytest.mark.asyncio
+async def test_search_never_requests_a_write_intent():
+    calls = []
+
+    async def call_tool(name, arguments):
+        calls.append((name, arguments))
+        return {"results": []}
+
+    await RemoteIwikiClient(call_tool).search("team", "question")
+
+    assert "intent" not in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_the_write_scope_is_learned_from_the_reported_status():
+    async def call_tool(name, arguments):
+        return {"domains": ["team", "public"], "write": ["team"]}
+
+    client = RemoteIwikiClient(call_tool)
+
+    assert client.writable("team") is True
+    await client.list_domains()
+    assert client.writable("team") is True
+    assert client.writable("public") is False

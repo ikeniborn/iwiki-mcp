@@ -428,6 +428,9 @@ class ConversationService:
             return await self._ask_for_domain(
                 "Select a domain, then send the command again."
             )
+        if not self._remote.writable(domain):
+            # Refuse before drafting: the mutation would be refused anyway.
+            return BotReply("Selected domain is read-only.")
         return domain
 
     async def _draft_context(self, domain: str, request: str) -> str:

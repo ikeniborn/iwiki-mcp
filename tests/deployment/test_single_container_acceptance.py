@@ -263,6 +263,12 @@ async def test_recreated_bot_service_has_no_confirmation_or_selection_state(tmp_
     preview_marker = f"preview-{secrets.token_urlsafe(24)}"
 
     class Remote:
+        async def bind(self):
+            await self.list_domains()
+
+        def writable(self, domain):
+            return True
+
         async def list_domains(self):
             return ["docs"]
 
