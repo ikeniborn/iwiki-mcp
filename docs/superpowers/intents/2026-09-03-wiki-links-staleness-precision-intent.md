@@ -1,4 +1,70 @@
 ---
+result_check:
+  verdict: OK
+  intent_hash: 3bf59b121a60ac41
+  last_run: 2026-09-03
+  reconciliation:
+    base: 0ec24ab
+    outcomes:
+      - id: DO-1
+        status: DONE
+        evidence: >-
+          `server.py` registers `wiki_code_refresh_links`; the store method
+          derives without parsing or resolving;
+          `test_refresh_rederives_wiki_links_without_touching_the_graph`
+          observes `wiki_links_stale` false after one call.
+      - id: DO-2
+        status: PARTIAL
+        evidence: >-
+          Suppression in `codegraph.py` keys on the same flag the tests assert,
+          so the outcome follows, but no test calls
+          `wiki_code_context(include_wiki=true)` after a refresh.
+      - id: DO-3
+        status: DONE
+        evidence: >-
+          The same test asserts an unchanged `snapshot_revision` and identical
+          file, symbol and relation counts. `graph_payload_revision` is
+          untouched by construction but not asserted.
+      - id: DO-4
+        status: DONE
+        evidence: >-
+          `test_refresh_matches_what_a_full_publication_derives` compares the
+          snapshot-scoped link rows of a refresh against a republication.
+      - id: DO-5
+        status: PARTIAL
+        evidence: >-
+          Hosted-only by construction, since the handler requires an
+          authenticated token and refuses non-PostgreSQL storage, and the tool
+          matrix lists it supported. No test exercises the refusals directly.
+    excess:
+      - path: CLAUDE.md
+        note: >-
+          The disposable-PostgreSQL testing rule, authorized by the user in the
+          same exchange but accounted for by no Desired Outcome.
+      - path: pyproject.toml, src/iwiki_mcp/__init__.py, tests/test_package.py, uv.lock
+        note: The version bump this repository requires of every change.
+  findings:
+    - id: R-001
+      severity: CRITICAL
+      text: >-
+        New observable behavior in a `strict` domain with no Given-When-Then
+        scenario covering it.
+      verdict: fixed
+      verdict_at: 2026-09-03
+      fix: >-
+        Two scenarios authored in `concept/code-graph-wiki-linking` under a new
+        `Specification` section: the refresh against an active snapshot and the
+        refusal without one.
+    - id: R-002
+      severity: WARNING
+      text: DO-2 has no test calling wiki_code_context after a refresh.
+      verdict: accepted
+      verdict_at: 2026-09-03
+    - id: R-003
+      severity: WARNING
+      text: DO-5 has no test for the hosted-transport and storage refusals.
+      verdict: accepted
+      verdict_at: 2026-09-03
 review:
   intent_hash: 3bf59b121a60ac41
   last_run: 2026-09-03
