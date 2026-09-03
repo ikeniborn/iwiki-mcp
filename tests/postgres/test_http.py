@@ -589,7 +589,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
 
     assert runtime.pool.min_size == 1
     assert runtime.pool.max_size == 2
-    assert runtime.app.app.routes[0].app.session_manager.session_idle_timeout == 1800
+    assert runtime.app.app.routes[0].app.session_manager.session_idle_timeout == 86400
     with runtime.pool.connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute("SHOW statement_timeout")
