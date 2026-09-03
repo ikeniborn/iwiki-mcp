@@ -3,6 +3,7 @@
 import json
 
 from .context import ContextBudget, Section, select_context
+from .inference import InferenceError
 from .iwiki import RemoteIwikiError
 
 _MAX_TOOL_CALLS = 6
@@ -100,6 +101,7 @@ class AgentLoop:
         calls_used = 0
         seen: set[tuple[str, str, int]] = set()
         forced = False
+        forced_retries = 0
         while True:
             over_budget = _transcript_chars(messages) >= limit_chars
             if not forced and (calls_used >= _MAX_TOOL_CALLS or over_budget):
@@ -117,9 +119,14 @@ class AgentLoop:
                 # provider defect; treat any content as the answer.
                 if response.content is not None:
                     return response.content
+                if forced_retries >= 1:
+                    raise InferenceError("invalid_inference_response")
+                forced_retries += 1
                 messages.append({"role": "user", "content": _FORCE_ANSWER})
                 continue
             for call in response.tool_calls:
+                if calls_used >= _MAX_TOOL_CALLS:
+                    break
                 calls_used += 1
                 result = await self._execute(
                     domain, question, call, seen,

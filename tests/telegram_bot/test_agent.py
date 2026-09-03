@@ -4,7 +4,7 @@ import pytest
 
 from iwiki_mcp.telegram_bot.agent import AgentLoop, _MAX_TOOL_CALLS
 from iwiki_mcp.telegram_bot.context import ContextBudget
-from iwiki_mcp.telegram_bot.inference import ToolCall, ToolResponse
+from iwiki_mcp.telegram_bot.inference import InferenceError, ToolCall, ToolResponse
 
 
 class FakeRemote:
@@ -95,3 +95,38 @@ async def test_progress_reports_iterations():
 
     assert any(stage.startswith("Searching wiki (1/") for stage in stages)
     assert "Generating answer" in stages
+
+
+class StubbornInference(ScriptedInference):
+    """Ignores tool_choice and always returns tool_calls."""
+
+    async def complete_with_tools(self, messages, tools, tool_choice="auto"):
+        self.requests.append((
+            [dict(message) for message in messages], tool_choice
+        ))
+        return ToolResponse(None, (_call("search_wiki", {"query": "x"}),))
+
+
+@pytest.mark.asyncio
+async def test_forced_loop_terminates_when_provider_ignores_tool_choice():
+    burst = [None] * (_MAX_TOOL_CALLS + 3)  # responses come from override
+    loop = AgentLoop(FakeRemote(), StubbornInference(burst), ContextBudget())
+    with pytest.raises(InferenceError, match="invalid_inference_response"):
+        await loop.run("team", "q")
+
+
+@pytest.mark.asyncio
+async def test_batched_tool_calls_never_exceed_limit():
+    calls = tuple(
+        _call("search_wiki", {"query": f"q{i}"}, f"c{i}") for i in range(4)
+    )
+    inference = ScriptedInference([
+        ToolResponse(None, calls),
+        ToolResponse(None, calls),
+        ToolResponse("Done.", ()),
+    ])
+    remote = FakeRemote()
+    loop = AgentLoop(remote, inference, ContextBudget())
+    await loop.run("team", "q")
+    searches = [c for c in remote.calls if c[0] == "search"]
+    assert len(searches) <= _MAX_TOOL_CALLS
