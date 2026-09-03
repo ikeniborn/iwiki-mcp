@@ -1,5 +1,5 @@
-read = ["iwiki-mcp", "icodex", "iclaude", "okf","framework","minipc"]
-write = ["iwiki-mcp"]
+read = ["iwiki-mcp", "icodex", "iclaude", "okf","framework","minipc","aioperator-dev-logical-service-platform-versioning"]
+write = ["iwiki-mcp","aioperator-dev-logical-service-platform-versioning"]
 primary = "iwiki-mcp"
 
 # GWT specification policy for every visible local domain.

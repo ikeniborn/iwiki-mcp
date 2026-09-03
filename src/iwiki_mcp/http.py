@@ -49,6 +49,9 @@ _WRITE_DOMAIN_TOOLS = {
     "wiki_move_section",
     "wiki_index",
     "wiki_spec_resolve",
+    # Names its own domain and mutates it, so it authorizes like a Markdown
+    # write rather than like the domain-free code reads.
+    "wiki_code_refresh_links",
 }
 _CODE_PUBLISH_TOOLS = {
     "wiki_code_publish_begin",

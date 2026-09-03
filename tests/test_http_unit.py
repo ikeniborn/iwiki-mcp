@@ -479,3 +479,47 @@ async def test_middleware_reports_a_primary_substituted_by_the_write_scope():
         "requested": "private",
         "primary": "docs",
     }
+
+
+def _refresh_call(domain):
+    return {
+        "method": "tools/call",
+        "params": {
+            "name": "wiki_code_refresh_links",
+            "arguments": {"domain": domain},
+        },
+    }
+
+
+def test_refresh_links_authorizes_the_domain_it_names():
+    """The transport checks the named domain, like every other write tool.
+
+    It shipped in none of the authorization sets, so `_authorize_tool` matched
+    no branch and authorized nothing; only the handler's own binding check
+    stood between a caller and another domain's links.
+    """
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    context = AuthContext("wiki-a", "token-a", ("docs", "other"), ("docs",), "docs")
+
+    http._authorize_tool(context, _refresh_call("docs"))
+
+    with pytest.raises(AccessError) as error:
+        http._authorize_tool(context, _refresh_call("other"))
+    assert error.value.status_code == 403
+
+
+def test_refresh_links_without_a_domain_falls_back_to_the_primary():
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AccessError, AuthContext
+
+    readable = AuthContext("wiki-a", "token-a", ("docs",), (), "docs")
+    call = {
+        "method": "tools/call",
+        "params": {"name": "wiki_code_refresh_links", "arguments": {}},
+    }
+
+    with pytest.raises(AccessError) as error:
+        http._authorize_tool(readable, call)
+    assert error.value.status_code == 403
