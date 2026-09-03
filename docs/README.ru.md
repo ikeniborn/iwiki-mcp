@@ -380,7 +380,7 @@ iwiki-mcp schema rollback-v5-compat --confirm --json
 | Поддерживаются | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_insert_section`, `wiki_delete_section`, `wiki_move_section`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
 | Только hosted PostgreSQL | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
 | Поддерживается code graph | `wiki_code_status`, `wiki_code_search`, `wiki_code_context` |
-| Только hosted PostgreSQL | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort` |
+| Только hosted PostgreSQL | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort`, `wiki_code_refresh_links` |
 | Только локальный checkout | `wiki_code_index` |
 | Только Git | `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
 
@@ -661,6 +661,16 @@ optional `IWIKI_RERANK_MODEL`, когда он настроен).
 расширить. Сессия принадлежит создавшей её личности: другой токен с правом записи в тот
 же домен не может дополнить, прервать или завершить её, а процесс-замена обязан открыть
 новую сессию.
+
+`wiki_code_refresh_links(domain)` заново выводит `DOCUMENTED_BY`-ссылки активного
+снапшота из текущего Markdown домена. Он не разбирает исходники и не резолвит символы,
+поэтому снимает `wiki_links_stale` за время, пропорциональное числу страниц, а не
+пересобирая граф. Сам снапшот не меняется: `snapshot_revision`, `graph_payload_revision`
+и счётчики файлов, символов и связей после вызова те же, меняются только
+`code_graph_wiki_links` и сохранённая Markdown-ревизия. В отличие от вызовов публикации
+он принимает домен явно, потому что мутирует, а протухший биндинг сессии иначе увёл бы
+его в другой primary; токен обязан иметь право записи в этот домен. Без активного
+готового снапшота он отвечает `missing_snapshot`, а не запускает сборку.
 
 Батчи несут только строки — никогда файл базы, текст исходников, абсолютный путь
 checkout, учётные данные или сформированные издателем wiki-ссылки. Цель пересчитывает

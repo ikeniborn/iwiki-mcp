@@ -695,11 +695,19 @@ async def test_fastmcp_registry_has_exact_code_tools():
         "wiki_code_publish_batch",
         "wiki_code_publish_finalize",
         "wiki_code_publish_abort",
+        "wiki_code_refresh_links",
     }
+    # Reads and publication sessions take their domain from the binding. The
+    # refresh names its own because it mutates, so a lapsed binding cannot
+    # retarget it at another primary.
     assert all(
         "domain" not in tool.inputSchema.get("properties", {})
-        for tool in code_tools.values()
+        for name, tool in code_tools.items()
+        if name != "wiki_code_refresh_links"
     )
+    assert set(
+        tools["wiki_code_refresh_links"].inputSchema["properties"]
+    ) == {"domain"}
     assert set(tools["wiki_code_status"].inputSchema.get("properties", {})) == set()
     assert set(tools["wiki_code_index"].inputSchema["properties"]) == {
         "force", "languages",

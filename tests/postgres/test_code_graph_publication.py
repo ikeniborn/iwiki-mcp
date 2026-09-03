@@ -364,3 +364,96 @@ def test_selector_update_republishes_wiki_context(
     assert context["state"] == "ready"
     assert context["wiki_links_stale"] is False
     assert page_slug in {page["page_id"] for page in context["wiki_pages"]}
+
+
+def _active_wiki_links(graph):
+    """Read the links of the snapshot that is active right now.
+
+    The fixture accessor spans every snapshot of the domain, and a
+    republication activates a new one beside the old, so a refresh and a
+    publication are only comparable when both are read snapshot-scoped.
+    """
+    domain_id = graph._domain_id()
+    active = graph._query(
+        "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
+        "WHERE iwiki_id = %s AND domain_id = %s",
+        (graph.iwiki_id, domain_id),
+        admin=True,
+    )
+    return graph._query(
+        "SELECT relation_id, selector FROM iwiki.code_graph_wiki_links "
+        "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
+        "ORDER BY relation_id",
+        (graph.iwiki_id, domain_id, active[0][0]),
+        admin=True,
+    )
+
+
+def test_refresh_rederives_wiki_links_without_touching_the_graph(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    pg_graph.finalize(pg_graph.complete_session())
+    before_status = pg_graph.reader_status()
+    before_rows = pg_graph.active_rows()
+
+    pg_graph.write_markdown_page("guide", _selector_page("pkg.module_1.run"))
+    assert pg_graph.reader_status()["wiki_links_stale"] is True
+
+    result = pg_graph.store.refresh_wiki_links()
+
+    assert result["state"] == "ready"
+    assert result["wiki_links_stale"] is False
+    assert result["snapshot_revision"] == before_status["snapshot_revision"]
+    assert result["markdown_revision"] != result["previous_markdown_revision"]
+
+    after_status = pg_graph.reader_status()
+    assert after_status["wiki_links_stale"] is False
+    assert after_status["snapshot_revision"] == before_status["snapshot_revision"]
+    assert pg_graph.active_rows() == before_rows
+
+    report = pg_graph.lint()["code_graph"]
+    assert report["wiki_links_stale"] is False
+    assert report["stored_markdown_revision"] == report[
+        "current_markdown_revision"
+    ]
+
+
+def test_refresh_matches_what_a_full_publication_derives(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.write_markdown_page("guide", _selector_page("pkg.module_1.run"))
+
+    pg_graph.store.refresh_wiki_links()
+    refreshed = _active_wiki_links(pg_graph)
+
+    pg_graph.finalize(pg_graph.complete_session())
+    republished = _active_wiki_links(pg_graph)
+
+    assert refreshed == republished
+    assert refreshed
+
+
+def test_refresh_without_an_active_snapshot_refuses(pg_graph):
+    result = pg_graph.store.refresh_wiki_links()
+
+    assert result["state"] == "missing_snapshot"
+    assert "publish" in result["hint"]
+
+
+def test_refresh_advances_the_revision_when_no_link_changed(pg_graph):
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
+    pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.write_markdown_page("prose", "# Prose\n\n## Body\ntext\n")
+    before = pg_graph.wiki_links()
+    assert pg_graph.reader_status()["wiki_links_stale"] is True
+
+    result = pg_graph.store.refresh_wiki_links()
+
+    assert pg_graph.wiki_links() == before
+    assert result["markdown_revision"] != result["previous_markdown_revision"]
+    assert pg_graph.reader_status()["wiki_links_stale"] is False

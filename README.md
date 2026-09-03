@@ -381,7 +381,7 @@ exactly, or when the maintenance artifact digests do not reproduce.
 | Supported | `wiki_status`, `wiki_list_domains`, `wiki_list_pages`, `wiki_read_page`, `wiki_search`, `wiki_related`, `wiki_write_page`, `wiki_update_page`, `wiki_insert_section`, `wiki_delete_section`, `wiki_move_section`, `wiki_delete_page`, `wiki_index`, `wiki_bind`, `wiki_lint` |
 | Hosted PostgreSQL only | `wiki_create_domain`, `wiki_list_domain_grants`, `wiki_set_domain_grant`, `wiki_revoke_domain_grant` |
 | Supported code graph | `wiki_code_status`, `wiki_code_search`, `wiki_code_context` |
-| Hosted PostgreSQL only | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort` |
+| Hosted PostgreSQL only | `wiki_code_publish_begin`, `wiki_code_publish_batch`, `wiki_code_publish_finalize`, `wiki_code_publish_abort`, `wiki_code_refresh_links` |
 | Local checkout only | `wiki_code_index` |
 | Git only | `wiki_remediation_plan`, `wiki_migrate_okf`, `wiki_apply_okf`, `wiki_export_okf`, `wiki_sync` |
 
@@ -655,6 +655,16 @@ hold write access to the project's primary domain — `wiki_bind` narrows an alr
 granted scope and cannot widen it. A session belongs to the identity that created it:
 another token with write access to the same domain cannot append to, abort, or finalize
 it, and a replacement process must start a new session.
+
+`wiki_code_refresh_links(domain)` re-derives the active snapshot's `DOCUMENTED_BY`
+links from the domain's current Markdown. It parses no source and resolves no symbol, so
+it clears `wiki_links_stale` in time proportional to the page count instead of rebuilding
+the graph. The snapshot itself is untouched: `snapshot_revision`, `graph_payload_revision`
+and the file, symbol and relation counts are the same afterwards, and only
+`code_graph_wiki_links` plus the stored Markdown revision change. Unlike the publication
+calls it names its domain, because it mutates and a lapsed session binding would otherwise
+retarget it; the token must hold write access to that domain. Without an active ready
+snapshot it answers `missing_snapshot` rather than starting a build.
 
 Batches carry rows only — never a database file, source text, an absolute checkout
 path, credentials, or publisher-generated wiki links. The target recomputes the payload
