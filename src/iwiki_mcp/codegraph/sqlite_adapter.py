@@ -31,6 +31,7 @@ from .linking import (
     SelectorError,
     SelectorSnapshotChanged,
     WikiSelectorResolver,
+    links_stale,
     selector_capture_budget,
 )
 from .publication import (
@@ -1354,8 +1355,9 @@ class SqliteCodeGraphReader:
             "markdown_revision": stored_markdown_revision,
             "stored_markdown_revision": stored_markdown_revision,
             "current_markdown_revision": current_markdown_revision,
-            "wiki_links_stale": (
-                stored_markdown_revision != current_markdown_revision
+            "wiki_links_stale": links_stale(
+                stored_markdown_revision,
+                lambda: current_markdown_revision,
             ),
             "counts": counts,
         }

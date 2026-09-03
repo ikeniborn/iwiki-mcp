@@ -2255,7 +2255,11 @@ class PostgresStore:
 
     def _code_graph_lint(self, domain: str, pages) -> dict:
         """Report stored and current Markdown revisions for the code graph."""
-        from ..codegraph.linking import MarkdownPageSnapshot, markdown_revision
+        from ..codegraph.linking import (
+            MarkdownPageSnapshot,
+            links_stale,
+            markdown_revision,
+        )
 
         current_pages = tuple(
             MarkdownPageSnapshot(slug=slug, markdown=markdown)
@@ -2298,6 +2302,11 @@ class PostgresStore:
             "current_markdown_revision": current_revision,
             "stored_change_token": row[2],
             "current_change_token": row[3],
-            "wiki_links_stale": row[1] != current_revision,
+            "wiki_links_stale": links_stale(
+                row[1],
+                lambda: current_revision,
+                stored_generation=row[2],
+                current_generation=row[3],
+            ),
             "findings": [],
         }
