@@ -25,9 +25,13 @@ async def test_probe_requires_both_configured_models():
     def handler(request):
         seen["method"] = request.method
         seen["url"] = str(request.url)
-        return httpx.Response(
-            200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
-        )
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
+            )
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}],
+        })
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = InferenceClient(
@@ -36,10 +40,8 @@ async def test_probe_requires_both_configured_models():
 
     await client.probe()
 
-    assert seen == {
-        "method": "GET",
-        "url": "https://models.example/v1/models",
-    }
+    assert seen["method"] == "POST"
+    assert "chat/completions" in seen["url"]
     await http.aclose()
 
 
@@ -703,4 +705,73 @@ async def test_complete_with_tools_rejects_empty_message():
         await client.complete_with_tools(
             [{"role": "user", "content": "q"}], []
         )
+    await http.aclose()
+
+
+def _models_ok():
+    return httpx.Response(
+        200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_detects_tool_calling_support():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return _models_ok()
+        payload = json.loads(request.content)
+        assert payload["tools"]
+        assert payload["max_tokens"] == 1
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}],
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    await client.probe()
+
+    assert client.tools_supported is True
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_demotes_when_provider_refuses_tools():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return _models_ok()
+        return httpx.Response(400, json={"error": {
+            "message": "unknown parameter: tools",
+            "type": "invalid_request_error",
+        }})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    await client.probe()
+
+    assert client.tools_supported is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_transient_tool_check_failure_keeps_startup_semantics():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return _models_ok()
+        return httpx.Response(503)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is True
     await http.aclose()

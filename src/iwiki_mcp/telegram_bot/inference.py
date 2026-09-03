@@ -32,6 +32,31 @@ class ToolResponse:
 LOGGER = logging.getLogger(__name__)
 # Keep in sync with config.BotConfig.max_output_tokens.
 _DEFAULT_MAX_OUTPUT_TOKENS = 1024
+# Any client-side rejection of the probe request is a tools refusal: the only
+# unusual thing about the probe is the tools parameter. At runtime (task 6)
+# the same helper additionally requires tool wording, because a live 400 can
+# have other causes.
+_TOOLS_REFUSAL_STATUSES = frozenset({400, 404, 422, 501})
+_TOOLS_REFUSAL_WORDS = ("tool", "function")
+
+
+def _tools_refusal(
+    status: int | None, code: str | None, message: str | None
+) -> bool:
+    if status not in _TOOLS_REFUSAL_STATUSES:
+        return False
+    lowered = f"{code or ''} {message or ''}".lower()
+    return any(word in lowered for word in _TOOLS_REFUSAL_WORDS)
+
+
+_PROBE_TOOL = [{
+    "type": "function",
+    "function": {
+        "name": "noop",
+        "description": "capability probe",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}]
 # Keep in sync with config.BotConfig.inference_timeout_seconds.
 _DEFAULT_TIMEOUT_SECONDS = 180.0
 _CONNECT_TIMEOUT_SECONDS = 10.0
@@ -63,12 +88,14 @@ class InferenceError(RuntimeError):
         status: int | None = None,
         path: str | None = None,
         provider_code: str | None = None,
+        provider_message: str | None = None,
     ) -> None:
         super().__init__(code)
         self.retryable = retryable
         self.status = status
         self.path = path
         self.provider_code = provider_code
+        self.provider_message = provider_message
 
 
 def _provider_error_fields(
@@ -166,6 +193,7 @@ class InferenceClient:
             ),
             trust_env=False,
         )
+        self.tools_supported = False
 
     async def close(self) -> None:
         if self._owns_http:
@@ -201,6 +229,28 @@ class InferenceClient:
             if model not in available:
                 LOGGER.warning("configured model unavailable role=%s", role)
                 raise InferenceError("configured_model_unavailable")
+        try:
+            await self._post_json(
+                "/chat/completions",
+                json={
+                    "model": self._chat_model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tools": _PROBE_TOOL,
+                    "max_tokens": 1,
+                },
+            )
+        except InferenceError as error:
+            probe_refusal = error.status in _TOOLS_REFUSAL_STATUSES
+            if not probe_refusal:
+                raise
+            LOGGER.warning(
+                "tool calling unavailable status=%s code=%s",
+                error.status,
+                error.provider_code,
+            )
+            self.tools_supported = False
+            return
+        self.tools_supported = True
 
     async def answer(self, question: str, context: str) -> str:
         return await self._complete(
@@ -403,6 +453,7 @@ class InferenceClient:
             status=status,
             path=path,
             provider_code=provider_code,
+            provider_message=message,
         )
 
     async def _post_json(self, path: str, **kwargs: Any) -> dict[str, object]:
