@@ -451,6 +451,15 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
 
         reapplied = run_migrations(settings)
         assert reapplied.applied_versions == (5, 6, 7, 8)
+        # An upgraded database must reach the same delete rule a fresh one
+        # does, not merely the same version number.
+        with psycopg.connect(clean_postgres) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT confdeltype, convalidated FROM pg_constraint "
+                    "WHERE conname = 'code_graph_wiki_links_page_fk'"
+                )
+                assert cursor.fetchone() == ("c", True)
     finally:
         with psycopg.connect(clean_postgres, autocommit=True) as connection:
             with connection.cursor() as cursor:

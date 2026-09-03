@@ -1,4 +1,79 @@
 ---
+result_check:
+  verdict: OK
+  intent_hash: dbaabd8b8f38782a
+  last_run: 2026-09-03
+  reconciliation:
+    base: cf1efa5
+    outcomes:
+      - id: DO-1
+        status: DONE
+        evidence: >-
+          Migration version 8 makes the key cascade;
+          `test_a_page_pinned_by_a_superseded_snapshot_still_deletes` publishes
+          twice and then deletes the page through the real store. Whether the
+          three named pages actually delete depends on the schema owner running
+          the migration, which no diff can carry.
+      - id: DO-2
+        status: DONE
+        evidence: >-
+          The same test asserts the domain holds no link row afterwards, and the
+          cascade runs inside the delete's own transaction.
+      - id: DO-3
+        status: PARTIAL
+        evidence: >-
+          `active_rows()` and the active snapshot pointer are asserted
+          unchanged, and a second test shows a surviving page keeps its row. No
+          test calls `wiki_code_status`, `wiki_code_search` or
+          `wiki_code_context` after such a delete.
+      - id: DO-4
+        status: DONE
+        evidence: >-
+          `pg_constraint.confdeltype` and `convalidated` are asserted on a
+          freshly migrated database in `test_code_graph_migrations.py`, and on
+          an upgraded one after the rollback-and-reapply chain in
+          `test_code_graph_rollback.py`.
+      - id: DO-5
+        status: DONE
+        evidence: >-
+          The change ships migration statements only; no manual delete and no
+          data-repair step is part of it.
+    excess:
+      - path: src/iwiki_mcp/postgres/migrations.py rollback, src/iwiki_mcp/http.py, src/iwiki_mcp/server.py
+        note: >-
+          The version bump pins the runtime and demands a rollback artifact per
+          the repository's existing per-version contract. The intent scoped only
+          the constraint; the user authorized the full version-8 release after
+          discovery surfaced the obligation.
+      - path: pyproject.toml, src/iwiki_mcp/__init__.py, tests/test_package.py, uv.lock
+        note: The version bump this repository requires of every change.
+  findings:
+    - id: R-001
+      severity: CRITICAL
+      text: >-
+        Changed observable behavior in a `strict` domain with no
+        Given-When-Then scenario covering page deletion.
+      verdict: fixed
+      verdict_at: 2026-09-03
+      fix: >-
+        Two scenarios authored in `concept/code-graph-wiki-linking`: deleting a
+        page held by a superseded snapshot, and keeping the links of every page
+        the delete does not name.
+    - id: R-002
+      severity: WARNING
+      text: >-
+        DO-3 has no test calling a graph read after such a delete; the counts
+        and the active pointer are asserted instead.
+      verdict: accepted
+      verdict_at: 2026-09-03
+    - id: R-003
+      severity: WARNING
+      text: >-
+        Thirteen assertions across five files encoded version 7 as the pinned
+        schema. They were updated rather than left, which widens the diff well
+        past the one constraint the intent described.
+      verdict: accepted
+      verdict_at: 2026-09-03
 review:
   intent_hash: dbaabd8b8f38782a
   last_run: 2026-09-03
