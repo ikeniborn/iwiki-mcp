@@ -322,6 +322,9 @@ def create_postgres_publisher(
         superseded_retention_seconds=getattr(
             settings, "superseded_retention_seconds", 86400
         ),
+        superseded_cleanup_limit=getattr(
+            settings, "superseded_cleanup_limit", 2
+        ),
         require_database_principal=True,
     )
 

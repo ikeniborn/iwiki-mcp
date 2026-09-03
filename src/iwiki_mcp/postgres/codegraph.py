@@ -109,6 +109,7 @@ class PostgresCodeGraphStore:
         staging_retention_seconds: int,
         staging_cleanup_limit: int,
         superseded_retention_seconds: int = 86400,
+        superseded_cleanup_limit: int = 2,
         connection_factory: Callable[[], psycopg.Connection] | None = None,
         require_database_principal: bool = False,
         clock: Callable[[], datetime.datetime] | None = None,
@@ -121,6 +122,7 @@ class PostgresCodeGraphStore:
         self._session_ttl_seconds = session_ttl_seconds
         self._staging_retention_seconds = staging_retention_seconds
         self._superseded_retention_seconds = superseded_retention_seconds
+        self._superseded_cleanup_limit = superseded_cleanup_limit
         self._staging_cleanup_limit = staging_cleanup_limit
         self._connection_factory = connection_factory or (
             lambda: psycopg.connect(dsn)
@@ -646,6 +648,14 @@ class PostgresCodeGraphStore:
         window buys only a manual revert, while retaining every one of them
         forever is what let a deleted page stay pinned. The active snapshot is
         excluded by the query, not by an ordering assumption.
+
+        The rows are removed explicitly, children first, each statement keyed
+        by `snapshot_id` so it rides the primary-key prefix. Letting the
+        foreign keys cascade instead searches every child table once per
+        deleted parent row, and those keys carry no index of their own: one
+        such prune ran for 49 minutes on a live domain and took the server
+        with it. A snapshot holds tens of thousands of rows, so the per-call
+        bound counts snapshots, not rows, and must stay small.
         """
         threshold = now - datetime.timedelta(
             seconds=self._superseded_retention_seconds
@@ -662,11 +672,23 @@ class PostgresCodeGraphStore:
                 self.iwiki_id,
                 domain_id,
                 threshold,
-                self._staging_cleanup_limit,
+                self._superseded_cleanup_limit,
             ),
         )
         superseded = [row[0] for row in cursor.fetchall()]
         for snapshot_id in superseded:
+            for table in (
+                "code_graph_wiki_links",
+                "code_graph_relations",
+                "code_graph_symbols",
+                "code_graph_files",
+            ):
+                cursor.execute(
+                    f"DELETE FROM iwiki.{table} "
+                    "WHERE iwiki_id = %s AND domain_id = %s "
+                    "AND snapshot_id = %s",
+                    (self.iwiki_id, domain_id, snapshot_id),
+                )
             cursor.execute(
                 "DELETE FROM iwiki.code_graph_snapshots "
                 "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "

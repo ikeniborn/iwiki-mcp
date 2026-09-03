@@ -39,6 +39,7 @@ _FIELDS = {
     "publication_session_ttl_seconds",
     "staging_retention_seconds",
     "superseded_retention_seconds",
+    "superseded_cleanup_limit",
     "staging_cleanup_limit",
     "typescript_type_boost",
 }
@@ -136,6 +137,7 @@ class CodeGraphConfig:
     publication_session_ttl_seconds: int = 900
     staging_retention_seconds: int = 86400
     superseded_retention_seconds: int = 86400
+    superseded_cleanup_limit: int = 2
     staging_cleanup_limit: int = 100
 
     def __post_init__(self) -> None:

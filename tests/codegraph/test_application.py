@@ -334,6 +334,7 @@ def test_postgres_target_uses_exact_store_settings(tmp_path, monkeypatch):
         publication_session_ttl_seconds=37,
         staging_retention_seconds=91,
         superseded_retention_seconds=53,
+        superseded_cleanup_limit=3,
         staging_cleanup_limit=7,
     )
     binding = _postgres_binding(tmp_path)
@@ -360,6 +361,7 @@ def test_postgres_target_uses_exact_store_settings(tmp_path, monkeypatch):
             "staging_retention_seconds": 91,
             "staging_cleanup_limit": 7,
             "superseded_retention_seconds": 53,
+            "superseded_cleanup_limit": 3,
             "require_database_principal": True,
         },
     }

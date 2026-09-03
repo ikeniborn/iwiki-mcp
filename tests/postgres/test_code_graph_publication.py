@@ -562,3 +562,60 @@ def test_a_recent_supersession_survives_inside_the_window(pg_graph):
     pg_graph.store.begin(pg_graph.header)
 
     assert first in {row[0] for row in _snapshot_states(pg_graph)}
+
+
+def _snapshot_rows(graph, snapshot_id):
+    counts = {}
+    for kind, table in (
+        ("wiki_links", "code_graph_wiki_links"),
+        ("relations", "code_graph_relations"),
+        ("symbols", "code_graph_symbols"),
+        ("files", "code_graph_files"),
+    ):
+        counts[kind] = graph._query(
+            f"SELECT count(*) FROM iwiki.{table} "
+            "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
+            (graph.iwiki_id, graph._domain_id(), snapshot_id),
+            admin=True,
+        )[0][0]
+    return counts
+
+
+def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
+    """The prune deletes children itself instead of leaving it to the cascade.
+
+    Cascading searches every child table once per deleted parent row, and
+    those foreign keys carry no index, which is what turned one prune into a
+    49-minute transaction on a live domain.
+    """
+    pg_graph.finalize(pg_graph.complete_session())
+    first = pg_graph.reader_status()["snapshot_id"]
+    assert any(_snapshot_rows(pg_graph, first).values())
+    pg_graph.finalize(pg_graph.complete_session())
+
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+    pg_graph.store.begin(pg_graph.header)
+
+    assert _snapshot_rows(pg_graph, first) == {
+        "wiki_links": 0,
+        "relations": 0,
+        "symbols": 0,
+        "files": 0,
+    }
+
+
+def test_pruning_never_exceeds_its_per_call_bound(pg_graph):
+    superseded = []
+    for _ in range(pg_graph.superseded_cleanup_limit + 2):
+        pg_graph.finalize(pg_graph.complete_session())
+        superseded.append(pg_graph.reader_status()["snapshot_id"])
+    pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    # `begin` also inserts a staging snapshot, so only the ready ones count.
+    before = {row[0] for row in _snapshot_states(pg_graph) if row[1] == "ready"}
+    pg_graph.store.begin(pg_graph.header)
+    after = {row[0] for row in _snapshot_states(pg_graph) if row[1] == "ready"}
+
+    assert len(before - after) == pg_graph.superseded_cleanup_limit
+    assert after < before
