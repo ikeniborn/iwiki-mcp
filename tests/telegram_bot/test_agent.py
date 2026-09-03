@@ -5,6 +5,7 @@ import pytest
 from iwiki_mcp.telegram_bot.agent import AgentLoop, _MAX_TOOL_CALLS
 from iwiki_mcp.telegram_bot.context import ContextBudget
 from iwiki_mcp.telegram_bot.inference import InferenceError, ToolCall, ToolResponse
+from iwiki_mcp.telegram_bot.iwiki import RemoteIwikiError
 
 
 class FakeRemote:
@@ -130,3 +131,162 @@ async def test_batched_tool_calls_never_exceed_limit():
     await loop.run("team", "q")
     searches = [c for c in remote.calls if c[0] == "search"]
     assert len(searches) <= _MAX_TOOL_CALLS
+
+
+class OverflowingInference(ScriptedInference):
+    """Raises context_overflow once, then serves the queue."""
+
+    def __init__(self, responses, overflow_at):
+        super().__init__(responses)
+        self.overflow_at = overflow_at
+        self.count = 0
+
+    async def complete_with_tools(self, messages, tools, tool_choice="auto"):
+        self.count += 1
+        if self.count == self.overflow_at:
+            self.requests.append((
+                [dict(message) for message in messages], tool_choice
+            ))
+            raise InferenceError("context_overflow")
+        return await super().complete_with_tools(
+            messages, tools, tool_choice
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_read_returns_marker():
+    read = _call(
+        "read_section", {"slug": "guide/deploy", "heading": "Rollout"}
+    )
+    inference = ScriptedInference([
+        ToolResponse(None, (read,)),
+        ToolResponse(None, (read,)),
+        ToolResponse("Answer.", ()),
+    ])
+    remote = FakeRemote()
+    loop = AgentLoop(remote, inference, ContextBudget())
+
+    await loop.run("team", "q")
+
+    reads = [call for call in remote.calls if call[0] == "read_page"]
+    assert len(reads) == 1
+    final_messages = inference.requests[-1][0]
+    assert any(
+        message["role"] == "tool" and message["content"] == "already provided"
+        for message in final_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_arguments_become_error_results():
+    inference = ScriptedInference([
+        ToolResponse(None, (ToolCall("c1", "search_wiki", "not json"),)),
+        ToolResponse(None, (_call("search_wiki", {"query": "   "}),)),
+        ToolResponse(None, (_call("no_such_tool", {}),)),
+        ToolResponse("Answer.", ()),
+    ])
+    loop = AgentLoop(FakeRemote(), inference, ContextBudget())
+
+    answer = await loop.run("team", "q")
+
+    assert answer == "Answer."
+    final_messages = inference.requests[-1][0]
+    errors = [
+        message["content"] for message in final_messages
+        if message["role"] == "tool"
+    ]
+    assert all(text.startswith("error:") for text in errors)
+    assert len(errors) == 3
+
+
+@pytest.mark.asyncio
+async def test_overflow_drops_oldest_results_and_retries_once():
+    inference = OverflowingInference([
+        ToolResponse(None, (_call("search_wiki", {"query": "a"}, "c1"),)),
+        ToolResponse(None, (_call(
+            "read_section", {"slug": "guide/deploy", "heading": "Rollout"},
+            "c2",
+        ),)),
+        ToolResponse("Answer.", ()),
+    ], overflow_at=3)
+    loop = AgentLoop(FakeRemote(), inference, ContextBudget())
+
+    answer = await loop.run("team", "q")
+
+    assert answer == "Answer."
+    final_messages = inference.requests[-1][0]
+    tool_contents = [
+        message["content"] for message in final_messages
+        if message["role"] == "tool"
+    ]
+    assert "[dropped]" in tool_contents
+
+
+@pytest.mark.asyncio
+async def test_second_overflow_raises():
+    class AlwaysOverflow(ScriptedInference):
+        async def complete_with_tools(self, messages, tools, tool_choice="auto"):
+            raise InferenceError("context_overflow")
+
+    loop = AgentLoop(FakeRemote(), AlwaysOverflow([]), ContextBudget())
+
+    with pytest.raises(InferenceError, match="context_overflow"):
+        await loop.run("team", "q")
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_wiki_error_becomes_tool_result():
+    class BrokenRemote(FakeRemote):
+        async def search(self, domain, query):
+            raise RemoteIwikiError("remote_call_failed")
+
+    inference = ScriptedInference([
+        ToolResponse(None, (_call("search_wiki", {"query": "x"}),)),
+        ToolResponse("Partial answer.", ()),
+    ])
+    loop = AgentLoop(BrokenRemote(), inference, ContextBudget())
+
+    answer = await loop.run("team", "q")
+
+    assert answer == "Partial answer."
+
+
+@pytest.mark.asyncio
+async def test_retryable_wiki_error_propagates():
+    class DownRemote(FakeRemote):
+        async def search(self, domain, query):
+            raise RemoteIwikiError("remote_call_failed", retryable=True)
+
+    inference = ScriptedInference([
+        ToolResponse(None, (_call("search_wiki", {"query": "x"}),)),
+    ])
+    loop = AgentLoop(DownRemote(), inference, ContextBudget())
+
+    with pytest.raises(RemoteIwikiError):
+        await loop.run("team", "q")
+
+
+@pytest.mark.asyncio
+async def test_part_read_returns_untrimmed_chunk():
+    class LongRemote(FakeRemote):
+        async def read_page(self, domain, slug, heading=None):
+            self.calls.append(("read_page", domain, slug, heading))
+            return {"body": "x" * 5000}
+
+    inference = ScriptedInference([
+        ToolResponse(None, (_call(
+            "read_section",
+            {"slug": "guide/deploy", "heading": "Rollout", "part": 2},
+        ),)),
+        ToolResponse("Answer.", ()),
+    ])
+    loop = AgentLoop(LongRemote(), inference, ContextBudget())
+
+    await loop.run("team", "q")
+
+    final_messages = inference.requests[-1][0]
+    chunk = next(
+        message["content"] for message in final_messages
+        if message["role"] == "tool"
+    )
+    assert chunk == "x" * 1000  # 5000 - _PART_CHARS offset for part 2

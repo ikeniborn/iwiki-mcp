@@ -160,6 +160,24 @@ class AgentLoop:
                     )
 
     async def _complete(self, messages, tool_choice):
+        try:
+            return await self._inference.complete_with_tools(
+                messages, _TOOLS, tool_choice
+            )
+        except InferenceError as error:
+            if str(error) != "context_overflow":
+                raise
+        # Drop the oldest half of the tool results and retry exactly once,
+        # with no further wiki call.
+        tool_indexes = [
+            index for index, message in enumerate(messages)
+            if message.get("role") == "tool"
+            and message.get("content") != "[dropped]"
+        ]
+        if not tool_indexes:
+            raise InferenceError("context_overflow")
+        for index in tool_indexes[:max(1, len(tool_indexes) // 2)]:
+            messages[index]["content"] = "[dropped]"
         return await self._inference.complete_with_tools(
             messages, _TOOLS, tool_choice
         )
