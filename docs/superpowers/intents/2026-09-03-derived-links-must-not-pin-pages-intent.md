@@ -1,7 +1,7 @@
 ---
 result_check:
   verdict: OK
-  intent_hash: dbaabd8b8f38782a
+  intent_hash: a42470fc324335c0
   last_run: 2026-09-03
   reconciliation:
     base: cf1efa5
@@ -36,8 +36,17 @@ result_check:
       - id: DO-5
         status: DONE
         evidence: >-
-          The change ships migration statements only; no manual delete and no
+          The cascade ships migration statements only; no manual delete and no
           data-repair step is part of it.
+      - id: DO-6
+        status: DONE
+        evidence: >-
+          `_prune_superseded` drops ready snapshots that are no longer active
+          and older than `superseded_retention_seconds`, bounded by
+          `staging_cleanup_limit`. Three tests cover it: a snapshot outside the
+          window is gone after the next publication, the active one survives an
+          arbitrarily long wait, and a recent supersession survives inside the
+          window.
     excess:
       - path: src/iwiki_mcp/postgres/migrations.py rollback, src/iwiki_mcp/http.py, src/iwiki_mcp/server.py
         note: >-
@@ -64,6 +73,14 @@ result_check:
       text: >-
         DO-3 has no test calling a graph read after such a delete; the counts
         and the active pointer are asserted instead.
+      verdict: accepted
+      verdict_at: 2026-09-03
+    - id: R-004
+      severity: WARNING
+      text: >-
+        The retention half was added after the intent was approved, against a
+        hard constraint that put it out of scope. The intent was amended and
+        re-gated rather than the constraint being ignored.
       verdict: accepted
       verdict_at: 2026-09-03
     - id: R-003
