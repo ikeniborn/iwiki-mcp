@@ -8,7 +8,7 @@ import pytest
 from iwiki_mcp.telegram_bot import conversation as conversation_module
 from iwiki_mcp.telegram_bot.access import AccessPolicy
 from iwiki_mcp.telegram_bot.conversation import ConversationService
-from iwiki_mcp.telegram_bot.inference import InferenceError
+from iwiki_mcp.telegram_bot.inference import InferenceError, ToolResponse
 
 
 class FakeRemote:
@@ -626,3 +626,85 @@ async def test_a_partial_context_reports_how_much_was_used(clock):
     reply = await service.answer_question(1001, "Question")
 
     assert reply.text == "Answer\n\nContext: 1 of 2 sections used in full."
+
+
+class AgenticFakeInference(FakeInference):
+    def __init__(self):
+        super().__init__()
+        self.tools_supported = True
+
+    async def complete_with_tools(self, messages, tools, tool_choice="auto"):
+        self.calls.append(("complete_with_tools", tool_choice))
+        return ToolResponse("Agentic answer.", ())
+
+
+@pytest.mark.asyncio
+async def test_agentic_inference_answers_through_the_loop(tmp_path, clock):
+    remote = FakeRemote()
+    inference = AgenticFakeInference()
+    service = ConversationService(
+        AccessPolicy(frozenset({1001})),
+        remote,
+        inference,
+        confirmation_ttl_seconds=300,
+        temporary_directory=tmp_path,
+        clock=clock,
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "How do we deploy?")
+
+    assert reply.text == "Agentic answer."
+    assert ("complete_with_tools", "auto") in inference.calls
+    assert not any(call[0] == "answer" for call in inference.calls)
+
+
+@pytest.mark.asyncio
+async def test_fallback_inference_keeps_single_pass(service):
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "How do we deploy?")
+
+    assert reply.text.startswith("Answer")
+    assert any(call[0] == "answer" for call in service.inference.calls)
+
+
+class DemotingFakeInference(FakeInference):
+    """Refuses the first tool completion the way a live provider would."""
+
+    def __init__(self):
+        super().__init__()
+        self.tools_supported = True
+
+    async def complete_with_tools(self, messages, tools, tool_choice="auto"):
+        self.tools_supported = False
+        raise InferenceError("tools_unsupported")
+
+
+@pytest.mark.asyncio
+async def test_runtime_demotion_falls_back_within_the_same_request(
+    tmp_path, clock
+):
+    remote = FakeRemote()
+    inference = DemotingFakeInference()
+    service = ConversationService(
+        AccessPolicy(frozenset({1001})),
+        remote,
+        inference,
+        confirmation_ttl_seconds=300,
+        temporary_directory=tmp_path,
+        clock=clock,
+    )
+    await service.select_domain(1001, "team")
+
+    reply = await service.answer_question(1001, "How do we deploy?")
+
+    # The user gets a normal answer from the fallback path, no error.
+    assert reply.failed is False
+    assert any(call[0] == "answer" for call in inference.calls)
+    # The next question skips the loop entirely.
+    inference.calls.clear()
+    await service.answer_question(1001, "Second question?")
+    assert not any(
+        call[0] == "complete_with_tools" for call in inference.calls
+    )

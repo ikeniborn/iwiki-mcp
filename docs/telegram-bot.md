@@ -99,6 +99,20 @@ already read at half the budget and sends exactly one more completion, without a
 further wiki call. Only when that also overflows does the user get
 `Question context is too large. Ask a narrower question.`
 
+## Agentic retrieval
+
+When the inference provider supports OpenAI tool calling (verified by a one-token
+probe at startup), questions and `/create` drafts run as an agentic loop: the model
+calls `search_wiki` and `read_section` tools against the selected domain, reformulates
+searches, re-reads oversized sections in parts, and writes the final answer itself,
+attributing statements as `page#heading`. The loop is bounded: at most 6 tool calls,
+the same derived context budget, and a forced final answer when either runs out. A
+provider that refuses tool calling — at the probe or on a live request — permanently
+demotes the process to the single-pass pipeline described above, with no user-visible
+error. The tools are read-only; the model never selects a domain and never mutates
+the wiki. The `Context: n of m sections used in full.` line is not emitted on the
+agentic path.
+
 ## Telegram HTTPS proxy boundary
 
 Accepted values have one of these exact shapes:

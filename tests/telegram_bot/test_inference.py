@@ -20,14 +20,17 @@ def assert_sanitized_error(captured, marker):
 
 @pytest.mark.asyncio
 async def test_probe_requires_both_configured_models():
-    seen = {}
+    requests = []
 
     def handler(request):
-        seen["method"] = request.method
-        seen["url"] = str(request.url)
-        return httpx.Response(
-            200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
-        )
+        requests.append((request.method, str(request.url)))
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
+            )
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}],
+        })
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client = InferenceClient(
@@ -36,10 +39,10 @@ async def test_probe_requires_both_configured_models():
 
     await client.probe()
 
-    assert seen == {
-        "method": "GET",
-        "url": "https://models.example/v1/models",
-    }
+    assert requests[0] == ("GET", "https://models.example/v1/models")
+    assert len(requests) > 1
+    assert requests[-1][0] == "POST"
+    assert "chat/completions" in requests[-1][1]
     await http.aclose()
 
 
@@ -623,4 +626,195 @@ async def test_ordinary_server_failure_stays_retryable_and_is_recorded(caplog):
     message = caplog.records[0].getMessage()
     assert "500" in message
     assert "secret" not in message
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_returns_tool_calls():
+    seen = {}
+
+    def handler(request):
+        seen["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_wiki",
+                        "arguments": "{\"query\": \"deploy\"}",
+                    },
+                }],
+            }}],
+            "usage": {"prompt_tokens": 50},
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+    messages = [{"role": "user", "content": "q"}]
+    tools = [{"type": "function", "function": {"name": "search_wiki"}}]
+
+    response = await client.complete_with_tools(messages, tools)
+
+    assert response.content is None
+    assert response.tool_calls[0].name == "search_wiki"
+    assert response.tool_calls[0].arguments == "{\"query\": \"deploy\"}"
+    assert seen["payload"]["tools"] == tools
+    assert seen["payload"]["tool_choice"] == "auto"
+    assert seen["payload"]["temperature"] == 0
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_returns_final_content():
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "Answer."}}],
+            "usage": {"prompt_tokens": 30},
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    response = await client.complete_with_tools(
+        [{"role": "user", "content": "q"}], [], tool_choice="none"
+    )
+
+    assert response.content == "Answer."
+    assert response.tool_calls == ()
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_rejects_empty_message():
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "", "tool_calls": []}}],
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError, match="invalid_inference_response"):
+        await client.complete_with_tools(
+            [{"role": "user", "content": "q"}], []
+        )
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_demotes_on_provider_tools_refusal():
+    def handler(request):
+        return httpx.Response(400, json={"error": {
+            "message": "unknown parameter: tools",
+            "type": "invalid_request_error",
+        }})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+    client.tools_supported = True
+
+    with pytest.raises(InferenceError, match="tools_unsupported"):
+        await client.complete_with_tools([{"role": "user", "content": "q"}], [])
+
+    assert client.tools_supported is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_overflow_still_raises_context_overflow():
+    def handler(request):
+        return httpx.Response(400, json={"error": {
+            "message": "This model's maximum context length is 4096 tokens",
+            "code": "context_length_exceeded",
+        }})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+    client.tools_supported = True
+
+    with pytest.raises(InferenceError, match="context_overflow"):
+        await client.complete_with_tools([{"role": "user", "content": "q"}], [])
+
+    assert client.tools_supported is True
+    await http.aclose()
+
+
+def _models_ok():
+    return httpx.Response(
+        200, json={"data": [{"id": "chat-model"}, {"id": "audio-model"}]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_probe_detects_tool_calling_support():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return _models_ok()
+        payload = json.loads(request.content)
+        assert payload["tools"]
+        assert payload["max_tokens"] == 1
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}],
+        })
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    await client.probe()
+
+    assert client.tools_supported is True
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_demotes_when_provider_refuses_tools():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return _models_ok()
+        return httpx.Response(400, json={"error": {
+            "message": "unknown parameter: tools",
+            "type": "invalid_request_error",
+        }})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    await client.probe()
+
+    assert client.tools_supported is False
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_transient_tool_check_failure_keeps_startup_semantics():
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return _models_ok()
+        return httpx.Response(503)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = InferenceClient(
+        "https://models.example/v1", "key", "chat-model", "audio-model", http
+    )
+
+    with pytest.raises(InferenceError) as captured:
+        await client.probe()
+
+    assert captured.value.retryable is True
     await http.aclose()

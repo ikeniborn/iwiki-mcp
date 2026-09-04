@@ -14,8 +14,10 @@ select domains, ask text or voice questions, and confirm page changes; typing `/
 the bot commands and `/menu` opens an inline action menu. A domain selection is sticky
 for the life of the bot process, a question sent before any domain is chosen is answered
 as soon as one is, and each request reports its progress with a reaction, a typing
-action, and a status message edited per stage. See the
-[deployment runbook](docs/deployment.md) for the operator path and migration steps.
+action, and a status message edited per stage. With a tool-calling inference provider
+the bot answers through an agentic search/read loop over the wiki, falling back
+automatically to single-pass retrieval when the provider does not support tools. See
+the [deployment runbook](docs/deployment.md) for the operator path and migration steps.
 
 ## Install
 

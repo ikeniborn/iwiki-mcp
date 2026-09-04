@@ -11,6 +11,7 @@ from typing import Any
 import anyio
 
 from .access import AccessPolicy
+from .agent import AgentLoop
 from .context import ContextBudget, Section, Selection, select_context
 from .inference import InferenceError
 from .iwiki import RemoteIwikiError
@@ -76,6 +77,12 @@ class ConversationService:
 
     def _allowed(self, telegram_id: int) -> bool:
         return self._access.allows(telegram_id)
+
+    def _agentic(self) -> bool:
+        return bool(getattr(self._inference, "tools_supported", False))
+
+    def _agent_loop(self) -> AgentLoop:
+        return AgentLoop(self._remote, self._inference, self._budget)
 
     def replace_remote(self, remote: Any) -> None:
         self._remote = remote
@@ -193,6 +200,17 @@ class ConversationService:
         progress: ProgressCallback | None = None,
     ) -> BotReply:
         try:
+            if self._agentic():
+                await _report(progress, _STAGE_SEARCHING)
+                try:
+                    answer = await self._agent_loop().run(
+                        domain, question, progress
+                    )
+                    return BotReply(answer)
+                except InferenceError as error:
+                    if str(error) != "tools_unsupported":
+                        raise
+                    # Demoted mid-request: serve this question single-pass.
             await _report(progress, _STAGE_SEARCHING)
             sections = await self._collect_sections(domain, question)
             budget = self._budget.chars(len(question))
@@ -373,9 +391,22 @@ class ConversationService:
             return domain
         try:
             await _report(progress, _STAGE_SEARCHING)
-            context = await self._draft_context(domain, request)
-            await _report(progress, _STAGE_DRAFTING)
-            markdown = await self._inference.draft_markdown(request, context)
+            markdown = None
+            if self._agentic():
+                try:
+                    markdown = await self._agent_loop().run(
+                        domain, request, progress, drafting=True
+                    )
+                except InferenceError as error:
+                    if str(error) != "tools_unsupported":
+                        raise
+                    # Demoted mid-request: draft this request single-pass.
+            if markdown is None:
+                context = await self._draft_context(domain, request)
+                await _report(progress, _STAGE_DRAFTING)
+                markdown = await self._inference.draft_markdown(
+                    request, context
+                )
         except RemoteIwikiError as error:
             return self._remote_unavailable(error)
         except InferenceError as error:

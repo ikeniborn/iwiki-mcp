@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>telegram-bot-agentic-retrieval — итоговый отчёт</title>
+<style>
+:root[data-theme="dark"]{
+  --bg:#12151c; --panel:#1a1f2a; --panel2:#212836; --text:#e6e9f0; --muted:#9aa4b5;
+  --accent:#5eb0ff; --ok:#4ecf8a; --warn:#e8b64c; --line:#33405a; --chip:#2a3448;
+}
+:root[data-theme="light"]{
+  --bg:#f6f7fa; --panel:#ffffff; --panel2:#eef1f6; --text:#1c2330; --muted:#5a6577;
+  --accent:#1a6fd4; --ok:#177a4c; --warn:#a4761a; --line:#c9d2e0; --chip:#e3e9f2;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--text);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:1080px;margin-inline:auto}
+h1{font-size:24px;margin:0 0 4px}
+h2{font-size:18px;margin:32px 0 12px;border-bottom:1px solid var(--line);padding-bottom:6px}
+.lead{color:var(--muted);margin:0 0 16px}
+.toggle{position:fixed;top:16px;right:16px;background:var(--panel);border:1px solid var(--line);
+  color:var(--text);border-radius:20px;padding:6px 14px;cursor:pointer;font-size:13px}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;overflow:hidden;font-size:14px}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--panel2);font-weight:600}
+tr:last-child td{border-bottom:none}
+code{background:var(--chip);padding:1px 6px;border-radius:4px;font-size:13px}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.b-ok{background:var(--ok);color:#fff}
+.b-warn{background:var(--warn);color:#fff}
+.b-info{background:var(--accent);color:#fff}
+.note{background:var(--panel);border-left:4px solid var(--accent);padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0}
+.note.warn{border-left-color:var(--warn)}
+figure{margin:16px 0;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+figcaption{color:var(--muted);font-size:13px;margin-top:8px}
+svg text{fill:var(--text);font:12px system-ui,sans-serif}
+svg .muted{fill:var(--muted)}
+svg .box{fill:var(--panel2);stroke:var(--line);rx:8}
+svg .hl{stroke:var(--accent);stroke-width:1.5}
+svg .edge{stroke:var(--muted);stroke-width:1.4;fill:none;marker-end:url(#arr)}
+svg .edge.ok{stroke:var(--ok)}
+svg .edge.warn{stroke:var(--warn)}
+details{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:8px 0}
+summary{cursor:pointer;font-weight:600}
+</style>
+</head>
+<body>
+<button class="toggle" id="themeToggle">🌗 Тема</button>
+
+<h1>telegram-bot-agentic-retrieval</h1>
+<p class="lead">Итоговый отчёт реализации (chain result). Дата: 2026-09-04. Ветка <code>dev-telegram-bot-agentic-retrieval</code>, база диффа <code>ec57020</code> (origin/master).</p>
+
+<h2>1. Резюме внедрения</h2>
+<table>
+<tr><th>Артефакт</th><th>Путь</th><th>Статус</th></tr>
+<tr><td>Intent</td><td><code>docs/superpowers/intents/2026-09-03-telegram-bot-agentic-retrieval-intent.md</code></td><td><span class="badge b-ok">OK</span> (2 warning закрыты порогами spec)</td></tr>
+<tr><td>Spec</td><td><code>docs/superpowers/specs/2026-09-03-telegram-bot-agentic-retrieval-design.md</code></td><td><span class="badge b-ok">OK</span></td></tr>
+<tr><td>Plan</td><td><code>docs/superpowers/plans/2026-09-03-telegram-bot-agentic-retrieval.md</code></td><td><span class="badge b-ok">OK</span> (1 принятый INFO)</td></tr>
+<tr><td>Result</td><td>реконсиляция плана против диффа ветки (16 коммитов, 17 файлов, +2812/−22)</td><td><span class="badge b-ok">OK</span></td></tr>
+</table>
+<p>Суть: однопроходный RAG-конвейер Telegram-бота заменён агентным циклом — модель сама вызывает read-only инструменты <code>search_wiki</code> / <code>read_section</code> по протоколу OpenAI tool calling, отбирает и дочитывает секции, синтезирует ответ с атрибуцией <code>page#heading</code>. Провайдер без tool calling детектируется probe-запросом на старте (и демоцией в рантайме) — такой процесс работает по прежнему однопроходному пути без ошибок для пользователя.</p>
+
+<h2>2. Выполненные изменения</h2>
+<table>
+<tr><th>Файл</th><th>Тип</th><th>±</th><th>Что делает изменение</th></tr>
+<tr><td><code>src/iwiki_mcp/telegram_bot/agent.py</code></td><td>добавлен</td><td>+264</td><td>AgentLoop: транскрипт, схемы инструментов, диспетчер вызовов, три рельсы терминации (лимит 6 вызовов, бюджет, overflow-восстановление), дедуп чтений, part-чтение больших секций, два системных промта (ответ / черновик).</td></tr>
+<tr><td><code>src/iwiki_mcp/telegram_bot/inference.py</code></td><td>изменён</td><td>+188</td><td><code>complete_with_tools</code> (+ ToolCall/ToolResponse), probe-детекция <code>tools_supported</code>, рантайм-демоция с <code>InferenceError("tools_unsupported")</code>, <code>provider_message</code> на ошибке.</td></tr>
+<tr><td><code>src/iwiki_mcp/telegram_bot/conversation.py</code></td><td>изменён</td><td>+37</td><td>Ветвление вопросов и черновиков <code>/create</code> на агентный цикл при <code>tools_supported</code>; fallback в том же запросе при демоции; single-pass путь не тронут байт-в-байт; <code>/update</code> без изменений.</td></tr>
+<tr><td><code>tests/telegram_bot/test_agent.py</code></td><td>добавлен</td><td>+352</td><td>12 тестов цикла: happy path, лимиты, форс-терминация, дедуп, невалидные аргументы, overflow, wiki-ошибки, part-чтение.</td></tr>
+<tr><td><code>tests/telegram_bot/test_inference.py</code></td><td>изменён</td><td>+180</td><td>Тесты tool-completion, probe-детекции (поддержка / отказ / transient), живой демоции и несмешивания с context_overflow.</td></tr>
+<tr><td><code>tests/telegram_bot/test_conversation_read.py / _write.py</code></td><td>изменены</td><td>+120</td><td>Агентный ответ через цикл, fallback без tools_supported, демоция в том же запросе, черновик /create через цикл с сохранением превью/Confirm.</td></tr>
+<tr><td><code>docs/telegram-bot.md, README.md, docs/README.ru.md</code></td><td>изменены</td><td>+21</td><td>Раздел «Agentic retrieval» и синхронные упоминания в обоих README.</td></tr>
+<tr><td><code>pyproject.toml, src/iwiki_mcp/__init__.py, tests/test_package.py, uv.lock</code></td><td>изменены</td><td>+4/−4</td><td>Версия 0.7.245 → 0.7.246 (синхронно во всех точках).</td></tr>
+<tr><td><code>docs/superpowers/{intents,specs,plans}/…</code></td><td>добавлены</td><td>+1640</td><td>Артефакты цепочки intent → spec → plan с вердиктами гейтов.</td></tr>
+</table>
+
+<h2>3. Результаты</h2>
+<table>
+<tr><th>Задача плана</th><th>Статус</th><th>Свидетельство (коммиты)</th></tr>
+<tr><td>1. complete_with_tools</td><td><span class="badge b-ok">DONE</span></td><td><code>e382bfe</code>, ревью чистое</td></tr>
+<tr><td>2. Probe-детекция</td><td><span class="badge b-ok">DONE</span></td><td><code>f97d2fb</code> + fix <code>eb3acd7</code> (восстановлен ослабленный тест)</td></tr>
+<tr><td>3. Ядро AgentLoop</td><td><span class="badge b-ok">DONE</span></td><td><code>2651461</code> + fix <code>2f0aded</code> (гарантия терминации, кап батча)</td></tr>
+<tr><td>4. Рельсы цикла</td><td><span class="badge b-ok">DONE</span></td><td><code>0ed0d1b</code>, ревью чистое</td></tr>
+<tr><td>5. Ветвление conversation</td><td><span class="badge b-ok">DONE</span></td><td><code>8f38485</code>, ревью чистое</td></tr>
+<tr><td>6. Рантайм-демоция</td><td><span class="badge b-ok">DONE</span></td><td><code>3844793</code> + fix <code>18b03a7</code> (тесты живой ветки демоции)</td></tr>
+<tr><td>7. Доки + версия + верификация</td><td><span class="badge b-ok">DONE</span></td><td><code>e59ba66</code>, ревью чистое</td></tr>
+</table>
+<p>Покрытие Desired Outcomes интента: <b>2 из 3 полностью, 1 частично</b>. Требования spec §§2–9: <b>реализованы</b> (2 minor-отклонения формы задокументированы). Лишние изменения вне плана: только санкционированная синхронизация версии.</p>
+<table>
+<tr><th>Desired Outcome</th><th>Статус</th><th>Свидетельство</th></tr>
+<tr><td>Многоитерационный цикл наблюдаем, ответ с атрибуцией</td><td><span class="badge b-ok">Покрыт</span></td><td>test_loop_searches_reads_and_answers, test_progress_reports_iterations; стадии «Searching wiki (n/6)» в статус-сообщении</td></tr>
+<tr><td>Fallback без ошибок на провайдере без tools</td><td><span class="badge b-ok">Покрыт</span></td><td>test_probe_demotes…, test_fallback_inference_keeps_single_pass, test_runtime_demotion_falls_back_within_the_same_request</td></tr>
+<tr><td>Полнее ответы на 5 эталонных вопросах (ручная рубрика)</td><td><span class="badge b-warn">Частично</span></td><td>Механика доказана тестами; живой бенчмарк по рубрике spec §10 требует развёрнутого бота + inference-провайдера — отложен до деплоя</td></tr>
+</table>
+<div class="note">Верификация: <code>uv run pytest -q tests/telegram_bot</code> → 269 passed; полный прогон (без известного slow scale-теста на 20 000 файлов, по практике репозитория) → <b>3400 passed, 229 skipped (env), 1 deselected, 0 failed</b>; flake8 чист на всех затронутых файлах. Финальное whole-branch ревью: <b>mergeable as-is</b>, 0 critical / 0 important, 6 minor отложены.</div>
+
+<h2>4. Влияние на систему</h2>
+<table>
+<tr><th>Область</th><th>Изменение поведения</th><th>Риски / follow-up</th></tr>
+<tr><td>Вопросы (текст и голос)</td><td>При поддержке tools — агентный цикл до 6 инструмент-вызовов; строка «Context: n of m» на агентном пути не выводится</td><td>Латентность сложных вопросов растёт (больше completions); простые — ≤ 2 итераций</td></tr>
+<tr><td>/create</td><td>Черновик собирается циклом; превью → Confirm/Reject → запись не изменены</td><td>—</td></tr>
+<tr><td>/update, записи, CAS</td><td>Без изменений (byte-for-byte)</td><td>—</td></tr>
+<tr><td>Приватность / trust</td><td>Не изменены: транскрипт в памяти запроса, логи — только stable-поля, инструменты read-only, домен фиксирует бот</td><td>—</td></tr>
+<tr><td>Совместимость провайдеров</td><td>Probe + рантайм-демоция → любой OpenAI-совместимый бэкенд работает (в худшем случае — прежний конвейер)</td><td>Minor: N параллельных tool_calls разбиваются на N пар assistant/tool — строгий chat-template может отвергнуть; отказ с «tool» в тексте демоцирует процесс (fail-safe)</td></tr>
+<tr><td>Наблюдаемость</td><td>WARNING при демоции (status + code), счётчик итераций в логах</td><td>Minor: лог демоции без structured extra-полей (spec §6 form drift)</td></tr>
+</table>
+
+<h2>5. Схемы</h2>
+<figure>
+<svg viewBox="0 0 980 400" role="img" aria-label="Архитектура агентного цикла">
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10 z" fill="currentColor" style="fill:var(--muted)"/>
+</marker>
+</defs>
+<!-- nodes -->
+<rect class="box" x="20" y="40" width="150" height="52" rx="8"/>
+<text x="95" y="62" text-anchor="middle">Telegram</text>
+<text x="95" y="78" text-anchor="middle" class="muted">вопрос / голос / create</text>
+
+<rect class="box" x="230" y="40" width="170" height="52" rx="8"/>
+<text x="315" y="62" text-anchor="middle">ConversationService</text>
+<text x="315" y="78" text-anchor="middle" class="muted">tools_supported?</text>
+
+<rect class="box hl" x="470" y="20" width="190" height="60" rx="8"/>
+<text x="565" y="44" text-anchor="middle">AgentLoop (agent.py)</text>
+<text x="565" y="62" text-anchor="middle" class="muted">≤6 вызовов, бюджет, рельсы</text>
+
+<rect class="box" x="470" y="150" width="190" height="52" rx="8"/>
+<text x="565" y="172" text-anchor="middle">Однопроходный RAG</text>
+<text x="565" y="188" text-anchor="middle" class="muted">fallback (не изменён)</text>
+
+<rect class="box" x="740" y="20" width="210" height="60" rx="8"/>
+<text x="845" y="44" text-anchor="middle">InferenceClient</text>
+<text x="845" y="62" text-anchor="middle" class="muted">complete_with_tools / probe</text>
+
+<rect class="box" x="740" y="150" width="210" height="60" rx="8"/>
+<text x="845" y="174" text-anchor="middle">RemoteIwikiClient</text>
+<text x="845" y="192" text-anchor="middle" class="muted">wiki_search / wiki_read_page</text>
+
+<rect class="box" x="470" y="290" width="480" height="72" rx="8"/>
+<text x="710" y="314" text-anchor="middle">Цикл: search_wiki → read_section(part) → … → финальный ответ</text>
+<text x="710" y="334" text-anchor="middle" class="muted">терминация: лимит 6 · бюджет окна · overflow (drop старых + 1 ретрай)</text>
+<text x="710" y="352" text-anchor="middle" class="muted">дедуп (slug, heading, part) · невалидные аргументы = error-результат</text>
+
+<!-- edges -->
+<path class="edge" d="M170 66 H230"/>
+<path class="edge ok" d="M400 56 C430 46 440 44 470 44"/>
+<text x="418" y="34" class="muted">tools_supported</text>
+<path class="edge warn" d="M400 78 C430 110 440 160 470 172"/>
+<text x="398" y="126" class="muted">нет tools / демоция</text>
+<path class="edge" d="M660 44 H740"/>
+<text x="700" y="34" class="muted">completions</text>
+<path class="edge" d="M660 66 C700 90 700 150 740 168"/>
+<text x="668" y="112" class="muted">tool-вызовы</text>
+<path class="edge" d="M565 80 V290" stroke-dasharray="4 3"/>
+<path class="edge warn" d="M845 80 C900 110 900 44 850 44" transform="translate(0,0)" opacity="0"/>
+<path class="edge warn" d="M740 180 H700 C670 180 670 176 660 176"/>
+<text x="688" y="168" class="muted">секции</text>
+</svg>
+<figcaption>Поток запроса: ConversationService ветвится по <code>tools_supported</code>; AgentLoop гоняет completions с инструментами через InferenceClient и читает вики через RemoteIwikiClient; при отказе провайдера от tools — демоция на прежний однопроходный путь в том же запросе.</figcaption>
+</figure>
+
+<details>
+<summary>Отложенные minor-замечания финального ревью (6)</summary>
+<ol>
+<li>Неканоничная форма транскрипта при параллельных tool_calls (N пар вместо одной assistant-записи) — кандидат на follow-up.</li>
+<li>WARNING демоции без structured extra-полей (spec §6 form drift) — кандидат на follow-up.</li>
+<li>Двойной учёт фиксированного промта в бюджете / неучёт JSON-аргументов — ограничено, поглощается запасом ratio и overflow-рельсой.</li>
+<li>Калибровка ratio с агентных completions слегка пессимизирует single-pass бюджет (безопасное направление, клампится).</li>
+<li>Дублирующий вызов стадии «Searching wiki» на пути демоции — косметика.</li>
+<li>Repo-wide flake8 падает на файлах вне ветки (унаследовано от base, не регрессия).</li>
+</ol>
+</details>
+
+<script>
+/* Guarded: единственный inline-скрипт — переключатель темы; без него CSS-темы статичны. */
+document.getElementById("themeToggle").addEventListener("click", function () {
+  var root = document.documentElement;
+  root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+});
+</script>
+</body>
+</html>
