@@ -21,7 +21,12 @@ from iwiki_mcp.lock import mutation_lock
 
 from . import models as codegraph_models
 from .config import CodeGraphConfig
-from .discovery import DiscoveryError, DiscoverySnapshot, discover_sources
+from .discovery import (
+    DiscoveryError,
+    DiscoverySnapshot,
+    build_ignore_spec,
+    discover_sources,
+)
 from .fingerprint import (
     FingerprintSet,
     compose_fingerprints,
@@ -575,7 +580,9 @@ class CodeGraphIndexer:
         selector_snapshot: object = _UNCAPTURED,
     ) -> tuple[FingerprintSet, str | None, str, object | None]:
         commit = current_git_commit(self.project_dir)
-        dirty = git_dirty_marker(self.project_dir)
+        dirty = git_dirty_marker(
+            self.project_dir, build_ignore_spec(self.project_dir, config)
+        )
         fingerprints = compose_fingerprints(
             discovered.files,
             config,
@@ -1394,7 +1401,9 @@ class CodeGraphIndexer:
                 config,
                 repository_id=self.domain,
                 git_commit=commit,
-                dirty_marker=git_dirty_marker(self.project_dir),
+                dirty_marker=git_dirty_marker(
+                    self.project_dir, build_ignore_spec(self.project_dir, config)
+                ),
                 schema_version=SCHEMA_VERSION,
                 parser_version=self._parser_version(config),
                 grammar_version=self._grammar_version(config),

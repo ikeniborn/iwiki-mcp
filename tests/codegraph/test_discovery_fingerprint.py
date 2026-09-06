@@ -3,9 +3,11 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
-from dataclasses import FrozenInstanceError
+import time
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 
+import pathspec
 import pytest
 
 from iwiki_mcp.codegraph import models
@@ -15,6 +17,7 @@ from iwiki_mcp.codegraph.discovery import (
     DiscoverySnapshot,
     DiscoveryWarning,
     SourceFile,
+    build_ignore_spec,
     discover_sources,
 )
 from iwiki_mcp.codegraph.fingerprint import (
@@ -23,6 +26,7 @@ from iwiki_mcp.codegraph.fingerprint import (
     _source_rows,
     compose_fingerprints,
     config_fingerprint,
+    filter_porcelain_lines,
     git_commit,
     git_dirty_marker,
     normalized_config,
@@ -862,14 +866,15 @@ def test_git_helpers_report_commit_and_dirty_state_without_content(tmp_path: Pat
     _write(project / "safe.py")
     subprocess.run(["git", "add", "safe.py"], cwd=project, check=True)
     subprocess.run(["git", "commit", "-qm", "initial"], cwd=project, check=True)
+    ignore_spec = build_ignore_spec(project, _config())
 
     commit = git_commit(project)
     assert commit is not None and len(commit) == 40
-    assert git_dirty_marker(project) == "clean"
+    assert git_dirty_marker(project, ignore_spec) == "clean"
 
     _write(project / "private-token.txt", b"DO_NOT_RETURN_THIS")
-    assert git_dirty_marker(project) == "dirty"
-    assert "DO_NOT_RETURN_THIS" not in git_dirty_marker(project)
+    assert git_dirty_marker(project, ignore_spec) == "dirty"
+    assert "DO_NOT_RETURN_THIS" not in git_dirty_marker(project, ignore_spec)
 
 
 def test_git_helpers_return_stable_sanitized_results_on_errors(
@@ -877,6 +882,7 @@ def test_git_helpers_return_stable_sanitized_results_on_errors(
 ) -> None:
     private_path = tmp_path / "private-repository"
     private_path.mkdir()
+    ignore_spec = build_ignore_spec(private_path, _config())
 
     def fail(*args, **kwargs):
         raise OSError(f"credential at {private_path}/secret.key")
@@ -884,8 +890,106 @@ def test_git_helpers_return_stable_sanitized_results_on_errors(
     monkeypatch.setattr(subprocess, "run", fail)
 
     assert git_commit(private_path) is None
-    assert git_dirty_marker(private_path) == "unavailable"
-    assert str(private_path) not in repr((git_commit(private_path), git_dirty_marker(private_path)))
+    assert git_dirty_marker(private_path, ignore_spec) == "unavailable"
+    assert str(private_path) not in repr(
+        (git_commit(private_path), git_dirty_marker(private_path, ignore_spec))
+    )
+
+
+@dataclass
+class _TmpRepo:
+    root: Path
+
+    def ignore_spec(self, exclude: list[str] = ()) -> pathspec.GitIgnoreSpec:
+        return build_ignore_spec(self.root, _config(exclude=list(exclude)))
+
+
+@pytest.fixture
+def tmp_repo(tmp_path: Path) -> _TmpRepo:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Tests"], cwd=root, check=True)
+    _write(root / "pkg" / "mod.py", b"value = 0\n")
+    subprocess.run(["git", "add", "pkg/mod.py"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=root, check=True)
+    return _TmpRepo(root)
+
+
+def test_excluded_path_edit_does_not_change_dirty_marker(tmp_repo: _TmpRepo) -> None:
+    spec = tmp_repo.ignore_spec(exclude=[".worktrees/"])
+    before = git_dirty_marker(tmp_repo.root, spec)
+
+    _write(tmp_repo.root / ".worktrees" / "noise.txt", b"x")
+
+    assert git_dirty_marker(tmp_repo.root, spec) == before
+
+
+def test_indexed_source_edit_changes_dirty_marker(tmp_repo: _TmpRepo) -> None:
+    spec = tmp_repo.ignore_spec(exclude=[".worktrees/"])
+    before = git_dirty_marker(tmp_repo.root, spec)
+
+    (tmp_repo.root / "pkg" / "mod.py").write_text("changed = True\n")
+
+    assert git_dirty_marker(tmp_repo.root, spec) != before
+
+
+def test_dirty_marker_filtering_latency_bound(tmp_repo: _TmpRepo) -> None:
+    spec = tmp_repo.ignore_spec(exclude=[".worktrees/"])
+    lines = [f"?? .worktrees/w{i}/file{i}.py" for i in range(10_000)]
+
+    start = time.monotonic()
+    filter_porcelain_lines(lines, spec)
+
+    assert time.monotonic() - start < 0.5
+
+
+def test_filter_porcelain_lines_handles_empty_input() -> None:
+    spec = pathspec.GitIgnoreSpec.from_lines([".worktrees/"])
+
+    assert filter_porcelain_lines([], spec) == []
+
+
+def test_filter_porcelain_lines_matches_untracked_directory_entries() -> None:
+    spec = pathspec.GitIgnoreSpec.from_lines([".worktrees/"])
+
+    assert filter_porcelain_lines(["?? .worktrees/"], spec) == []
+
+
+def test_filter_porcelain_lines_keeps_indexed_paths() -> None:
+    spec = pathspec.GitIgnoreSpec.from_lines([".worktrees/"])
+    lines = [" M pkg/mod.py", "?? new.py"]
+
+    assert filter_porcelain_lines(lines, spec) == lines
+
+
+def test_filter_porcelain_lines_drops_rename_when_both_sides_excluded() -> None:
+    spec = pathspec.GitIgnoreSpec.from_lines([".worktrees/"])
+    lines = ["R  .worktrees/old.py -> .worktrees/new.py"]
+
+    assert filter_porcelain_lines(lines, spec) == []
+
+
+def test_filter_porcelain_lines_keeps_rename_when_either_side_is_indexed() -> None:
+    spec = pathspec.GitIgnoreSpec.from_lines([".worktrees/"])
+    lines = ["R  pkg/old.py -> .worktrees/new.py"]
+
+    assert filter_porcelain_lines(lines, spec) == lines
+
+
+def test_filter_porcelain_lines_unquotes_paths_with_special_characters() -> None:
+    spec = pathspec.GitIgnoreSpec.from_lines([".worktrees/"])
+
+    excluded = ['?? ".worktrees/weird name.py"']
+    assert filter_porcelain_lines(excluded, spec) == []
+
+    kept = ['?? "pkg/weird name.py"']
+    assert filter_porcelain_lines(kept, spec) == kept
 
 
 def test_fixture_safe_source_is_available() -> None:

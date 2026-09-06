@@ -342,6 +342,29 @@ def _ignore_spec(
         raise DiscoveryError("ignore_rules_invalid") from None
 
 
+def build_ignore_spec(
+    project: os.PathLike[str] | str, config: CodeGraphConfig
+) -> pathspec.GitIgnoreSpec:
+    """Merge ``.gitignore`` + ``.iwikiignore`` + ``config.exclude`` into one spec.
+
+    The single builder behind exclude-aware path decisions: reused by the
+    fingerprint dirty-marker filter and the wiki-selector policy checks so
+    exclude semantics stay identical across both call sites.
+    """
+    root = _canonical_root(project)
+    try:
+        descriptor = _open_root_directory(root)
+    except _CandidateRejected:
+        raise DiscoveryError("project_root_unavailable") from None
+    try:
+        ignore_spec, _warnings = _ignore_spec(
+            descriptor, config.exclude, config.max_file_bytes
+        )
+    finally:
+        os.close(descriptor)
+    return ignore_spec
+
+
 def _relative_child(parent: str, name: str) -> str:
     return f"{parent}/{name}" if parent else name
 
