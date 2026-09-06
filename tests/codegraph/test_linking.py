@@ -294,6 +294,42 @@ def test_adding_or_changing_a_code_selector_changes_selector_digest(tmp_path):
     assert after_added.fingerprint != after_changed.fingerprint
 
 
+def test_selector_digest_is_pinned_to_relative_path_not_page_id(tmp_path):
+    """Regression pin: the digest key is ``page.relative``, never ``page.page_id``.
+
+    A page_id-keyed digest (domain-qualified) produces a different hash than a
+    relative-keyed one for the exact same selector content, which would flip
+    every already-indexed domain's ``input_fingerprint`` on upgrade with zero
+    real change. This test fails loudly if the digest key is renamed again.
+    """
+    base = tmp_path / "base"
+    domain = base / "project"
+    (domain / "sub").mkdir(parents=True)
+    (domain / "a.md").write_text(
+        "---\ncode:\n  files:\n    - src/a.py\n---\n# A\n", encoding="utf-8"
+    )
+    (domain / "sub" / "b.md").write_text(
+        "---\ncode:\n  files:\n    - src/b.py\n---\n# B\n", encoding="utf-8"
+    )
+    resolver = WikiSelectorResolver(base)
+
+    snapshot = resolver.capture(domain="project")
+
+    relative_keyed = linking._rows_fingerprint([
+        (page.relative, page.selectors)
+        for page in snapshot.pages
+        if page.selectors is not None
+    ])
+    page_id_keyed = linking._rows_fingerprint([
+        (page.page_id, page.selectors)
+        for page in snapshot.pages
+        if page.selectors is not None
+    ])
+
+    assert snapshot.fingerprint == relative_keyed
+    assert snapshot.fingerprint != page_id_keyed
+
+
 def test_selector_verification_reads_only_frontmatter_evidence(
     tmp_path, monkeypatch
 ):

@@ -1398,14 +1398,11 @@ class WikiSelectorResolver:
                 "Wiki selector snapshot changed during capture"
             )
         pages.sort(key=lambda page: page.relative)
-        selector_rows = sorted(
-            (
-                (page.page_id, page.selectors)
-                for page in pages
-                if page.selectors is not None
-            ),
-            key=lambda row: row[0],
-        )
+        selector_rows = [
+            (page.relative, page.selectors)
+            for page in pages
+            if page.selectors is not None
+        ]
         generation_rows = [
             (page.relative, page.content_hash) for page in pages
         ]
