@@ -1360,6 +1360,11 @@ class CodeGraphIndexer:
             raise CodeGraphUnsafePathError(
                 "unsafe code graph source path"
             ) from exc
+        except SelectorError as exc:
+            # Wiki selectors are freshness inputs: an unreadable page tree
+            # cannot prove the snapshot fresh, so report stale rather than a
+            # crash-shaped rebuild failure.
+            raise CodeGraphStaleError("code graph is stale") from exc
         except CodeGraphStoreError as exc:
             raise CodeGraphStoreFailure("code graph store failed") from exc
 

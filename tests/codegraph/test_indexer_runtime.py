@@ -787,6 +787,22 @@ def test_context_freshness_guard_reseals_the_ready_envelope(ready_context):
     assert "metadata_reconstructed" not in after["warnings"]
 
 
+def test_context_auto_rebuilds_dirty_graph_like_search(ready_context):
+    """Context must spend the whole bounded budget search already spends."""
+    bounded = ready_context.with_config(
+        auto_rebuild="bounded", max_rebuild_seconds=10
+    )
+    ready_context.change_source_after_index()
+    assert bounded.status()["state"] == "dirty"
+
+    response = bounded.context([ready_context.service_file_id])
+    bounded.runtime.join_workers(timeout=10)
+
+    assert response["state"] == "ready"
+    assert response["fresh"] is True
+    assert response["nodes"], "bounded auto-rebuild must serve context too"
+
+
 def test_no_op_selector_verify_failure_reseals_the_ready_envelope(
     ready_runtime, monkeypatch
 ):

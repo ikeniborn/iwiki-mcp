@@ -1421,21 +1421,27 @@ def test_context_include_wiki_hydrates_derived_pages_without_authority_mutation(
     assert page.read_text(encoding="utf-8") == authored
 
 
-def test_runtime_include_wiki_holds_selector_lease_after_guard_until_return(
+def test_runtime_include_wiki_holds_selector_lease_until_return(
     ready_context, monkeypatch
 ):
-    guarded = threading.Event()
+    """The lease must outlive the row read, not end with the page capture."""
+    read = threading.Event()
     release = threading.Event()
     writer_acquired = threading.Event()
-    original_guard = ready_context.runtime.query_guard
+    resolver = ready_context.runtime._indexer.wiki_selector_resolver
+    original_verify = resolver.verify_snapshot
+    verifications = 0
 
-    def paused_guard(**kwargs):
-        result = original_guard(**kwargs)
-        guarded.set()
-        assert release.wait(timeout=5)
+    def paused_verify(snapshot, **kwargs):
+        nonlocal verifications
+        verifications += 1
+        result = original_verify(snapshot, **kwargs)
+        if verifications == 2:
+            read.set()
+            assert release.wait(timeout=5)
         return result
 
-    monkeypatch.setattr(ready_context.runtime, "query_guard", paused_guard)
+    monkeypatch.setattr(resolver, "verify_snapshot", paused_verify)
     response = {}
 
     reader = threading.Thread(target=lambda: response.update(
@@ -1451,7 +1457,7 @@ def test_runtime_include_wiki_holds_selector_lease_after_guard_until_return(
             writer_acquired.set()
 
     reader.start()
-    assert guarded.wait(timeout=5)
+    assert read.wait(timeout=5)
     writer = threading.Thread(target=mutate)
     writer.start()
     assert not writer_acquired.wait(timeout=0.2)
@@ -1485,9 +1491,10 @@ def test_runtime_include_wiki_marks_stale_without_shared_lock_upgrade(
     assert ready_context.status()["state"] == "dirty"
 
 
-def test_runtime_include_wiki_reuses_one_selector_capture(
+def test_runtime_include_wiki_captures_selectors_once_after_the_guard(
     ready_context, monkeypatch
 ):
+    """One capture proves freshness, one serves the lease; never more."""
     resolver = ready_context.runtime._indexer.wiki_selector_resolver
     original_capture = resolver.capture
     captures = 0
@@ -1505,7 +1512,7 @@ def test_runtime_include_wiki_reuses_one_selector_capture(
     )
 
     assert response["fresh"] is True
-    assert captures == 1
+    assert captures == 2
 
 
 @pytest.mark.parametrize(
@@ -1555,6 +1562,27 @@ def test_runtime_selector_capture_failure_returns_exact_empty_context(
     assert response["truncated"] is False
     assert response["warnings"] == ready_context.status()["warnings"]
     assert response["fresh"] is False
+
+
+def test_runtime_selector_lease_failure_returns_graph_with_warning(
+    ready_context, monkeypatch
+):
+    """A refused selector lease suppresses pages; it never hides the graph."""
+    resolver = ready_context.runtime._indexer.wiki_selector_resolver
+
+    def refuse(*_args, **_kwargs):
+        raise SelectorError("safe capture unavailable")
+
+    monkeypatch.setattr(resolver, "verify_snapshot", refuse)
+
+    response = ready_context.context(
+        [ready_context.run_symbol_id], include_wiki=True
+    )
+
+    assert response["fresh"] is True
+    assert response["nodes"]
+    assert "wiki_selector_unavailable" in response["warnings"]
+    assert "wiki_pages" not in response
 
 
 def test_runtime_missing_wiki_domain_returns_complete_nonready_context(
