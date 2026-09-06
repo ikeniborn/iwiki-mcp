@@ -38,6 +38,7 @@ from .indexer import (
     _wiki_read_lock,
     exact_ready_metadata,
     sanitize_warning_codes,
+    valid_envelope,
 )
 from .linking import selector_capture_budget
 from .location import CodeGraphLocationError, CodeGraphLocationResolver
@@ -569,9 +570,8 @@ class CodeGraphRuntime:
         persisted_fingerprints = persisted.get("fingerprints")
         persisted_input = persisted.get("input_fingerprint")
         metadata_matches = (
-            exact_ready_metadata(persisted)
+            valid_envelope(persisted, state=state)
             and persisted.get("domain") == row[0]
-            and persisted.get("state") == "ready"
             and persisted.get("revision") == row[7]
             and _is_canonical_revision(row[7])
             and persisted.get("schema_version") == SCHEMA_VERSION

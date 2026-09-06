@@ -712,6 +712,35 @@ def test_query_guard_materializes_changed_source_as_dirty_without_rows(
     assert ready_runtime.status()["revision"] == initial["revision"]
 
 
+def test_dirty_transition_preserves_counts_and_matches_metadata(ready_runtime):
+    """A second runtime marking dirty must not zero counts or reconstruct."""
+    other_runtime = ready_runtime.with_config()
+    before = ready_runtime.status()
+    assert before["state"] == "ready"
+    assert before["counts"]["files"] > 0
+    ready_runtime.project_file("src/pkg/service.py").write_text(
+        "class Service:\n    def changed(self):\n        return None\n",
+        encoding="utf-8",
+    )
+
+    other_runtime.query_guard()
+
+    after = ready_runtime.status()
+    assert after["state"] == "dirty"
+    assert after["counts"] == before["counts"]
+    assert after["resolution_ratios"] == before["resolution_ratios"]
+    assert after["revision"] == before["revision"]
+    assert "metadata_reconstructed" not in after["warnings"]
+
+
+def test_status_idempotent_without_repository_change(ready_runtime):
+    """Two consecutive reads of an unchanged repository must agree."""
+    first = ready_runtime.status()
+    second = ready_runtime.status()
+
+    assert first == second
+
+
 def test_status_and_guard_show_rebuilding_during_current_process_build(
     ready_runtime, monkeypatch
 ):

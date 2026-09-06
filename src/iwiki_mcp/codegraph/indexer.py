@@ -132,6 +132,8 @@ _PUBLICATION_READY_METADATA_KEYS = frozenset({
     "graph_payload_revision",
     "markdown_revision",
 })
+# Repository states a sealed metadata envelope may declare.
+_ENVELOPE_STATES = ("ready", "dirty")
 
 _DATABASE_STAMP_KEYS = frozenset({
     "change_counter",
@@ -389,8 +391,12 @@ def _valid_storage_stamp(value: object) -> bool:
     )
 
 
-def exact_ready_metadata(metadata: Mapping[str, object]) -> bool:
-    """Validate the complete final metadata envelope and its diagnostics."""
+def valid_envelope(
+    metadata: Mapping[str, object],
+    *,
+    state: str = "ready",
+) -> bool:
+    """Validate a complete sealed metadata envelope for one declared state."""
     timings = _safe_phase_timings(metadata.get("phase_timings_ms"))
     warnings = metadata.get("warnings")
     keys = set(metadata)
@@ -407,8 +413,8 @@ def exact_ready_metadata(metadata: Mapping[str, object]) -> bool:
     )
     return (
         publication_fields_valid
-        and metadata.get("state") == "ready"
-        and metadata.get("fresh") is True
+        and metadata.get("state") == state
+        and metadata.get("fresh") is (state == "ready")
         and metadata.get("publication_phase") == "pending_final_verify"
         and metadata.get("pending_final_verify") is True
         and metadata.get("recovery_policy") == "failed"
@@ -432,6 +438,18 @@ def exact_ready_metadata(metadata: Mapping[str, object]) -> bool:
         and type(metadata.get("duration_ms")) is int
         and metadata["duration_ms"] >= 0
         and metadata.get("metadata_digest") == _metadata_digest(metadata)
+    )
+
+
+def exact_ready_metadata(metadata: Mapping[str, object]) -> bool:
+    """Validate the complete final ready envelope and its diagnostics."""
+    return valid_envelope(metadata, state="ready")
+
+
+def sealed_envelope(metadata: Mapping[str, object]) -> bool:
+    """Report whether metadata is a sealed envelope for any declared state."""
+    return any(
+        valid_envelope(metadata, state=state) for state in _ENVELOPE_STATES
     )
 
 
@@ -1141,6 +1159,68 @@ class CodeGraphIndexer:
             metadata["recovery_policy"] = recovery_policy
         return metadata
 
+    def _repository_revision(self) -> str | None:
+        """Read the canonical revision of this domain's repository row."""
+        with self.store.read_lease() as connection:
+            row = connection.execute(
+                "SELECT revision FROM repositories WHERE repository_id = ?",
+                (self.domain,),
+            ).fetchone()
+        return row[0] if row is not None and isinstance(row[0], str) else None
+
+    def reseal_envelope(
+        self,
+        previous: Mapping[str, object],
+        *,
+        state: str,
+        generation: int | None = None,
+    ) -> dict[str, object] | None:
+        """Re-declare a sealed envelope under a new state and storage stamp.
+
+        Returns ``None`` when ``previous`` is not a sealed envelope, so the
+        caller can fall back to its own reconstructed record. The storage
+        stamp must be captured after the SQL write it accompanies.
+        """
+        if not sealed_envelope(previous):
+            return None
+        envelope = dict(previous)
+        envelope["state"] = state
+        envelope["fresh"] = state == "ready"
+        if generation is not None:
+            envelope["generation"] = generation
+        envelope["storage_stamp"] = self.store.storage_stamp()
+        _seal_ready_metadata(envelope)
+        return envelope
+
+    def publish_transition_envelope(
+        self,
+        state: str,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Write one SQL state and republish the agreeing metadata envelope.
+
+        Callers already hold the graph write lock. The SQL write invalidates
+        the sealed storage stamp, so the envelope is resealed with a stamp
+        captured afterwards; an out-of-band SQL write still breaks the seal.
+        """
+        previous = _safe_metadata(self.paths.metadata) or {}
+        self.store.set_repository_state(self.domain, state)
+        envelope = self.reseal_envelope(
+            previous, state=state, generation=generation
+        )
+        if envelope is None:
+            envelope = self._transition_metadata(
+                state=state,
+                generation=(
+                    self._generation(previous)
+                    if generation is None
+                    else generation
+                ),
+                revision=self._repository_revision(),
+            )
+        self._publish_metadata_record(envelope, deadline=None)
+
     def _mark_selector_snapshot_dirty(
         self, *, generation: int, maximum: float
     ) -> None:
@@ -1151,26 +1231,7 @@ class CodeGraphIndexer:
             current = _safe_metadata(self.paths.metadata) or {}
             if self._generation(current) != generation:
                 return
-            with self.store.read_lease() as connection:
-                row = connection.execute(
-                    "SELECT revision FROM repositories "
-                    "WHERE repository_id = ?",
-                    (self.domain,),
-                ).fetchone()
-            revision = (
-                row[0]
-                if row is not None and isinstance(row[0], str)
-                else None
-            )
-            self.store.set_repository_state(self.domain, "dirty")
-            self._publish_metadata_record(
-                self._transition_metadata(
-                    state="dirty",
-                    generation=generation,
-                    revision=revision,
-                ),
-                deadline=None,
-            )
+            self.publish_transition_envelope("dirty", generation=generation)
 
     def _publish_metadata_record(
         self,
@@ -1268,7 +1329,7 @@ class CodeGraphIndexer:
                 ):
                     if ready_now():
                         return False
-                    self.store.set_repository_state(self.domain, "dirty")
+                    self.publish_transition_envelope("dirty")
                     return True
             with _selector_read_lock(
                 self.cache_base,
@@ -1286,7 +1347,7 @@ class CodeGraphIndexer:
             ):
                 if ready_now():
                     return False
-                self.store.set_repository_state(self.domain, "dirty")
+                self.publish_transition_envelope("dirty")
                 return True
         except DiscoveryError as exc:
             raise CodeGraphUnsafePathError(
@@ -1579,8 +1640,8 @@ class CodeGraphIndexer:
                                     except Timeout:
                                         raise
                                     except Exception:
-                                        self.store.set_repository_state(
-                                            self.domain, "dirty"
+                                        self.publish_transition_envelope(
+                                            "dirty"
                                         )
                                         raise
                                 result = dict(final_ready)
@@ -1931,7 +1992,7 @@ class CodeGraphIndexer:
                     self.paths.lock,
                     timeout=config.max_rebuild_seconds,
                 ):
-                    self.store.set_repository_state(self.domain, "dirty")
+                    self.publish_transition_envelope("dirty")
             except (CodeGraphError, Timeout):
                 pass
             raise CodeGraphStaleError(
@@ -1977,5 +2038,8 @@ __all__ = [
     "CodeGraphStoreFailure",
     "CodeGraphUnsafePathError",
     "WikiSelectorResolver",
+    "exact_ready_metadata",
     "sanitize_warning_codes",
+    "sealed_envelope",
+    "valid_envelope",
 ]
