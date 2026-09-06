@@ -553,12 +553,31 @@ def test_nonready_state_guard_returns_stable_empty_contract(seed_runtime):
         assert out["fresh"] is False
         assert out["results"] == []
         assert out["hint"]
+        # A non-ready answer must always name its own error/code so an
+        # empty `results` list is never mistaken for a real, ready answer
+        # that simply matched nothing (spec R4).
+        assert out["error"]
+        assert out["code"] == f"code_graph_{state}"
         hints.add(out["hint"])
 
     ready = seed_runtime.with_state("ready", auto_rebuild="off").query_guard()
     assert ready["fresh"] is True
     assert ready["results"] == []
+    assert "error" not in ready
+    assert "code" not in ready
     assert hints == {"run wiki_code_index"}
+
+
+def test_missing_state_context_names_its_own_error(seed_runtime):
+    """A "missing" context answer must never look like a real empty match."""
+    response = seed_runtime.context(["py:file:" + "a" * 64])
+
+    assert response["state"] == "missing"
+    assert response["fresh"] is False
+    assert response["nodes"] == []
+    assert response["error"]
+    assert response["code"] == "code_graph_missing"
+    assert response["hint"] == "run wiki_code_index"
 
 
 def test_dirty_bounded_auto_rebuild_attempts_once_and_becomes_fresh(seed_runtime):
@@ -779,6 +798,12 @@ def test_context_freshness_guard_reseals_the_ready_envelope(ready_context):
     persisted = _persisted(ready_context)
     after = ready_context.status()
     assert stale["fresh"] is False
+    # A non-ready context answer must always name its own error/code so an
+    # empty `nodes` list is never mistaken for a real, ready answer that
+    # simply matched nothing (spec R4).
+    assert stale["error"]
+    assert stale["code"] == "stale"
+    assert stale["hint"]
     assert _repository_state(ready_context)[0] == "dirty"
     assert valid_envelope(persisted, state="dirty")
     assert persisted["counts"] == before["counts"]

@@ -15,6 +15,7 @@ from iwiki_mcp.codegraph.context import (
     ContextRequest,
     validate_context_request,
 )
+from iwiki_mcp.codegraph.runtime import _invalid_config
 
 
 def test_context_request_defaults_are_frozen():
@@ -51,6 +52,58 @@ def test_context_validation_rejects_unbounded_or_untyped_input(seeds, changes):
         validate_context_request(seeds, **changes)
 
 
+def validate_context_error(seeds=None, **changes) -> dict:
+    """Validate a bad context request and map its error like the runtime does.
+
+    Mirrors `CodeGraphRuntime._context_unleased`'s
+    `except CodeGraphContextError` -> `_invalid_config` path without needing
+    a full runtime.
+    """
+    if seeds is None:
+        seeds = ["py:file:" + "a" * 64]
+    with pytest.raises(CodeGraphContextError) as failure:
+        validate_context_request(seeds, **changes)
+    return _invalid_config(failure.value.parameter)
+
+
+def test_invalid_depth_names_the_parameter():
+    error = validate_context_error(depth=1.0)
+
+    assert error == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "field": "depth",
+        "hint": "inspect code_graph project configuration",
+    }
+
+
+@pytest.mark.parametrize(
+    ("seeds", "changes", "parameter"),
+    [
+        ([], {}, "seeds"),
+        (["pkg.Service.run"], {}, "seeds"),
+        (["py:file:" + "a" * 64], {"direction": "sideways"}, "direction"),
+        (["py:file:" + "a" * 64], {"depth": -1}, "depth"),
+        (["py:file:" + "a" * 64], {"relations": []}, "relations"),
+        (["py:file:" + "a" * 64], {"relations": ["LINKS"]}, "relations"),
+        (["py:file:" + "a" * 64], {"include_source": 1}, "include_source"),
+        (["py:file:" + "a" * 64], {"include_wiki": "yes"}, "include_wiki"),
+        (["py:file:" + "a" * 64], {"max_nodes": 0}, "max_nodes"),
+        (["py:file:" + "a" * 64], {"max_files": 21}, "max_files"),
+        (
+            ["py:file:" + "a" * 64],
+            {"max_source_bytes": 200_001},
+            "max_source_bytes",
+        ),
+    ],
+)
+def test_context_validation_names_the_parameter(seeds, changes, parameter):
+    with pytest.raises(CodeGraphContextError) as failure:
+        validate_context_request(seeds, **changes)
+
+    assert failure.value.parameter == parameter
+
+
 def test_javascript_and_typescript_seeds_are_accepted():
     digest = "a" * 64
     request = validate_context_request([f"js:symbol:{digest}", f"ts:symbol:{digest}"])
@@ -76,6 +129,7 @@ def test_context_validation_precedes_runtime_binding_and_io(seed_runtime, monkey
     response = seed_runtime.runtime.context(["pkg.Service.run"])
 
     assert response["code"] == "invalid_config"
+    assert response["field"] == "seeds"
     assert seed_runtime.database_accesses == []
 
 
@@ -105,6 +159,7 @@ def test_noncanonical_seed_is_rejected_before_query_guard(
     response = seed_runtime.runtime.context([seed])
 
     assert response["code"] == "invalid_config"
+    assert response["field"] == "seeds"
     assert seed_runtime.database_accesses == []
 
 

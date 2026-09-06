@@ -32,6 +32,10 @@ class CodeGraphContextError(CodeGraphError):
 
     code = "invalid_config"
 
+    def __init__(self, message: str, *, parameter: str | None = None) -> None:
+        super().__init__(message)
+        self.parameter = parameter
+
 
 @dataclass(frozen=True)
 class ContextRequest:
@@ -84,11 +88,15 @@ def validate_context_request(
         or len(seeds) > _MAX_NODES
         or any(not _entity_id(seed) for seed in seeds)
     ):
-        raise CodeGraphContextError("seeds must contain typed entity IDs")
+        raise CodeGraphContextError(
+            "seeds must contain typed entity IDs", parameter="seeds"
+        )
     if direction not in ("in", "out", "both"):
-        raise CodeGraphContextError("invalid context direction")
+        raise CodeGraphContextError(
+            "invalid context direction", parameter="direction"
+        )
     if type(depth) is not int or not 0 <= depth <= _MAX_DEPTH:
-        raise CodeGraphContextError("invalid context depth")
+        raise CodeGraphContextError("invalid context depth", parameter="depth")
     if relations is None:
         normalized_relations = None
     elif (
@@ -97,20 +105,34 @@ def validate_context_request(
         or any(type(item) is not str or item not in KNOWN_RELATIONS
                for item in relations)
     ):
-        raise CodeGraphContextError("invalid context relations")
+        raise CodeGraphContextError(
+            "invalid context relations", parameter="relations"
+        )
     else:
         normalized_relations = tuple(sorted(set(relations)))
-    if type(include_source) is not bool or type(include_wiki) is not bool:
-        raise CodeGraphContextError("context flags must be boolean")
+    if type(include_source) is not bool:
+        raise CodeGraphContextError(
+            "context flags must be boolean", parameter="include_source"
+        )
+    if type(include_wiki) is not bool:
+        raise CodeGraphContextError(
+            "context flags must be boolean", parameter="include_wiki"
+        )
     if type(max_nodes) is not int or not 1 <= max_nodes <= _MAX_NODES:
-        raise CodeGraphContextError("invalid context node budget")
+        raise CodeGraphContextError(
+            "invalid context node budget", parameter="max_nodes"
+        )
     if type(max_files) is not int or not 1 <= max_files <= _MAX_FILES:
-        raise CodeGraphContextError("invalid context file budget")
+        raise CodeGraphContextError(
+            "invalid context file budget", parameter="max_files"
+        )
     if (
         type(max_source_bytes) is not int
         or not 0 <= max_source_bytes <= _MAX_SOURCE_BYTES
     ):
-        raise CodeGraphContextError("invalid context source budget")
+        raise CodeGraphContextError(
+            "invalid context source budget", parameter="max_source_bytes"
+        )
     return ContextRequest(
         seeds=tuple(seeds),
         direction=direction,

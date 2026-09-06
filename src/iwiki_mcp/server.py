@@ -859,12 +859,16 @@ def _missing_code_primary() -> dict:
     }
 
 
-def _invalid_code_config() -> dict:
-    return {
+def _invalid_code_config(field: str | None = None) -> dict:
+    result = {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+    whitelisted = _codegraph_runtime._whitelisted_field(field)
+    if whitelisted is not None:
+        result["field"] = whitelisted
+    return result
 
 
 _CODE_SOURCE_UNAVAILABLE = {
