@@ -1405,6 +1405,15 @@ class CodeGraphRuntime:
         verify = getattr(resolver, "verify_snapshot", None)
         if not callable(capture) or not callable(verify):
             return self._context_unleased(seeds, **arguments)
+        # Prove freshness with the whole rebuild budget before taking the
+        # selector lease, exactly as search does: a bounded auto-rebuild needs
+        # the Wiki mutation lock that this shared lease would hold against it.
+        guarded = self.query_guard()
+        if guarded.get("fresh") is not True:
+            return self._empty_context_response(
+                request,
+                {key: value for key, value in guarded.items() if key != "results"},
+            )
         timeout = self.config.max_rebuild_seconds
         deadline = time.monotonic() + timeout
 
@@ -1427,9 +1436,7 @@ class CodeGraphRuntime:
                 response = self._context_unleased(
                     seeds,
                     _request=request,
-                    _selector_lock_held=True,
-                    _selector_snapshot=snapshot,
-                    _deadline=deadline,
+                    _guarded=guarded,
                     **arguments,
                 )
                 verify(snapshot, check_control=selector_control)
@@ -1439,15 +1446,31 @@ class CodeGraphRuntime:
                 request, {**self.status(), **self._busy_response()}
             )
         except Exception:
-            return self._empty_context_response(
-                request,
-                {**self.status(), **_typed_failure(CodeGraphStaleError())},
-            )
+            return self._context_without_wiki(seeds, arguments, guarded)
         finally:
             if snapshot is not None:
                 close_snapshot = getattr(resolver, "close_snapshot", None)
                 if callable(close_snapshot):
                     close_snapshot(snapshot)
+
+    def _context_without_wiki(
+        self,
+        seeds: list[str],
+        arguments: Mapping[str, object],
+        guarded: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Answer the graph question when the Wiki selectors are unreadable."""
+        response = self._context_unleased(
+            seeds,
+            **{**arguments, "include_wiki": False},
+            _guarded=guarded,
+        )
+        response.pop("wiki_pages", None)
+        response["warnings"] = list(dict.fromkeys([
+            *response.get("warnings", []),
+            "wiki_selector_unavailable",
+        ]))
+        return response
 
     def _context_unleased(
         self,
@@ -1462,9 +1485,7 @@ class CodeGraphRuntime:
         max_files: int = 20,
         max_source_bytes: int = 200_000,
         _request: ContextRequest | None = None,
-        _selector_lock_held: bool = False,
-        _selector_snapshot: object | None = None,
-        _deadline: float | None = None,
+        _guarded: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Compose context under one coherent ready-revision read lease."""
         if _request is None:
@@ -1484,14 +1505,7 @@ class CodeGraphRuntime:
                 return _invalid_config()
         else:
             request = _request
-        remaining = (
-            None if _deadline is None else max(0.0, _deadline - time.monotonic())
-        )
-        guarded = self.query_guard(
-            remaining_seconds=remaining,
-            _selector_lock_held=_selector_lock_held,
-            _selector_snapshot=_selector_snapshot,
-        )
+        guarded = self.query_guard() if _guarded is None else _guarded
         context_guarded = {
             key: value for key, value in guarded.items() if key != "results"
         }
