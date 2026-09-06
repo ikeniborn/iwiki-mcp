@@ -162,6 +162,32 @@ def test_search_filters_match_the_sqlite_reader(
     assert [item["match"] for item in postgres_results["results"]] == expected
 
 
+@pytest.mark.parametrize(
+    "raw", ["./typed/prefix", "typed//prefix", " typed/prefix ", "typed/prefix/"]
+)
+def test_path_prefix_variants_match_canonical_via_starts_with(
+    ranked_graph_pair, raw
+):
+    # Bypass `validate_search_request`'s own normalization so this asserts
+    # the PostgreSQL reader's `_path_filter` normalizes independently
+    # before binding `starts_with`, per the design's belt-and-suspenders
+    # contract at the storage boundary.
+    import dataclasses
+
+    from iwiki_mcp.codegraph.query import validate_search_request
+
+    canonical = validate_search_request("needle", limit=20, path="typed/prefix")
+    variant = dataclasses.replace(canonical, path=raw)
+
+    canonical_results = ranked_graph_pair.postgres.search(canonical)
+    variant_results = ranked_graph_pair.postgres.search(variant)
+
+    assert variant_results == canonical_results
+    assert [item["match"] for item in canonical_results["results"]] == (
+        ["canonical_prefix"]
+    )
+
+
 def test_context_traverses_bounded_relations_from_typed_seeds(pg_ready_graph):
     result = pg_ready_graph.reader().context(pg_ready_graph.context_request())
 
