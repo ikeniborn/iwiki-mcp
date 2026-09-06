@@ -18,6 +18,10 @@ except ModuleNotFoundError:  # Python 3.10
 class CodeGraphConfigError(RuntimeError):
     """Raised when code graph configuration is invalid."""
 
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
 
 KNOWN_LANGUAGES = frozenset({"python", "typescript", "javascript", "bash"})
 
@@ -59,13 +63,17 @@ _FORBIDDEN_FIELDS = {
 
 def _bool(value: Any, field: str) -> bool:
     if type(value) is not bool:
-        raise CodeGraphConfigError(f"code_graph.{field} must be a boolean")
+        raise CodeGraphConfigError(
+            f"code_graph.{field} must be a boolean", field=field
+        )
     return value
 
 
 def _positive_int(value: Any, field: str) -> int:
     if type(value) is not int or value <= 0:
-        raise CodeGraphConfigError(f"code_graph.{field} must be a positive integer")
+        raise CodeGraphConfigError(
+            f"code_graph.{field} must be a positive integer", field=field
+        )
     return value
 
 
@@ -78,7 +86,7 @@ def _optional_positive_int(value: Any, field: str) -> int | None:
 def _non_negative_int(value: Any, field: str) -> int:
     if type(value) is not int or value < 0:
         raise CodeGraphConfigError(
-            f"code_graph.{field} must be a non-negative integer"
+            f"code_graph.{field} must be a non-negative integer", field=field
         )
     return value
 
@@ -86,34 +94,43 @@ def _non_negative_int(value: Any, field: str) -> int:
 def _mode(value: Any, field: str) -> PublishMode:
     if value not in ("sqlite", "postgres", "mcp"):
         raise CodeGraphConfigError(
-            f"code_graph.{field} must be sqlite, postgres, or mcp"
+            f"code_graph.{field} must be sqlite, postgres, or mcp", field=field
         )
     return value
 
 
 def _languages(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or not value:
-        raise CodeGraphConfigError("code_graph.languages must be a non-empty array")
+        raise CodeGraphConfigError(
+            "code_graph.languages must be a non-empty array", field="languages"
+        )
     result = tuple(value)
     if any(
         type(item) is not str or item not in KNOWN_LANGUAGES
         for item in result
     ):
         raise CodeGraphConfigError(
-            "code_graph.languages supports only python, typescript, javascript, bash"
+            "code_graph.languages supports only python, typescript, javascript, bash",
+            field="languages",
         )
     return result
 
 
 def _exclude(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
-        raise CodeGraphConfigError("code_graph.exclude must be an array")
+        raise CodeGraphConfigError(
+            "code_graph.exclude must be an array", field="exclude"
+        )
     result = tuple(value)
     for item in result:
         if type(item) is not str or not item or os.path.isabs(item):
-            raise CodeGraphConfigError("code_graph.exclude contains an unsafe path")
+            raise CodeGraphConfigError(
+                "code_graph.exclude contains an unsafe path", field="exclude"
+            )
         if ".." in item.replace("\\", "/").split("/"):
-            raise CodeGraphConfigError("code_graph.exclude contains an unsafe path")
+            raise CodeGraphConfigError(
+                "code_graph.exclude contains an unsafe path", field="exclude"
+            )
     return result
 
 
@@ -144,7 +161,10 @@ class CodeGraphConfig:
         object.__setattr__(self, "enabled", _bool(self.enabled, "enabled"))
         object.__setattr__(self, "languages", _languages(self.languages))
         if self.auto_rebuild not in ("off", "bounded"):
-            raise CodeGraphConfigError("code_graph.auto_rebuild must be off or bounded")
+            raise CodeGraphConfigError(
+                "code_graph.auto_rebuild must be off or bounded",
+                field="auto_rebuild",
+            )
         object.__setattr__(
             self,
             "max_rebuild_seconds",
@@ -198,8 +218,9 @@ class CodeGraphConfig:
             raise CodeGraphConfigError("code_graph connection fields are not supported")
         unknown = keys - _FIELDS
         if unknown:
+            offending = sorted(unknown)[0]
             raise CodeGraphConfigError(
-                f"unknown code_graph field: {sorted(unknown)[0]}"
+                f"unknown code_graph field: {offending}", field=offending
             )
         return cls(**dict(raw))
 

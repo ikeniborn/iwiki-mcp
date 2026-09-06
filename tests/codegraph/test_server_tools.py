@@ -11,6 +11,7 @@ import pytest
 from iwiki_mcp import server
 from iwiki_mcp.codegraph import application as application_module
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph.context import CodeGraphContextError
 from iwiki_mcp.codegraph.languages.bash import BashAdapter
 from iwiki_mcp.codegraph.models import CodeGraphError
 from iwiki_mcp.codegraph.query import CodeGraphQueryError
@@ -404,20 +405,32 @@ def test_search_handler_defers_languages_to_the_active_snapshot(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "field"),
     [
-        {"seeds": []},
-        {"seeds": ["not-an-entity-id"]},
-        {"seeds": ["py:file:" + "a" * 64], "direction": "sideways"},
-        {"seeds": ["py:file:" + "a" * 64], "depth": 4},
-        {"seeds": ["py:file:" + "a" * 64], "relations": ["DOCUMENTED_BY"]},
-        {"seeds": ["py:file:" + "a" * 64], "include_source": 1},
-        {"seeds": ["py:file:" + "a" * 64], "max_nodes": 51},
-        {"seeds": ["py:file:" + "a" * 64], "max_files": 21},
-        {"seeds": ["py:file:" + "a" * 64], "max_source_bytes": 200_001},
+        ({"seeds": []}, "seeds"),
+        ({"seeds": ["not-an-entity-id"]}, "seeds"),
+        (
+            {"seeds": ["py:file:" + "a" * 64], "direction": "sideways"},
+            "direction",
+        ),
+        ({"seeds": ["py:file:" + "a" * 64], "depth": 4}, "depth"),
+        (
+            {"seeds": ["py:file:" + "a" * 64], "relations": ["DOCUMENTED_BY"]},
+            "relations",
+        ),
+        (
+            {"seeds": ["py:file:" + "a" * 64], "include_source": 1},
+            "include_source",
+        ),
+        ({"seeds": ["py:file:" + "a" * 64], "max_nodes": 51}, "max_nodes"),
+        ({"seeds": ["py:file:" + "a" * 64], "max_files": 21}, "max_files"),
+        (
+            {"seeds": ["py:file:" + "a" * 64], "max_source_bytes": 200_001},
+            "max_source_bytes",
+        ),
     ],
 )
-def test_context_validation_precedes_binding(monkeypatch, arguments):
+def test_context_validation_precedes_binding(monkeypatch, arguments, field):
     def fail_binding():
         raise AssertionError("binding must not be resolved")
 
@@ -426,6 +439,7 @@ def test_context_validation_precedes_binding(monkeypatch, arguments):
     assert server.wiki_code_context(**arguments) == {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
+        "field": field,
         "hint": "inspect code_graph project configuration",
     }
 
@@ -483,12 +497,16 @@ def test_safe_maps_code_graph_errors_without_leaking_exception_text(
         lambda _source: FailingRuntime(),
     )
 
-    assert server.wiki_code_status() == {
+    result = server.wiki_code_status()
+
+    assert result == {
         "error": "code graph store failed",
         "code": "store_failed",
         "hint": "inspect wiki_code_status and retry",
         "fresh": False,
     }
+    assert "field" not in result
+    assert "secret" not in repr(result)
     assert "code_graph_handler" not in caplog.text
 
 
@@ -506,11 +524,69 @@ def test_search_handler_maps_invalid_config_without_leaking_text(
         lambda _source: InvalidRuntime(),
     )
 
-    assert server.wiki_code_search("run") == {
+    result = server.wiki_code_search("run")
+
+    assert result == {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+    assert "field" not in result
+    assert "secret" not in repr(result)
+    assert "code_graph_handler" not in caplog.text
+
+
+def test_context_handler_names_the_whitelisted_parameter_only(
+    seed_binding, monkeypatch, caplog
+):
+    """`invalid_config` exposes only a whitelisted, identifier-shaped name.
+
+    A legitimate context-parameter name (e.g. "depth") is surfaced under
+    "field"; an attacker/bug-influenced value that does not look like a
+    field/parameter identifier (spaces, secrets, punctuation) is dropped
+    instead of ever reaching the client.
+    """
+
+    class InvalidContextRuntime:
+        def __init__(self, parameter):
+            self.parameter = parameter
+
+        def context(self, *_args, **_kwargs):
+            raise CodeGraphContextError(
+                "secret /absolute/path SELECT credentials",
+                parameter=self.parameter,
+            )
+
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "code_runtime",
+        lambda _source: InvalidContextRuntime("depth"),
+    )
+    named = server.wiki_code_context(["py:file:" + "a" * 64])
+    assert named == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "field": "depth",
+        "hint": "inspect code_graph project configuration",
+    }
+
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "code_runtime",
+        lambda _source: InvalidContextRuntime(
+            "secret /absolute/path SELECT credentials"
+        ),
+    )
+    unnamed = server.wiki_code_context(["py:file:" + "a" * 64])
+    assert unnamed == {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "hint": "inspect code_graph project configuration",
+    }
+    assert "field" not in unnamed
+    assert "secret" not in repr(unnamed)
     assert "code_graph_handler" not in caplog.text
 
 

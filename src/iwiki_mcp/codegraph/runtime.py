@@ -191,12 +191,37 @@ def _not_configured() -> dict[str, object]:
     }
 
 
-def _invalid_config() -> dict[str, object]:
-    return {
+_FIELD_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _whitelisted_field(name: object) -> str | None:
+    """Only ever surface an identifier-shaped config field or parameter name.
+
+    Guards an `invalid_config` response against ever leaking raw exception
+    text: the offending name must look like a real field/parameter
+    identifier (lowercase snake_case, bounded length), never free-form
+    prose. A raise site always attaches a deliberate, bounded name (a
+    dataclass field, a validator parameter, or a literal unrecognized TOML
+    key) -- this is a shape check, not a fixed enumeration, so an unknown
+    but well-formed key (e.g. a typo'd field) is still diagnosable.
+    """
+    return (
+        name
+        if isinstance(name, str) and _FIELD_NAME_PATTERN.fullmatch(name)
+        else None
+    )
+
+
+def _invalid_config(field: str | None = None) -> dict[str, object]:
+    result = {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
         "hint": "inspect code_graph project configuration",
     }
+    whitelisted = _whitelisted_field(field)
+    if whitelisted is not None:
+        result["field"] = whitelisted
+    return result
 
 
 def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
@@ -214,6 +239,31 @@ def _rebuild_failed() -> dict[str, object]:
         "code": "rebuild_failed",
         "hint": "inspect wiki_code_status and retry",
     }
+
+
+def _not_ready_defaults(state: object) -> tuple[str, str]:
+    """Default diagnostics for a non-ready answer with no more specific error."""
+    code = (
+        f"code_graph_{state}" if isinstance(state, str) and state else "not_ready"
+    )
+    return "code graph is not ready for this query", code
+
+
+def _not_ready(payload: Mapping[str, object]) -> dict[str, object]:
+    """Guarantee a non-ready query answer names its own error and code.
+
+    A caller-visible empty `results`/`nodes` list must never be mistaken for
+    a real, ready answer that simply matched nothing: every non-ready branch
+    of `query_guard`/`search` carries `error`, `code`, and `hint` alongside
+    it. Existing, more specific diagnostics (e.g. a typed failure or a busy
+    response) are preserved -- only a missing key is filled in.
+    """
+    result = dict(payload)
+    error_default, code_default = _not_ready_defaults(result.get("state"))
+    result.setdefault("error", error_default)
+    result.setdefault("code", code_default)
+    result.setdefault("hint", _INDEX_HINT)
+    return result
 
 
 def _typed_failure(error: CodeGraphError) -> dict[str, object]:
@@ -248,7 +298,7 @@ def sanitized_error(error: CodeGraphError) -> dict[str, object]:
     """Map typed graph failures without exposing exception text."""
     code = getattr(error, "code", "rebuild_failed")
     if code == "invalid_config":
-        return _invalid_config()
+        return _invalid_config(getattr(error, "parameter", None))
     if code == "unsupported_language":
         return _unsupported_language(getattr(error, "available", ()))
     if code == "not_configured":
@@ -311,7 +361,7 @@ class CodeGraphRuntime:
         self._store = None
         self._indexer = None
         self._context_root = None
-        self._configuration_error = False
+        self._configuration_error: CodeGraphConfigError | None = None
         self._initialization_error = False
         self._unsafe_location = False
         self._worker_domain_key = (
@@ -329,8 +379,8 @@ class CodeGraphRuntime:
                 binding.project_dir,
                 environ=environ,
             )
-        except CodeGraphConfigError:
-            self._configuration_error = True
+        except CodeGraphConfigError as exc:
+            self._configuration_error = exc
             return
         if not self.config.enabled:
             return
@@ -348,7 +398,11 @@ class CodeGraphRuntime:
                     for language in self.config.languages
                 }
             except KeyError:
-                self._configuration_error = True
+                self._configuration_error = CodeGraphConfigError(
+                    "code_graph.languages names a language with no "
+                    "registered adapter",
+                    field="languages",
+                )
                 self.paths = None
                 return
             self._parser_version = ";".join(
@@ -393,8 +447,8 @@ class CodeGraphRuntime:
             return _typed_failure(CodeGraphUnsafePathError())
         if self._initialization_error:
             return _rebuild_failed()
-        if self._configuration_error:
-            return _invalid_config()
+        if self._configuration_error is not None:
+            return _invalid_config(self._configuration_error.field)
         if (
             self.binding.primary is None
             or self.config is None
@@ -1138,12 +1192,11 @@ class CodeGraphRuntime:
                 if current.get("state") == "ready":
                     return {**current, "results": []}
                 if current.get("state") != "dirty":
-                    return {
+                    return _not_ready({
                         **current,
                         "fresh": False,
                         "results": [],
-                        "hint": _INDEX_HINT,
-                    }
+                    })
                 return {
                     **current,
                     **_typed_failure(CodeGraphStaleError()),
@@ -1177,12 +1230,11 @@ class CodeGraphRuntime:
             if rebuilt.get("state") == "ready":
                 return {**self.status(), "results": []}
             status = self.status()
-        return {
+        return _not_ready({
             **status,
             "fresh": False,
             "results": [],
-            "hint": _INDEX_HINT,
-        }
+        })
 
     def search(
         self,
@@ -1225,7 +1277,7 @@ class CodeGraphRuntime:
                     or before.get("state") != "ready"
                     or before.get("revision") != guarded_revision
                 ):
-                    return {
+                    return _not_ready({
                         **self._with_rebuilding_state(
                             guarded,
                             shared_writer=_BUILD_WORKERS.is_active(
@@ -1234,8 +1286,7 @@ class CodeGraphRuntime:
                         ),
                         "fresh": False,
                         "results": [],
-                        "hint": _INDEX_HINT,
-                    }
+                    })
                 with self._store.read_lease() as connection:
                     data_version = connection.execute(
                         "PRAGMA data_version"
@@ -1246,23 +1297,21 @@ class CodeGraphRuntime:
                         (self.binding.primary,),
                     ).fetchone()
                     if repository != ("ready", guarded_revision):
-                        return {
+                        return _not_ready({
                             **guarded,
                             "fresh": False,
                             "results": [],
-                            "hint": _INDEX_HINT,
-                        }
+                        })
                     sealed_stamp = before.get("storage_stamp")
                     if (
                         not isinstance(sealed_stamp, Mapping)
                         or self._store.storage_stamp() != sealed_stamp
                     ):
-                        return {
+                        return _not_ready({
                             **guarded,
                             "fresh": False,
                             "results": [],
-                            "hint": _INDEX_HINT,
-                        }
+                        })
                     results = query_engine.search(
                         connection,
                         request,
@@ -1280,23 +1329,21 @@ class CodeGraphRuntime:
                         or repository_after != repository
                         or data_version_after != data_version
                     ):
-                        return {
+                        return _not_ready({
                             **guarded,
                             "fresh": False,
                             "results": [],
-                            "hint": _INDEX_HINT,
-                        }
+                        })
                     after = dict(_metadata(self.paths.metadata))
                     if (
                         before != after
                         or _BUILD_WORKERS.is_active(self._worker_domain_key)
                     ):
-                        return {
+                        return _not_ready({
                             **guarded,
                             "fresh": False,
                             "results": [],
-                            "hint": _INDEX_HINT,
-                        }
+                        })
         except CodeGraphQueryError:
             return _invalid_config()
         except Timeout:
@@ -1365,9 +1412,13 @@ class CodeGraphRuntime:
             "warnings": list(guard.get("warnings", [])),
             "fresh": False,
         }
-        for key in ("error", "code", "hint"):
-            if key in guard:
-                response[key] = guard[key]
+        # A non-ready context answer must always name its own error/code/hint
+        # (see `_not_ready`) so an empty `nodes` list is never mistaken for a
+        # real, ready answer that simply matched nothing.
+        error_default, code_default = _not_ready_defaults(response["state"])
+        response["error"] = guard.get("error", error_default)
+        response["code"] = guard.get("code", code_default)
+        response["hint"] = guard.get("hint", _INDEX_HINT)
         return response
 
     def context(
@@ -1398,8 +1449,8 @@ class CodeGraphRuntime:
             return self._context_unleased(seeds, **arguments)
         try:
             request = validate_context_request(seeds, **arguments)
-        except CodeGraphContextError:
-            return _invalid_config()
+        except CodeGraphContextError as exc:
+            return _invalid_config(exc.parameter)
         resolver = self._indexer.wiki_selector_resolver
         capture = getattr(resolver, "capture", None)
         verify = getattr(resolver, "verify_snapshot", None)
@@ -1501,8 +1552,8 @@ class CodeGraphRuntime:
                     max_files=max_files,
                     max_source_bytes=max_source_bytes,
                 )
-            except CodeGraphContextError:
-                return _invalid_config()
+            except CodeGraphContextError as exc:
+                return _invalid_config(exc.parameter)
         else:
             request = _request
         guarded = self.query_guard() if _guarded is None else _guarded
