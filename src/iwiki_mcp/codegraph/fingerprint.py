@@ -13,6 +13,7 @@ from .discovery import SourceFile
 
 
 _COMMIT = re.compile(r"^[0-9a-fA-F]{40,64}$")
+_RENAME_SEPARATOR = " -> "
 
 
 @dataclass(frozen=True)
@@ -137,7 +138,45 @@ def git_commit(project: os.PathLike[str] | str) -> str | None:
     return commit.lower() if _COMMIT.fullmatch(commit) else None
 
 
-def git_dirty(project: os.PathLike[str] | str) -> bool | None:
+def _unquote_porcelain_path(raw: str) -> str:
+    """Undo git's C-style quoting of a porcelain path with unusual characters."""
+    if len(raw) < 2 or raw[0] != '"' or raw[-1] != '"':
+        return raw
+    try:
+        return (
+            raw[1:-1]
+            .encode("latin-1", "backslashreplace")
+            .decode("unicode_escape")
+            .encode("latin-1")
+            .decode("utf-8")
+        )
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return raw[1:-1]
+
+
+def _porcelain_paths(line: str) -> tuple[str, ...]:
+    """Return the path column(s) of one porcelain line, both sides of a rename."""
+    if len(line) < 4:
+        return ()
+    rest = line[3:]
+    if _RENAME_SEPARATOR in rest:
+        before, _sep, after = rest.partition(_RENAME_SEPARATOR)
+        return (_unquote_porcelain_path(before), _unquote_porcelain_path(after))
+    return (_unquote_porcelain_path(rest),)
+
+
+def filter_porcelain_lines(lines: Iterable[str], ignore_spec) -> list[str]:
+    """Drop porcelain status lines whose every path the ignore spec covers."""
+    kept: list[str] = []
+    for line in lines:
+        paths = _porcelain_paths(line)
+        if paths and all(ignore_spec.match_file(path) for path in paths):
+            continue
+        kept.append(line)
+    return kept
+
+
+def git_dirty(project: os.PathLike[str] | str, ignore_spec) -> bool | None:
     """Return dirty state, or None for unavailable and non-Git projects."""
     result = _git_run(
         project,
@@ -145,11 +184,12 @@ def git_dirty(project: os.PathLike[str] | str) -> bool | None:
     )
     if result is None or result.returncode != 0:
         return None
-    return bool(result.stdout)
+    lines = filter_porcelain_lines(result.stdout.splitlines(), ignore_spec)
+    return bool(lines)
 
 
-def git_dirty_marker(project: os.PathLike[str] | str) -> str:
-    dirty = git_dirty(project)
+def git_dirty_marker(project: os.PathLike[str] | str, ignore_spec) -> str:
+    dirty = git_dirty(project, ignore_spec)
     if dirty is None:
         return "unavailable"
     return "dirty" if dirty else "clean"

@@ -557,16 +557,9 @@ def _lint_pages(wiki_dir: str, domain: str) -> Iterator[tuple[str, str, object]]
 
 
 def _selector_policy(project_dir: str, config):
-    from .discovery import _ignore_spec, _open_root_directory
+    from .discovery import build_ignore_spec
 
-    descriptor = _open_root_directory(Path(project_dir).resolve(strict=True))
-    try:
-        ignore_spec, _warnings = _ignore_spec(
-            descriptor, config.exclude, config.max_file_bytes
-        )
-    finally:
-        os.close(descriptor)
-    return ignore_spec
+    return build_ignore_spec(project_dir, config)
 
 
 def _secret_selector(value: str) -> bool:

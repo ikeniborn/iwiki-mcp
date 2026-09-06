@@ -241,6 +241,95 @@ def test_selector_capture_is_compact_and_prose_does_not_change_fingerprint(
     }
 
 
+def test_selector_free_page_write_does_not_change_selector_digest(tmp_path):
+    base = tmp_path / "base"
+    domain = base / "project"
+    domain.mkdir(parents=True)
+    selector_page = domain / "with-code.md"
+    selector_page.write_text(
+        "---\ncode:\n  files:\n    - src/a.py\n---\n# With code\n",
+        encoding="utf-8",
+    )
+    resolver = WikiSelectorResolver(base)
+
+    before = resolver.capture(domain="project")
+    plain_page = domain / "plain.md"
+    plain_page.write_text("# Ordinary page\nSome prose.\n", encoding="utf-8")
+    after = resolver.capture(domain="project")
+
+    assert before.fingerprint == after.fingerprint
+
+    plain_page.write_text(
+        "---\ntype: concept\ndescription: updated\n---\n# Ordinary page\n",
+        encoding="utf-8",
+    )
+    still_after = resolver.capture(domain="project")
+
+    assert before.fingerprint == still_after.fingerprint
+
+
+def test_adding_or_changing_a_code_selector_changes_selector_digest(tmp_path):
+    base = tmp_path / "base"
+    domain = base / "project"
+    domain.mkdir(parents=True)
+    page = domain / "page.md"
+    page.write_text("# Ordinary page\nSome prose.\n", encoding="utf-8")
+    resolver = WikiSelectorResolver(base)
+
+    before = resolver.capture(domain="project")
+    page.write_text(
+        "---\ncode:\n  files:\n    - src/a.py\n---\n# Ordinary page\n",
+        encoding="utf-8",
+    )
+    after_added = resolver.capture(domain="project")
+
+    assert before.fingerprint != after_added.fingerprint
+
+    page.write_text(
+        "---\ncode:\n  files:\n    - src/b.py\n---\n# Ordinary page\n",
+        encoding="utf-8",
+    )
+    after_changed = resolver.capture(domain="project")
+
+    assert after_added.fingerprint != after_changed.fingerprint
+
+
+def test_selector_digest_is_pinned_to_relative_path_not_page_id(tmp_path):
+    """Regression pin: the digest key is ``page.relative``, never ``page.page_id``.
+
+    A page_id-keyed digest (domain-qualified) produces a different hash than a
+    relative-keyed one for the exact same selector content, which would flip
+    every already-indexed domain's ``input_fingerprint`` on upgrade with zero
+    real change. This test fails loudly if the digest key is renamed again.
+    """
+    base = tmp_path / "base"
+    domain = base / "project"
+    (domain / "sub").mkdir(parents=True)
+    (domain / "a.md").write_text(
+        "---\ncode:\n  files:\n    - src/a.py\n---\n# A\n", encoding="utf-8"
+    )
+    (domain / "sub" / "b.md").write_text(
+        "---\ncode:\n  files:\n    - src/b.py\n---\n# B\n", encoding="utf-8"
+    )
+    resolver = WikiSelectorResolver(base)
+
+    snapshot = resolver.capture(domain="project")
+
+    relative_keyed = linking._rows_fingerprint([
+        (page.relative, page.selectors)
+        for page in snapshot.pages
+        if page.selectors is not None
+    ])
+    page_id_keyed = linking._rows_fingerprint([
+        (page.page_id, page.selectors)
+        for page in snapshot.pages
+        if page.selectors is not None
+    ])
+
+    assert snapshot.fingerprint == relative_keyed
+    assert snapshot.fingerprint != page_id_keyed
+
+
 def test_selector_verification_reads_only_frontmatter_evidence(
     tmp_path, monkeypatch
 ):
