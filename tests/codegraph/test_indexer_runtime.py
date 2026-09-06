@@ -27,7 +27,10 @@ from iwiki_mcp.codegraph.indexer import (
     CodeGraphStaleError,
     CodeGraphStoreFailure,
     CodeGraphUnsafePathError,
+    sealed_envelope,
+    valid_envelope,
 )
+from iwiki_mcp.codegraph.linking import SelectorError, SelectorSnapshotChanged
 from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
@@ -710,6 +713,169 @@ def test_query_guard_materializes_changed_source_as_dirty_without_rows(
     assert guarded["results"] == []
     assert ready_runtime.status()["state"] == "dirty"
     assert ready_runtime.status()["revision"] == initial["revision"]
+
+
+def test_dirty_transition_preserves_counts_and_matches_metadata(ready_runtime):
+    """A second runtime marking dirty must not zero counts or reconstruct."""
+    other_runtime = ready_runtime.with_config()
+    before = ready_runtime.status()
+    assert before["state"] == "ready"
+    assert before["counts"]["files"] > 0
+    ready_runtime.project_file("src/pkg/service.py").write_text(
+        "class Service:\n    def changed(self):\n        return None\n",
+        encoding="utf-8",
+    )
+
+    other_runtime.query_guard()
+
+    after = ready_runtime.status()
+    assert after["state"] == "dirty"
+    assert after["counts"] == before["counts"]
+    assert after["resolution_ratios"] == before["resolution_ratios"]
+    assert after["revision"] == before["revision"]
+    assert "metadata_reconstructed" not in after["warnings"]
+
+
+def test_status_idempotent_without_repository_change(ready_runtime):
+    """Two consecutive reads of an unchanged repository must agree."""
+    first = ready_runtime.status()
+    second = ready_runtime.status()
+
+    assert first == second
+
+
+# Shape of the reconstructed record the transition helper falls back to when
+# the metadata it replaces was not a sealed envelope.
+_MINIMAL_TRANSITION_KEYS = {
+    "domain",
+    "fresh",
+    "generation",
+    "revision",
+    "schema_version",
+    "state",
+    "warnings",
+}
+
+
+def _repository_state(harness):
+    with closing(sqlite3.connect(harness.paths.database)) as connection:
+        return connection.execute(
+            "SELECT state, revision FROM repositories WHERE repository_id = ?",
+            (harness.binding.primary,),
+        ).fetchone()
+
+
+def _persisted(harness):
+    return json.loads(harness.paths.metadata.read_text(encoding="utf-8"))
+
+
+def test_context_freshness_guard_reseals_the_ready_envelope(ready_context):
+    """The selector-leased freshness guard must keep the sealed diagnostics."""
+    before = ready_context.status()
+    ready_context.change_source_after_index()
+
+    stale = ready_context.context([ready_context.service_file_id])
+
+    persisted = _persisted(ready_context)
+    after = ready_context.status()
+    assert stale["fresh"] is False
+    assert _repository_state(ready_context)[0] == "dirty"
+    assert valid_envelope(persisted, state="dirty")
+    assert persisted["counts"] == before["counts"]
+    assert after["state"] == "dirty"
+    assert after["counts"] == before["counts"]
+    assert "metadata_reconstructed" not in after["warnings"]
+
+
+def test_no_op_selector_verify_failure_reseals_the_ready_envelope(
+    ready_runtime, monkeypatch
+):
+    """The no-op verify guard must reseal the envelope beside its state flip."""
+    before = ready_runtime.status()
+    indexer = ready_runtime.runtime._indexer
+    resolver = indexer.wiki_selector_resolver
+    published = []
+    real_publish = indexer._publish_metadata_record
+
+    def recorded(metadata, **kwargs):
+        published.append(dict(metadata))
+        return real_publish(metadata, **kwargs)
+
+    def refuse(_snapshot, **_kwargs):
+        raise SelectorError("safe capture unavailable")
+
+    monkeypatch.setattr(indexer, "_publish_metadata_record", recorded)
+    monkeypatch.setattr(resolver, "verify_snapshot", refuse)
+    refused = ready_runtime.index(force=False)
+
+    # The guard flips the SQL row inside the no-op read lease, so the lease's
+    # own seal check supersedes the refusal with CodeGraphStoreError and the
+    # build abandons the no-op for a full rebuild. The transition record is
+    # therefore the first one published, not the one left on disk.
+    assert refused["code"] == "stale"
+    assert _repository_state(ready_runtime)[0] == "dirty"
+    assert valid_envelope(published[0], state="dirty")
+    assert published[0]["counts"] == before["counts"]
+    assert published[1]["state"] == "rebuilding"
+
+
+def test_selector_snapshot_change_publishes_the_minimal_dirty_record(
+    ready_runtime, monkeypatch
+):
+    """A changed Wiki snapshot leaves SQL and metadata agreeing on dirty."""
+    generation = _persisted(ready_runtime)["generation"]
+    resolver = ready_runtime.runtime._indexer.wiki_selector_resolver
+
+    def changed(_snapshot, **_kwargs):
+        raise SelectorSnapshotChanged("wiki changed during rebuild")
+
+    monkeypatch.setattr(resolver, "verify_snapshot", changed)
+    stale = ready_runtime.index(force=True)
+
+    persisted = _persisted(ready_runtime)
+    state, revision = _repository_state(ready_runtime)
+    assert stale["code"] == "stale"
+    assert state == "dirty"
+    assert set(persisted) == _MINIMAL_TRANSITION_KEYS
+    assert persisted["state"] == "dirty"
+    assert persisted["fresh"] is False
+    assert persisted["revision"] == revision
+    assert persisted["generation"] == generation + 1
+    assert sealed_envelope(persisted) is False
+
+
+def test_selector_error_publishes_the_minimal_dirty_record(
+    ready_runtime, monkeypatch
+):
+    """An unavailable selector authority reports dirty, never crash recovery."""
+    resolver = ready_runtime.runtime._indexer.wiki_selector_resolver
+
+    def refuse(_snapshot, **_kwargs):
+        raise SelectorError("safe capture unavailable")
+
+    monkeypatch.setattr(resolver, "resolve_snapshot", refuse)
+    stale = ready_runtime.index(force=True)
+
+    persisted = _persisted(ready_runtime)
+    state, revision = _repository_state(ready_runtime)
+    # A fresh runtime stands in for the process that died after the flip.
+    observer = ready_runtime.with_config()
+    after = observer.status()
+    assert stale["code"] == "stale"
+    assert state == "dirty"
+    assert set(persisted) == _MINIMAL_TRANSITION_KEYS
+    assert persisted["state"] == "dirty"
+    assert persisted["revision"] == revision
+    assert sealed_envelope(persisted) is False
+    # The aborted build's crash-recovery inputs are deliberately dropped: the
+    # SQL row already says dirty, so restoring a prior "ready" would contradict
+    # it and a "failed" record would hide an auto-rebuildable graph.
+    assert "publication_phase" not in persisted
+    assert "prior_state" not in persisted
+    assert "recovery_policy" not in persisted
+    assert after["state"] == "dirty"
+    assert after["fresh"] is False
+    assert after["warnings"] == ["code_graph_dirty", "metadata_reconstructed"]
 
 
 def test_status_and_guard_show_rebuilding_during_current_process_build(
