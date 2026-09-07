@@ -1079,7 +1079,8 @@ def test_disabled_code_graph_never_leaves_the_local_runtime(
     assert reader.status()["code"] == "not_configured"
 
 
-def test_postgres_read_mode_without_a_dsn_names_read_mode(tmp_path):
+def test_postgres_read_mode_on_a_git_binding_names_read_mode(tmp_path):
+    """`read_mode = "postgres"` needs PostgreSQL storage; no DSN is consulted."""
     binding = _read_mode_project(tmp_path, "postgres")
 
     with pytest.raises(application.CodeGraphReadModeError) as failure:
