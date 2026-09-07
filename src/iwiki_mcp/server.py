@@ -1776,7 +1776,7 @@ def wiki_code_index(
             for language in languages
         )
     ):
-        return _invalid_code_config()
+        return _invalid_code_config("languages")
     bind = _resolved_binding()
     if _is_postgres(bind):
         return dict(_CODE_SOURCE_UNAVAILABLE)

@@ -174,6 +174,7 @@ def test_index_handler_validates_languages_before_binding(monkeypatch):
     assert server.wiki_code_index(languages=["go"]) == {
         "error": "code graph configuration is invalid",
         "code": "invalid_config",
+        "field": "languages",
         "hint": "inspect code_graph project configuration",
     }
 
