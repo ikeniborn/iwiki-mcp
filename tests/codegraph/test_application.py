@@ -1167,3 +1167,90 @@ def test_published_snapshot_reader_exposes_reads_only(tmp_path, monkeypatch):
     assert not hasattr(reader, "query_guard")
     assert not hasattr(reader, "index")
     assert not hasattr(reader, "export_snapshot")
+
+
+# -- remote reads are scoped by the snapshot, not by the local config -------
+
+
+def _two_language_config() -> CodeGraphConfig:
+    return CodeGraphConfig(languages=("python", "typescript"))
+
+
+class _RecordingTransport:
+    """Capture the exact remote payload without opening a session."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def call(self, tool: str, payload: dict) -> dict:
+        self.calls.append((tool, payload))
+        return {"state": "ready", "fresh": True, "results": []}
+
+
+def test_mcp_read_omits_languages_when_the_caller_named_none():
+    """A local `languages` config is not a filter the caller asked for."""
+    transport = _RecordingTransport()
+    reader = application.PublishedSnapshotReader(
+        McpCodeGraphReader(transport), _two_language_config()
+    )
+
+    reader.search("needle")
+
+    assert "languages" not in transport.calls[0][1]
+
+
+def test_mcp_read_forwards_the_languages_the_caller_named():
+    transport = _RecordingTransport()
+    reader = application.PublishedSnapshotReader(
+        McpCodeGraphReader(transport), _two_language_config()
+    )
+
+    reader.search("needle", languages=["typescript"])
+
+    assert transport.calls[0][1]["languages"] == ["typescript"]
+
+
+class _RecordingPostgresReader:
+    """Stand in for `PostgresCodeGraphReader.search`'s two accepted shapes."""
+
+    def __init__(self, snapshot_languages: tuple[str, ...]) -> None:
+        self._snapshot_languages = snapshot_languages
+        self.request = None
+
+    def search(self, request):
+        self.request = (
+            request(self._snapshot_languages) if callable(request) else request
+        )
+        return {"state": "ready", "fresh": True, "results": []}
+
+
+def test_postgres_read_scopes_languages_to_the_published_snapshot():
+    """A python-only snapshot must not receive the project's second language.
+
+    Sending it makes the remote's snapshot-scoped validator refuse every
+    search with `unsupported_language`, even though the caller filtered
+    nothing.
+    """
+    wrapped = _RecordingPostgresReader(("python",))
+    reader = application.PublishedSnapshotReader(
+        wrapped, _two_language_config(), snapshot_scoped_languages=True
+    )
+
+    reader.search("needle")
+
+    assert wrapped.request.languages == ("python",)
+
+
+def test_postgres_read_forwards_the_languages_the_caller_named():
+    from iwiki_mcp.codegraph.query import CodeGraphLanguageUnavailableError
+
+    wrapped = _RecordingPostgresReader(("python",))
+    reader = application.PublishedSnapshotReader(
+        wrapped, _two_language_config(), snapshot_scoped_languages=True
+    )
+
+    reader.search("needle", languages=["python"])
+    assert wrapped.request.languages == ("python",)
+
+    with pytest.raises(CodeGraphLanguageUnavailableError):
+        reader.search("needle", languages=["typescript"])

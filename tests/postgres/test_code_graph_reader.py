@@ -219,6 +219,41 @@ def test_trailing_slash_path_prefix_scopes_to_that_directory(
     assert scoped == ranked_graph_pair.sqlite.search(request("typed/needle/"))
 
 
+def test_local_read_mode_scopes_languages_to_the_published_snapshot(
+    pg_mixed_language_graph
+):
+    """The published snapshot, not the project config, is the read scope.
+
+    The snapshot declares python + javascript; the project declares only
+    python. Sending the project's `code_graph.languages` as an explicit
+    filter silently drops every javascript row the caller never filtered
+    out -- and, over the MCP transit reader, makes the remote's
+    snapshot-scoped validator refuse the search outright.
+    """
+    from iwiki_mcp.codegraph.application import PublishedSnapshotReader
+    from iwiki_mcp.codegraph.config import CodeGraphConfig
+
+    def reader():
+        return PublishedSnapshotReader(
+            pg_mixed_language_graph.reader(),
+            CodeGraphConfig(languages=("python",)),
+            snapshot_scoped_languages=True,
+        )
+
+    def widget_rows(answer):
+        return [
+            item for item in answer["results"]
+            if item["qualified_name"].endswith("needleWidget")
+        ]
+
+    scoped = reader().search("needle")
+    assert "error" not in scoped
+    assert widget_rows(scoped)
+
+    # The caller's own filter still wins, and still owns its own scope.
+    assert not widget_rows(reader().search("needle", languages=["python"]))
+
+
 def test_context_traverses_bounded_relations_from_typed_seeds(pg_ready_graph):
     result = pg_ready_graph.reader().context(pg_ready_graph.context_request())
 

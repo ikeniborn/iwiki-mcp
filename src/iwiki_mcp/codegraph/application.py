@@ -299,9 +299,16 @@ class PublishedSnapshotReader:
     freshness is whatever the published snapshot itself reports.
     """
 
-    def __init__(self, reader, config: codegraph_config.CodeGraphConfig) -> None:
+    def __init__(
+        self,
+        reader,
+        config: codegraph_config.CodeGraphConfig,
+        *,
+        snapshot_scoped_languages: bool = False,
+    ) -> None:
         self._reader = reader
         self._config = config
+        self._snapshot_scoped_languages = snapshot_scoped_languages
 
     def status(self) -> dict[str, object]:
         return self._reader.status()
@@ -315,16 +322,30 @@ class PublishedSnapshotReader:
         languages: list[str] | None = None,
         limit: int = 20,
     ) -> dict[str, object]:
-        return self._reader.search(
-            validate_search_request(
+        """Search the published snapshot under the caller's own filters.
+
+        The published snapshot, not this project's `code_graph.languages`,
+        declares the unfiltered language scope. A reader that can report
+        that scope gets the builder form the hosted dispatch uses; the
+        remote transit reader instead omits the key entirely (see
+        `McpCodeGraphReader.search`) so the remote applies its own.
+        """
+        def build(configured: tuple[str, ...], source: str):
+            return validate_search_request(
                 query,
                 kinds=kinds,
                 path=path,
                 languages=languages,
-                configured_languages=self._config.languages,
+                configured_languages=configured,
+                languages_source=source,
                 limit=limit,
             )
-        )
+
+        if self._snapshot_scoped_languages:
+            return self._reader.search(
+                lambda snapshot_languages: build(snapshot_languages, "snapshot")
+            )
+        return self._reader.search(build(self._config.languages, "config"))
 
     def context(
         self,
@@ -380,6 +401,7 @@ def code_reader(binding: GitBinding | PostgresBinding):
                 max_snapshot_age_seconds=config.max_snapshot_age_seconds,
             ),
             config,
+            snapshot_scoped_languages=True,
         )
     try:
         transport = RemoteMcpTransport(primary=binding.primary)

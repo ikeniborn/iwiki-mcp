@@ -82,6 +82,11 @@ class ValidatedSearchRequest:
     a sibling ``services/abc.py``) while ``services/a/`` scopes to that
     directory alone. Matching itself stays a literal, case-sensitive prefix
     comparison against the stored path — no casefold.
+
+    ``languages_requested`` records whether the caller named a language
+    filter at all. When it is false, ``languages`` merely mirrors the
+    queried scope's own declaration, so a transport that has its own
+    scope (a published snapshot) must not resend it as an explicit filter.
     """
 
     query: str
@@ -90,6 +95,7 @@ class ValidatedSearchRequest:
     languages: tuple[str, ...]
     limit: int
     tokens: tuple[str, ...]
+    languages_requested: bool = False
 
 
 def search_result_from_row(row: tuple[Any, ...]) -> SearchResult:
@@ -222,6 +228,7 @@ def validate_search_request(
         languages=normalized_languages,
         limit=limit,
         tokens=query_tokens,
+        languages_requested=languages is not None,
     )
 
 
