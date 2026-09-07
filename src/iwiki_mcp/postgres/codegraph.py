@@ -24,7 +24,7 @@ from ..codegraph.linking import (
     markdown_revision,
     resolve_selectors,
 )
-from ..codegraph.models import ContextNode, ContextRelation, SearchResult, module_key
+from ..codegraph.models import ContextNode, ContextRelation, SearchResult
 from ..codegraph.publication import (
     PublicationSession,
     SnapshotBatch,
@@ -36,6 +36,7 @@ from ..codegraph.config import KNOWN_LANGUAGES
 from ..codegraph.query import (
     MATCH_RANK,
     ValidatedSearchRequest,
+    normalized_path_prefix,
     result_key,
     search_result_from_row,
 )
@@ -1065,14 +1066,17 @@ def _lexical(column: str, tokens: tuple[str, ...]) -> tuple[str, list[Any]]:
 def _path_filter(
     request: ValidatedSearchRequest, column: str
 ) -> tuple[str, list[Any]]:
-    # `request.path` is already `module_key`-normalized by
-    # `validate_search_request` (query.py); re-normalize here too so a
-    # request built by any other caller still binds a literal,
-    # case-sensitive prefix that matches the stored (also `module_key`-
-    # normalized) path -- the same contract the SQLite reader enforces.
+    # `request.path` is already normalized by `validate_search_request`
+    # (query.py); re-normalize here too so a request built by any other
+    # caller still binds a literal, case-sensitive prefix that matches the
+    # stored (also `module_key`-normalized) path -- the same contract the
+    # SQLite reader enforces, trailing separator included.
     if request.path is None:
         return "", []
-    return f"AND starts_with({column}, %s)", [module_key(request.path.strip())]
+    return (
+        f"AND starts_with({column}, %s)",
+        [normalized_path_prefix(request.path)],
+    )
 
 
 def _excluded_filter(

@@ -516,6 +516,13 @@ schema-v1 несовместим и заменяется детерминиро�
 | `wiki_code_search` | Ищет typed file, module и symbol entities с optional kind, path, language и limit filters. |
 | `wiki_code_context` | Расширяет точные typed entity-ID `seeds` через bounded relations; source по умолчанию выключен. |
 
+Фильтр `path` в `wiki_code_search` — это буквальный, чувствительный к регистру префикс
+хранимого project-relative пути. Перед сопоставлением он нормализуется: обрезаются
+окружающие пробелы, отбрасывается ведущий `./`, схлопываются повторяющиеся слэши.
+Завершающий `/` значим и сохраняется — `deploy/` ограничивает выборку именно этим
+каталогом, тогда как голый `deploy` — более широкий префикс, который совпадает и с
+`deployment/`.
+
 `wiki_code_context` принимает только точные file/module/symbol entity IDs, возвращённые
 code graph. Default: direction `both`, depth `1`, максимум 50 nodes, 20 files и
 200000 source bytes. `include_source` по умолчанию `false`. Source discovery

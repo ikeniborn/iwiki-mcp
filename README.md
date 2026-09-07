@@ -516,6 +516,12 @@ documented under distributed publication below:
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
 
+`wiki_code_search`'s `path` filter is a literal, case-sensitive prefix over the stored
+project-relative path. It is normalized before matching: surrounding whitespace is
+trimmed, a leading `./` is dropped, and duplicate slashes are collapsed. A trailing `/`
+is significant and preserved — `deploy/` scopes to that directory alone, while the bare
+`deploy` is the wider prefix that also matches `deployment/`.
+
 `wiki_code_context` accepts only exact file/module/symbol entity IDs returned by the
 code graph. Its default direction is `both`, depth is `1`, and its bounded defaults
 are 50 nodes, 20 files, and 200,000 source bytes. `include_source` is `false` by

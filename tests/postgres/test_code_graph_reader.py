@@ -163,7 +163,7 @@ def test_search_filters_match_the_sqlite_reader(
 
 
 @pytest.mark.parametrize(
-    "raw", ["./typed/prefix", "typed//prefix", " typed/prefix ", "typed/prefix/"]
+    "raw", ["./typed/prefix", "typed//prefix", " typed/prefix "]
 )
 def test_path_prefix_variants_match_canonical_via_starts_with(
     ranked_graph_pair, raw
@@ -186,6 +186,37 @@ def test_path_prefix_variants_match_canonical_via_starts_with(
     assert [item["match"] for item in canonical_results["results"]] == (
         ["canonical_prefix"]
     )
+
+
+def test_trailing_slash_path_prefix_scopes_to_that_directory(
+    ranked_graph_pair
+):
+    """The directory scope is distinct from the wider prefix, on both backends.
+
+    `typed/needle` also matches the sibling-named `typed/needle-assets/`;
+    `typed/needle/` names a directory that does not exist, so it matches
+    nothing. SQLite `substr` and PostgreSQL `starts_with` agree.
+    """
+    from iwiki_mcp.codegraph.query import validate_search_request
+
+    def request(path):
+        return validate_search_request(
+            "needle", kinds=["file"], path=path, limit=20
+        )
+
+    wide = ranked_graph_pair.postgres.search(request("typed/needle"))
+    directory = ranked_graph_pair.postgres.search(
+        request("typed/needle-assets/")
+    )
+    scoped = ranked_graph_pair.postgres.search(request("typed/needle/"))
+
+    assert [item["path"] for item in wide["results"]] == (
+        ["typed/needle-assets/asset.py"]
+    )
+    assert directory == wide
+    assert scoped["results"] == []
+    assert wide == ranked_graph_pair.sqlite.search(request("typed/needle"))
+    assert scoped == ranked_graph_pair.sqlite.search(request("typed/needle/"))
 
 
 def test_context_traverses_bounded_relations_from_typed_seeds(pg_ready_graph):

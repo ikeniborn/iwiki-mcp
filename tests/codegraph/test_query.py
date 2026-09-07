@@ -713,7 +713,7 @@ def test_alias_path_filter_counts_and_returns_target_entities(
 
 
 @pytest.mark.parametrize(
-    "raw", ["./services/a", "services//a", " services/a ", "services/a/"]
+    "raw", ["./services/a", "services//a", " services/a "]
 )
 def test_path_prefix_variants_match_alias(schema_v2_search_connection, raw):
     query = CodeGraphQuery("backend")
@@ -732,7 +732,7 @@ def test_path_prefix_variants_match_alias(schema_v2_search_connection, raw):
 
 
 @pytest.mark.parametrize(
-    "raw", ["./typed/local", "typed//local", " typed/local ", "typed/local/"]
+    "raw", ["./typed/local", "typed//local", " typed/local "]
 )
 def test_path_prefix_variants_match_canonical_module(
     schema_v2_search_connection, raw
@@ -753,7 +753,7 @@ def test_path_prefix_variants_match_canonical_module(
 
 
 @pytest.mark.parametrize(
-    "raw", ["./typed/local", "typed//local", " typed/local ", "typed/local/"]
+    "raw", ["./typed/local", "typed//local", " typed/local "]
 )
 def test_path_prefix_variants_match_canonical_file(
     schema_v2_search_connection, raw
@@ -771,6 +771,55 @@ def test_path_prefix_variants_match_canonical_file(
     )
 
     assert variant == canonical and canonical
+
+
+def test_trailing_slash_path_prefix_scopes_to_that_directory(
+    schema_v2_search_connection,
+):
+    """A trailing slash keeps its separator, so it scopes to one directory.
+
+    `typed/needle` is the wider prefix and also matches the sibling-named
+    `typed/needle-assets/`; `typed/needle/` names a directory that does not
+    exist and therefore matches nothing.
+    """
+    query = CodeGraphQuery("backend")
+
+    def search(path):
+        return query.search(
+            schema_v2_search_connection,
+            validate_search_request(
+                "needle", kinds=["file"], path=path, limit=20
+            ),
+        )
+
+    wide = search("typed/needle")
+    directory = search("typed/needle-assets/")
+
+    assert [item.path for item in wide] == ["typed/needle-assets/asset.py"]
+    assert directory == wide
+    assert search("typed/needle/") == ()
+
+
+def test_trailing_slash_is_preserved_by_the_other_normalizations(
+    schema_v2_search_connection,
+):
+    """The directory scope survives `./`, `//`, and whitespace normalization."""
+    request = validate_search_request(
+        "needle", kinds=["file"], path=" .//typed//needle-assets// ", limit=20
+    )
+
+    assert request.path == "typed/needle-assets/"
+    assert [
+        item.path
+        for item in CodeGraphQuery("backend").search(
+            schema_v2_search_connection, request
+        )
+    ] == ["typed/needle-assets/asset.py"]
+
+
+def test_non_string_path_raises_the_typed_query_error():
+    with pytest.raises(CodeGraphQueryError):
+        validate_search_request("needle", path=123)
 
 
 def test_alias_fanout_and_public_alias_are_deterministic(

@@ -75,13 +75,13 @@ class CodeGraphLanguageUnavailableError(CodeGraphQueryError):
 class ValidatedSearchRequest:
     """Pure validated input consumed by the SQLite query boundary.
 
-    ``path``, when present, is always in ``module_key(path.strip())`` form:
-    a leading ``./`` is dropped, repeated ``/`` are collapsed, and a trailing
-    ``/`` is dropped. That last point means a directory prefix and its
-    slash-terminated form are equivalent (``services/a/`` behaves exactly
-    like ``services/a``), because prefix matching against stored paths
-    already covers the directory case. Matching itself stays a literal,
-    case-sensitive prefix comparison against the stored path — no casefold.
+    ``path``, when present, is always in ``normalized_path_prefix`` form:
+    surrounding whitespace is trimmed, a leading ``./`` is dropped, and
+    repeated ``/`` are collapsed. A trailing ``/`` is **kept**, so the two
+    forms are distinct: ``services/a`` is the wider prefix (it also matches
+    a sibling ``services/abc.py``) while ``services/a/`` scopes to that
+    directory alone. Matching itself stays a literal, case-sensitive prefix
+    comparison against the stored path — no casefold.
     """
 
     query: str
@@ -125,6 +125,27 @@ def result_key(item: SearchResult) -> tuple[int, str, str]:
 
 def _tokens(value: str) -> tuple[str, ...]:
     return tuple(_TOKENS.findall(value.casefold()))
+
+
+def normalized_path_prefix(path: object) -> str:
+    """Normalize one `path` filter without widening the scope it names.
+
+    Trims surrounding whitespace, drops a leading `./`, and collapses
+    duplicate slashes. A trailing `/` is preserved: it is the only way a
+    caller can scope to an exact directory, so dropping it would silently
+    widen `deploy/` into the `deploy` prefix (which also matches
+    `deployment/`).
+    """
+    if not isinstance(path, str):
+        raise CodeGraphQueryError("path must be a safe project-relative prefix")
+    raw = path.strip()
+    try:
+        normalized = module_key(raw)
+    except ValueError as exc:
+        raise CodeGraphQueryError(
+            "path must be a safe project-relative prefix"
+        ) from exc
+    return normalized + "/" if raw.endswith("/") else normalized
 
 
 def validate_search_request(
@@ -193,12 +214,7 @@ def validate_search_request(
     if type(limit) is not int or not 1 <= limit <= 100:
         raise CodeGraphQueryError("limit must be between 1 and 100")
     if path is not None:
-        try:
-            path = module_key(path.strip())
-        except ValueError as exc:
-            raise CodeGraphQueryError(
-                "path must be a safe project-relative prefix"
-            ) from exc
+        path = normalized_path_prefix(path)
     return ValidatedSearchRequest(
         query=query,
         kinds=normalized_kinds,
