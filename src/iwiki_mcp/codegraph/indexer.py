@@ -1275,8 +1275,6 @@ class CodeGraphIndexer:
         self,
         *,
         deadline: float | None = None,
-        selector_lock_held: bool = False,
-        selector_snapshot: object | None = None,
     ) -> bool:
         """Discover fingerprints for a query and persist ready-to-dirty drift."""
         config = self.config
@@ -1292,7 +1290,6 @@ class CodeGraphIndexer:
                 extensions=self._extensions(config),
             )
             _check_deadline(deadline, self.paths.lock)
-            owned_snapshot = selector_snapshot is None
             captured = None
             try:
                 fingerprints, commit, _dirty, captured = self._fingerprints(
@@ -1301,11 +1298,6 @@ class CodeGraphIndexer:
                     normalization_versions=normalization_versions,
                     check_control=lambda: _check_deadline(
                         deadline, self.paths.lock
-                    ),
-                    selector_snapshot=(
-                        selector_snapshot
-                        if selector_snapshot is not None
-                        else _UNCAPTURED
                     ),
                 )
                 _check_deadline(deadline, self.paths.lock)
@@ -1316,7 +1308,7 @@ class CodeGraphIndexer:
                     normalization_versions,
                 ) is not None
             finally:
-                if owned_snapshot and captured is not None:
+                if captured is not None:
                     close_snapshot = getattr(
                         self.wiki_selector_resolver,
                         "close_snapshot",
@@ -1326,18 +1318,6 @@ class CodeGraphIndexer:
                         close_snapshot(captured)
 
         try:
-            if selector_lock_held:
-                with code_graph_read_lock(self.paths.lock):
-                    if ready_now():
-                        return False
-                with code_graph_write_lock(
-                    self.paths.lock,
-                    timeout=_lock_timeout(config.max_rebuild_seconds, deadline),
-                ):
-                    if ready_now():
-                        return False
-                    self.publish_transition_envelope("dirty")
-                    return True
             with _selector_read_lock(
                 self.cache_base,
                 self.paths.lock,
