@@ -1522,9 +1522,17 @@ def test_runtime_include_wiki_captures_selectors_once_after_the_guard(
         (SelectorError("safe capture unavailable"), "stale"),
     ],
 )
-def test_runtime_selector_capture_failure_returns_exact_empty_context(
+def test_query_guard_selector_capture_failure_returns_exact_empty_context(
     ready_context, monkeypatch, failure, code
 ):
+    """Since S3 the first selector capture is the freshness one.
+
+    `context` runs `query_guard` with the full budget before taking the
+    wiki lease, and `mark_dirty_if_stale` captures selectors to compute
+    `input_fingerprint`. A capture that fails therefore resolves in the
+    guard and never reaches the lease; the lease's own failure paths are
+    covered by the two tests below.
+    """
     resolver = ready_context.runtime._indexer.wiki_selector_resolver
 
     def fail_capture(*_args, **kwargs):
@@ -1561,6 +1569,53 @@ def test_runtime_selector_capture_failure_returns_exact_empty_context(
     }
     assert response["truncated"] is False
     assert response["warnings"] == ready_context.status()["warnings"]
+    assert response["fresh"] is False
+
+
+def test_runtime_selector_lease_timeout_returns_busy_empty_context(
+    ready_context, monkeypatch
+):
+    """Wiki-lease contention is reported as `busy`, not as a graph answer.
+
+    `verify_snapshot` runs inside the lease, after `query_guard` already
+    proved freshness, so a `Timeout` here reaches `context`'s own
+    `except Timeout` branch -- the only route to the user-visible `busy`
+    answer under wiki-lease contention.
+    """
+    resolver = ready_context.runtime._indexer.wiki_selector_resolver
+
+    def time_out(*_args, **_kwargs):
+        raise Timeout("selector-lease")
+
+    monkeypatch.setattr(resolver, "verify_snapshot", time_out)
+
+    response = ready_context.context(
+        [ready_context.run_symbol_id],
+        include_wiki=True,
+        depth=2,
+        max_nodes=7,
+        max_files=3,
+        max_source_bytes=1234,
+    )
+
+    assert set(response) == {
+        "domain", "state", "revision", "seeds", "nodes", "relations",
+        "files", "wiki_pages", "limits", "truncated", "warnings", "fresh",
+        "error", "code", "hint",
+    }
+    assert response["code"] == "busy"
+    assert response["seeds"] == [ready_context.run_symbol_id]
+    assert response["nodes"] == []
+    assert response["relations"] == []
+    assert response["files"] == []
+    assert response["wiki_pages"] == []
+    assert response["limits"] == {
+        "depth": 2,
+        "max_nodes": 7,
+        "max_files": 3,
+        "max_source_bytes": 1234,
+    }
+    assert response["truncated"] is False
     assert response["fresh"] is False
 
 
