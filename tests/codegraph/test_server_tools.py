@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from importlib.metadata import version
+from pathlib import Path
 import sqlite3
 
 import pytest
@@ -487,6 +488,8 @@ def test_safe_maps_code_graph_errors_without_leaking_exception_text(
         code = "store_failed"
 
     class FailingRuntime:
+        config = None
+
         def status(self):
             raise SecretStoreFailure("secret /absolute/path SQL SELECT credentials")
 
@@ -514,6 +517,8 @@ def test_search_handler_maps_invalid_config_without_leaking_text(
     seed_binding, monkeypatch, caplog
 ):
     class InvalidRuntime:
+        config = None
+
         def search(self, *_args, **_kwargs):
             raise CodeGraphQueryError("secret query and /absolute/path")
 
@@ -548,6 +553,8 @@ def test_context_handler_names_the_whitelisted_parameter_only(
     """
 
     class InvalidContextRuntime:
+        config = None
+
         def __init__(self, parameter):
             self.parameter = parameter
 
@@ -1130,3 +1137,40 @@ def test_specification_graph_composition_selects_postgres_reader_for_primary(
         binding, binding.primary
     ) is resolver
     assert calls == [binding]
+
+
+def test_sqlite_read_mode_keeps_every_read_answer_byte_identical(
+    ready_runtime, monkeypatch
+):
+    """R6 compatibility guard: routing must not touch the local read path.
+
+    The three read tools are answered once by a project whose
+    `.iwiki.toml` declares no `read_mode` and once by the same project
+    after it declares the default `read_mode = "sqlite"`. Both answers
+    must be identical, so selecting the local mode explicitly is exactly
+    the behavior that shipped before read_mode routed anything.
+    """
+    binding = ready_runtime.binding
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    seeds = [
+        server.wiki_code_search("run", kinds=["method"])["results"][0]["entity_id"]
+    ]
+
+    def answers():
+        return (
+            server.wiki_code_status(),
+            server.wiki_code_search("run", kinds=["method"], path="src/pkg"),
+            server.wiki_code_context(seeds, include_wiki=False),
+        )
+
+    default = answers()
+
+    config = Path(binding.project_dir) / ".iwiki.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + 'read_mode = "sqlite"\n',
+        encoding="utf-8",
+    )
+
+    assert answers() == default
+    assert default[0]["state"] == "ready"
+    assert default[1]["results"] and default[2]["nodes"]

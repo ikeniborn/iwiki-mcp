@@ -608,6 +608,20 @@ superseded_retention_seconds = 86400
 staging_cleanup_limit = 100
 ```
 
+`read_mode` selects where `wiki_code_status`, `wiki_code_search`, and
+`wiki_code_context` are answered from, exactly as `publish_mode` selects where the built
+snapshot goes. `sqlite` — the default — answers from the local code-graph cache and is
+unchanged: same guarded reads, same bounded auto-rebuild. `postgres` and `mcp` answer
+from the published snapshot instead, so a read never indexes, never rebuilds, and never
+touches project source; freshness is whatever the snapshot itself reports
+(`missing_snapshot`, `stale_snapshot`). `wiki_code_index` remains a local build under
+every read mode. When the selected mode's prerequisite is absent — no PostgreSQL storage
+binding for `postgres`, no `IWIKI_CODE_GRAPH_MCP_URL` / `IWIKI_CODE_GRAPH_MCP_TOKEN` for
+`mcp` — the read returns `{"error": ..., "code": "invalid_config", "field":
+"read_mode", "hint": ...}`, naming the key to fix and never retrying against another
+mode. PostgreSQL wiki storage always reads from its own database, so `read_mode` has
+nothing left to choose there.
+
 `superseded_retention_seconds` bounds how long a snapshot that is no longer active is
 kept before publication prunes it, at most `staging_cleanup_limit` per call and never
 the active one. Nothing reads a superseded snapshot — every query joins

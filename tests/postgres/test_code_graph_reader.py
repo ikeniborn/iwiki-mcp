@@ -247,3 +247,56 @@ def test_reads_stay_inside_the_bound_domain(pg_ready_graph):
     assert other.reader().search(
         pg_ready_graph.search_request
     )["results"] == []
+
+
+def test_postgres_read_mode_answers_reads_from_the_active_snapshot(
+    pg_ready_graph, tmp_path, monkeypatch
+):
+    """R6: `read_mode = "postgres"` reads only the published snapshot."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    from iwiki_mcp.codegraph import application
+    from iwiki_mcp.storage import PostgresBinding
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project.joinpath(".iwiki.toml").write_text(
+        '[code_graph]\nread_mode = "postgres"\n'
+        "max_snapshot_age_seconds = 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        application.wiki_base,
+        "ensure_graph_store_excluded",
+        lambda _value: True,
+    )
+    parts = conninfo_to_dict(str(pg_ready_graph.dsn))
+    binding = PostgresBinding(
+        host=parts.get("host", "127.0.0.1"),
+        port=int(parts.get("port", 5432)),
+        database=parts["dbname"],
+        user=parts["user"],
+        password=parts.get("password", ""),
+        sslmode=parts.get("sslmode", "prefer"),
+        iwiki_id=pg_ready_graph.iwiki_id,
+        read=(pg_ready_graph.domain,),
+        write=(pg_ready_graph.domain,),
+        primary=pg_ready_graph.domain,
+        project_dir=str(project),
+        embed_model="fixture-model",
+        embed_dimensions=3,
+        rerank_model="",
+    )
+
+    reader = application.code_reader(binding)
+    status = reader.status()
+    search = reader.search(pg_ready_graph.search_request.query)
+    context = reader.context(list(pg_ready_graph.context_request().seeds))
+
+    assert status["state"] == "ready"
+    assert status["fresh"] is True
+    assert search["state"] == "ready"
+    assert search["results"]
+    assert context["state"] == "ready"
+    assert context["nodes"]
+    assert not (project / ".iwiki" / "graph.sqlite3").exists()

@@ -1760,9 +1760,7 @@ def wiki_code_status() -> dict:
         return _defaulted_scope_answer(_postgres_code_reader(bind).status())
     if bind.primary is None:
         return _missing_code_primary()
-    return _codegraph_application.code_runtime(
-        _codegraph_application.source_context(bind)
-    ).status()
+    return _codegraph_application.code_reader(bind).status()
 
 
 @_safe
@@ -1843,9 +1841,7 @@ def wiki_code_search(
         )
     if bind.primary is None:
         return _missing_code_primary()
-    return _codegraph_application.code_runtime(
-        _codegraph_application.source_context(bind)
-    ).search(
+    return _codegraph_application.code_reader(bind).search(
         query,
         kinds=kinds,
         path=path,
@@ -1901,9 +1897,7 @@ def wiki_code_context(
         )
     if bind.primary is None:
         return _missing_code_primary()
-    return _codegraph_application.code_runtime(
-        _codegraph_application.source_context(bind)
-    ).context(
+    return _codegraph_application.code_reader(bind).context(
         seeds,
         direction=direction,
         depth=depth,
