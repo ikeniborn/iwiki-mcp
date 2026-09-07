@@ -1149,16 +1149,24 @@ secrets are `IWIKI_DB_PASSWORD`, `IWIKI_LLM_KEY`, and the model endpoint environ
 | Package | Role |
 | --- | --- |
 | `mcp` | FastMCP stdio server + tool registration |
+| `pydantic` | tool parameter metadata (`Field`) on the registered tool surface |
+| `anyio` | async primitives for the stdio idle timer and hosted lifecycle |
 | `httpx` | embeddings / chat / rerank HTTP client |
+| `urllib3` | Telegram bot HTTPS proxy tunnel and long-poll transport |
 | `numpy` | query-embedding array (float32 cast); cosine itself is pure-Python in `store.py` |
 | `pathspec` | gitignore-style `.iwikiignore` matching |
 | `filelock` | cross-process git lock on the base |
 | `tomli` | `.iwiki.toml` parsing on Python 3.10 (`tomllib` on ≥3.11) |
+| `exceptiongroup` | `BaseExceptionGroup` fallback on Python 3.10 (`builtins` on ≥3.11) |
+| `tree-sitter` | parser runtime shared by every code-graph language adapter |
+| `tree-sitter-python` / `tree-sitter-bash` / `tree-sitter-typescript` | pinned grammars for the Python, Bash, and TypeScript/JavaScript adapters |
+| `tree-sitter-language-pack` | grammar fallback resolution for the Python and ECMAScript adapters |
 | `psycopg` / `psycopg-pool` | PostgreSQL driver and bounded hosted connection pool |
 | `pgvector` | PostgreSQL vector adaptation and similarity storage |
 | `uvicorn` | loopback ASGI server for hosted Streamable HTTP |
 
-Dev extra: `pytest`, `pytest-asyncio`, `flake8` (max-line-length 100). Tests never
+Dev extra: `pytest`, `pytest-asyncio`, `flake8` (max-line-length 100), `starlette`
+(hosted ASGI `TestClient`), and `packaging` (requirement parsing). Tests never
 hit the network — they monkeypatch `indexer.embed_texts` and set dummy `IWIKI_*`
 env vars.
 
