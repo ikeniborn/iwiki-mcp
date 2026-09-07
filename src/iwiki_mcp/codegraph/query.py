@@ -7,8 +7,8 @@ from typing import Any
 
 from .models import (
     _TOKENS,
-    _validated_relative_posix,
     CodeGraphError,
+    module_key,
     SearchResult,
 )
 from .schema import CodeGraphStoreError
@@ -73,7 +73,16 @@ class CodeGraphLanguageUnavailableError(CodeGraphQueryError):
 
 @dataclass(frozen=True)
 class ValidatedSearchRequest:
-    """Pure validated input consumed by the SQLite query boundary."""
+    """Pure validated input consumed by the SQLite query boundary.
+
+    ``path``, when present, is always in ``module_key(path.strip())`` form:
+    a leading ``./`` is dropped, repeated ``/`` are collapsed, and a trailing
+    ``/`` is dropped. That last point means a directory prefix and its
+    slash-terminated form are equivalent (``services/a/`` behaves exactly
+    like ``services/a``), because prefix matching against stored paths
+    already covers the directory case. Matching itself stays a literal,
+    case-sensitive prefix comparison against the stored path — no casefold.
+    """
 
     query: str
     kinds: tuple[str, ...]
@@ -185,7 +194,7 @@ def validate_search_request(
         raise CodeGraphQueryError("limit must be between 1 and 100")
     if path is not None:
         try:
-            _validated_relative_posix(path)
+            path = module_key(path.strip())
         except ValueError as exc:
             raise CodeGraphQueryError(
                 "path must be a safe project-relative prefix"

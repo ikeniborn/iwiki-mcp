@@ -712,6 +712,67 @@ def test_alias_path_filter_counts_and_returns_target_entities(
     assert results[0].alias_ambiguous is False
 
 
+@pytest.mark.parametrize(
+    "raw", ["./services/a", "services//a", " services/a ", "services/a/"]
+)
+def test_path_prefix_variants_match_alias(schema_v2_search_connection, raw):
+    query = CodeGraphQuery("backend")
+    canonical = query.search(
+        schema_v2_search_connection,
+        validate_search_request(
+            "svc", kinds=["module"], path="services/a", limit=20
+        ),
+    )
+    variant = query.search(
+        schema_v2_search_connection,
+        validate_search_request("svc", kinds=["module"], path=raw, limit=20),
+    )
+
+    assert variant == canonical and canonical
+
+
+@pytest.mark.parametrize(
+    "raw", ["./typed/local", "typed//local", " typed/local ", "typed/local/"]
+)
+def test_path_prefix_variants_match_canonical_module(
+    schema_v2_search_connection, raw
+):
+    query = CodeGraphQuery("backend")
+    canonical = query.search(
+        schema_v2_search_connection,
+        validate_search_request(
+            "needle", kinds=["module"], path="typed/local", limit=20
+        ),
+    )
+    variant = query.search(
+        schema_v2_search_connection,
+        validate_search_request("needle", kinds=["module"], path=raw, limit=20),
+    )
+
+    assert variant == canonical and canonical
+
+
+@pytest.mark.parametrize(
+    "raw", ["./typed/local", "typed//local", " typed/local ", "typed/local/"]
+)
+def test_path_prefix_variants_match_canonical_file(
+    schema_v2_search_connection, raw
+):
+    query = CodeGraphQuery("backend")
+    canonical = query.search(
+        schema_v2_search_connection,
+        validate_search_request(
+            "local.py", kinds=["file"], path="typed/local", limit=20
+        ),
+    )
+    variant = query.search(
+        schema_v2_search_connection,
+        validate_search_request("local.py", kinds=["file"], path=raw, limit=20),
+    )
+
+    assert variant == canonical and canonical
+
+
 def test_alias_fanout_and_public_alias_are_deterministic(
     schema_v2_search_connection,
 ):

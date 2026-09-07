@@ -628,6 +628,14 @@ the server binary does not know is dropped from the filter and reported in `warn
 what that domain's hosted reads return. Local `sqlite` reads are unchanged: there the
 project's own `code_graph.languages` stays authoritative.
 
+An `invalid_config` error names its cause when a safe identifier is available: the
+response is `{"error": ..., "code": "invalid_config", "field": "<name>", "hint": ...}`,
+where `field` is the offending configuration key or request parameter (for example
+`depth`, or a misspelled `.iwiki.toml` key). The name passes a strict identifier gate,
+so exception text, values, or paths never appear in it; the key is simply absent when no
+safe name exists. Every non-ready query answer also carries `error`, `code`, and `hint`
+beside its empty `results`, so it cannot be mistaken for an empty filter match.
+
 A ready snapshot older than a positive `max_snapshot_age_seconds` returns
 `stale_snapshot` and no rows, while status keeps reporting age and timestamps. Value
 `0` disables age rejection entirely. The hosted server enforces its own validated
