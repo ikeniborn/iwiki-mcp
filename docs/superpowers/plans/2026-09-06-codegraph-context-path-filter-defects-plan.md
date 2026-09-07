@@ -3,8 +3,8 @@ chain:
   intent: docs/superpowers/intents/2026-09-05-codegraph-context-path-filter-defects-intent.md
   spec: docs/superpowers/specs/2026-09-06-codegraph-context-path-filter-defects-design.md
 review:
-  plan_hash: 62c63897866eede3
-  last_run: 2026-09-06
+  plan_hash: 99b0b16c7c530f83
+  last_run: 2026-09-07
   phases:
     structure:
       status: passed
@@ -325,7 +325,7 @@ Expected: FAIL — variants return empty today.
 
 - [ ] **Step 3: Implement**
 
-In `query.py:186-196`: `path = str(module_key(path.strip()))` (strip first; `module_key` rejects an empty result). `module_key` drops a trailing slash; prefix matching already covers the directory case, so `services/a/` and `services/a` are equivalent — state that in the docstring. Apply the same normalization in the PostgreSQL reader before binding the `starts_with` parameter.
+In `query.py:186-196`: normalize through `module_key` on the stripped value (`module_key` rejects an empty result), and re-append the separator when the caller's raw value ended with one — a trailing slash is the only way to scope a prefix to exactly one directory, so `services/a/` selects that directory while `services/a` is the wider prefix that also admits `services/ab`. State that distinction in the docstring. A non-string path must still raise the typed query error. Apply the same normalization in the PostgreSQL reader before binding the `starts_with` parameter.
 
 - [ ] **Step 4: Verification incl. PostgreSQL**
 
@@ -344,7 +344,7 @@ Patch-bump. Wiki `concept/code-graph-search` (normalization + case-sensitivity c
 - Test: `tests/codegraph/test_application.py`, `tests/codegraph/test_mcp_adapter.py`, `tests/codegraph/test_server_tools.py`, `tests/postgres/test_code_graph_reader.py`
 
 **Interfaces:**
-- Consumes: `Config.read_mode` (`config.py:132`, default `"sqlite"`), `McpCodeGraphReader` (`mcp_adapter.py:271`), the PostgreSQL reader from `postgres/codegraph.py`, credentials `IWIKI_CODE_GRAPH_MCP_URL` / `IWIKI_CODE_GRAPH_MCP_TOKEN`, the PostgreSQL DSN environment already used by publication.
+- Consumes: `Config.read_mode` (`config.py:132`, default `"sqlite"`), `McpCodeGraphReader` (`mcp_adapter.py:271`), the PostgreSQL reader from `postgres/codegraph.py`, credentials `IWIKI_CODE_GRAPH_MCP_URL` / `IWIKI_CODE_GRAPH_MCP_TOKEN`, and `PostgresBinding.connection_dsn()` — the same DSN source `publish_mode = "postgres"` already validates against.
 - Produces: `application.code_reader(bind, config)` — returns the runtime (sqlite), the direct PostgreSQL reader, or the MCP transit reader per `read_mode`; one mode, no fallback; missing DSN/credentials → `invalid_config` with `field: "read_mode"`. Hosted `PostgresBinding` dispatch unchanged. In `postgres`/`mcp` read modes no local auto-rebuild: freshness comes from the published snapshot (`stale_snapshot` semantics).
 
 - [ ] **Step 1: Write the failing tests**
@@ -374,7 +374,7 @@ Expected: FAIL — `code_reader` does not exist / routing ignores `read_mode`.
 
 - [ ] **Step 3: Implement**
 
-Add `code_reader` to `application.py`; switch `server.py` local-binding dispatch for the three read tools through it. `postgres` mode builds the direct reader from the publication DSN environment; `mcp` mode builds `McpCodeGraphReader` from the transit credentials; both return the typed error when their prerequisite is absent; neither attempts a local rebuild (skip `query_guard` auto-rebuild; surface the published snapshot's staleness as-is).
+Add `code_reader` to `application.py`; switch `server.py` local-binding dispatch for the three read tools through it. `postgres` mode builds the direct reader from `PostgresBinding.connection_dsn()` and therefore requires that binding, which keeps `code_reader` total over the three modes rather than serving production dispatch (the server routes every `PostgresBinding` down the hosted path first); `mcp` mode builds `McpCodeGraphReader` from the transit credentials; both return the typed error when their prerequisite is absent; neither attempts a local rebuild (skip `query_guard` auto-rebuild; surface the published snapshot's staleness as-is).
 
 - [ ] **Step 4: Verification incl. PostgreSQL**
 

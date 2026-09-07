@@ -289,6 +289,50 @@ def code_runtime(
     return runtime
 
 
+# Human message and hint for each machine token a snapshot reader puts in
+# `error`. The hosted answers those readers were written for carry the token
+# alone; spec R4 requires `error` + `code` + `hint` on every non-ready
+# query-path answer, with `error` the message and `code` the token.
+_PUBLISHED_NON_READY: dict[str, tuple[str, str]] = {
+    "missing_snapshot": (
+        "no code graph snapshot is published",
+        "publish a code graph snapshot for this domain",
+    ),
+    "stale_snapshot": (
+        "code graph snapshot is stale",
+        "republish the code graph snapshot",
+    ),
+    "remote_mcp_failed": (
+        "the remote code graph call failed",
+        "retry the remote code graph call",
+    ),
+}
+_PUBLISHED_NON_READY_DEFAULT = (
+    "code graph is not ready for this query",
+    "inspect wiki_code_status and retry",
+)
+
+
+def _normalized_published_answer(answer: dict[str, object]) -> dict[str, object]:
+    """Give a snapshot reader's non-ready answer the R4 error/code/hint shape.
+
+    The wrapped readers report a machine token in `error` and carry no
+    `code` -- the opposite of the runtime, whose `error` is the human
+    message. S6 made those answers reachable from a local server through
+    one `read_mode` key, so without this the same tool returns two
+    incompatible non-ready shapes on one machine. An answer that already
+    names its `code` (a hosted answer relayed through the MCP transit
+    reader) is compliant and passes through untouched.
+    """
+    token = answer.get("error")
+    if "code" in answer or not isinstance(token, str):
+        return answer
+    message, hint = _PUBLISHED_NON_READY.get(token, _PUBLISHED_NON_READY_DEFAULT)
+    normalized = {**answer, "error": message, "code": token}
+    normalized.setdefault("hint", hint)
+    return normalized
+
+
 class PublishedSnapshotReader:
     """Answer the three read tools from a published snapshot.
 
@@ -297,14 +341,24 @@ class PublishedSnapshotReader:
     server's local dispatch is one call site per tool whatever `read_mode`
     selected. It never indexes and never runs the runtime's rebuild guard:
     freshness is whatever the published snapshot itself reports.
+
+    The hosted `PostgresBinding` dispatch in `server.py` does not go through
+    this adapter and keeps its own answer shape, which hosted clients pin.
     """
 
-    def __init__(self, reader, config: codegraph_config.CodeGraphConfig) -> None:
+    def __init__(
+        self,
+        reader,
+        config: codegraph_config.CodeGraphConfig,
+        *,
+        snapshot_scoped_languages: bool = False,
+    ) -> None:
         self._reader = reader
         self._config = config
+        self._snapshot_scoped_languages = snapshot_scoped_languages
 
     def status(self) -> dict[str, object]:
-        return self._reader.status()
+        return _normalized_published_answer(self._reader.status())
 
     def search(
         self,
@@ -315,15 +369,31 @@ class PublishedSnapshotReader:
         languages: list[str] | None = None,
         limit: int = 20,
     ) -> dict[str, object]:
-        return self._reader.search(
-            validate_search_request(
+        """Search the published snapshot under the caller's own filters.
+
+        The published snapshot, not this project's `code_graph.languages`,
+        declares the unfiltered language scope. A reader that can report
+        that scope gets the builder form the hosted dispatch uses; the
+        remote transit reader instead omits the key entirely (see
+        `McpCodeGraphReader.search`) so the remote applies its own.
+        """
+        def build(configured: tuple[str, ...], source: str):
+            return validate_search_request(
                 query,
                 kinds=kinds,
                 path=path,
                 languages=languages,
-                configured_languages=self._config.languages,
+                configured_languages=configured,
+                languages_source=source,
                 limit=limit,
             )
+
+        if self._snapshot_scoped_languages:
+            return _normalized_published_answer(self._reader.search(
+                lambda snapshot_languages: build(snapshot_languages, "snapshot")
+            ))
+        return _normalized_published_answer(
+            self._reader.search(build(self._config.languages, "config"))
         )
 
     def context(
@@ -339,7 +409,7 @@ class PublishedSnapshotReader:
         max_files: int = 20,
         max_source_bytes: int = 200_000,
     ) -> dict[str, object]:
-        return self._reader.context(
+        return _normalized_published_answer(self._reader.context(
             validate_context_request(
                 seeds,
                 direction=direction,
@@ -351,7 +421,7 @@ class PublishedSnapshotReader:
                 max_files=max_files,
                 max_source_bytes=max_source_bytes,
             )
-        )
+        ))
 
 
 def code_reader(binding: GitBinding | PostgresBinding):
@@ -380,6 +450,7 @@ def code_reader(binding: GitBinding | PostgresBinding):
                 max_snapshot_age_seconds=config.max_snapshot_age_seconds,
             ),
             config,
+            snapshot_scoped_languages=True,
         )
     try:
         transport = RemoteMcpTransport(primary=binding.primary)

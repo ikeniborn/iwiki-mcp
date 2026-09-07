@@ -1130,8 +1130,6 @@ class CodeGraphRuntime:
         self,
         *,
         remaining_seconds: float | None = None,
-        _selector_lock_held: bool = False,
-        _selector_snapshot: object | None = None,
     ) -> dict[str, object]:
         """Prevent non-ready callers from observing rows from an old snapshot."""
         status = self.status()
@@ -1152,8 +1150,6 @@ class CodeGraphRuntime:
             try:
                 became_dirty = self._indexer.mark_dirty_if_stale(
                     deadline=freshness_deadline,
-                    selector_lock_held=_selector_lock_held,
-                    selector_snapshot=_selector_snapshot,
                 )
             except Timeout:
                 return {

@@ -261,6 +261,8 @@ def test_reader_maps_public_requests_without_scope_fields(
     mcp_reader.search(validate_search_request("needle", limit=5))
     name, arguments = fake_session.calls[-1]
     assert name == "wiki_code_search"
+    # No `languages`: the caller named none, so the remote snapshot -- not
+    # the local `configured_languages` default -- decides the scope.
     assert arguments == {
         "query": "needle",
         "kinds": [
@@ -268,9 +270,11 @@ def test_reader_maps_public_requests_without_scope_fields(
             "interface", "method", "module", "type_alias",
         ],
         "path": None,
-        "languages": ["python"],
         "limit": 5,
     }
+
+    mcp_reader.search(validate_search_request("needle", languages=["python"]))
+    assert fake_session.calls[-1][1]["languages"] == ["python"]
 
     mcp_reader.context(validate_context_request(["py:file:" + "0" * 64]))
     name, arguments = fake_session.calls[-1]
@@ -662,9 +666,11 @@ def test_mcp_read_mode_routes_every_read_through_the_remote_session(
     assert fake_session.calls[3][1] == {
         "query": "needle",
         "kinds": ["module"],
-        # S5: the prefix reaches the remote already `module_key`-normalized.
-        "path": "src/pkg",
-        "languages": ["python"],
+        # The prefix reaches the remote already normalized, with the
+        # caller's trailing directory separator intact.
+        "path": "src/pkg/",
+        # The caller named no language, so the remote scopes the search by
+        # its own published snapshot instead of this project's config.
         "limit": 5,
     }
     assert fake_session.calls[2][1] == {"primary": "docs"}

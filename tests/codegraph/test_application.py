@@ -1079,7 +1079,8 @@ def test_disabled_code_graph_never_leaves_the_local_runtime(
     assert reader.status()["code"] == "not_configured"
 
 
-def test_postgres_read_mode_without_a_dsn_names_read_mode(tmp_path):
+def test_postgres_read_mode_on_a_git_binding_names_read_mode(tmp_path):
+    """`read_mode = "postgres"` needs PostgreSQL storage; no DSN is consulted."""
     binding = _read_mode_project(tmp_path, "postgres")
 
     with pytest.raises(application.CodeGraphReadModeError) as failure:
@@ -1167,3 +1168,188 @@ def test_published_snapshot_reader_exposes_reads_only(tmp_path, monkeypatch):
     assert not hasattr(reader, "query_guard")
     assert not hasattr(reader, "index")
     assert not hasattr(reader, "export_snapshot")
+
+
+# -- remote reads are scoped by the snapshot, not by the local config -------
+
+
+def _two_language_config() -> CodeGraphConfig:
+    return CodeGraphConfig(languages=("python", "typescript"))
+
+
+class _RecordingTransport:
+    """Capture the exact remote payload without opening a session."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def call(self, tool: str, payload: dict) -> dict:
+        self.calls.append((tool, payload))
+        return {"state": "ready", "fresh": True, "results": []}
+
+
+def test_mcp_read_omits_languages_when_the_caller_named_none():
+    """A local `languages` config is not a filter the caller asked for."""
+    transport = _RecordingTransport()
+    reader = application.PublishedSnapshotReader(
+        McpCodeGraphReader(transport), _two_language_config()
+    )
+
+    reader.search("needle")
+
+    assert "languages" not in transport.calls[0][1]
+
+
+def test_mcp_read_forwards_the_languages_the_caller_named():
+    transport = _RecordingTransport()
+    reader = application.PublishedSnapshotReader(
+        McpCodeGraphReader(transport), _two_language_config()
+    )
+
+    reader.search("needle", languages=["typescript"])
+
+    assert transport.calls[0][1]["languages"] == ["typescript"]
+
+
+class _RecordingPostgresReader:
+    """Stand in for `PostgresCodeGraphReader.search`'s two accepted shapes."""
+
+    def __init__(self, snapshot_languages: tuple[str, ...]) -> None:
+        self._snapshot_languages = snapshot_languages
+        self.request = None
+
+    def search(self, request):
+        self.request = (
+            request(self._snapshot_languages) if callable(request) else request
+        )
+        return {"state": "ready", "fresh": True, "results": []}
+
+
+def test_postgres_read_scopes_languages_to_the_published_snapshot():
+    """A python-only snapshot must not receive the project's second language.
+
+    Sending it makes the remote's snapshot-scoped validator refuse every
+    search with `unsupported_language`, even though the caller filtered
+    nothing.
+    """
+    wrapped = _RecordingPostgresReader(("python",))
+    reader = application.PublishedSnapshotReader(
+        wrapped, _two_language_config(), snapshot_scoped_languages=True
+    )
+
+    reader.search("needle")
+
+    assert wrapped.request.languages == ("python",)
+
+
+def test_postgres_read_forwards_the_languages_the_caller_named():
+    from iwiki_mcp.codegraph.query import CodeGraphLanguageUnavailableError
+
+    wrapped = _RecordingPostgresReader(("python",))
+    reader = application.PublishedSnapshotReader(
+        wrapped, _two_language_config(), snapshot_scoped_languages=True
+    )
+
+    reader.search("needle", languages=["python"])
+    assert wrapped.request.languages == ("python",)
+
+    with pytest.raises(CodeGraphLanguageUnavailableError):
+        reader.search("needle", languages=["typescript"])
+
+
+# -- R4's non-ready contract holds on the local read_mode routes -----------
+
+
+class _NonReadyReader:
+    """Answer every read with one fixed non-ready payload."""
+
+    def __init__(self, answer: dict) -> None:
+        self._answer = answer
+
+    def status(self):
+        return dict(self._answer)
+
+    def search(self, request):
+        request = request(("python",)) if callable(request) else request
+        return {**self._answer, "results": []}
+
+    def context(self, request):
+        return {
+            **self._answer,
+            "seeds": list(request.seeds),
+            "nodes": [],
+            "relations": [],
+            "files": [],
+            "wiki_pages": [],
+            "warnings": [],
+        }
+
+
+_NON_READY_ANSWERS = {
+    "missing_snapshot": {
+        "domain": "docs", "state": "missing", "fresh": False,
+        "error": "missing_snapshot",
+    },
+    "stale_snapshot": {
+        "domain": "docs", "state": "ready", "fresh": False,
+        "error": "stale_snapshot",
+    },
+    "remote_mcp_failed": {
+        "domain": "docs", "state": "missing", "fresh": False,
+        "error": "remote_mcp_failed", "reason": "timeout",
+        "hint": "the remote code graph call timed out; retry it",
+    },
+}
+
+
+@pytest.mark.parametrize("token", sorted(_NON_READY_ANSWERS))
+@pytest.mark.parametrize("call", ["status", "search", "context"])
+def test_published_snapshot_reader_normalizes_non_ready_answers(token, call):
+    """Spec R4: `error` is the message, `code` the machine token, plus a hint.
+
+    The wrapped snapshot readers put the machine token in `error` and
+    carry no `code`. S6 made those answers reachable from a local server
+    through one config key, so without normalization the same tool
+    returns two incompatible non-ready shapes on one machine.
+    """
+    reader = application.PublishedSnapshotReader(
+        _NonReadyReader(_NON_READY_ANSWERS[token]), _two_language_config()
+    )
+    arguments = {
+        "status": (),
+        "search": ("needle",),
+        "context": (["py:file:" + "0" * 64],),
+    }
+
+    answer = getattr(reader, call)(*arguments[call])
+
+    assert answer["code"] == token
+    assert answer["error"] != token and answer["error"]
+    assert answer["hint"]
+    assert answer["fresh"] is False
+    assert answer.get("results", []) == []
+    assert answer.get("nodes", []) == []
+
+
+def test_published_snapshot_reader_preserves_a_compliant_answer():
+    """A remote answer that already names its code is left exactly alone."""
+    compliant = {
+        "domain": "docs", "state": "missing", "fresh": False,
+        "error": "code graph is stale", "code": "stale",
+        "hint": "run wiki_code_index",
+    }
+    reader = application.PublishedSnapshotReader(
+        _NonReadyReader(compliant), _two_language_config()
+    )
+
+    assert reader.status() == compliant
+
+
+def test_published_snapshot_reader_passes_a_ready_answer_through():
+    ready = {"domain": "docs", "state": "ready", "fresh": True}
+    reader = application.PublishedSnapshotReader(
+        _NonReadyReader(ready), _two_language_config()
+    )
+
+    assert reader.status() == ready
+    assert reader.search("needle") == {**ready, "results": []}

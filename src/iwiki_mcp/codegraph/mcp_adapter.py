@@ -283,17 +283,23 @@ class McpCodeGraphReader:
         return {**_UNREADABLE, **result} if "error" in result else result
 
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
-        """Search the remote snapshot under the shared validated bounds."""
-        result = self._transport.call(
-            "wiki_code_search",
-            {
-                "query": request.query,
-                "kinds": list(request.kinds),
-                "path": request.path,
-                "languages": list(request.languages),
-                "limit": request.limit,
-            },
-        )
+        """Search the remote snapshot under the shared validated bounds.
+
+        `languages` is sent only when the caller named one. The remote
+        snapshot -- not this project's `code_graph.languages` -- is the
+        authority for the unfiltered scope, and sending the local list
+        would make the remote's snapshot-scoped validator refuse every
+        search whose project declares a language the snapshot lacks.
+        """
+        payload: dict[str, object] = {
+            "query": request.query,
+            "kinds": list(request.kinds),
+            "path": request.path,
+            "limit": request.limit,
+        }
+        if request.languages_requested:
+            payload["languages"] = list(request.languages)
+        result = self._transport.call("wiki_code_search", payload)
         if "error" in result:
             return {**_UNREADABLE, **result, "results": []}
         return result
