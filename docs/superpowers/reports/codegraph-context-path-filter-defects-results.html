@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Результат внедрения — codegraph-context-path-filter-defects</title>
+<style>
+:root{
+  --bg:#f6f7fb; --surface:#ffffff; --fg:#2b2b3a; --muted:#6b6b80;
+  --accent:#5c6bc0; --accent-2:#3949ab; --border:#d6d8e6; --line:#9aa0b4; --zebra:#eef0f8;
+  --ok:#43a047; --ok-2:#2e7d32; --warn:#fb8c00; --warn-2:#ef6c00; --danger:#e53935; --danger-2:#c62828;
+  --shadow:rgba(40,40,80,.18);
+}
+body:has(#theme-toggle:checked){
+  --bg:#181825; --surface:#262637; --fg:#cdd6f4; --muted:#a6adc8;
+  --accent:#89b4fa; --accent-2:#5e95f0; --border:#3a3b52; --line:#6c7086; --zebra:#21222f;
+  --ok:#a6e3a1; --ok-2:#74c46e; --warn:#f9e2af; --warn-2:#f5c95b; --danger:#f38ba8; --danger-2:#e8638a;
+  --shadow:rgba(0,0,0,.45);
+}
+body{
+  margin:0 auto; padding:1.5rem 2rem 4rem; max-width:1080px;
+  font:16px/1.55 system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 100% -10%, color-mix(in srgb,var(--accent) 10%, transparent), transparent),
+    var(--bg);
+  color:var(--fg);
+  transition:background .3s, color .3s;
+}
+.theme-btn{
+  position:sticky; top:.5rem; float:right; z-index:5;
+  cursor:pointer; user-select:none;
+  padding:.25rem .6rem; border:1px solid var(--border); border-radius:6px;
+  background:var(--surface);
+}
+h1{ font-size:1.6rem; margin:.2rem 0 .4rem; }
+h2{ font-size:1.22rem; margin:2.2rem 0 .6rem; padding-bottom:.3rem; border-bottom:2px solid var(--accent); }
+h3{ font-size:1.02rem; margin:1.4rem 0 .4rem; color:var(--accent); }
+code{ font-family:ui-monospace, monospace; font-size:.9em;
+  background:color-mix(in srgb, var(--accent) 10%, var(--surface));
+  padding:.05rem .32rem; border-radius:4px; }
+
+.lead{ font-size:1.08rem; }
+.sub{ color:var(--muted); font-size:.95rem; }
+.note{ border-left:4px solid var(--accent); padding:.55rem 1rem; margin:1rem 0;
+  background:color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius:0 8px 8px 0;
+  box-shadow:0 1px 8px var(--shadow); }
+.note.ok{ border-left-color:var(--ok); background:color-mix(in srgb, var(--ok) 10%, var(--surface)); }
+.note.warn{ border-left-color:var(--warn); background:color-mix(in srgb, var(--warn) 10%, var(--surface)); }
+details{ background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:.7rem 1rem; margin:.7rem 0; box-shadow:0 1px 8px var(--shadow); }
+details summary{ cursor:pointer; font-weight:600; color:var(--accent); }
+details[open] summary{ margin-bottom:.55rem; }
+ul.tight li{ margin:.28rem 0; }
+.badge{ display:inline-block; font-size:.72rem; padding:.05rem .5rem; border-radius:999px; border:1px solid var(--border); white-space:nowrap; }
+.badge.det{ color:var(--ok-2); border-color:var(--ok); }
+.badge.llm{ color:var(--warn-2); border-color:var(--warn); }
+.badge.dg{ color:var(--danger-2); border-color:var(--danger); }
+
+.rpt-table{ border-collapse:separate; border-spacing:0; width:100%; background:var(--surface);
+  margin:1rem 0; font-size:.9rem; border:1px solid var(--border); border-radius:10px;
+  overflow:hidden; box-shadow:0 2px 12px var(--shadow); }
+.rpt-table th, .rpt-table td{ border-bottom:1px solid var(--border); padding:.45rem .7rem; text-align:left; vertical-align:top; }
+.rpt-table tbody tr:last-child td{ border-bottom:none; }
+.rpt-table thead th{ background:var(--accent); color:var(--bg); }
+.rpt-table tbody tr:nth-child(even){ background:var(--zebra); }
+.rpt-table tbody tr:hover{ background:color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.rpt-table td code{ white-space:nowrap; }
+.num{ text-align:right; font-family:ui-monospace, monospace; white-space:nowrap; }
+.plus{ color:var(--ok-2); } .minus{ color:var(--danger-2); }
+
+.cards{ display:flex; flex-wrap:wrap; gap:.7rem; margin:1rem 0; }
+.kpi{ flex:1 1 8.5rem; background:var(--surface); border:1px solid var(--border);
+  border-left:4px solid var(--accent); border-radius:8px; padding:.6rem .85rem;
+  box-shadow:0 1px 8px var(--shadow); }
+.kpi b{ display:block; font-size:1.35rem; color:var(--accent); font-family:ui-monospace, monospace; }
+.kpi span{ font-size:.8rem; color:var(--muted); }
+.kpi.ok{ border-left-color:var(--ok); } .kpi.ok b{ color:var(--ok-2); }
+
+figure.diagram{ margin:1.2rem 0; }
+figure.diagram svg{ width:100%; height:auto; display:block; overflow:visible; }
+figcaption{ color:var(--muted); font-size:.85rem; margin-top:.35rem; text-align:center; }
+.card{ fill:var(--surface); stroke:var(--border); stroke-width:1.5; filter:url(#dropshadow); transition:stroke .15s, stroke-width .15s; }
+.node:hover .card{ stroke:var(--accent); stroke-width:2.5; }
+.bar-accent{ fill:var(--accent); } .bar-ok{ fill:var(--ok); }
+.bar-warn{ fill:var(--warn); } .bar-term{ fill:var(--danger); }
+.t-title{ fill:var(--fg); font:600 13px system-ui, sans-serif; }
+.t-sub{ fill:var(--muted); font:10.5px system-ui, sans-serif; }
+.t-mono{ font-family:ui-monospace, monospace; }
+text{ pointer-events:none; }
+.conn{ fill:none; stroke:var(--line); stroke-width:2; }
+.conn-a{ fill:none; stroke:var(--accent); stroke-width:2; stroke-dasharray:5 5; }
+.conn-term{ fill:none; stroke:var(--danger); stroke-width:2.2; }
+.flow{ fill:none; stroke:var(--accent); stroke-width:2.6; stroke-dasharray:8 6; animation:dash 1.1s linear infinite; }
+.flow-ok{ fill:none; stroke:var(--ok); stroke-width:2.6; stroke-dasharray:8 6; animation:dash 1.1s linear infinite; }
+@keyframes dash{ to{ stroke-dashoffset:-14; } }
+@media (prefers-reduced-motion: reduce){ .flow,.flow-ok{ animation:none; } }
+.lbl-bg{ fill:var(--bg); }
+.lbl{ fill:var(--fg); font:10.5px system-ui, sans-serif; }
+.boundary-rect{ fill:none; stroke:var(--accent); stroke-width:1.6; stroke-dasharray:7 6; opacity:.85; }
+</style>
+</head>
+<body>
+<input type="checkbox" id="theme-toggle" hidden>
+<label for="theme-toggle" class="theme-btn" title="Переключить тему">🌙 / ☀️</label>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="dropshadow" x="-20%" y="-20%" width="140%" height="160%">
+    <feDropShadow dx="0" dy="2.5" stdDeviation="3.5" flood-color="var(--shadow)" flood-opacity="1"/>
+  </filter>
+  <marker id="arr"     markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--line)"/></marker>
+  <marker id="arrA"    markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--accent)"/></marker>
+  <marker id="arrOk"   markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--ok)"/></marker>
+  <marker id="arrTerm" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="var(--danger)"/></marker>
+</defs></svg>
+
+<main class="report">
+
+<h1>Результат внедрения — codegraph-context-path-filter-defects</h1>
+<p class="sub">Локальный read-path код-графа iwiki-mcp · база диффа <code>ed07283</code> → <code>04b1d27</code> · сгенерировано 2026-09-07</p>
+
+<h2>1. Резюме внедрения</h2>
+
+<p class="lead">Опубликованный локальный снапшот код-графа снова читаем и честен в диагностике: переход в <code>dirty</code> больше не уничтожает счётчики, правки в исключённых путях не портят свежесть, <code>wiki_code_context</code> восстанавливается наравне с поиском, ошибки конфигурации называют виновное поле, префикс пути нормализуется, а ключ <code>read_mode</code> действительно маршрутизирует чтения.</p>
+
+<div class="cards">
+  <div class="kpi"><b>8/8</b><span>требований спеки R1–R8</span></div>
+  <div class="kpi"><b>8/8</b><span>задач плана</span></div>
+  <div class="kpi ok"><b>4/4</b><span>Desired Outcomes подтверждены</span></div>
+  <div class="kpi ok"><b>14/14</b><span>проверок acceptance-прогона</span></div>
+  <div class="kpi"><b>7</b><span>смерженных PR (#72–#79)</span></div>
+  <div class="kpi"><b>~60</b><span>новых тестов</span></div>
+</div>
+
+<table class="rpt-table">
+  <thead><tr><th>Параметр</th><th>Значение</th></tr></thead>
+  <tbody>
+    <tr><td>Тема (topic)</td><td><code>codegraph-context-path-filter-defects</code></td></tr>
+    <tr><td>Intent</td><td><code>docs/superpowers/intents/2026-09-05-codegraph-context-path-filter-defects-intent.md</code></td></tr>
+    <tr><td>Spec</td><td><code>docs/superpowers/specs/2026-09-06-codegraph-context-path-filter-defects-design.md</code></td></tr>
+    <tr><td>Plan</td><td><code>docs/superpowers/plans/2026-09-06-codegraph-context-path-filter-defects-plan.md</code></td></tr>
+    <tr><td>База диффа</td><td><code>ed07283</code> (передана как <code>--since</code>) → <code>04b1d27</code></td></tr>
+    <tr><td>Объём</td><td>31 файл, <span class="plus">+2197</span> / <span class="minus">−237</span> строк</td></tr>
+    <tr><td>Версия пакета</td><td><code>0.7.246</code> → <code>0.7.253</code> (семь patch-бампов)</td></tr>
+    <tr><td>Маршрут работы</td><td>chain → continuation <code>full</code> → шесть слайсов S1–S6 + финальная волна правок</td></tr>
+  </tbody>
+</table>
+
+<h2>2. Выполненные изменения</h2>
+
+<p>Ниже — полный состав диффа <code>git diff --stat ed07283..04b1d27</code>. Все файлы изменённые (modified); новых и удалённых файлов в цикле нет.</p>
+
+<h3>Исходный код</h3>
+<table class="rpt-table">
+  <thead><tr><th>Файл</th><th class="num">±</th><th>Что делает изменение</th></tr></thead>
+  <tbody>
+    <tr><td><code>codegraph/application.py</code></td><td class="num">192</td><td>Новые швы <code>code_reader</code> и <code>PublishedSnapshotReader</code>: выбор читателя по <code>read_mode</code>, нормализация не-ready ответов, скоуп языков по опубликованному снапшоту</td></tr>
+    <tr><td><code>codegraph/runtime.py</code></td><td class="num">183</td><td>State-aware сопоставление метаданных, счётчики в <code>dirty</code>, перестановка guard до wiki-lease, мягкая деградация захвата селекторов, единый шлюз имени поля, единообразие не-ready ответов</td></tr>
+    <tr><td><code>codegraph/indexer.py</code></td><td class="num">162</td><td><code>publish_transition_envelope</code> — единственный писатель SQL-состояния; обобщение <code>exact_ready_metadata</code> → <code>valid_envelope</code>; удалён неисполняемый альтернативный порядок блокировок</td></tr>
+    <tr><td><code>codegraph/query.py</code></td><td class="num">48</td><td><code>normalized_path_prefix</code>: нормализация префикса с сохранением хвостового разделителя; типизированная ошибка на не-строку</td></tr>
+    <tr><td><code>codegraph/fingerprint.py</code></td><td class="num">48</td><td><code>filter_porcelain_lines</code> — фильтрация вывода <code>git status</code> через ignore-spec, включая переименования и octal-quoted пути</td></tr>
+    <tr><td><code>codegraph/config.py</code></td><td class="num">43</td><td>Поле <code>field</code> на ошибках конфигурации, прикреплённое в каждой точке возбуждения</td></tr>
+    <tr><td><code>codegraph/context.py</code></td><td class="num">40</td><td>Поле <code>parameter</code> на ошибках валидации запроса контекста</td></tr>
+    <tr><td><code>codegraph/mcp_adapter.py</code></td><td class="num">28</td><td>Активация <code>McpCodeGraphReader</code> в продакшене; ключ <code>languages</code> опускается, когда вызывающий фильтр не задал</td></tr>
+    <tr><td><code>codegraph/discovery.py</code></td><td class="num">23</td><td>Выделен общий <code>build_ignore_spec</code> (<code>.gitignore</code> + <code>.iwikiignore</code> + <code>config.exclude</code>)</td></tr>
+    <tr><td><code>server.py</code></td><td class="num">22</td><td>Диспетчеризация трёх read-инструментов через <code>code_reader</code>; <code>wiki_code_index</code> называет <code>languages</code></td></tr>
+    <tr><td><code>codegraph/linking.py</code></td><td class="num">11</td><td>Переиспользование общего ignore-spec; ключ digest селекторов закреплён за <code>page.relative</code></td></tr>
+    <tr><td><code>postgres/codegraph.py</code></td><td class="num">11</td><td>Та же нормализация префикса перед привязкой <code>starts_with</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Тесты</h3>
+<table class="rpt-table">
+  <thead><tr><th>Файл</th><th class="num">±</th><th>Покрытие</th></tr></thead>
+  <tbody>
+    <tr><td><code>tests/codegraph/test_application.py</code></td><td class="num">350</td><td>Маршрутизация <code>read_mode</code>, типизированные ошибки, скоуп языков, нормализация ответов</td></tr>
+    <tr><td><code>tests/codegraph/test_linking.py</code></td><td class="num">228</td><td>Контракт мягкой деградации селекторов, ветка <code>busy</code> при контенции lease, замер латентности</td></tr>
+    <tr><td><code>tests/codegraph/test_indexer_runtime.py</code></td><td class="num">207</td><td>Кросс-runtime сценарий dirty, по тесту на каждого перенаправленного писателя состояния</td></tr>
+    <tr><td><code>tests/codegraph/test_server_tools.py</code></td><td class="num">147</td><td>Точная форма ответа с <code>field</code>, негативный тест на утечку враждебного текста</td></tr>
+    <tr><td><code>tests/postgres/test_code_graph_reader.py</code></td><td class="num">145</td><td>Первые тесты path-фильтра на PostgreSQL, включая распознавание хвостового слэша</td></tr>
+    <tr><td><code>tests/codegraph/test_discovery_fingerprint.py</code></td><td class="num">116</td><td>Exclude-aware маркер, таймированная граница 10 000 строк &lt; 0,5 с</td></tr>
+    <tr><td><code>tests/codegraph/test_query.py</code></td><td class="num">110</td><td>Варианты написания префикса, канонические ветки module/file, различение директорного скоупа</td></tr>
+    <tr><td><code>tests/codegraph/test_mcp_adapter.py</code></td><td class="num">78</td><td>Фейковый MCP-сервер: реальная последовательность вызовов, отсутствие локального снапшота</td></tr>
+    <tr><td><code>tests/codegraph/test_context.py</code></td><td class="num">55</td><td>Имена параметров в ошибках валидации контекста</td></tr>
+    <tr><td><code>tests/codegraph/test_config.py</code></td><td class="num">52</td><td>Имя неизвестного ключа <code>[code_graph]</code> в ответе</td></tr>
+  </tbody>
+</table>
+
+<h3>Документация и версия</h3>
+<table class="rpt-table">
+  <thead><tr><th>Файл</th><th class="num">±</th><th>Содержание</th></tr></thead>
+  <tbody>
+    <tr><td><code>docs/README.ru.md</code></td><td class="num">30</td><td>Контракт <code>read_mode</code>, форма ключа <code>field</code>, вид не-ready ответа</td></tr>
+    <tr><td><code>README.md</code></td><td class="num">28</td><td>То же на английском (файлы держатся эквивалентными)</td></tr>
+    <tr><td><code>…-design.md</code> (spec)</td><td class="num">51</td><td>Правки R5 (сохранение хвостового разделителя) и R6 (источник DSN, тотальность ветки)</td></tr>
+    <tr><td><code>…-plan.md</code></td><td class="num">10</td><td>Приведение текстов S5/S6 к отгруженному контракту</td></tr>
+    <tr><td><code>…-intent.md</code></td><td class="num">8</td><td>Закрытие findings F-001 / F-002</td></tr>
+    <tr><td><code>pyproject.toml</code>, <code>src/iwiki_mcp/__init__.py</code>, <code>tests/test_package.py</code>, <code>uv.lock</code></td><td class="num">4</td><td>Версия <code>0.7.253</code>, согласованная во всех четырёх местах</td></tr>
+  </tbody>
+</table>
+
+<h2>3. Результаты</h2>
+
+<h3>Сверка плана с диффом</h3>
+<table class="rpt-table">
+  <thead><tr><th>Задача плана</th><th>Статус</th><th>Свидетельство в диффе</th></tr></thead>
+  <tbody>
+    <tr><td>Task 1 — PR цепочки документов</td><td><span class="badge det">DONE</span></td><td>PR #72, master <code>ed07283</code></td></tr>
+    <tr><td>Task 2 — S1 переходный envelope (R1)</td><td><span class="badge det">DONE</span></td><td>PR #73; <code>publish_transition_envelope</code>, <code>valid_envelope</code> в <code>indexer.py</code></td></tr>
+    <tr><td>Task 3 — S2 exclude-aware fingerprint (R2)</td><td><span class="badge det">DONE</span></td><td>PR #74; <code>filter_porcelain_lines</code>, <code>build_ignore_spec</code></td></tr>
+    <tr><td>Task 4 — S3 паритет контекста (R3)</td><td><span class="badge det">DONE</span></td><td>PR #75; guard до lease, <code>wiki_selector_unavailable</code></td></tr>
+    <tr><td>Task 5 — S4 диагностируемый <code>invalid_config</code> (R4)</td><td><span class="badge det">DONE</span></td><td>PR #76; <code>_whitelisted_field</code> в <code>runtime.py</code> и <code>server.py</code></td></tr>
+    <tr><td>Task 6 — S5 нормализация префикса (R5)</td><td><span class="badge det">DONE</span></td><td>PR #77; <code>normalized_path_prefix</code> в обоих бэкендах</td></tr>
+    <tr><td>Task 7 — S6 маршрутизация <code>read_mode</code> (R6)</td><td><span class="badge det">DONE</span></td><td>PR #78; <code>code_reader</code>, <code>PublishedSnapshotReader</code></td></tr>
+    <tr><td>Task 8 — сверка результата + финальная волна</td><td><span class="badge det">DONE</span></td><td>PR #79; acceptance-прогон, восемь закрытых находок, F-001 с измерением</td></tr>
+  </tbody>
+</table>
+
+<h3>Покрытие требований спеки</h3>
+<table class="rpt-table">
+  <thead><tr><th>Требование</th><th>Покрытие</th><th>Проверено по отгруженным символам</th></tr></thead>
+  <tbody>
+    <tr><td>R1 — переходный envelope</td><td><span class="badge det">есть</span></td><td><code>publish_transition_envelope</code> — единственный вызывающий <code>set_repository_state</code></td></tr>
+    <tr><td>R2 — exclude-aware fingerprint</td><td><span class="badge det">есть</span></td><td><code>filter_porcelain_lines</code>, <code>build_ignore_spec</code></td></tr>
+    <tr><td>R3 — паритет контекста и поиска</td><td><span class="badge det">есть</span></td><td><code>query_guard()</code> с полным бюджетом до lease, <code>wiki_selector_unavailable</code></td></tr>
+    <tr><td>R4 — диагностируемый <code>invalid_config</code></td><td><span class="badge det">есть</span></td><td><code>_whitelisted_field</code> на эмиссии, единая форма не-ready ответа</td></tr>
+    <tr><td>R5 — нормализация префикса пути</td><td><span class="badge det">есть</span></td><td><code>normalized_path_prefix</code> в <code>query.py</code> и <code>postgres/codegraph.py</code></td></tr>
+    <tr><td>R6 — маршрутизация <code>read_mode</code></td><td><span class="badge det">есть</span></td><td><code>code_reader</code>, <code>PublishedSnapshotReader</code></td></tr>
+    <tr><td>R7 — стратегия тестирования</td><td><span class="badge det">есть</span></td><td>~60 новых тестов; живая PostgreSQL на одноразовом контейнере в S5/S6</td></tr>
+    <tr><td>R8 — модель доставки</td><td><span class="badge det">есть</span></td><td>7 merge-коммитов, по слайсу на ветку и PR</td></tr>
+  </tbody>
+</table>
+
+<h3>Desired Outcomes из intent — наблюдаемое подтверждение</h3>
+<p>Acceptance-прогон выполнялся сквозным скриптом на реальном собранном снапшоте (master <code>dbc9518</code>), 14 из 14 проверок пройдены, exit 0.</p>
+<table class="rpt-table">
+  <thead><tr><th>Outcome</th><th>Что проверено</th><th>Итог</th></tr></thead>
+  <tbody>
+    <tr><td>Ready-снапшот отвечает корректно</td><td>Сборка ready; два подряд <code>status()</code> байт-идентичны; <code>search(path=…)</code> отдаёт префиксное подмножество; <code>context()</code> обходит IMPORTS для module-seed</td><td><span class="badge det">4/4</span></td></tr>
+    <tr><td>Конкурентность</td><td>Правка в исключённом пути оставляет <code>ready</code>; правка индексируемого источника даёт <code>dirty</code> с сохранёнными counts и без <code>metadata_reconstructed</code>; поиск и контекст восстанавливаются авто-ребилдом</td><td><span class="badge det">4/4</span></td></tr>
+    <tr><td>Диагностика</td><td>Некорректный <code>depth</code> называет <code>depth</code>; не-ready ответ несёт <code>error</code>+<code>code</code>+<code>hint</code></td><td><span class="badge det">2/2</span></td></tr>
+    <tr><td><code>read_mode</code> работает по-настоящему</td><td>Варианты написания префикса эквивалентны каноническому; <code>read_mode="mcp"</code> без кредов называет <code>read_mode</code>, креды не попадают в ответ</td><td><span class="badge det">4/4</span></td></tr>
+  </tbody>
+</table>
+
+<div class="note ok"><b>Вердикт сверки: OK.</b> 0 CRITICAL, 0 WARNING. Лишних изменений (EXCESS) нет — каждый изменённый файл прослеживается к задаче плана.</div>
+
+<div class="note warn"><b>INFO.</b> GWT-проекция домена <code>iwiki-mcp</code> сообщает <code>state: "absent"</code> и 0 сценариев, хотя на странице <code>concept/code-graph-read-path-specifications</code> написаны пять сценариев (<code>codegraph-truthful-dirty-status</code>, <code>codegraph-excluded-edit-stays-ready</code>, <code>codegraph-context-recovers-like-search</code>, <code>codegraph-path-prefix-normalized</code>, <code>codegraph-read-mode-routing</code>). <code>wiki_lint</code> не выдаёт ни одного specification-finding, поэтому это состояние проекции на уровне домена, а не дефект, внесённый этим циклом.</div>
+
+<details>
+  <summary>Как проверялось качество на каждом шаге</summary>
+  <ul class="tight">
+    <li>Каждый слайс: TDD (красный тест до правки), полный прогон, flake8, ревью задачи и — при находках — цикл правок со scoped re-review.</li>
+    <li>Слайсы S5 и S6 дополнительно прогонялись против живой PostgreSQL на одноразовом контейнере <code>pgvector/pgvector:pg16</code>.</li>
+    <li>Финальный whole-branch review вынес «With fixes» с шестью кросс-слайсовыми находками; все закрыты одной волной правок, scoped re-review подтвердил каждую.</li>
+    <li>Последний прогон: 3483 passed / 237 skipped (<code>-m "not slow"</code>), <code>tests/postgres</code> 543 passed на живой БД, flake8 чист на затронутых файлах.</li>
+  </ul>
+</details>
+
+<h2>4. Влияние на систему</h2>
+
+<table class="rpt-table">
+  <thead><tr><th>Компонент</th><th>Изменение поведения</th><th>Риск / follow-up</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>indexer.py</code> · <code>runtime.py</code><br><span class="sub">состояние снапшота</span></td>
+      <td>Снапшот в <code>dirty</code> сохраняет счётчики и диагностику (раньше — обнулялись навсегда до полного ребилда). <code>metadata_reconstructed</code> остаётся только для настоящей порчи или записи в обход хелпера.</td>
+      <td>Окно между SQL-записью и публикацией JSON даёт транзиентное расхождение, чинится следующим переходом — разрешено спекой R1.</td>
+    </tr>
+    <tr>
+      <td><code>fingerprint.py</code> · <code>discovery.py</code><br><span class="sub">свежесть</span></td>
+      <td>Правки в исключённых путях (worktrees, кэши) и обычные wiki-записи больше не переводят ready-снапшот в <code>dirty</code>.</td>
+      <td>На первом апгрейде развёрнутая база с «грязью» в исключённых, но не gitignored путях один раз пересоберётся — самоизлечимо.</td>
+    </tr>
+    <tr>
+      <td><code>runtime.py</code><br><span class="sub">контекст</span></td>
+      <td><code>wiki_code_context</code> восстанавливает грязный граф тем же ограниченным авто-ребилдом, что и поиск; сбой lease селекторов отдаёт граф с предупреждением вместо пустого <code>stale</code>.</td>
+      <td>Окно между двумя захватами селекторов может отставить <code>wiki_pages</code> на одну правку — самоизлечимо, неустранимо внутри предписанного порядка. Худшая латентность примерно удваивается, когда случается ребилд.</td>
+    </tr>
+    <tr>
+      <td><code>config.py</code> · <code>context.py</code> · <code>server.py</code><br><span class="sub">диагностика</span></td>
+      <td>Каждый <code>invalid_config</code> называет виновное поле через единый идентификаторный шлюз; текст исключений, значения, пути и окружение туда попасть не могут.</td>
+      <td>Форма ответа расширена ключом <code>field</code> — клиенты, сверяющие точный набор ключей, увидят новый ключ.</td>
+    </tr>
+    <tr>
+      <td><code>query.py</code> · <code>postgres/codegraph.py</code><br><span class="sub">поиск по пути</span></td>
+      <td>Варианты написания префикса дают тот же результат, что канонический; хвостовой слэш по-прежнему сужает до одной директории.</td>
+      <td>Прежнее (нешипнутое) поведение со срезанным слэшем было шире — восстановлен контракт спеки.</td>
+    </tr>
+    <tr>
+      <td><code>application.py</code> · <code>mcp_adapter.py</code><br><span class="sub">маршрутизация чтений</span></td>
+      <td><code>read_mode</code> выбирает читателя: <code>sqlite</code> (по умолчанию, поведение байт-идентично прежнему), <code>postgres</code> и <code>mcp</code> читают опубликованный снапшот. Один режим, без фолбэков.</td>
+      <td>Развёрнутый <code>.iwiki.toml</code> с <code>read_mode = "mcp"</code> при апгрейде тихо переключится с локальных чтений на удалённые. В mcp-ветке заданный вызывающим <code>languages</code> всё ещё сверяется с локальным конфигом — запарковано с рулингом.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note"><b>Измерение по метрике здоровья (F-001).</b> Латентность happy-path <code>context(include_wiki=True)</code> на ready-снапшоте: 15–23 мс на пяти сэмплах в трёх прогонах, медиана ≈ 17 мс. Закреплена граница 200 мс как сторожевой порог на незапланированный ребилд. Команда: <code>uv run pytest -q tests/codegraph/test_linking.py -k well_under_the_rebuild_budget</code>.</div>
+
+<h2>5. Схемы</h2>
+
+<h3>Маршрут чтения после подключения <code>read_mode</code></h3>
+<figure class="diagram">
+<svg viewBox="0 0 940 430" role="img" aria-label="Маршрутизация чтений код-графа: три инструмента, проверка типа привязки, выбор читателя по read_mode">
+  <g class="node"><rect class="card" x="24" y="30" width="170" height="120" rx="12"/>
+    <rect class="bar-accent" x="32" y="44" width="5" height="92" rx="2.5"/>
+    <text class="t-title t-mono" x="112" y="62" text-anchor="middle">wiki_code_search</text>
+    <text class="t-title t-mono" x="112" y="84" text-anchor="middle">wiki_code_context</text>
+    <text class="t-title t-mono" x="112" y="106" text-anchor="middle">wiki_code_status</text>
+    <text class="t-sub" x="112" y="130" text-anchor="middle">три read-инструмента</text></g>
+
+  <path class="flow" marker-end="url(#arrA)" d="M194,90 H249"/>
+
+  <g class="node"><rect class="card" x="252" y="55" width="160" height="70" rx="12"/>
+    <rect class="bar-warn" x="260" y="68" width="5" height="44" rx="2.5"/>
+    <text class="t-title" x="332" y="84" text-anchor="middle">тип привязки?</text>
+    <text class="t-sub t-mono" x="332" y="102" text-anchor="middle">_is_postgres(bind)</text></g>
+
+  <path class="conn" marker-end="url(#arr)" d="M332,125 V178"/>
+  <rect class="lbl-bg" x="338" y="140" width="172" height="16"/>
+  <text class="lbl" x="344" y="152">hosted PostgresBinding</text>
+
+  <g class="node"><rect class="card" x="222" y="180" width="220" height="58" rx="12"/>
+    <rect class="bar-ok" x="230" y="193" width="5" height="32" rx="2.5"/>
+    <text class="t-title" x="332" y="204" text-anchor="middle">хостовый путь</text>
+    <text class="t-sub" x="332" y="222" text-anchor="middle">не изменён этим циклом</text></g>
+
+  <path class="flow" marker-end="url(#arrA)" d="M412,90 H489"/>
+  <rect class="lbl-bg" x="418" y="66" width="68" height="16"/>
+  <text class="lbl" x="452" y="78" text-anchor="middle">локальная</text>
+
+  <g class="node"><rect class="card" x="492" y="55" width="170" height="70" rx="12"/>
+    <rect class="bar-accent" x="500" y="68" width="5" height="44" rx="2.5"/>
+    <text class="t-title t-mono" x="577" y="84" text-anchor="middle">code_reader</text>
+    <text class="t-sub" x="577" y="102" text-anchor="middle">один режим, без фолбэков</text></g>
+
+  <path class="flow-ok" marker-end="url(#arrOk)" d="M662,74 H700 Q712,74 712,86 V118"/>
+  <path class="flow"    marker-end="url(#arrA)"  d="M662,90 H744"/>
+  <path class="flow"    marker-end="url(#arrA)"  d="M662,106 H700 Q712,106 712,118 V300"/>
+
+  <g class="node"><rect class="card" x="700" y="120" width="216" height="66" rx="12"/>
+    <rect class="bar-ok" x="708" y="134" width="5" height="38" rx="2.5"/>
+    <text class="t-title t-mono" x="808" y="148" text-anchor="middle">CodeGraphRuntime</text>
+    <text class="t-sub" x="808" y="166" text-anchor="middle">read_mode = sqlite · байт-идентично</text></g>
+
+  <g class="node"><rect class="card" x="700" y="210" width="216" height="66" rx="12"/>
+    <rect class="bar-accent" x="708" y="224" width="5" height="38" rx="2.5"/>
+    <text class="t-title t-mono" x="808" y="238" text-anchor="middle">PostgresCodeGraphReader</text>
+    <text class="t-sub" x="808" y="256" text-anchor="middle">read_mode = postgres</text></g>
+
+  <g class="node"><rect class="card" x="700" y="300" width="216" height="66" rx="12"/>
+    <rect class="bar-accent" x="708" y="314" width="5" height="38" rx="2.5"/>
+    <text class="t-title t-mono" x="808" y="328" text-anchor="middle">McpCodeGraphReader</text>
+    <text class="t-sub" x="808" y="346" text-anchor="middle">read_mode = mcp · транзит</text></g>
+
+  <rect class="boundary-rect" x="686" y="196" width="244" height="184" rx="14"/>
+  <rect class="lbl-bg" x="700" y="188" width="212" height="16"/>
+  <text class="lbl" x="706" y="200" font-weight="600">PublishedSnapshotReader</text>
+
+  <g class="node"><rect class="card" x="452" y="330" width="216" height="76" rx="12"/>
+    <rect class="bar-term" x="460" y="344" width="5" height="48" rx="2.5"/>
+    <text class="t-title" x="560" y="358" text-anchor="middle">нет DSN / нет кредов</text>
+    <text class="t-sub t-mono" x="560" y="376" text-anchor="middle">code: invalid_config</text>
+    <text class="t-sub t-mono" x="560" y="392" text-anchor="middle">field: read_mode</text></g>
+  <path class="conn-term" marker-end="url(#arrTerm)" d="M577,125 V186 Q577,198 565,198 L560,198 V325"/>
+</svg>
+<figcaption>Хостовая привязка уходит на неизменённый путь до того, как читается <code>read_mode</code>; удалённые режимы не делают локального авто-ребилда и не пробуют другой режим при сбое.</figcaption>
+</figure>
+
+<h3>Состояния снапшота и переходный envelope</h3>
+<figure class="diagram">
+<svg viewBox="0 0 940 330" role="img" aria-label="Машина состояний снапшота: ready, dirty, восстановление ребилдом и путь порчи печати">
+  <g class="node"><rect class="card" x="60" y="60" width="190" height="70" rx="35"/>
+    <rect class="bar-ok" x="76" y="76" width="5" height="38" rx="2.5"/>
+    <text class="t-title" x="155" y="90" text-anchor="middle">ready</text>
+    <text class="t-sub" x="155" y="110" text-anchor="middle">запечатанный envelope, counts живы</text></g>
+
+  <g class="node"><rect class="card" x="620" y="60" width="190" height="70" rx="35"/>
+    <rect class="bar-warn" x="636" y="76" width="5" height="38" rx="2.5"/>
+    <text class="t-title" x="715" y="90" text-anchor="middle">dirty</text>
+    <text class="t-sub" x="715" y="110" text-anchor="middle">counts и диагностика унаследованы</text></g>
+
+  <path class="flow" marker-end="url(#arrA)" d="M250,82 H613"/>
+  <rect class="lbl-bg" x="300" y="52" width="266" height="16"/>
+  <text class="lbl" x="433" y="64" text-anchor="middle">правка индексируемого источника → query_guard</text>
+
+  <path class="conn-a" marker-end="url(#arrA)" d="M715,130 V170 Q715,182 703,182 L167,182 Q155,182 155,170 V136"/>
+  <rect class="lbl-bg" x="330" y="173" width="212" height="16"/>
+  <text class="lbl" x="436" y="185" text-anchor="middle">ограниченный авто-ребилд (поиск или контекст)</text>
+
+  <g class="node"><rect class="card" x="300" y="216" width="330" height="72" rx="12"/>
+    <rect class="bar-accent" x="308" y="230" width="5" height="44" rx="2.5"/>
+    <text class="t-title t-mono" x="465" y="244" text-anchor="middle">publish_transition_envelope</text>
+    <text class="t-sub" x="465" y="262" text-anchor="middle">единственный писатель SQL-состояния:</text>
+    <text class="t-sub" x="465" y="278" text-anchor="middle">пишет строку и тут же переиздаёт печать</text></g>
+  <path class="conn-a" d="M433,216 V196"/>
+
+  <g class="node"><rect class="card" x="686" y="216" width="230" height="72" rx="12"/>
+    <rect class="bar-term" x="694" y="230" width="5" height="44" rx="2.5"/>
+    <text class="t-title" x="801" y="240" text-anchor="middle">запись в обход хелпера</text>
+    <text class="t-sub t-mono" x="801" y="258" text-anchor="middle">metadata_reconstructed</text>
+    <text class="t-sub" x="801" y="274" text-anchor="middle">счётчики обнулены — печать сломана</text></g>
+  <path class="conn-term" marker-end="url(#arrTerm)" d="M715,130 V210"/>
+  <rect class="lbl-bg" x="722" y="160" width="150" height="16"/>
+  <text class="lbl" x="728" y="172">tamper-evidence</text>
+</svg>
+<figcaption>До цикла любой переход в <code>dirty</code> ломал запечатанный <code>storage_stamp</code> и обнулял счётчики навсегда; теперь это единственный признак настоящей порчи.</figcaption>
+</figure>
+
+<p class="sub">Отчёт сгенерирован из репозитория <code>iwiki-mcp</code>; данные — <code>git diff --stat ed07283..04b1d27</code>, acceptance-прогон на <code>dbc9518</code>, страница задачи <code>iwiki-mcp/reference/tasks/codegraph-context-path-filter-defects</code>.</p>
+
+</main>
+</body>
+</html>
