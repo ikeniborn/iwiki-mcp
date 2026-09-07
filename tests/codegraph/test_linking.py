@@ -1515,6 +1515,36 @@ def test_runtime_include_wiki_captures_selectors_once_after_the_guard(
     assert captures == 2
 
 
+def test_ready_context_with_wiki_stays_well_under_the_rebuild_budget(
+    ready_context
+):
+    """Named bound for the intent's query-path latency metric (F-001).
+
+    S3 gave the context path a second wiki-selector capture (pinned at two
+    by the test above) and a newly possible bounded rebuild, so the metric
+    needs a measured number rather than the word "measurably". Measured on
+    this fixture: five samples of 15-23 ms, median ~17 ms. The bound below
+    is ~10x that median -- deliberately generous, because the failure mode
+    worth catching is not micro-noise but a rebuild or an unbounded wiki
+    scan landing on the query path, which costs whole seconds (the default
+    `max_rebuild_seconds` is 10). The minimum of five samples is used so
+    an unrelated stall on a loaded machine cannot flake it.
+    """
+    ready_context.context([ready_context.run_symbol_id], include_wiki=True)
+
+    samples = []
+    for _attempt in range(5):
+        started = time.perf_counter()
+        response = ready_context.context(
+            [ready_context.run_symbol_id], include_wiki=True
+        )
+        samples.append((time.perf_counter() - started) * 1000)
+        assert response["fresh"] is True
+        assert response["nodes"]
+
+    assert min(samples) < 200, f"context latency regressed: {samples} ms"
+
+
 @pytest.mark.parametrize(
     ("failure", "code"),
     [
