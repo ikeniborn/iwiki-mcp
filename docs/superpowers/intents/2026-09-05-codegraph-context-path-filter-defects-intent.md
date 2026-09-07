@@ -22,8 +22,8 @@ review:
       fragment: "Query-path latency does not measurably regress"
       text: "Latency metric has no named threshold or measurement command; 'measurably' lacks a criterion."
       fix: "Name a bound (e.g. status/search p50 on the test fixture within +10% of master) or a benchmark command."
-      verdict: open
-      verdict_at: null
+      verdict: fixed
+      verdict_at: 2026-09-07
     - id: F-002
       phase: alignment
       severity: INFO
@@ -32,8 +32,8 @@ review:
       fragment: "read_mode is honored for real"
       text: "Scope extends beyond the original task page TODO (read_mode wiring); explicitly chosen by the user in Q5b."
       fix: null
-      verdict: open
-      verdict_at: null
+      verdict: accepted
+      verdict_at: 2026-09-07
 ---
 # Intent: codegraph-context-path-filter-defects
 

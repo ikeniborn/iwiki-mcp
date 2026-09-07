@@ -2,8 +2,8 @@
 chain:
   intent: docs/superpowers/intents/2026-09-05-codegraph-context-path-filter-defects-intent.md
 review:
-  spec_hash: 173beabdc4893343
-  last_run: 2026-09-06
+  spec_hash: c18b457c4615e266
+  last_run: 2026-09-07
   phases:
     structure:
       status: passed
@@ -22,8 +22,28 @@ review:
       fragment: "Query-path latency is checked manually on the full run"
       text: "Manual latency check has no threshold or command; inherited from intent finding F-001."
       fix: "Name a bound or a benchmark command in the plan's verification steps."
-      verdict: open
-      verdict_at: null
+      verdict: fixed
+      verdict_at: 2026-09-07
+    - id: F-002
+      phase: consistency
+      severity: INFO
+      section: R5 — Path-prefix normalization (slice S5)
+      section_hash: 067084f367257dec
+      fragment: "A trailing separator the caller wrote is preserved"
+      text: "R5 amended after the final whole-branch review: the implemented trailing-slash strip widened prefix matching beyond the enumerated normalization; the spec now states the preservation the fix wave restores."
+      fix: null
+      verdict: fixed
+      verdict_at: 2026-09-07
+    - id: F-003
+      phase: consistency
+      severity: INFO
+      section: R6 — read_mode routing (slice S6)
+      section_hash: 24b605261f254fe2
+      fragment: "using the DSN the binding itself carries"
+      text: "R6 amended after the final whole-branch review: the DSN comes from PostgresBinding.connection_dsn(), symmetric with publish_mode's existing validation, and the branch keeps code_reader total rather than serving production dispatch."
+      fix: null
+      verdict: fixed
+      verdict_at: 2026-09-07
 ---
 # Design: codegraph-context-path-filter-defects
 
@@ -121,13 +141,17 @@ asserts leaked exception text fails.
 
 The search request uses the value `_validated_relative_posix` returns: strip a leading
 `./`, collapse duplicate slashes, trim surrounding whitespace, reject an empty result.
-The normalized prefix feeds both the SQLite `substr` filter and the PostgreSQL
-`starts_with` filter. Matching stays case-sensitive (paths are exact); the contract is
-documented. Coverage extends to the canonical (non-alias) module and file branches and
-adds the first PostgreSQL path-filter test.
+A trailing separator the caller wrote is preserved, because it is the only way to scope a
+prefix to exactly one directory — `services/a/` selects that directory, `services/a` is
+the wider prefix that also admits `services/ab`. The normalized prefix feeds both the
+SQLite `substr` filter and the PostgreSQL `starts_with` filter. Matching stays
+case-sensitive (paths are exact); the contract is documented. Coverage extends to the
+canonical (non-alias) module and file branches and adds the first PostgreSQL path-filter
+test.
 
 DoD: `./deploy/services`, `deploy//services`, and a trailing-space variant return the
-same hits as `deploy/services` on both backends.
+same hits as `deploy/services` on both backends, while `deploy/services/` stays scoped to
+that directory.
 
 ## 7. R6 — read_mode routing (slice S6)
 
@@ -135,8 +159,13 @@ A hosted `PostgresBinding` read is unchanged. On a local binding the reader is s
 `read_mode`, one mode, no fallback (symmetric with `publish_mode`):
 
 - `sqlite` (default): the local snapshot via `CodeGraphRuntime` — current behavior.
-- `postgres`: the published snapshot via the direct PostgreSQL reader using the DSN from
-  the environment; a missing DSN returns `invalid_config` with `field: "read_mode"`.
+- `postgres`: the published snapshot via the direct PostgreSQL reader using the DSN the
+  binding itself carries (`PostgresBinding.connection_dsn()`, the same source
+  `publish_mode = "postgres"` already validates against); a binding that carries no DSN
+  returns `invalid_config` with `field: "read_mode"`. Because the server dispatches every
+  `PostgresBinding` down the untouched hosted path before consulting `read_mode`, this
+  branch keeps `code_reader` total over the three modes rather than serving production
+  traffic.
 - `mcp`: remote transit via `McpCodeGraphReader` using `IWIKI_CODE_GRAPH_MCP_URL` /
   `IWIKI_CODE_GRAPH_MCP_TOKEN`; missing credentials return the same typed error.
 
