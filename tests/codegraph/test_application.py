@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,7 +6,13 @@ import pytest
 
 from iwiki_mcp.codegraph import application
 from iwiki_mcp.codegraph.config import CodeGraphConfig
+from iwiki_mcp.codegraph.mcp_adapter import (
+    ENDPOINT_ENV,
+    McpCodeGraphReader,
+    TOKEN_ENV,
+)
 from iwiki_mcp.codegraph.publication import PublicationSession, SnapshotHeader
+from iwiki_mcp.codegraph.runtime import CodeGraphRuntime, sanitized_error
 from iwiki_mcp.storage import GitBinding, PostgresBinding
 from iwiki_mcp.specifications import UnavailableSpecificationGraphResolver
 
@@ -1003,3 +1010,160 @@ def test_ready_external_index_publishes_through_selected_target(
     assert outcome.ready
     assert outcome.snapshot_revision == _REMOTE_REVISION
     assert outcome.duration_ms >= 0
+
+
+# -- read_mode routing (R6) ------------------------------------------------
+
+_INVALID_READ_MODE = {
+    "error": "code graph configuration is invalid",
+    "code": "invalid_config",
+    "field": "read_mode",
+    "hint": "inspect code_graph project configuration",
+}
+
+
+def _read_mode_project(
+    tmp_path: Path, read_mode: str | None = None, *, enabled: bool = True
+) -> GitBinding:
+    """Write one real project config and bind it to a Git wiki base."""
+    project = tmp_path / "project"
+    wiki = tmp_path / "wiki"
+    project.mkdir(exist_ok=True)
+    (wiki / "docs").mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"base = {json.dumps(str(wiki))}",
+        'read = ["docs"]',
+        'write = ["docs"]',
+        'primary = "docs"',
+        "",
+        "[code_graph]",
+        f"enabled = {str(enabled).lower()}",
+        'languages = ["python"]',
+        'auto_rebuild = "off"',
+    ]
+    if read_mode is not None:
+        lines.append(f"read_mode = {json.dumps(read_mode)}")
+    project.joinpath(".iwiki.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    return GitBinding(
+        base=str(wiki),
+        read=("docs",),
+        write=("docs",),
+        primary="docs",
+        project_dir=str(project),
+    )
+
+
+@pytest.mark.parametrize("read_mode", [None, "sqlite"])
+def test_sqlite_read_mode_keeps_the_local_runtime(tmp_path, read_mode):
+    binding = _read_mode_project(tmp_path, read_mode)
+
+    reader = application.code_reader(binding)
+
+    assert isinstance(reader, CodeGraphRuntime)
+    assert reader.config.read_mode == "sqlite"
+
+
+@pytest.mark.parametrize("read_mode", ["postgres", "mcp"])
+def test_disabled_code_graph_never_leaves_the_local_runtime(
+    tmp_path, read_mode, monkeypatch
+):
+    monkeypatch.setenv(ENDPOINT_ENV, "https://wiki.example/mcp")
+    monkeypatch.setenv(TOKEN_ENV, "fixture-bearer-not-a-real-token")
+    binding = _read_mode_project(tmp_path, read_mode, enabled=False)
+
+    reader = application.code_reader(binding)
+
+    assert isinstance(reader, CodeGraphRuntime)
+    assert reader.status()["code"] == "not_configured"
+
+
+def test_postgres_read_mode_without_a_dsn_names_read_mode(tmp_path):
+    binding = _read_mode_project(tmp_path, "postgres")
+
+    with pytest.raises(application.CodeGraphReadModeError) as failure:
+        application.code_reader(binding)
+
+    assert sanitized_error(failure.value) == _INVALID_READ_MODE
+
+
+@pytest.mark.parametrize("present", [(), (ENDPOINT_ENV,), (TOKEN_ENV,)])
+def test_mcp_read_mode_without_credentials_names_read_mode(
+    tmp_path, monkeypatch, present
+):
+    for name in (ENDPOINT_ENV, TOKEN_ENV):
+        monkeypatch.delenv(name, raising=False)
+    for name in present:
+        monkeypatch.setenv(name, "fixture-value-not-a-real-secret")
+    binding = _read_mode_project(tmp_path, "mcp")
+
+    with pytest.raises(application.CodeGraphReadModeError) as failure:
+        application.code_reader(binding)
+
+    assert sanitized_error(failure.value) == _INVALID_READ_MODE
+    assert "fixture-value-not-a-real-secret" not in str(failure.value)
+
+
+def test_mcp_read_mode_selects_the_remote_transit_reader(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENDPOINT_ENV, "https://wiki.example/mcp")
+    monkeypatch.setenv(TOKEN_ENV, "fixture-bearer-not-a-real-token")
+    binding = _read_mode_project(tmp_path, "mcp")
+
+    reader = application.code_reader(binding)
+
+    assert not isinstance(reader, CodeGraphRuntime)
+    assert isinstance(reader._reader, McpCodeGraphReader)
+    assert reader._reader._transport._primary == "docs"
+
+
+def test_postgres_read_mode_uses_exact_direct_reader_settings(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    class Reader:
+        def __init__(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project.joinpath(".iwiki.toml").write_text(
+        "[code_graph]\nread_mode = \"postgres\"\n"
+        "max_snapshot_age_seconds = 41\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        application.wiki_base,
+        "ensure_graph_store_excluded",
+        lambda _value: True,
+    )
+    monkeypatch.setattr(application, "PostgresCodeGraphReader", Reader)
+    monkeypatch.setattr(
+        PostgresBinding,
+        "connection_dsn",
+        lambda _binding: "postgresql://fixture",
+    )
+
+    reader = application.code_reader(_postgres_binding(project))
+
+    assert isinstance(reader._reader, Reader)
+    assert captured == {
+        "args": ("postgresql://fixture", "wiki-a", "docs"),
+        "kwargs": {"max_snapshot_age_seconds": 41},
+    }
+
+
+def test_published_snapshot_reader_exposes_reads_only(tmp_path, monkeypatch):
+    """A non-sqlite reader carries no build or rebuild-guard entry point."""
+    monkeypatch.setenv(ENDPOINT_ENV, "https://wiki.example/mcp")
+    monkeypatch.setenv(TOKEN_ENV, "fixture-bearer-not-a-real-token")
+    binding = _read_mode_project(tmp_path, "mcp")
+
+    reader = application.code_reader(binding)
+
+    assert isinstance(reader, application.PublishedSnapshotReader)
+    assert not hasattr(reader, "query_guard")
+    assert not hasattr(reader, "index")
+    assert not hasattr(reader, "export_snapshot")

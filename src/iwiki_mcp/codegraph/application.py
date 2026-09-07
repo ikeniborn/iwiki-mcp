@@ -11,16 +11,21 @@ import time
 from typing import Callable, Mapping
 
 from iwiki_mcp import base as wiki_base
-from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+from iwiki_mcp.postgres.codegraph import (
+    PostgresCodeGraphReader,
+    PostgresCodeGraphStore,
+)
 from iwiki_mcp.storage import GitBinding, PostgresBinding
 
 from . import config as codegraph_config
 from . import indexer as codegraph_indexer
 from . import linking
 from . import runtime as codegraph_runtime
+from .context import validate_context_request
 from .languages import bash, javascript, python, typescript
 from .mcp_adapter import (
     CodeGraphAdapterError,
+    McpCodeGraphReader,
     McpSnapshotPublisher,
     RemoteMcpTransport,
 )
@@ -30,6 +35,7 @@ from .publication import (
     SnapshotPublisher,
     iter_snapshot_batches,
 )
+from .query import validate_search_request
 from .store import _is_canonical_revision
 from .sqlite_adapter import SqliteCodeGraphReader
 from iwiki_mcp.specifications import (
@@ -40,6 +46,18 @@ from iwiki_mcp.specifications import (
 
 class CodeGraphApplicationError(CodeGraphError):
     code = "invalid_config"
+
+
+class CodeGraphReadModeError(CodeGraphError):
+    """Raised when `code_graph.read_mode` names an unreachable read target.
+
+    `parameter` is what `runtime.sanitized_error` turns into the response's
+    `field`, so the caller is told which configuration key to fix without
+    ever seeing a DSN, endpoint, or token.
+    """
+
+    code = "invalid_config"
+    parameter = "read_mode"
 
 
 class CodeGraphPublishError(CodeGraphError):
@@ -269,6 +287,107 @@ def code_runtime(
             source.wiki_base
         )
     return runtime
+
+
+class PublishedSnapshotReader:
+    """Answer the three read tools from a published snapshot.
+
+    Adapts a snapshot reader -- the direct PostgreSQL one or the remote MCP
+    transit one -- to the argument shape `CodeGraphRuntime` exposes, so the
+    server's local dispatch is one call site per tool whatever `read_mode`
+    selected. It never indexes and never runs the runtime's rebuild guard:
+    freshness is whatever the published snapshot itself reports.
+    """
+
+    def __init__(self, reader, config: codegraph_config.CodeGraphConfig) -> None:
+        self._reader = reader
+        self._config = config
+
+    def status(self) -> dict[str, object]:
+        return self._reader.status()
+
+    def search(
+        self,
+        query: str,
+        *,
+        kinds: list[str] | None = None,
+        path: str | None = None,
+        languages: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        return self._reader.search(
+            validate_search_request(
+                query,
+                kinds=kinds,
+                path=path,
+                languages=languages,
+                configured_languages=self._config.languages,
+                limit=limit,
+            )
+        )
+
+    def context(
+        self,
+        seeds: list[str],
+        *,
+        direction: str = "both",
+        depth: int = 1,
+        relations: list[str] | None = None,
+        include_source: bool = False,
+        include_wiki: bool = True,
+        max_nodes: int = 50,
+        max_files: int = 20,
+        max_source_bytes: int = 200_000,
+    ) -> dict[str, object]:
+        return self._reader.context(
+            validate_context_request(
+                seeds,
+                direction=direction,
+                depth=depth,
+                relations=relations,
+                include_source=include_source,
+                include_wiki=include_wiki,
+                max_nodes=max_nodes,
+                max_files=max_files,
+                max_source_bytes=max_source_bytes,
+            )
+        )
+
+
+def code_reader(binding: GitBinding | PostgresBinding):
+    """Select the one reader `code_graph.read_mode` names, with no fallback.
+
+    The runtime is built first because it owns the single configuration
+    load (see `code_runtime`); only `read_mode = "sqlite"` -- the default --
+    goes on to query it, so that path stays exactly what shipped before
+    this key routed anything. A mode whose prerequisite is absent raises
+    `CodeGraphReadModeError` rather than degrading to another target.
+    """
+    runtime = code_runtime(source_context(binding))
+    config = runtime.config
+    if config is None or not config.enabled or config.read_mode == "sqlite":
+        return runtime
+    if config.read_mode == "postgres":
+        if not isinstance(binding, PostgresBinding):
+            raise CodeGraphReadModeError(
+                "postgres reads require PostgreSQL storage"
+            )
+        return PublishedSnapshotReader(
+            PostgresCodeGraphReader(
+                binding.connection_dsn(),
+                binding.iwiki_id,
+                binding.primary,
+                max_snapshot_age_seconds=config.max_snapshot_age_seconds,
+            ),
+            config,
+        )
+    try:
+        transport = RemoteMcpTransport(primary=binding.primary)
+    except CodeGraphAdapterError as exc:
+        raise CodeGraphReadModeError(
+            "remote reads require a code graph endpoint and token"
+        ) from exc
+    return PublishedSnapshotReader(McpCodeGraphReader(transport), config)
 
 
 def specification_graph_resolver(

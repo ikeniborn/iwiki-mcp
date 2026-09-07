@@ -600,3 +600,73 @@ def test_adapter_failure_is_redacted_by_application_and_cli_formatter(
             "Traceback",
         ):
             assert forbidden not in surface
+
+
+def _mcp_read_mode_project(tmp_path):
+    """Build the production project layout that selects `read_mode = "mcp"`."""
+    from iwiki_mcp.storage import GitBinding
+
+    project = tmp_path / "project"
+    wiki = tmp_path / "wiki"
+    project.mkdir()
+    (wiki / "docs").mkdir(parents=True)
+    project.joinpath(".iwiki.toml").write_text(
+        f"base = {json.dumps(str(wiki))}\n"
+        'read = ["docs"]\n'
+        'write = ["docs"]\n'
+        'primary = "docs"\n'
+        "\n"
+        "[code_graph]\n"
+        'languages = ["python"]\n'
+        'auto_rebuild = "off"\n'
+        'read_mode = "mcp"\n',
+        encoding="utf-8",
+    )
+    return GitBinding(
+        base=str(wiki),
+        read=("docs",),
+        write=("docs",),
+        primary="docs",
+        project_dir=str(project),
+    )
+
+
+def test_mcp_read_mode_routes_every_read_through_the_remote_session(
+    tmp_path, monkeypatch, fake_session
+):
+    """The production construction path reaches the remote tool surface."""
+    binding = _mcp_read_mode_project(tmp_path)
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MCP_URL", _URL)
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MCP_TOKEN", _TOKEN)
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.mcp_adapter._official_session",
+        lambda url, headers: _FakeConnection(fake_session),
+    )
+
+    reader = application.code_reader(binding)
+    status = reader.status()
+    search = reader.search("needle", kinds=["module"], path="./src/pkg/", limit=5)
+    context = reader.context(["py:file:" + "0" * 64])
+
+    assert status == {"state": "ready", "fresh": True}
+    assert search == {"state": "ready", "results": []}
+    assert context == {"state": "ready", "nodes": []}
+    assert [name for name, _arguments in fake_session.calls] == [
+        "wiki_bind",
+        "wiki_code_status",
+        "wiki_bind",
+        "wiki_code_search",
+        "wiki_bind",
+        "wiki_code_context",
+    ]
+    assert fake_session.calls[3][1] == {
+        "query": "needle",
+        "kinds": ["module"],
+        # S5: the prefix reaches the remote already `module_key`-normalized.
+        "path": "src/pkg",
+        "languages": ["python"],
+        "limit": 5,
+    }
+    assert fake_session.calls[2][1] == {"primary": "docs"}
+    # No local rebuild on a remote read: nothing indexed the checkout.
+    assert not list((tmp_path / "wiki" / ".iwiki").glob("code-*.sqlite3"))
