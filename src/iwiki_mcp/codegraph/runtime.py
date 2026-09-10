@@ -128,6 +128,14 @@ class _BuildWorkerRegistry:
         self._job: _BuildJob | None = None
 
     def start(self, domain_key, target, *, force=False, languages=None):
+        """Start a build, or join the live one that matches this request.
+
+        Returns `(job, started)`: `started` is True only when this call
+        created and started the thread, False when it handed back someone
+        else's already-running job (a join) or refused (`job is None`).
+        Cancellation on wait expiry is a starter-only privilege, so callers
+        must branch on `started` rather than reconstruct it later.
+        """
         with self._lock:
             live = (
                 self._job
@@ -140,8 +148,8 @@ class _BuildWorkerRegistry:
                 if live.domain_key == domain_key and live.matches(
                     force=force, languages=languages
                 ):
-                    return live
-                return None
+                    return live, False
+                return None, False
             job = _BuildJob(domain_key, force=force, languages=languages)
 
             def run() -> None:
@@ -170,7 +178,7 @@ class _BuildWorkerRegistry:
             except Exception:
                 self._job = None
                 raise
-            return job
+            return job, True
 
     def current(self, domain_key):
         """Return the live or last terminal job for this domain, if any."""
@@ -1161,7 +1169,7 @@ class CodeGraphRuntime:
                 LOGGER.error("code_graph_build code=rebuild_failed")
                 result.update(_rebuild_failed())
         try:
-            job = _BUILD_WORKERS.start(
+            job, started = _BUILD_WORKERS.start(
                 self._worker_domain_key,
                 run_build,
                 force=force,
@@ -1174,7 +1182,13 @@ class CodeGraphRuntime:
         job.thread.join(max(0.0, wait_deadline - time.monotonic()))
         if job.thread.is_alive():
             if cancel_on_wait:
-                job.control.cancel()
+                # Cancellation on wait expiry is a starter-only privilege: a
+                # caller that only joined someone else's job never asked for
+                # this work and must not cut it short out from under whoever
+                # did. A joined caller still answers busy -- it just leaves
+                # the build it does not own running.
+                if started:
+                    job.control.cancel()
                 LOGGER.info("code_graph_build code=busy")
                 return self._busy_response()
             if (

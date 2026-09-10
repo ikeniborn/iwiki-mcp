@@ -2196,7 +2196,8 @@ def test_registry_keeps_the_last_terminal_job():
     def target(control, result):
         result["state"] = "ready"
 
-    job = registry.start(key, target, force=True, languages=None)
+    job, started = registry.start(key, target, force=True, languages=None)
+    assert started is True
     job.thread.join(timeout=5)
     registry.finish(job, "ready")
 
@@ -2248,7 +2249,8 @@ def test_registry_join_no_longer_drops_the_finished_job_from_the_slot():
     def target(control, result):
         result["state"] = "ready"
 
-    job = registry.start(key, target, force=True, languages=None)
+    job, started = registry.start(key, target, force=True, languages=None)
+    assert started is True
     registry.join(timeout=5)
 
     assert registry.is_active(key) is False
@@ -3651,6 +3653,99 @@ def test_matching_second_call_joins_the_live_job(seed_runtime, monkeypatch):
     ) == 1
 
     runtime.runtime.join_workers(timeout=10)
+
+
+def test_joining_query_guard_never_cancels_an_explicit_build(
+    seed_runtime, monkeypatch
+):
+    """A query-time auto-rebuild that joins someone else's job must not
+    cancel it on its own (much shorter) wait expiry: cancellation belongs to
+    whoever started the build, never to a caller that only joined it.
+
+    The race this pins: `query_guard` reads `status() == "dirty"` and
+    decides to attempt its own bounded rebuild, but before it reaches
+    `_BUILD_WORKERS.start()` an explicit `index()` call wins the slot and
+    starts the build. `query_guard`'s call then joins that live job instead
+    of starting a second one -- and must not cancel a build it never asked
+    for just because its own, much shorter budget runs out first.
+    """
+    runtime = seed_runtime.with_state(
+        "dirty",
+        auto_rebuild="bounded",
+        max_rebuild_seconds=1,
+        max_full_rebuild_seconds=10,
+    )
+
+    # Keep the real build blocked (well past every deadline below) so the
+    # worker thread stays alive throughout the whole race.
+    build_paused = threading.Event()
+    release_build = threading.Event()
+    discover_calls = {"count": 0}
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        discover_calls["count"] += 1
+        if discover_calls["count"] == 1:
+            build_paused.set()
+            assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    # Pause query_guard's own call right after it has decided (from
+    # status() == "dirty") to attempt a rebuild, but before it reaches
+    # `_BUILD_WORKERS.start()` -- so the explicit caller below can win the
+    # worker slot first and query_guard is left to join it.
+    real_index_with_deadline = runtime.runtime._index_with_deadline
+    guard_ready = threading.Event()
+    release_guard = threading.Event()
+
+    def paused_index_with_deadline(**kwargs):
+        if kwargs.get("cancel_on_wait"):
+            guard_ready.set()
+            assert release_guard.wait(timeout=5)
+        return real_index_with_deadline(**kwargs)
+
+    monkeypatch.setattr(
+        runtime.runtime, "_index_with_deadline", paused_index_with_deadline
+    )
+
+    guard_result: dict[str, object] = {}
+
+    def call_query_guard():
+        guard_result["answer"] = runtime.query_guard()
+
+    guard_thread = threading.Thread(target=call_query_guard)
+    guard_thread.start()
+    assert guard_ready.wait(timeout=5)
+
+    # The explicit caller starts the build and owns it -- query_guard's
+    # thread is still paused before it could have raced it for the slot.
+    explicit = runtime.index(wait_seconds=0)
+    assert build_paused.is_set()
+    assert explicit["state"] == "rebuilding"
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert job is not None
+    assert job.job_id == explicit["job"]["id"]
+
+    # Let query_guard's call proceed: it joins the live job (same domain,
+    # same default force/languages) and waits out its own 1-second budget.
+    release_guard.set()
+    guard_thread.join(timeout=10)
+
+    assert discover_calls["count"] == 1  # joining never started a 2nd build
+    assert guard_result["answer"]["state"] == "rebuilding"
+    assert "error" in guard_result["answer"]
+    assert job.control.cancelled.is_set() is False
+
+    release_build.set()
+    runtime.runtime.join_workers(timeout=10)
+
+    assert job.control.cancelled.is_set() is False
+    assert job.state == "ready"
+    assert runtime.status()["state"] == "ready"
 
 
 def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
