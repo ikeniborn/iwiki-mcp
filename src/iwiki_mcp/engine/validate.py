@@ -16,6 +16,12 @@ LEAD_MAX = 250                  # section-lead advisory cap (validate-local)
 _DEEP = re.compile(r"^#{3,}\s", re.MULTILINE)   # ### or deeper
 _H1_LINE = re.compile(r"^#\s+\S")               # a single-# H1 line
 _H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)   # keep in sync with chunk._H2
+# Opening fence of a Given-When-Then scenario. Only pages typed `specification`
+# are parsed into the projection, so the same fence anywhere else is authored
+# work that no tool will ever see.
+_SCENARIO_FENCE = re.compile(
+    r"^[ \t]*(?:`{3,}|~{3,})[ \t]*iwiki-gwt[ \t]*$", re.MULTILINE
+)
 
 
 def _sections(content: str) -> list[tuple[str, str]]:
@@ -26,6 +32,11 @@ def _sections(content: str) -> list[tuple[str, str]]:
         end = ms[i + 1].start() if i + 1 < len(ms) else len(content)
         out.append((m.group(1).strip(), content[start:end].strip()))
     return out
+
+
+def has_scenario_fence(body: str) -> bool:
+    """Report whether the body opens a Given-When-Then scenario fence."""
+    return bool(_SCENARIO_FENCE.search(body))
 
 
 def _lead(body: str) -> str:
@@ -80,4 +91,15 @@ def validate_page(content: str) -> list[dict]:
         if isinstance(status, str) and _fm.normalize_status(status) not in _fm.STATUS_VOCAB:
             findings.append({"type": "unknown_status", "severity": "advisory",
                              "text": f"status '{status}' not in the status vocabulary"})
+
+    page_type = meta.get("type")
+    typed_specification = (
+        isinstance(page_type, str)
+        and _fm.normalize_type(page_type) == "specification"
+    )
+    if not typed_specification and has_scenario_fence(body):
+        findings.append({"type": "unprojected_scenario", "severity": "advisory",
+                         "text": "iwiki-gwt fence on a page whose type is not "
+                                 "'specification'; the scenario never enters the "
+                                 "projection"})
     return findings

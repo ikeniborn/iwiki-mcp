@@ -107,6 +107,12 @@ storage, search, and lint never depend on GWT parsing or on a code graph. The se
 tool surface is exactly `wiki_spec_search`, `wiki_spec_context`, and
 `wiki_spec_resolve`.
 
+Author a scenario only on a page typed `specification`: nothing else is parsed into the
+projection. An `iwiki-gwt` fence on any other page is stored and never projected — the
+write answers with a `warning` and `wiki_lint` reports the advisory finding
+`unprojected_scenario`. Neither blocks the write, so quote illustrative examples as
+`toml` fences and keep `iwiki-gwt` for scenarios you mean to project.
+
 All three answers carry `binding_source` on a hosted server. `wiki_spec_search` called
 without `domains` searches the bound read list, so under `binding_source: token_default`
 it also reports `binding_defaulted` in `warnings` — re-bind before trusting that result,

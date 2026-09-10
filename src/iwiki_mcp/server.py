@@ -2337,6 +2337,21 @@ def _compose_warnings(*warnings: str | None) -> str | None:
 
 
 _SPECIFICATION_WARNING = "specification projection is stale"
+_SCENARIO_PLACEMENT_WARNING = (
+    "iwiki-gwt fence on a page whose type is not 'specification'; the scenario "
+    "is stored but never projected, searched, or resolved"
+)
+
+
+def _scenario_placement_warning(markdown: str) -> str | None:
+    """Warn when a scenario fence lands where no projection will read it."""
+    unprojected = any(
+        finding.get("type") == "unprojected_scenario"
+        for finding in validate_page(markdown)
+    )
+    return _SCENARIO_PLACEMENT_WARNING if unprojected else None
+
+
 _SPECIFICATION_BLOCKING = {
     "missing_scenario",
     "invalid_scenario",
@@ -3030,7 +3045,11 @@ def _prepare_postgres_page(
     if authored_code is not None:
         meta["code"] = authored_code
     meta["timestamp"] = _dt.date.today().isoformat()
-    return identity, _fm.render(meta) + body, "; ".join(warnings) or None
+    rendered = _fm.render(meta) + body
+    placement = _scenario_placement_warning(rendered)
+    if placement:
+        warnings.append(placement)
+    return identity, rendered, "; ".join(warnings) or None
 
 
 @_safe
@@ -3161,6 +3180,9 @@ def wiki_write_page(
             "hint": "editing an existing page is a guarded op; confirm with the user",
         }
     full_md = fm_block + markdown
+    fm_warning = _compose_warnings(
+        fm_warning, _scenario_placement_warning(full_md)
+    )
     log_source = source or ""
     log_src_hash = indexer.src_hash(source) if source else None
     log_appended = False
@@ -4018,7 +4040,11 @@ def wiki_update_page(
         "embedded": stats["embedded"],
         "bytes": stats["bytes"],
         "over_cap": stats["over_cap"],
-        **_write_sync_result(commit, fresh.get("warning")),
+        **_write_sync_result(
+            commit,
+            fresh.get("warning"),
+            _scenario_placement_warning(new_md),
+        ),
     }
     if request["mode"] in {"section", "combined"}:
         result["heading"] = heading.lstrip("#").strip()
