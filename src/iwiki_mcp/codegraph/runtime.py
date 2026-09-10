@@ -138,7 +138,19 @@ class _BuildWorkerRegistry:
             job = _BuildJob(domain_key, force=force, languages=languages)
 
             def run() -> None:
-                target(job.control, job.result)
+                # The worker owns the terminal state: a caller that detached
+                # at its wait expiry never comes back to record it, and
+                # `finished_at` must be when the build ended rather than
+                # whenever some caller happened to return.
+                try:
+                    target(job.control, job.result)
+                finally:
+                    self.finish(
+                        job,
+                        "ready"
+                        if job.result.get("state") == "ready"
+                        else "failed",
+                    )
 
             job.thread = threading.Thread(
                 target=run,
@@ -1160,25 +1172,30 @@ class CodeGraphRuntime:
                 return self._busy_response()
             if (
                 time.monotonic() >= build_deadline
-                and not job.control.publication_entered.is_set()
+                and not job.control.publication_attempted.is_set()
             ):
                 # `enter_publication` refuses once the build deadline has
-                # passed, so a build still short of it can no longer publish
-                # anything: there is no job worth polling. The caller keeps
-                # today's `busy`, and the doomed worker unwinds on its own
-                # instead of being cancelled.
+                # passed, so a build that has not even reached the gate can no
+                # longer publish anything: there is no job worth polling. The
+                # caller keeps today's `busy`, and the doomed worker unwinds on
+                # its own instead of being cancelled. Reading `attempted`
+                # rather than `entered` keeps the observation monotone: the
+                # flag is set before the gate decides, so a build that goes on
+                # to publish is never mistaken for a doomed one.
                 LOGGER.info("code_graph_build code=busy")
                 return self._busy_response()
             LOGGER.info("code_graph_build code=rebuilding job=%s", job.job_id)
             return _rebuilding_job_answer(job)
         ready = job.result.get("state") == "ready"
+        # The worker recorded the terminal state as it ended; this idempotent
+        # call only ever repeats that fact.
         _BUILD_WORKERS.finish(job, "ready" if ready else "failed")
         if not ready:
             # A build that ended without a report answers with today's error
             # shape, field for field: those dicts are a pinned contract.
             return job.result or _rebuild_failed()
         answer = dict(job.result)
-        answer["job"] = {"id": job.job_id, "state": job.state}
+        answer["job"] = job.describe()
         return answer
 
     def index(

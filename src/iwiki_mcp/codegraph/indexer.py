@@ -202,6 +202,7 @@ class BuildControl:
 
     def __init__(self) -> None:
         self.cancelled = threading.Event()
+        self.publication_attempted = threading.Event()
         self.publication_entered = threading.Event()
         self._publication_gate = threading.Lock()
         self._phase: str | None = None
@@ -243,6 +244,11 @@ class BuildControl:
         lock_path: Path,
     ) -> None:
         self._publication_gate.acquire()
+        # Announce the attempt before the gate decides, so an observer that
+        # samples this flag at the deadline instant can never conclude "this
+        # build cannot publish" about a build that is about to. The flag is
+        # monotone and says nothing about the decision itself.
+        self.publication_attempted.set()
         if self.cancelled.is_set() or time.monotonic() >= deadline:
             self._publication_gate.release()
             raise Timeout(str(lock_path))

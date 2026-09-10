@@ -34,7 +34,7 @@ from iwiki_mcp.codegraph.linking import SelectorError, SelectorSnapshotChanged
 from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
-from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
+from iwiki_mcp.codegraph.runtime import _BUILD_WORKERS, CodeGraphRuntime
 from iwiki_mcp.codegraph.query import CodeGraphQuery
 from iwiki_mcp.codegraph.schema import (
     SCHEMA_VERSION,
@@ -1431,7 +1431,10 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
 def test_slow_metadata_publication_respects_absolute_deadline(
     seed_runtime, monkeypatch
 ):
-    runtime = seed_runtime.with_config(max_rebuild_seconds=1)
+    # Two seconds of budget so the build reliably reaches the publication gate
+    # before the caller's wait expires; the two slowed publications outlast the
+    # budget from wherever that entry lands.
+    runtime = seed_runtime.with_config(max_rebuild_seconds=2)
     first = runtime.index(force=True)
     runtime.project_file("src/pkg/service.py").write_text(
         "def changed_during_metadata_publish():\n    return None\n",
@@ -1460,13 +1463,18 @@ def test_slow_metadata_publication_respects_absolute_deadline(
 
     out = runtime.index(force=True)
     during = runtime.status()
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    detached_cancelled = job.control.cancelled.is_set()
     runtime.runtime.join_workers(timeout=3)
     status = runtime.status()
 
     # The wait expired after the build entered publication, so the call hands
-    # back the running job instead of cancelling it into `busy`.
+    # back the running job instead of cancelling it into `busy`. Nothing in the
+    # atomic section reads `cancelled`, so the tail below would survive a
+    # reintroduced cancel -- assert on the flag itself.
     assert out["state"] == "rebuilding"
     assert out["job"]["state"] == "running"
+    assert detached_cancelled is False
     assert during["state"] == "rebuilding"
     assert during["fresh"] is False
     assert status["state"] == "ready"
@@ -1479,13 +1487,16 @@ def test_slow_metadata_publication_respects_absolute_deadline(
 def test_expired_final_ready_metadata_is_not_published(
     seed_runtime, monkeypatch
 ):
-    runtime = seed_runtime.with_config(max_rebuild_seconds=1)
+    # Two seconds of budget so the build reliably reaches the publication gate
+    # before the caller's wait expires, and a final publication slow enough to
+    # still be running when it does.
+    runtime = seed_runtime.with_config(max_rebuild_seconds=2)
     real_publish = runtime.runtime._indexer.store.publish_metadata
 
     def slow_final_publish(metadata_path, staging, **kwargs):
         payload = json.loads(Path(staging).read_text(encoding="utf-8"))
         if payload["state"] == "ready":
-            time.sleep(1.05)
+            time.sleep(2.05)
         return real_publish(metadata_path, staging, **kwargs)
 
     monkeypatch.setattr(
@@ -1497,7 +1508,7 @@ def test_expired_final_ready_metadata_is_not_published(
     out = runtime.index(force=True)
     persisted = json.loads(runtime.paths.metadata.read_text(encoding="utf-8"))
     during = runtime.status()
-    runtime.runtime.join_workers(timeout=3)
+    runtime.runtime.join_workers(timeout=5)
     status = runtime.status()
 
     # The wait expired inside the publication the build had already entered,
@@ -2199,6 +2210,32 @@ def test_registry_keeps_the_last_terminal_job():
     assert described["id"] == job.job_id
     assert described["state"] == "ready"
     assert len(described["id"]) == 16
+
+
+def test_publication_attempt_is_announced_before_the_gate_decides(tmp_path):
+    """A refused attempt still leaves the monotone flag set.
+
+    The wait-expiry guard reads `publication_attempted` to decide whether a
+    build past its deadline can still publish. If the flag were set only after
+    the gate admitted the build, a worker descheduled between the deadline
+    check and the flag would be reported `busy` while going on to publish.
+    """
+    admitted = codegraph_indexer.BuildControl()
+    admitted.enter_publication(
+        deadline=time.monotonic() + 60, lock_path=tmp_path / "lock"
+    )
+
+    assert admitted.publication_attempted.is_set()
+    assert admitted.publication_entered.is_set()
+
+    refused = codegraph_indexer.BuildControl()
+    with pytest.raises(Timeout):
+        refused.enter_publication(
+            deadline=time.monotonic() - 1, lock_path=tmp_path / "lock"
+        )
+
+    assert refused.publication_attempted.is_set()
+    assert refused.publication_entered.is_set() is False
 
 
 def test_registry_join_no_longer_drops_the_finished_job_from_the_slot():
@@ -3152,7 +3189,10 @@ def test_slow_git_setup_is_bounded_and_cannot_publish_after_cancel(
 def test_timeout_after_atomic_entry_finishes_non_ready_then_ready(
     ready_runtime, monkeypatch
 ):
-    runtime = ready_runtime.with_config(max_rebuild_seconds=1)
+    # Two seconds of budget so the build reliably reaches the blocked
+    # replacement -- the atomic entry this test is about -- before the caller's
+    # wait expires.
+    runtime = ready_runtime.with_config(max_rebuild_seconds=2)
     previous = runtime.status()["revision"]
     runtime.project_file("src/pkg/service.py").write_text(
         "def changed_during_publication():\n    return None\n",
@@ -3174,6 +3214,8 @@ def test_timeout_after_atomic_entry_finishes_non_ready_then_ready(
     out = runtime.index(force=True)
     elapsed = time.monotonic() - started
     during = runtime.status()
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    detached_cancelled = job.control.cancelled.is_set()
     release.set()
     runtime.runtime.join_workers(timeout=3)
     after = runtime.status()
@@ -3181,9 +3223,13 @@ def test_timeout_after_atomic_entry_finishes_non_ready_then_ready(
     assert entered.is_set()
     # The wait expired after the atomic entry, so the caller receives the
     # running job; the build finishes it under the writer lock regardless.
+    # The atomic section ignores `cancelled`, so only the flag itself can tell
+    # a detached caller from a cancelling one.
     assert out["state"] == "rebuilding"
     assert out["job"]["state"] == "running"
-    assert elapsed < 1.5
+    assert detached_cancelled is False
+    assert job.state == "ready"
+    assert elapsed < 2.5
     assert during["state"] == "rebuilding"
     assert during["fresh"] is False
     assert after["state"] == "ready"
@@ -3568,8 +3614,18 @@ def test_wait_expiry_returns_the_job_and_the_build_still_reaches_ready(
     assert len(answer["job"]["id"]) == 16
     assert "error" not in answer
 
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert job.job_id == answer["job"]["id"]
+    assert not job.control.cancelled.is_set()
+
     runtime.runtime.join_workers(timeout=10)
     assert runtime.status()["state"] == "ready"
+    # The detached caller never comes back, so the worker itself has to record
+    # the terminal state -- otherwise the job it handed out stays `running`
+    # forever and `wiki_code_status` reports a finished build as live.
+    assert job.state == "ready"
+    assert job.finished_at is not None
+    assert job.describe()["state"] == "ready"
 
 
 def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
