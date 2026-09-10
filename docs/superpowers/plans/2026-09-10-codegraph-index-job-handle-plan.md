@@ -4,6 +4,57 @@ stage: plan
 chain:
   intent: docs/superpowers/intents/2026-09-10-codegraph-index-job-handle-intent.md
   spec: docs/superpowers/specs/2026-09-10-codegraph-index-job-handle-design.md
+review:
+  plan_hash: 626785116a8d4a75
+  last_run: 2026-09-10
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    dependencies:
+      status: passed
+    verifiability:
+      status: passed
+    consistency:
+      status: passed
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: WARNING
+      section: Task 1
+      section_hash: ab76e33ea0ba5c26
+      fragment: "### Task 1: The job becomes a value in the worker registry"
+      text: "No task named the spec requirement it implements, so the R1-R8 coverage held
+        only in the author's head and could not be checked mechanically."
+      fix: "Every task now opens with a `**Spec:**` line naming its requirements; R1-R8 are
+        each claimed by exactly one task."
+      verdict: fixed
+      verdict_at: 2026-09-10
+    - id: F-002
+      phase: verifiability
+      severity: WARNING
+      section: Task 8
+      section_hash: null
+      fragment: "Update `concept/code-graph-runtime`'s \"Full-build lifecycle\" section"
+      text: "The wiki update step had no observable expected result, so it could be called
+        done without evidence."
+      fix: "Added an expected result: a new page revision and the section re-read showing
+        the three cancellation points and the job descriptor."
+      verdict: fixed
+      verdict_at: 2026-09-10
+    - id: F-003
+      phase: dependencies
+      severity: INFO
+      section: Task 6
+      section_hash: null
+      fragment: "Add the flag to `_BuildJob.__init__` as `explicit: bool = False`"
+      text: "Task 6 extends a class introduced in Task 1 rather than Task 1 defining the
+        field up front."
+      fix: "Accepted: the flag only has meaning once the idle predicate exists, and Task 6
+        states the edit explicitly."
+      verdict: accepted
+      verdict_at: 2026-09-10
 ---
 # Code graph index job handle Implementation Plan
 
@@ -30,6 +81,8 @@ chain:
 ---
 
 ### Task 1: The job becomes a value in the worker registry
+
+**Spec:** R1
 
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/runtime.py:84-98` (`_BuildJob`)
@@ -170,6 +223,8 @@ git commit -m "feat(codegraph): give the build worker's job an identity and a te
 
 ### Task 2: The build reports the phase it is in
 
+**Spec:** R3
+
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/indexer.py:200-231` (`BuildControl`)
 - Modify: `src/iwiki_mcp/codegraph/indexer.py:1513` and every `phase = time.monotonic()` site inside `build`
@@ -293,6 +348,8 @@ git commit -m "feat(codegraph): record the build phase on the control object"
 ---
 
 ### Task 3: The caller's wait stops cancelling the build
+
+**Spec:** R2, R4, R8
 
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/runtime.py:1037-1100` (`_index_with_deadline`)
@@ -508,6 +565,8 @@ git commit -m "feat(codegraph): return the running job instead of cancelling on 
 
 ### Task 4: Joining a live job is narrow
 
+**Spec:** R6
+
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/runtime.py:99-125` (`_BuildWorkerRegistry.start`)
 - Modify: `src/iwiki_mcp/codegraph/runtime.py:1037-1100` (`_index_with_deadline`'s `job is None` branch)
@@ -598,6 +657,8 @@ git commit -m "feat(codegraph): join a live build only when domain and parameter
 ---
 
 ### Task 5: The tool surface carries the job
+
+**Spec:** R5
 
 **Files:**
 - Modify: `src/iwiki_mcp/codegraph/runtime.py:808-816` (`status`)
@@ -738,6 +799,8 @@ git commit -m "feat(codegraph): expose the index job through the tool surface"
 
 ### Task 6: An explicit job keeps the server awake
 
+**Spec:** R7
+
 **Files:**
 - Modify: `src/iwiki_mcp/engine/idle.py:9-45` (`IdleTracker`)
 - Modify: `src/iwiki_mcp/server.py:125-170` (`IdleFastMCP`)
@@ -865,6 +928,8 @@ git commit -m "feat(server): keep the stdio server awake while an explicit index
 
 ### Task 7: Whole-suite verification, docs, and release
 
+**Spec:** the Testing section, and the Global Constraints of this plan
+
 **Files:**
 - Modify: `pyproject.toml`, `src/iwiki_mcp/__init__.py`, `tests/test_package.py`, `uv.lock`
 - Modify: `src/iwiki_mcp/resources.py` (authoring rules mention of the rebuild answer)
@@ -939,6 +1004,8 @@ git commit -m "chore(release): bump version to 0.7.257"
 
 ### Task 8: Result reconciliation and wiki closure
 
+**Spec:** the Known limits section (they are what the wiki must record) plus the chain's own result gate
+
 **Files:**
 - Modify: wiki pages through the MCP tools (no repository files)
 
@@ -956,6 +1023,9 @@ Expected: verdict OK with every plan task matched to the diff
 Update `concept/code-graph-runtime`'s "Full-build lifecycle" section through
 `wiki_update_page`: the caller's wait no longer cancels, the three surviving cancellation
 points, and the `job` descriptor on both tools.
+
+Expected: the write returns a new `revision`, and re-reading that section shows the three
+cancellation points and the `job` descriptor named in it.
 
 - [ ] **Step 3: Author the scenario**
 
