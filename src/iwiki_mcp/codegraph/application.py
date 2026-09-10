@@ -566,11 +566,26 @@ def effective_batch_bounds(
 
 def _abort_preserving_failure(
     publisher: SnapshotPublisher, session: PublicationSession
-) -> None:
+) -> dict | None:
     try:
-        publisher.abort(session)
+        return publisher.abort(session)
     except Exception:
-        return
+        return None
+
+
+def _activated_despite_the_failure(result: dict | None) -> bool:
+    """Report whether an abort answered with a finished activation.
+
+    A finalize the client could not read the answer of -- a timeout, a dropped
+    connection -- may still have activated the snapshot on the target. The
+    abort of an already terminal session replays that terminal result, which is
+    the only way the client can tell "never ran" from "ran and finished".
+    """
+    return (
+        isinstance(result, dict)
+        and result.get("state") == "ready"
+        and _is_canonical_revision(result.get("snapshot_revision"))
+    )
 
 
 def publish_snapshot(
@@ -601,7 +616,9 @@ def publish_snapshot(
         finalized = publisher.finalize(session)
         snapshot_revision = finalized.get("snapshot_revision")
         if finalized.get("state") != "ready":
-            _abort_preserving_failure(publisher, session)
+            aborted = _abort_preserving_failure(publisher, session)
+            if _activated_despite_the_failure(aborted):
+                return aborted
             return finalized
         if not _is_canonical_revision(snapshot_revision):
             _abort_preserving_failure(publisher, session)

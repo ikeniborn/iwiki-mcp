@@ -430,6 +430,20 @@ class GraphFixture:
 
         return replace(self.header, graph_payload_revision=revision)
 
+    def header_with_counts(self, rows):
+        """Return a header describing another row set for this fixture."""
+        from dataclasses import replace
+
+        from iwiki_mcp.codegraph import publication
+
+        return replace(
+            self.header,
+            expected_counts={
+                kind: len(value) for kind, value in rows.items()
+            },
+            graph_payload_revision=publication.graph_payload_revision(rows),
+        )
+
     def tampered(self, batch):
         from dataclasses import replace
 

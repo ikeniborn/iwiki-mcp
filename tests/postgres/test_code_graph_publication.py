@@ -183,6 +183,104 @@ def test_separate_domains_finalize_without_blocking_each_other(pg_graph):
     assert pg_graph.finalize(first)["state"] == "ready"
 
 
+class _CountingCursor:
+    """Cursor proxy counting the SQL commands one publication issues."""
+
+    def __init__(self, cursor, commands):
+        self._cursor = cursor
+        self._commands = commands
+
+    def __repr__(self):
+        return "<counting publication cursor>"
+
+    def __enter__(self):
+        self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._cursor.__exit__(*exc_info)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def execute(self, *args, **kwargs):
+        self._commands.append("execute")
+        return self._cursor.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self._commands.append("executemany")
+        return self._cursor.executemany(*args, **kwargs)
+
+
+class _CountingConnection:
+    """Connection proxy handing out counting cursors."""
+
+    def __init__(self, connection, commands):
+        self._connection = connection
+        self._commands = commands
+
+    def __repr__(self):
+        return "<counting publication connection>"
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def cursor(self, *args, **kwargs):
+        return _CountingCursor(
+            self._connection.cursor(*args, **kwargs), self._commands
+        )
+
+
+def _relation_heavy_rows(rows, count):
+    """Return the fixture rows with `count` relations over the same symbols."""
+    relation = rows["relations"][0]
+    return {
+        **rows,
+        "relations": [
+            {**relation, "relation_id": f"relation-{index}"}
+            for index in range(count)
+        ],
+    }
+
+
+def test_activation_cost_is_bounded_by_row_kinds_not_row_count(pg_graph):
+    """Activation must not pay one database round trip per published row."""
+    import psycopg
+
+    from iwiki_mcp.codegraph import publication
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    rows = _relation_heavy_rows(pg_graph.rows, 300)
+    header = pg_graph.header_with_counts(rows)
+    commands = []
+    store = PostgresCodeGraphStore(
+        pg_graph.dsn,
+        pg_graph.iwiki_id,
+        pg_graph.domain,
+        "owner-counting",
+        lock_timeout_ms=500,
+        session_ttl_seconds=60,
+        staging_retention_seconds=60,
+        staging_cleanup_limit=2,
+        connection_factory=lambda: _CountingConnection(
+            psycopg.connect(pg_graph.dsn), commands
+        ),
+    )
+    session = store.begin(header)
+    for batch in publication.iter_snapshot_batches(
+        rows, max_rows=1000, max_bytes=1_000_000
+    ):
+        assert store.publish_batch(session, batch) == {"accepted": True}
+
+    commands.clear()
+    result = store.finalize(session)
+
+    assert result["state"] == "ready"
+    assert result["counts"]["relations"] == 300
+    assert len(commands) < 30
+    assert pg_graph.active_rows()["relations"] == 300
+
+
 def test_readers_never_observe_staging_rows(pg_graph):
     ready = pg_graph.finalize(pg_graph.complete_session())
     staged = pg_graph.complete_session()

@@ -530,22 +530,9 @@ class PostgresCodeGraphStore:
                 "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s",
                 (self.iwiki_id, domain_id, snapshot_id),
             )
-            for link in links:
-                cursor.execute(
-                    "INSERT INTO iwiki.code_graph_wiki_links "
-                    "(iwiki_id, domain_id, snapshot_id, relation_id, page_id, "
-                    "selector, provenance) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT DO NOTHING",
-                    (
-                        self.iwiki_id,
-                        domain_id,
-                        snapshot_id,
-                        link["relation_id"],
-                        link["page_id"],
-                        Jsonb(link["selector"]),
-                        Jsonb(link["provenance"]),
-                    ),
-                )
+            _insert_wiki_links(
+                cursor, self.iwiki_id, domain_id, snapshot_id, links
+            )
             cursor.execute(
                 "UPDATE iwiki.code_graph_snapshots "
                 "SET markdown_revision = %s, markdown_generation = %s "
@@ -800,11 +787,14 @@ class PostgresCodeGraphStore:
             },
             prefix=True,
         )
-        for row in rows["files"]:
-            cursor.execute(
-                "INSERT INTO iwiki.code_graph_files "
-                "(iwiki_id, domain_id, snapshot_id, file_id, repository_id, "
-                "row_data) VALUES (%s, %s, %s, %s, %s, %s)",
+        # One command per row kind, never one per row: a snapshot carries tens
+        # of thousands of rows, and a round trip each would make activation
+        # cost scale with the database's latency instead of its throughput.
+        cursor.executemany(
+            "INSERT INTO iwiki.code_graph_files "
+            "(iwiki_id, domain_id, snapshot_id, file_id, repository_id, "
+            "row_data) VALUES (%s, %s, %s, %s, %s, %s)",
+            [
                 (
                     self.iwiki_id,
                     domain_id,
@@ -812,13 +802,15 @@ class PostgresCodeGraphStore:
                     row["file_id"],
                     row["repository_id"],
                     Jsonb(row),
-                ),
-            )
-        for row in rows["symbols"]:
-            cursor.execute(
-                "INSERT INTO iwiki.code_graph_symbols "
-                "(iwiki_id, domain_id, snapshot_id, symbol_id, file_id, "
-                "row_data) VALUES (%s, %s, %s, %s, %s, %s)",
+                )
+                for row in rows["files"]
+            ],
+        )
+        cursor.executemany(
+            "INSERT INTO iwiki.code_graph_symbols "
+            "(iwiki_id, domain_id, snapshot_id, symbol_id, file_id, "
+            "row_data) VALUES (%s, %s, %s, %s, %s, %s)",
+            [
                 (
                     self.iwiki_id,
                     domain_id,
@@ -826,14 +818,16 @@ class PostgresCodeGraphStore:
                     row["symbol_id"],
                     row["file_id"],
                     Jsonb(row),
-                ),
-            )
-        for row in rows["relations"]:
-            cursor.execute(
-                "INSERT INTO iwiki.code_graph_relations "
-                "(iwiki_id, domain_id, snapshot_id, relation_id, "
-                "source_file_id, source_symbol_id, target_symbol_id, row_data) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                )
+                for row in rows["symbols"]
+            ],
+        )
+        cursor.executemany(
+            "INSERT INTO iwiki.code_graph_relations "
+            "(iwiki_id, domain_id, snapshot_id, relation_id, "
+            "source_file_id, source_symbol_id, target_symbol_id, row_data) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            [
                 (
                     self.iwiki_id,
                     domain_id,
@@ -843,24 +837,11 @@ class PostgresCodeGraphStore:
                     row.get("source_symbol_id"),
                     row.get("target_symbol_id"),
                     Jsonb(row),
-                ),
-            )
-        for link in links:
-            cursor.execute(
-                "INSERT INTO iwiki.code_graph_wiki_links "
-                "(iwiki_id, domain_id, snapshot_id, relation_id, page_id, "
-                "selector, provenance) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT DO NOTHING",
-                (
-                    self.iwiki_id,
-                    domain_id,
-                    snapshot_id,
-                    link["relation_id"],
-                    link["page_id"],
-                    Jsonb(link["selector"]),
-                    Jsonb(link["provenance"]),
-                ),
-            )
+                )
+                for row in rows["relations"]
+            ],
+        )
+        _insert_wiki_links(cursor, self.iwiki_id, domain_id, snapshot_id, links)
         cursor.execute(
             "UPDATE iwiki.code_graph_snapshots "
             "SET state = 'ready', snapshot_revision = %s, ready_at = %s, "
@@ -1962,3 +1943,27 @@ def _derive_links(pages, rows, domain: str) -> list[dict[str, object]]:
                     }
                 )
     return derived
+
+
+def _insert_wiki_links(cursor, iwiki_id: str, domain_id: int, snapshot_id, links):
+    """Insert one derived link set as a single command, like the graph rows."""
+    if not links:
+        return
+    cursor.executemany(
+        "INSERT INTO iwiki.code_graph_wiki_links "
+        "(iwiki_id, domain_id, snapshot_id, relation_id, page_id, "
+        "selector, provenance) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT DO NOTHING",
+        [
+            (
+                iwiki_id,
+                domain_id,
+                snapshot_id,
+                link["relation_id"],
+                link["page_id"],
+                Jsonb(link["selector"]),
+                Jsonb(link["provenance"]),
+            )
+            for link in links
+        ],
+    )
