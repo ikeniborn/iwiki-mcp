@@ -5,11 +5,16 @@ review:
   intent_hash: 90b8c7961bfb3679
   last_run: 2026-09-10
   phases:
-    structure: passed
-    completeness: passed
-    clarity: passed
-    consistency: passed
-    alignment: passed
+    structure:
+      status: passed
+    completeness:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
+    alignment:
+      status: passed
   findings:
     - id: F-001
       phase: clarity
