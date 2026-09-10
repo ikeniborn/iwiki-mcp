@@ -193,13 +193,12 @@ class _BuildWorkerRegistry:
             self.release(job)
 
     def release(self, job: _BuildJob) -> None:
-        with self._lock:
-            if (
-                self._job is job
-                and job.thread is not None
-                and not job.thread.is_alive()
-            ):
-                self._job = None
+        """No-op kept for call-site compatibility.
+
+        The terminal job now stays in the slot so `current()` can keep
+        reporting it after completion; Task 3 removes this method's
+        remaining callers.
+        """
 
     def shutdown(self, timeout: float = 1.0) -> None:
         with self._lock:

@@ -2142,7 +2142,7 @@ def test_process_worker_registry_caps_four_domains_at_one(
     assert runtimes[0].active_workers == 0
 
 
-def test_registry_keeps_the_last_terminal_job(monkeypatch):
+def test_registry_keeps_the_last_terminal_job():
     from iwiki_mcp.codegraph import runtime as runtime_module
 
     registry = runtime_module._BuildWorkerRegistry()
@@ -2165,6 +2165,24 @@ def test_registry_keeps_the_last_terminal_job(monkeypatch):
     assert described["id"] == job.job_id
     assert described["state"] == "ready"
     assert len(described["id"]) == 16
+
+
+def test_registry_join_no_longer_drops_the_finished_job_from_the_slot():
+    """`join()` calls `release()`; `release()` must no longer clear the slot."""
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    def target(control, result):
+        result["state"] = "ready"
+
+    job = registry.start(key, target, force=True, languages=None)
+    registry.join(timeout=5)
+
+    assert registry.is_active(key) is False
+    assert registry.active_count == 0
+    assert registry.current(key) is job
 
 
 def test_secure_descriptor_path_falls_back_to_dev_fd(monkeypatch):
