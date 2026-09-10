@@ -644,6 +644,34 @@ def test_build_reports_observability_without_source_text(seed_runtime):
     assert seed_runtime.status()["phase_timings_ms"] == out["phase_timings_ms"]
 
 
+def test_build_control_reports_phases_including_zero_millisecond_ones():
+    from iwiki_mcp.codegraph.indexer import BuildControl
+
+    control = BuildControl()
+    assert control.phase is None
+    assert control.phases_done == ()
+
+    control.enter_phase("discovery")
+    assert control.phase == "discovery"
+
+    control.enter_phase("normalization")
+    control.enter_phase("resolution")
+    assert control.phase == "resolution"
+    assert control.phases_done == ("discovery", "normalization")
+
+
+def test_real_build_records_publication_as_its_last_phase(seed_runtime):
+    from iwiki_mcp.codegraph.indexer import BuildControl
+
+    control = BuildControl()
+    built = seed_runtime.runtime._indexer.build(force=True, control=control)
+
+    assert built["state"] == "ready"
+    assert control.phase == "publication"
+    assert "discovery" in control.phases_done
+    assert "normalization" in control.phases_done
+
+
 def test_build_rows_is_portable_and_does_not_publish(seed_runtime):
     indexer = seed_runtime.runtime._indexer
 
