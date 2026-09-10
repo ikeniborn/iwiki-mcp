@@ -1,3 +1,40 @@
+---
+topic: codegraph-index-job-handle
+stage: intent
+review:
+  intent_hash: 90b8c7961bfb3679
+  last_run: 2026-09-10
+  phases:
+    structure: passed
+    completeness: passed
+    clarity: passed
+    consistency: passed
+    alignment: passed
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: Health Metrics
+      section_hash: d26f68f764520f77
+      fragment: "stays at or under ~86 s and its publication phase at or under ~2 s"
+      text: "The rebuild-speed metric was stated approximately; a tilde threshold cannot be
+        passed or failed deterministically."
+      fix: "Named the exact bound and its measurement source: 100 s end to end and 5 s in
+        the publication phase, read from duration_ms and phase_timings_ms.publication."
+      verdict: fixed
+      verdict_at: 2026-09-10
+    - id: F-002
+      phase: alignment
+      severity: INFO
+      section: Objective
+      section_hash: d3ef7b04bed7cde1
+      fragment: "The change is a full job handle rather than only the missing cancel"
+      text: "Scope is wider than the measured defect: the session measured cancel-versus-keep,
+        and the user chose the full job handle over the minimal fix."
+      fix: "None required; recorded so the spec keeps the wider scope deliberate."
+      verdict: open
+      verdict_at: null
+---
 # Intent: codegraph-index-job-handle
 
 **Date:** 2026-09-10
@@ -22,7 +59,7 @@ The change is a full job handle rather than only the missing cancel: `wiki_code_
 
 - Publication atomicity is unchanged: the replace → provisional `rebuilding` → verification #1 → `ready` → verification #2 order, the writer lock, and the rule that readers never observe an unproven snapshot all hold.
 - `iwiki-mcp code publish` stays synchronous with its current exit codes (0 ready, 1 runtime/publication failure, 2 usage/configuration) and its current text and `--json` shapes.
-- Rebuild speed does not regress: a full rebuild of this repository stays at or under ~86 s and its publication phase at or under ~2 s.
+- Rebuild speed does not regress: on this repository a full rebuild stays at or under 100 s end to end and its publication phase at or under 5 s, measured through `wiki_code_index`'s own `duration_ms` and `phase_timings_ms.publication` (86.1 s / 2.0 s on the run that opened this topic).
 - Exactly one build worker per process, with no new contention for the per-domain writer lock.
 
 ## Strategic Context
