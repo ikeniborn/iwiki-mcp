@@ -3628,6 +3628,31 @@ def test_wait_expiry_returns_the_job_and_the_build_still_reaches_ready(
     assert job.describe()["state"] == "ready"
 
 
+def test_matching_second_call_joins_the_live_job(seed_runtime, monkeypatch):
+    runtime = seed_runtime
+    store = runtime.runtime._indexer.store
+    real_publish = store.publish_metadata
+
+    def slow_publish(*args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish_metadata", slow_publish)
+
+    first = runtime.index(force=True, wait_seconds=0)
+    second = runtime.index(force=True, wait_seconds=0)
+    mismatched = runtime.index(force=True, languages=["python"], wait_seconds=0)
+
+    assert first["job"]["id"] == second["job"]["id"]
+    assert mismatched["code"] == "busy"
+    assert sum(
+        thread.name == "iwiki-code-graph-build"
+        for thread in threading.enumerate()
+    ) == 1
+
+    runtime.runtime.join_workers(timeout=10)
+
+
 def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
     runtime = seed_runtime
     assert runtime.index(force=True)["state"] == "ready"

@@ -129,11 +129,18 @@ class _BuildWorkerRegistry:
 
     def start(self, domain_key, target, *, force=False, languages=None):
         with self._lock:
-            if (
-                self._job is not None
+            live = (
+                self._job
+                if self._job is not None
                 and self._job.thread is not None
                 and self._job.thread.is_alive()
-            ):
+                else None
+            )
+            if live is not None:
+                if live.domain_key == domain_key and live.matches(
+                    force=force, languages=languages
+                ):
+                    return live
                 return None
             job = _BuildJob(domain_key, force=force, languages=languages)
 
