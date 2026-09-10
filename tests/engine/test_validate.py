@@ -70,3 +70,51 @@ def test_long_lead_is_advisory():
     fs = [f for f in validate_page(f"## Overview\ns.\n\n## A\n{long}\n")
           if f["type"] == "long_lead"]
     assert fs and fs[0]["severity"] == "advisory"
+
+
+_SCENARIO_FENCE = (
+    "```iwiki-gwt\n"
+    'id = "confirm-account-opening"\n'
+    'title = "Confirm account opening"\n'
+    "given = []\n"
+    'when = { role = "command", name = "ConfirmAccountOpening" }\n'
+    'then = [{ role = "event", name = "AccountOpened" }]\n'
+    "code = [\n"
+    '  { relation = "implements", symbol = "accounts.Account.confirm" },\n'
+    '  { relation = "verifies", file = "tests/test_account.py" },\n'
+    "]\n"
+    "```\n"
+)
+
+
+def _fenced_page(page_type):
+    declared = "" if page_type is None else f"type: {page_type}\n"
+    return (
+        f"---\n{declared}description: d\nstatus: stable\n---\n"
+        "# T\n\n## Overview\nsummary.\n\n## Scenario\nlead.\n\n"
+        f"{_SCENARIO_FENCE}"
+    )
+
+
+def test_scenario_fence_outside_a_specification_page_is_advisory():
+    fs = [f for f in validate_page(_fenced_page("concept"))
+          if f["type"] == "unprojected_scenario"]
+    assert fs and fs[0]["severity"] == "advisory"
+
+
+def test_scenario_fence_on_a_specification_page_has_no_finding():
+    assert "unprojected_scenario" not in _types(_fenced_page("specification"))
+
+
+def test_page_without_a_scenario_fence_has_no_finding():
+    assert "unprojected_scenario" not in _types(CLEAN)
+
+
+def test_scenario_fence_without_frontmatter_is_advisory():
+    body = "# T\n\n## Overview\nsummary.\n\n## Scenario\nlead.\n\n" + _SCENARIO_FENCE
+    assert "unprojected_scenario" in _types(body)
+
+
+def test_tilde_scenario_fence_is_detected():
+    page = _fenced_page("concept").replace("```", "~~~")
+    assert "unprojected_scenario" in _types(page)

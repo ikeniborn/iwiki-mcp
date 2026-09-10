@@ -806,3 +806,75 @@ def test_concurrent_updates_to_same_section_second_conflicts(tmp_path, monkeypat
         expected_section_hash=flow["section_hash"],  # stale, already applied above
     )
     assert out["error"] == "section_conflict"
+
+
+_GWT_SECTION = (
+    "## Scenario\nlead.\n\n"
+    "```iwiki-gwt\n"
+    'id = "confirm-account-opening"\n'
+    'title = "Confirm account opening"\n'
+    "given = []\n"
+    'when = { role = "command", name = "ConfirmAccountOpening" }\n'
+    'then = [{ role = "event", name = "AccountOpened" }]\n'
+    "code = [\n"
+    '  { relation = "implements", symbol = "accounts.Account.confirm" },\n'
+    '  { relation = "verifies", file = "tests/test_account.py" },\n'
+    "]\n"
+    "```\n"
+)
+
+
+def test_write_warns_when_a_scenario_lands_on_a_non_specification_page(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+
+    out = server.wiki_write_page(
+        "backend",
+        "auth",
+        f"# Auth\n\n## Overview\nsummary.\n\n{_GWT_SECTION}",
+        type="concept",
+        description="d",
+    )
+
+    assert out["page"] == "backend/concept/auth.md"
+    assert "iwiki-gwt" in (out.get("warning") or "")
+
+
+def test_write_of_a_specification_page_carries_no_scenario_warning(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+
+    out = server.wiki_write_page(
+        "backend",
+        "auth",
+        f"# Auth\n\n## Overview\nsummary.\n\n{_GWT_SECTION}",
+        type="specification",
+        description="d",
+    )
+
+    assert "iwiki-gwt" not in (out.get("warning") or "")
+
+
+def test_section_update_warns_when_a_scenario_lands_outside_specification(
+    tmp_path, monkeypatch
+):
+    _seed(tmp_path, monkeypatch)
+    server.wiki_write_page(
+        "backend",
+        "auth",
+        "# Auth\n\n## Overview\nsummary.\n\n## Scenario\nlead.\n",
+        type="concept",
+        description="d",
+    )
+
+    out = server.wiki_update_page(
+        "backend",
+        "concept/auth",
+        heading="Scenario",
+        new_body=_GWT_SECTION.split("\n", 2)[2],
+    )
+
+    assert out.get("page") == "backend/concept/auth.md"
+    assert "iwiki-gwt" in (out.get("warning") or "")
