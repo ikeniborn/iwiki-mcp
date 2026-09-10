@@ -3,6 +3,43 @@ topic: codegraph-index-job-handle
 stage: spec
 chain:
   intent: docs/superpowers/intents/2026-09-10-codegraph-index-job-handle-intent.md
+review:
+  spec_hash: c3899db3155049eb
+  last_run: 2026-09-10
+  phases:
+    structure:
+      status: passed
+    coverage:
+      status: passed
+    clarity:
+      status: passed
+    consistency:
+      status: passed
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: CRITICAL
+      section: R4
+      section_hash: 6d9ad48b1ac31a1b
+      fragment: "the call waits a fixed 1 s grace before returning a descriptor"
+      text: "A 1 s grace contradicted the intent's first Desired Outcome, which requires the
+        call to return in under one second; grace plus overhead would cross it."
+      fix: "Grace set to 500 ms, keeping a 2.5x margin over the noop_ms < 200 benchmark gate
+        and leaving the answer inside one second."
+      verdict: fixed
+      verdict_at: 2026-09-10
+    - id: F-002
+      phase: clarity
+      severity: INFO
+      section: R5
+      section_hash: null
+      fragment: "job block"
+      text: "The same value is called job handle, job descriptor and job block across
+        sections."
+      fix: "Harmless: each name is unambiguous in place. Left as is rather than churning the
+        text."
+      verdict: accepted
+      verdict_at: 2026-09-10
 ---
 # Design: code graph index job handle
 
@@ -32,7 +69,7 @@ Desired Outcomes:
 
 Done when: on this repository, `wiki_code_index` returns in under one second; `wiki_code_status` shows the job progressing and then reports `ready` with a fresh revision for the same run; a second `wiki_code_index` issued while the job runs joins it rather than answering `busy`; and the CLI publish path still exits 0 with an unchanged answer shape.
 
-The first Desired Outcome is met through `wait_seconds=0`, which returns within the one-second grace of R4. The fourth is met for a job of the same domain and the same parameters (R6); joining a build the caller did not ask for would return a report of work it never requested.
+The first Desired Outcome is met through `wait_seconds=0`, which returns within the 500 ms grace of R4 — comfortably inside the one second the outcome allows. The fourth is met for a job of the same domain and the same parameters (R6); joining a build the caller did not ask for would return a report of work it never requested.
 
 ## 3. Requirements
 
@@ -56,7 +93,7 @@ The first Desired Outcome is met through `wait_seconds=0`, which returns within 
 
 ### R4 — a no-op still answers with its report
 
-Even at `wait_seconds=0` the call waits a fixed 1 s grace before returning a descriptor. The no-op decision is made inside `build` (`indexer.py:1642`), so without the grace the common "graph is already current" case would answer with a descriptor and force a status poll. The benchmark gate gives the budget: `eval/code_graph/runner.py:72` requires `noop_ms < 200`.
+Even at `wait_seconds=0` the call waits a fixed 500 ms grace before returning a descriptor. The no-op decision is made inside `build` (`indexer.py:1642`), so without the grace the common "graph is already current" case would answer with a descriptor and force a status poll. The benchmark gate gives the budget: `eval/code_graph/runner.py:72` requires `noop_ms < 200`, so 500 ms carries a 2.5x margin while keeping the answer inside the one second the intent's first Desired Outcome allows.
 
 **DoD:** with a current graph and `wait_seconds=0`, the answer is the full report carrying `no_op: true`, with no running job in it.
 
