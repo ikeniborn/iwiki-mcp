@@ -3748,6 +3748,123 @@ def test_joining_query_guard_never_cancels_an_explicit_build(
     assert runtime.status()["state"] == "ready"
 
 
+def test_query_guard_style_request_never_joins_an_explicit_build(
+    seed_runtime, monkeypatch
+):
+    """Provenance is part of a join match.
+
+    An explicit `wiki_code_index()` call and `query_guard`'s bounded
+    auto-rebuild can share `force`/`languages` and still disagree on the
+    build deadline (`max_full_rebuild_seconds` vs. `max_rebuild_seconds`) and
+    on `restore_prior_on_abort` (False vs. True). A request styled like
+    `query_guard`'s must therefore never join an already-running explicit
+    build -- it has to answer busy exactly as it did before joining existed,
+    the same way an explicit request must never join a live auto-rebuild.
+    """
+    runtime = seed_runtime.with_state(
+        "dirty",
+        auto_rebuild="bounded",
+        max_rebuild_seconds=2,
+        max_full_rebuild_seconds=10,
+    )
+
+    # Keep the real build blocked so the worker thread stays alive across
+    # the whole race below.
+    build_paused = threading.Event()
+    release_build = threading.Event()
+    discover_calls = {"count": 0}
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        discover_calls["count"] += 1
+        if discover_calls["count"] == 1:
+            build_paused.set()
+            assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    # Pause query_guard's call right after it has decided (from
+    # status() == "dirty") to attempt a rebuild, but before it reaches
+    # `_BUILD_WORKERS.start()` -- so the explicit caller below can win the
+    # worker slot first, exactly as in the round-1 race.
+    real_index_with_deadline = runtime.runtime._index_with_deadline
+    guard_ready = threading.Event()
+    release_guard = threading.Event()
+
+    def paused_index_with_deadline(**kwargs):
+        if kwargs.get("cancel_on_wait"):
+            guard_ready.set()
+            assert release_guard.wait(timeout=5)
+        return real_index_with_deadline(**kwargs)
+
+    monkeypatch.setattr(
+        runtime.runtime, "_index_with_deadline", paused_index_with_deadline
+    )
+
+    # Record every `_BUILD_WORKERS.start()` call's own return value -- the
+    # only place "joined vs. refused" is unambiguous, since `query_guard`'s
+    # public answer re-reads `status()` (which reports "rebuilding" as long
+    # as *any* job for this domain is live) regardless of which happened.
+    start_calls: list[tuple[bool, object]] = []
+    real_start = _BUILD_WORKERS.start
+
+    def recording_start(*args, **kwargs):
+        result = real_start(*args, **kwargs)
+        start_calls.append((kwargs.get("explicit"), result))
+        return result
+
+    monkeypatch.setattr(_BUILD_WORKERS, "start", recording_start)
+
+    guard_result: dict[str, object] = {}
+
+    def call_query_guard():
+        guard_result["answer"] = runtime.query_guard()
+
+    guard_thread = threading.Thread(target=call_query_guard)
+    guard_thread.start()
+    assert guard_ready.wait(timeout=5)
+
+    # The explicit caller starts the build and owns it as `explicit=True`.
+    explicit = runtime.index(wait_seconds=0)
+    assert build_paused.is_set()
+    assert explicit["state"] == "rebuilding"
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert job is not None
+    assert job.job_id == explicit["job"]["id"]
+    assert job.explicit is True
+
+    # Release query_guard's call: it now tries to join the live job with
+    # `explicit=False` (query_guard's own provenance) and must be refused.
+    release_guard.set()
+    guard_thread.join(timeout=10)
+
+    assert discover_calls["count"] == 1  # no second build was ever started
+    assert sum(
+        thread.name == "iwiki-code-graph-build"
+        for thread in threading.enumerate()
+    ) == 1
+
+    query_guard_start_results = [
+        result for explicit_flag, result in start_calls
+        if explicit_flag is False
+    ]
+    assert len(query_guard_start_results) == 1
+    assert query_guard_start_results[0] == (None, False)
+    assert guard_result["answer"].get("state") != "ready"
+    assert job.control.cancelled.is_set() is False
+
+    release_build.set()
+    runtime.runtime.join_workers(timeout=10)
+
+    assert job.control.cancelled.is_set() is False
+    assert job.explicit is True
+    assert job.state == "ready"
+    assert runtime.status()["state"] == "ready"
+
+
 def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
     runtime = seed_runtime
     assert runtime.index(force=True)["state"] == "ready"

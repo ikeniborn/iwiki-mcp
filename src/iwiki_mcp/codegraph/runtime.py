@@ -91,6 +91,7 @@ class _BuildJob:
         *,
         force: bool,
         languages: list[str] | None,
+        explicit: bool,
     ) -> None:
         self.domain_key = domain_key
         self.job_id = secrets.token_hex(8)
@@ -99,14 +100,28 @@ class _BuildJob:
         self.state = "running"
         self.force = force
         self.languages = None if languages is None else tuple(languages)
+        self.explicit = explicit
         self.control = BuildControl()
         self.result: dict[str, object] = {}
         self.thread: threading.Thread | None = None
 
-    def matches(self, *, force: bool, languages: list[str] | None) -> bool:
-        """Report whether a new request asks for the work this job is doing."""
+    def matches(
+        self, *, force: bool, languages: list[str] | None, explicit: bool
+    ) -> bool:
+        """Report whether a new request asks for the work this job is doing.
+
+        Provenance is part of the request: an explicit `wiki_code_index` call
+        and a query-time auto-rebuild carry different build deadlines and a
+        different `restore_prior_on_abort` policy even when `force` and
+        `languages` happen to agree, so joining across that boundary would
+        silently hand one caller the other's deadline and abort policy.
+        """
         requested = None if languages is None else tuple(languages)
-        return self.force == force and self.languages == requested
+        return (
+            self.force == force
+            and self.languages == requested
+            and self.explicit == explicit
+        )
 
     def describe(self) -> dict[str, object]:
         """Return the caller-visible descriptor for this job."""
@@ -127,7 +142,9 @@ class _BuildWorkerRegistry:
         self._lock = threading.Lock()
         self._job: _BuildJob | None = None
 
-    def start(self, domain_key, target, *, force=False, languages=None):
+    def start(
+        self, domain_key, target, *, force=False, languages=None, explicit=False
+    ):
         """Start a build, or join the live one that matches this request.
 
         Returns `(job, started)`: `started` is True only when this call
@@ -146,11 +163,13 @@ class _BuildWorkerRegistry:
             )
             if live is not None:
                 if live.domain_key == domain_key and live.matches(
-                    force=force, languages=languages
+                    force=force, languages=languages, explicit=explicit
                 ):
                     return live, False
                 return None, False
-            job = _BuildJob(domain_key, force=force, languages=languages)
+            job = _BuildJob(
+                domain_key, force=force, languages=languages, explicit=explicit
+            )
 
             def run() -> None:
                 # The worker owns the terminal state: a caller that detached
@@ -1174,6 +1193,7 @@ class CodeGraphRuntime:
                 run_build,
                 force=force,
                 languages=languages,
+                explicit=not cancel_on_wait,
             )
         except Exception:
             return _rebuild_failed()
