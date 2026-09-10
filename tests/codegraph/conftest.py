@@ -166,8 +166,10 @@ class RuntimeHarness:
     def status(self):
         return self.runtime.status()
 
-    def index(self, *, force=False, languages=None):
-        return self.runtime.index(force=force, languages=languages)
+    def index(self, *, force=False, languages=None, wait_seconds=None):
+        return self.runtime.index(
+            force=force, languages=languages, wait_seconds=wait_seconds
+        )
 
     def query_guard(self):
         return self.runtime.query_guard()

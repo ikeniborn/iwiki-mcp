@@ -1463,7 +1463,10 @@ def test_slow_metadata_publication_respects_absolute_deadline(
     runtime.runtime.join_workers(timeout=3)
     status = runtime.status()
 
-    assert out["code"] == "busy"
+    # The wait expired after the build entered publication, so the call hands
+    # back the running job instead of cancelling it into `busy`.
+    assert out["state"] == "rebuilding"
+    assert out["job"]["state"] == "running"
     assert during["state"] == "rebuilding"
     assert during["fresh"] is False
     assert status["state"] == "ready"
@@ -1497,7 +1500,10 @@ def test_expired_final_ready_metadata_is_not_published(
     runtime.runtime.join_workers(timeout=3)
     status = runtime.status()
 
-    assert out["code"] == "busy"
+    # The wait expired inside the publication the build had already entered,
+    # so the call hands back the running job instead of cancelling it.
+    assert out["state"] == "rebuilding"
+    assert out["job"]["state"] == "running"
     assert persisted["state"] == "rebuilding"
     assert "duration_ms" not in persisted
     assert "phase_timings_ms" not in persisted
@@ -3173,7 +3179,10 @@ def test_timeout_after_atomic_entry_finishes_non_ready_then_ready(
     after = runtime.status()
 
     assert entered.is_set()
-    assert out["code"] == "busy"
+    # The wait expired after the atomic entry, so the caller receives the
+    # running job; the build finishes it under the writer lock regardless.
+    assert out["state"] == "rebuilding"
+    assert out["job"]["state"] == "running"
     assert elapsed < 1.5
     assert during["state"] == "rebuilding"
     assert during["fresh"] is False
@@ -3534,3 +3543,44 @@ def test_adding_javascript_changes_the_configured_language_fingerprint():
     without = parser_fingerprint(languages=("python",), **common)
     with_js = parser_fingerprint(languages=("python", "javascript"), **common)
     assert without != with_js
+
+
+def test_wait_expiry_returns_the_job_and_the_build_still_reaches_ready(
+    seed_runtime, monkeypatch
+):
+    # A build budget the slowed publication fits inside: the caller's wait
+    # expires long before the build's own deadline, so only the removed
+    # cancellation could end this run anywhere but `ready`.
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=10)
+    store = runtime.runtime._indexer.store
+    real_publish = store.publish_metadata
+
+    def slow_publish(*args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish_metadata", slow_publish)
+
+    answer = runtime.index(force=True, wait_seconds=0)
+
+    assert answer["state"] == "rebuilding"
+    assert answer["job"]["state"] == "running"
+    assert len(answer["job"]["id"]) == 16
+    assert "error" not in answer
+
+    runtime.runtime.join_workers(timeout=10)
+    assert runtime.status()["state"] == "ready"
+
+
+def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
+    runtime = seed_runtime
+    assert runtime.index(force=True)["state"] == "ready"
+
+    started = time.monotonic()
+    answer = runtime.index(wait_seconds=0)
+    elapsed = time.monotonic() - started
+
+    assert answer["state"] == "ready"
+    assert answer["no_op"] is True
+    assert "job" not in answer or answer["job"]["state"] == "ready"
+    assert elapsed < 1.0

@@ -184,7 +184,11 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     assert all(item["fresh"] is False for item in during)
     assert all(item["fresh"] is False for item in guarded)
     assert all(item["results"] == [] for item in guarded)
-    assert writer_result["call"]["code"] == "busy"
+    # The writer's own wait expired inside the publication it had already
+    # entered, so its call carries the running job instead of a cancelling
+    # `busy`; the paused publication still completes under the writer lock.
+    assert writer_result["call"]["state"] == "rebuilding"
+    assert writer_result["call"]["job"]["state"] == "running"
     rebuilt = writer_result["status"]
     assert rebuilt["state"] == "ready"
     assert rebuilt["revision"] != old

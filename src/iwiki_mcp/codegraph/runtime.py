@@ -75,6 +75,7 @@ _PHASE_NAMES = (
     "publication",
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INDEX_GRACE_SECONDS = 0.5
 
 
 class CodeGraphSource(Protocol):
@@ -273,6 +274,19 @@ def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
         "error": "language not available in the active snapshot",
         "code": "unsupported_language",
         "hint": "the active snapshot declares: " + declared,
+    }
+
+
+def _rebuilding_job_answer(job: _BuildJob) -> dict[str, object]:
+    """Answer a caller whose wait ended while its build kept running."""
+    descriptor = job.describe()
+    descriptor["phase"] = job.control.phase
+    descriptor["phases_done"] = list(job.control.phases_done)
+    return {
+        "state": "rebuilding",
+        "fresh": False,
+        "job": descriptor,
+        "hint": "poll wiki_code_status for this job",
     }
 
 
@@ -1082,11 +1096,13 @@ class CodeGraphRuntime:
         *,
         force: bool,
         languages: list[str] | None,
-        deadline: float,
+        build_deadline: float,
+        wait_deadline: float,
         restore_prior_on_abort: bool,
+        cancel_on_wait: bool,
     ) -> dict[str, object]:
         assert self._indexer is not None
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= build_deadline:
             return self._busy_response()
 
         def run_build(
@@ -1097,7 +1113,7 @@ class CodeGraphRuntime:
                 built = self._indexer.build(
                     force=force,
                     languages=languages,
-                    deadline=deadline,
+                    deadline=build_deadline,
                     restore_prior_on_abort=restore_prior_on_abort,
                     control=control,
                 )
@@ -1129,24 +1145,48 @@ class CodeGraphRuntime:
             job = _BUILD_WORKERS.start(
                 self._worker_domain_key,
                 run_build,
+                force=force,
+                languages=languages,
             )
         except Exception:
             return _rebuild_failed()
         if job is None or job.thread is None:
             return self._busy_response()
-        job.thread.join(max(0.0, deadline - time.monotonic()))
+        job.thread.join(max(0.0, wait_deadline - time.monotonic()))
         if job.thread.is_alive():
-            job.control.cancel()
-            LOGGER.info("code_graph_build code=busy")
-            return self._busy_response()
-        _BUILD_WORKERS.release(job)
-        return job.result or _rebuild_failed()
+            if cancel_on_wait:
+                job.control.cancel()
+                LOGGER.info("code_graph_build code=busy")
+                return self._busy_response()
+            if (
+                time.monotonic() >= build_deadline
+                and not job.control.publication_entered.is_set()
+            ):
+                # `enter_publication` refuses once the build deadline has
+                # passed, so a build still short of it can no longer publish
+                # anything: there is no job worth polling. The caller keeps
+                # today's `busy`, and the doomed worker unwinds on its own
+                # instead of being cancelled.
+                LOGGER.info("code_graph_build code=busy")
+                return self._busy_response()
+            LOGGER.info("code_graph_build code=rebuilding job=%s", job.job_id)
+            return _rebuilding_job_answer(job)
+        ready = job.result.get("state") == "ready"
+        _BUILD_WORKERS.finish(job, "ready" if ready else "failed")
+        if not ready:
+            # A build that ended without a report answers with today's error
+            # shape, field for field: those dicts are a pinned contract.
+            return job.result or _rebuild_failed()
+        answer = dict(job.result)
+        answer["job"] = {"id": job.job_id, "state": job.state}
+        return answer
 
     def index(
         self,
         *,
         force: bool = False,
         languages: list[str] | None = None,
+        wait_seconds: float | None = None,
     ) -> dict[str, object]:
         if languages is not None and (
             not languages
@@ -1161,12 +1201,27 @@ class CodeGraphRuntime:
             self.config.max_full_rebuild_seconds
             or self.config.max_rebuild_seconds
         )
-        deadline = time.monotonic() + full_rebuild_seconds
+        if wait_seconds is not None and (
+            wait_seconds < 0 or wait_seconds > full_rebuild_seconds
+        ):
+            raise CodeGraphQueryError(
+                "wait_seconds must be between 0 and "
+                f"{full_rebuild_seconds}"
+            )
+        started = time.monotonic()
+        build_deadline = started + full_rebuild_seconds
+        wait_budget = (
+            full_rebuild_seconds
+            if wait_seconds is None
+            else max(float(wait_seconds), _INDEX_GRACE_SECONDS)
+        )
         return self._index_with_deadline(
             force=force,
             languages=languages,
-            deadline=deadline,
+            build_deadline=build_deadline,
+            wait_deadline=started + wait_budget,
             restore_prior_on_abort=False,
+            cancel_on_wait=False,
         )
 
     def query_guard(
@@ -1263,8 +1318,10 @@ class CodeGraphRuntime:
             rebuilt = self._index_with_deadline(
                 force=False,
                 languages=None,
-                deadline=deadline,
+                build_deadline=deadline,
+                wait_deadline=deadline,
                 restore_prior_on_abort=True,
+                cancel_on_wait=True,
             )
             if rebuilt.get("state") == "ready":
                 return {**self.status(), "results": []}
