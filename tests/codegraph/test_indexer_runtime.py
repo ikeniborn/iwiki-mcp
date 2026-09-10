@@ -2142,6 +2142,31 @@ def test_process_worker_registry_caps_four_domains_at_one(
     assert runtimes[0].active_workers == 0
 
 
+def test_registry_keeps_the_last_terminal_job(monkeypatch):
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    def target(control, result):
+        result["state"] = "ready"
+
+    job = registry.start(key, target, force=True, languages=None)
+    job.thread.join(timeout=5)
+    registry.finish(job, "ready")
+
+    remembered = registry.current(key)
+    assert remembered is job
+    assert remembered.state == "ready"
+    assert remembered.finished_at is not None
+    assert registry.is_active(key) is False
+    assert registry.active_count == 0
+    described = remembered.describe()
+    assert described["id"] == job.job_id
+    assert described["state"] == "ready"
+    assert len(described["id"]) == 16
+
+
 def test_secure_descriptor_path_falls_back_to_dev_fd(monkeypatch):
     monkeypatch.setattr(
         codegraph_location.Path,

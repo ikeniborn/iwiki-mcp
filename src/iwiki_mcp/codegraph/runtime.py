@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import secrets
 import threading
 import time
 from typing import Mapping, Protocol
@@ -83,11 +84,39 @@ class CodeGraphSource(Protocol):
 
 
 class _BuildJob:
-    def __init__(self, domain_key: tuple[str, str]) -> None:
+    def __init__(
+        self,
+        domain_key: tuple[str, str],
+        *,
+        force: bool,
+        languages: list[str] | None,
+    ) -> None:
         self.domain_key = domain_key
+        self.job_id = secrets.token_hex(8)
+        self.started_at = time.time()
+        self.finished_at: float | None = None
+        self.state = "running"
+        self.force = force
+        self.languages = None if languages is None else tuple(languages)
         self.control = BuildControl()
         self.result: dict[str, object] = {}
         self.thread: threading.Thread | None = None
+
+    def matches(self, *, force: bool, languages: list[str] | None) -> bool:
+        """Report whether a new request asks for the work this job is doing."""
+        requested = None if languages is None else tuple(languages)
+        return self.force == force and self.languages == requested
+
+    def describe(self) -> dict[str, object]:
+        """Return the caller-visible descriptor for this job."""
+        described: dict[str, object] = {
+            "id": self.job_id,
+            "state": self.state,
+            "started_at": self.started_at,
+        }
+        if self.finished_at is not None:
+            described["finished_at"] = self.finished_at
+        return described
 
 
 class _BuildWorkerRegistry:
@@ -97,7 +126,7 @@ class _BuildWorkerRegistry:
         self._lock = threading.Lock()
         self._job: _BuildJob | None = None
 
-    def start(self, domain_key, target):
+    def start(self, domain_key, target, *, force=False, languages=None):
         with self._lock:
             if (
                 self._job is not None
@@ -105,7 +134,7 @@ class _BuildWorkerRegistry:
                 and self._job.thread.is_alive()
             ):
                 return None
-            job = _BuildJob(domain_key)
+            job = _BuildJob(domain_key, force=force, languages=languages)
 
             def run() -> None:
                 target(job.control, job.result)
@@ -122,6 +151,21 @@ class _BuildWorkerRegistry:
                 self._job = None
                 raise
             return job
+
+    def current(self, domain_key):
+        """Return the live or last terminal job for this domain, if any."""
+        with self._lock:
+            job = self._job
+            if job is None or job.domain_key != domain_key:
+                return None
+            return job
+
+    def finish(self, job: _BuildJob, state: str) -> None:
+        """Record a terminal state without dropping the job from the slot."""
+        with self._lock:
+            if job.state == "running":
+                job.state = state
+                job.finished_at = time.time()
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:
         with self._lock:
