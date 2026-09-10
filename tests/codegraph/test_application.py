@@ -96,8 +96,12 @@ class RecordingPublisher:
         batch_exception=None,
         finalize_exception=None,
         abort_exception=None,
+        abort_result=None,
     ):
         self.calls = []
+        self.abort_result = (
+            {"state": "aborted"} if abort_result is None else abort_result
+        )
         self.begin_result = begin_result
         self.batch_result = (
             {"accepted": True} if batch_result is None else batch_result
@@ -148,7 +152,7 @@ class RecordingPublisher:
         self.calls.append(("abort", session.session_id))
         if self.abort_exception is not None:
             raise self.abort_exception
-        return {"state": "aborted"}
+        return dict(self.abort_result)
 
 
 @pytest.fixture
@@ -698,6 +702,48 @@ def test_ready_finalize_rejects_noncanonical_revision_and_aborts_once(
     assert publisher.calls[-1] == ("abort", "session-a")
     assert [call[0] for call in publisher.calls].count("abort") == 1
     assert revision not in repr(result)
+
+
+def test_finalize_the_client_could_not_await_reports_the_activation(
+    snapshot_fixture,
+):
+    """A lost finalize answer is not a failed publication when the target finished it."""
+    completed = {
+        "state": "ready",
+        "snapshot_revision": _REMOTE_REVISION,
+        "counts": {"relations": 3},
+    }
+    publisher = RecordingPublisher(
+        finalize_result={
+            "error": "remote_mcp_failed",
+            "reason": "timeout",
+            "hint": "the remote code graph call timed out; retry it",
+        },
+        abort_result=completed,
+    )
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == completed
+    assert [call[0] for call in publisher.calls].count("abort") == 1
+
+
+def test_abort_reporting_a_noncanonical_revision_keeps_the_failure(
+    snapshot_fixture,
+):
+    rejected = {"error": "remote_mcp_failed", "reason": "timeout", "hint": "retry"}
+    publisher = RecordingPublisher(
+        finalize_result=rejected,
+        abort_result={"state": "ready", "snapshot_revision": "sha256:remote"},
+    )
+
+    result = application.publish_snapshot(
+        snapshot_fixture.runtime, publisher, snapshot_fixture.config
+    )
+
+    assert result == rejected
 
 
 def test_exact_batch_and_finalize_success_never_aborts(snapshot_fixture):

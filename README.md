@@ -754,6 +754,12 @@ through `.git/info/exclude`, and is not fallback target.
 Text and `--json` choose only output format. Either format exits `0` when ready, `1`
 for runtime/publication failure, or `2` for usage/configuration failure.
 
+When the transport loses the answer to a `finalize` — a timeout or a dropped connection —
+the publisher asks the target what actually happened before it reports. An already
+terminal session replays its terminal result, so a publication the target did complete
+exits `0` as ready instead of `1`. Only a session the target never activated is reported
+as a publication failure.
+
 Both text stderr and compact JSON redact secrets and operational location data: no
 password, token, URL, DSN, or checkout path is emitted. `postgres` reads
 `IWIKI_DB_PASSWORD`, `IWIKI_EMBED_MODEL`, and `IWIKI_EMBED_DIMENSIONS` (plus optional

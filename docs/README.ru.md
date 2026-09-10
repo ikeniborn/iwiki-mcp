@@ -765,6 +765,12 @@ Text и `--json` выбирают только output format. Оба форма�
 snapshot ready, с `1` при runtime/publication failure или с `2` при
 usage/configuration failure.
 
+Когда transport теряет ответ на `finalize` — timeout или разорванное соединение —
+publisher спрашивает target, что произошло на самом деле, и только потом сообщает
+результат. Уже терминальная сессия воспроизводит свой terminal result, поэтому
+публикация, которую target довёл до конца, завершается с `0` как ready, а не с `1`.
+Как publication failure сообщается только сессия, которую target не активировал.
+
 Text stderr и compact JSON редактируют secrets и operational location data: не выводятся
 password, token, URL, DSN или checkout path. `postgres` читает `IWIKI_DB_PASSWORD`; `mcp`
 читает `IWIKI_CODE_GRAPH_MCP_URL` и `IWIKI_CODE_GRAPH_MCP_TOKEN` из защищённого runtime
