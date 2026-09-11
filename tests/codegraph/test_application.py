@@ -1271,6 +1271,54 @@ def test_detached_publication_failure_ends_the_job_as_failed(
     assert _BUILD_WORKERS.terminal_by_id(domain_key, job_id).state == "failed"
 
 
+def test_missing_publication_credentials_refuse_before_any_build(
+    seed_runtime,
+):
+    """R3: a missing endpoint or token is a configuration failure, exit 2.
+
+    The behavioural guard for the wave's final ruling. Nothing is mocked
+    here: a real project configured for `publish_mode = "mcp"`, a real empty
+    environment, the real CLI entry point. Selecting the publisher before the
+    build is what keeps `CodeGraphAdapterError` on the caller's thread, where
+    it becomes `invalid_config` and exit 2 -- discovered on the worker it
+    could only ever be a runtime publication failure (exit 1), and a
+    deployment branching on the two would retry forever against a credential
+    no retry can supply.
+    """
+    from io import StringIO
+
+    from iwiki_mcp import admin
+
+    harness = seed_runtime.with_config(publish_mode="mcp")
+    project = str(harness.project_dir)
+    domain_key = codegraph_runtime.worker_domain_key(
+        application.source_context(harness.binding)
+    )
+    stdout, stderr = StringIO(), StringIO()
+
+    assert harness.status()["state"] == "missing"
+
+    code = admin.run(
+        ["code", "publish", "--project", project, "--json"],
+        stdout=stdout,
+        stderr=stderr,
+        environ={},
+    )
+
+    assert code == 2
+    assert json.loads(stdout.getvalue()) == {
+        "state": "failed",
+        "publish_mode": "mcp",
+        "error": "invalid_config",
+        "duration_ms": 0,
+    }
+    assert stderr.getvalue() == ""
+    # No build ran: the graph is untouched and no job was ever started.
+    assert harness.status()["state"] == "missing"
+    assert not harness.paths.database.is_file()
+    assert _BUILD_WORKERS.current(domain_key) is None
+
+
 def test_synchronous_build_still_reports_its_publication(
     seed_runtime, monkeypatch
 ):
