@@ -639,6 +639,15 @@ def index_and_publish(
     redact_failures: bool = False,
     wait_seconds: float | None = None,
 ) -> CodeGraphPublishOutcome:
+    """Build the project's graph and publish the snapshot it produced.
+
+    The build publishes itself, through the callback below: a caller that
+    detached at its `wait_seconds` expiry is no longer here to publish for it,
+    and a detached build that never published would leave the hosted snapshot
+    stale with nothing anywhere reporting it. There is deliberately one
+    publication path, not one per wait outcome -- this call reads the result
+    out of what the build returned.
+    """
     started = time.monotonic()
     runtime = code_runtime(
         source_context(binding),
@@ -651,6 +660,22 @@ def index_and_publish(
     config = runtime.config
     mode = None if config is None else config.publish_mode
     failure_category = None
+
+    def publish() -> dict[str, object]:
+        """Publish the snapshot the build just produced.
+
+        Runs on the build worker's thread, after a `ready` build and before
+        the job reports terminality. The publisher is selected here rather
+        than up front so that a build which never reaches `ready` -- and a
+        wait that expires before it does -- still never touches a
+        publication target.
+        """
+        assert config is not None
+        publisher = publisher_for(binding, config, environ=environ)
+        if publisher is None:
+            return {}
+        return publish_snapshot(runtime, publisher, config)
+
     try:
         if config is not None:
             validate_target(binding, config.publish_mode)
@@ -661,14 +686,13 @@ def index_and_publish(
         # is `False`. The tool layer (`wiki_code_index`'s `_code_safe`
         # decorator) turns it into the same sanitized `invalid_config` answer
         # every other typed graph failure gets via `sanitized_error`.
-        indexed = runtime.index(
-            force=force, languages=languages, wait_seconds=wait_seconds
-        )
-        publication: dict[str, object] = {}
-        if config is not None and indexed.get("state") == "ready":
-            publisher = publisher_for(binding, config, environ=environ)
-            if publisher is not None:
-                publication = publish_snapshot(runtime, publisher, config)
+        indexed = dict(runtime.index(
+            force=force,
+            languages=languages,
+            wait_seconds=wait_seconds,
+            publish=None if config is None else publish,
+        ))
+        publication: dict[str, object] = indexed.pop("publication", {})
     except (
         wiki_base.BaseError,
         codegraph_config.CodeGraphConfigError,

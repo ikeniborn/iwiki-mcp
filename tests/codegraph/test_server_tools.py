@@ -31,7 +31,10 @@ class _FakeRuntime:
         self.calls.append(f"status:{self.binding.primary}")
         return {"domain": self.binding.primary}
 
-    def index(self, *, force=False, languages=None, wait_seconds=None):
+    def index(
+        self, *, force=False, languages=None, wait_seconds=None,
+        publish=None,
+    ):
         self.calls.append(f"index:{self.binding.primary}")
         return {
             "domain": self.binding.primary,
@@ -360,6 +363,45 @@ def test_wiki_code_index_returns_rebuilding_job_when_wait_expires_first(
     assert answer["job"]["state"] == "running"
     assert answer["hint"] == "poll wiki_code_status for this job"
     assert "error" not in answer
+
+
+def test_wiki_code_status_reports_a_failed_publication_as_a_failed_job(
+    seed_runtime, monkeypatch
+):
+    """R3/F1: a build that indexed but could not publish is not `ready`.
+
+    The poller's whole protocol is the job's terminal state, so a refused
+    publication has to reach it -- otherwise the caller is told `ready` while
+    the published graph is still the old revision.
+    """
+    harness = seed_runtime.with_config(publish_mode="mcp")
+    monkeypatch.setattr(
+        server.base, "resolve_binding", lambda: harness.binding
+    )
+    refused = []
+
+    class RefusingPublisher:
+        def begin(self, header):
+            refused.append(header.repository_id)
+            return {"error": "snapshot_conflict", "hint": "retry publication"}
+
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "publisher_for",
+        lambda *_args, **_kwargs: RefusingPublisher(),
+    )
+
+    answer = server.wiki_code_index(force=True)
+    polled = server.wiki_code_status(job_id=answer["job"]["id"])
+
+    assert refused == ["project"]
+    assert answer["publication"] == {
+        "error": "snapshot_conflict",
+        "hint": "retry publication",
+    }
+    assert polled["job"]["id"] == answer["job"]["id"]
+    assert polled["job"]["state"] == "failed"
+    assert "error" not in polled
 
 
 @pytest.mark.parametrize(

@@ -107,6 +107,7 @@ def _write_config(project: Path, base: Path, **overrides) -> None:
         "max_file_bytes": 1_000_000,
         "max_total_files": 100,
         "include_tests": True,
+        "publish_mode": None,
         **overrides,
     }
     languages = ", ".join(json.dumps(item) for item in values["languages"])
@@ -126,6 +127,8 @@ def _write_config(project: Path, base: Path, **overrides) -> None:
         lines.append(
             f"max_full_rebuild_seconds = {values['max_full_rebuild_seconds']}"
         )
+    if values["publish_mode"] is not None:
+        lines.append(f"publish_mode = {json.dumps(values['publish_mode'])}")
     lines.extend(
         (
             f"max_file_bytes = {values['max_file_bytes']}",
@@ -167,9 +170,15 @@ class RuntimeHarness:
     def status(self):
         return self.runtime.status()
 
-    def index(self, *, force=False, languages=None, wait_seconds=None):
+    def index(
+        self, *, force=False, languages=None, wait_seconds=None,
+        publish=None,
+    ):
         return self.runtime.index(
-            force=force, languages=languages, wait_seconds=wait_seconds
+            force=force,
+            languages=languages,
+            wait_seconds=wait_seconds,
+            publish=publish,
         )
 
     def query_guard(self):
@@ -391,7 +400,7 @@ class FakeRuntime:
         self.database_accesses.append("status")
         return {"domain": self.binding.primary, "state": self.state}
 
-    def index(self, *, force=False, languages=None):
+    def index(self, *, force=False, languages=None, publish=None):
         self.calls.append(("index", {"force": force, "languages": languages}))
         self.build_attempts += 1
         if self._failure:

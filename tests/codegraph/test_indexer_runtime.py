@@ -42,6 +42,7 @@ from iwiki_mcp.codegraph.runtime import (
     CodeGraphRuntime,
     attach_job,
     explicit_job_active,
+    shutdown_code_graph_workers,
     worker_domain_key,
 )
 from iwiki_mcp.codegraph.query import CodeGraphQuery, CodeGraphQueryError
@@ -1492,6 +1493,71 @@ def test_slow_metadata_publication_respects_absolute_deadline(
     assert status["revision"] != first["revision"]
     assert "duration_ms" in status
     assert "phase_timings_ms" in status
+
+
+def test_worker_records_a_raised_publication_as_a_failed_job(
+    seed_runtime, monkeypatch, caplog
+):
+    """R3/F1: nothing raw escapes a publication that raised on the worker.
+
+    No caller is watching that thread, so the failure can only be recorded:
+    as a `failed` job, as a redacted `publication`, and as a log line in the
+    same style the build's own failures use.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    secret = "publication-token /absolute/private/path"
+
+    def explode():
+        raise RuntimeError(secret)
+
+    caplog.clear()
+    with caplog.at_level("ERROR", logger="iwiki_mcp.codegraph.runtime"):
+        out = runtime.index(force=True, publish=explode)
+    snapshot = _BUILD_WORKERS.terminal_by_id(
+        runtime.runtime._worker_domain_key, out["job"]["id"]
+    )
+
+    assert out["state"] == "ready"
+    assert out["publication"] == {
+        "state": "failed",
+        "error": "publication_failed",
+    }
+    assert snapshot.state == "failed"
+    assert out["job"]["state"] == "failed"
+    assert secret not in caplog.text
+    assert "code_graph_publish code=publication_failed" in caplog.text
+
+
+def test_a_cancelled_build_publishes_nothing(seed_runtime, monkeypatch):
+    """R3/F1: only a build that produced a ready snapshot publishes.
+
+    Cancellation and deadline behaviour is unchanged by the worker-side
+    publication -- a build cut short still ends `failed`, and must never
+    reach a publication target with a snapshot it did not finish.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    published = []
+    real_discover = codegraph_indexer.discover_sources
+
+    def slow_discover(*args, **kwargs):
+        time.sleep(1.0)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(codegraph_indexer, "discover_sources", slow_discover)
+
+    out = runtime.index(
+        force=True,
+        wait_seconds=0,
+        publish=lambda: published.append("published") or {"state": "ready"},
+    )
+    shutdown_code_graph_workers(timeout=30)
+    snapshot = _BUILD_WORKERS.terminal_by_id(
+        runtime.runtime._worker_domain_key, out["job"]["id"]
+    )
+
+    assert out["state"] == "rebuilding"
+    assert published == []
+    assert snapshot.state == "failed"
 
 
 def test_expired_final_ready_metadata_is_not_published(

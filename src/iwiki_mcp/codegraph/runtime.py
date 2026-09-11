@@ -10,7 +10,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from filelock import Timeout
 
@@ -194,6 +194,36 @@ class _BuildJob:
 
 
 _TERMINAL_HISTORY = 16
+#: What a build records for itself when its publication raised. Mirrors the
+#: shape `application.publish_snapshot` returns when it detects an
+#: unpublishable result, so a caller reading `publication` sees one dialect
+#: whichever way the publication failed -- and never the exception's text.
+_PUBLICATION_FAILED = {"state": "failed", "error": "publication_failed"}
+
+
+def _terminal_state(result: Mapping[str, object]) -> str:
+    """Decide a finished build's terminal state, its publication included.
+
+    A build that indexed but could not publish its snapshot is `failed`, not
+    `ready`: under a publishing `publish_mode` the graph a reader answers
+    from is still the old one, and a caller polling its handle must not be
+    told `ready` on the strength of a local index alone.
+
+    `publication` is absent -- not empty -- when nothing was asked to publish
+    (`publish_mode = "sqlite"`, or a mode whose publisher could not be
+    selected), and then the build's own state is the whole answer.
+    """
+    if result.get("state") != "ready":
+        return "failed"
+    publication = result.get("publication")
+    if publication is None:
+        return "ready"
+    return (
+        "ready"
+        if isinstance(publication, Mapping)
+        and publication.get("state") == "ready"
+        else "failed"
+    )
 
 
 class _BuildWorkerRegistry:
@@ -259,16 +289,13 @@ class _BuildWorkerRegistry:
                 # The worker owns the terminal state: a caller that detached
                 # at its wait expiry never comes back to record it, and
                 # `finished_at` must be when the build ended rather than
-                # whenever some caller happened to return.
+                # whenever some caller happened to return. The target
+                # publishes before it returns, so the publication's outcome is
+                # already in `result` when `_terminal_state` reads it.
                 try:
                     target(job.control, job.result)
                 finally:
-                    self.finish(
-                        job,
-                        "ready"
-                        if job.result.get("state") == "ready"
-                        else "failed",
-                    )
+                    self.finish(job, _terminal_state(job.result))
 
             job.thread = threading.Thread(
                 target=run,
@@ -1481,6 +1508,7 @@ class CodeGraphRuntime:
         wait_deadline: float,
         restore_prior_on_abort: bool,
         cancel_on_wait: bool,
+        publish: Callable[[], dict[str, object]] | None = None,
     ) -> dict[str, object]:
         assert self._indexer is not None
         if time.monotonic() >= build_deadline:
@@ -1522,6 +1550,27 @@ class CodeGraphRuntime:
             except Exception:
                 LOGGER.error("code_graph_build code=rebuild_failed")
                 result.update(_rebuild_failed())
+            # The build publishes its own snapshot, on this thread, before it
+            # reports terminality: a caller that detached at its wait expiry
+            # is not there to publish for it, and leaving the publication to
+            # whoever calls next would keep the remote graph stale for an
+            # unbounded time. A build that never reached `ready` -- cancelled,
+            # timed out, or failed -- publishes nothing.
+            if publish is None or result.get("state") != "ready":
+                return
+            try:
+                published = publish()
+            except Exception:
+                # Nobody is watching this thread, so the failure has to be
+                # recorded rather than raised, and in the same redacted style
+                # every other worker failure uses: the exception's text never
+                # reaches a log line or a tool answer.
+                LOGGER.error("code_graph_publish code=publication_failed")
+                published = dict(_PUBLICATION_FAILED)
+            # An empty answer is the "no publisher for this mode" no-op: the
+            # key stays absent so the build's own state decides terminality.
+            if published:
+                result["publication"] = published
         try:
             job, started = _BUILD_WORKERS.start(
                 self._worker_domain_key,
@@ -1571,8 +1620,10 @@ class CodeGraphRuntime:
             return _rebuilding_job_answer(job)
         ready = job.result.get("state") == "ready"
         # The worker recorded the terminal state as it ended; this idempotent
-        # call only ever repeats that fact.
-        _BUILD_WORKERS.finish(job, "ready" if ready else "failed")
+        # call only ever repeats that fact -- through the same decision, so a
+        # build whose publication failed is `failed` here too, however the
+        # index answer below describes the snapshot it did produce.
+        _BUILD_WORKERS.finish(job, _terminal_state(job.result))
         if not ready:
             # A build that ended without a report answers with today's error
             # shape, field for field: those dicts are a pinned contract.
@@ -1587,7 +1638,18 @@ class CodeGraphRuntime:
         force: bool = False,
         languages: list[str] | None = None,
         wait_seconds: float | None = None,
+        publish: Callable[[], dict[str, object]] | None = None,
     ) -> dict[str, object]:
+        """Build the graph, publishing the snapshot the build produced.
+
+        `publish` is the caller's publication step, run by the build worker
+        after a `ready` build and before the job reports terminality. It
+        answers with the publication result (`{}` when the configured mode
+        has nothing to publish to), which this call returns under
+        `publication` -- the one place a caller reads it from, whether the
+        build finished within `wait_seconds` or long after the caller
+        detached.
+        """
         if languages is not None and (
             not languages
             or any(language not in KNOWN_LANGUAGES for language in languages)
@@ -1623,6 +1685,7 @@ class CodeGraphRuntime:
             wait_deadline=started + wait_budget,
             restore_prior_on_abort=False,
             cancel_on_wait=False,
+            publish=publish,
         )
 
     def query_guard(
