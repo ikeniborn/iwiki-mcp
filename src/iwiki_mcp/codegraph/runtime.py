@@ -169,20 +169,26 @@ class _BuildJob:
     def describe(self) -> dict[str, object]:
         """Return the caller-visible descriptor for this job.
 
-        One unsynchronised read of `terminal` decides the whole answer. The
-        registry publishes that snapshot under its lock, after the terminal
-        fields are already in place, so a descriptor is either wholly running
-        or wholly terminal. Reassembling it here from `state` and
-        `finished_at` instead would read two fields `finish()` writes in
-        sequence, and could emit a `running` job that already carries a
-        `finished_at`.
+        Exactly one unsynchronised read -- of `terminal` -- decides the whole
+        answer, and the live branch then reads nothing else off the job. That
+        is what makes the descriptor atomic, not the order `finish()` writes
+        in: a second read could land after `finish()` published the snapshot
+        *and* set `job.state`, and would report a terminal state with no
+        `finished_at`. The write order only narrows that gap; removing the
+        read closes it.
+
+        The literal `"running"` is this branch's actual meaning rather than a
+        stand-in for `self.state`: the branch is reached only when no snapshot
+        was published, and an unpublished snapshot is precisely a job that has
+        not reached a terminal state. `state`/`finished_at` on the job stay
+        for direct readers after a join; they are never part of a descriptor.
         """
         terminal = self.terminal
         if terminal is not None:
             return terminal.describe()
         return {
             "id": self.job_id,
-            "state": self.state,
+            "state": "running",
             "started_at": self.started_at,
         }
 
@@ -349,13 +355,14 @@ class _BuildWorkerRegistry:
             snapshot = _JobSnapshot(
                 job, state=state, finished_at=finished_at
             )
-            # Publish it *first*. `describe()` decides its whole answer on one
-            # unsynchronised read of `terminal`, so that assignment is the
-            # single step from a wholly running descriptor to a wholly
-            # terminal one. Writing the job's own `state` first would open the
-            # mirror of the race this snapshot exists to close: a reader
-            # landing in between would see a terminal `state` with no
-            # `finished_at`, which the READMEs forbid just as firmly.
+            # Publish it *first*, before the job's own fields. What makes a
+            # descriptor atomic is `describe()` reading `terminal` and nothing
+            # else (see its docstring); this order is the second half of that
+            # bargain, keeping the loose `state` from ever being the newer of
+            # the two facts. A reader that did consult `job.state` would, in
+            # the opposite order, see a terminal state with no `finished_at`
+            # -- the mirror of the race this snapshot exists to close, and one
+            # the READMEs forbid just as firmly.
             job.terminal = snapshot
             job.state = state
             job.finished_at = finished_at

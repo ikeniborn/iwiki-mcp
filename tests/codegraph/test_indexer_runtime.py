@@ -2488,6 +2488,39 @@ def test_describe_never_reports_a_running_job_with_a_finished_timestamp():
     assert job.terminal is None
 
 
+def test_the_live_descriptor_branch_never_consults_the_jobs_own_state():
+    """The live branch must report `running` without reading `job.state`.
+
+    `describe()` reads `terminal`, finds it unset, and then has to say
+    something about the state. Reading `job.state` there is a *second*
+    unsynchronised read: `finish()` publishes the snapshot and sets
+    `job.state` as two adjacent stores, so a reader that passes the first
+    check before them and reaches the second after both reports a terminal
+    state with no `finished_at` -- the shape the whole snapshot exists to
+    prevent. Reordering the writer only narrows that gap; the reader has to
+    stop taking the second look.
+
+    The state built here is exactly what that gap produces, and it needs no
+    threads: `terminal` still unset, `state` already terminal.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    job = runtime_module._BuildJob(
+        ("/tmp/base", "docs"),
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    job.state = "ready"
+
+    described = job.describe()
+
+    assert job.terminal is None
+    assert described["state"] == "running"
+    assert "finished_at" not in described
+
+
 def test_describe_never_reports_a_terminal_state_without_a_timestamp(
     monkeypatch
 ):
