@@ -1542,12 +1542,21 @@ def test_local_reads_are_served_while_the_snapshot_is_publishing(
 
     Combination defect: the publication runs on the build worker, and every
     local read consults the registry's liveness. Read as "a build is running"
-    it refuses `wiki_code_status` and `wiki_code_search` for the whole remote
-    publication -- minutes, on a large graph -- over a local snapshot that is
-    complete. The session must still be held open for that same window, which
-    is the other half of what the liveness answered before it was split.
+    it refuses reads for the whole remote publication -- minutes, on a large
+    graph -- over a local snapshot that is complete. The session must still be
+    held open for that same window, which is the other half of what the
+    liveness answered before it was split.
+
+    All three read tools are exercised, not just the one whose guard was
+    converted first: `wiki_code_status`, `wiki_code_search` and
+    `wiki_code_context` each consult the predicate at their own sites, and a
+    test that covered only `status()` is exactly what let two of them ship
+    still refusing.
     """
     runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    assert runtime.index(force=True)["state"] == "ready"
+    seeded = runtime.runtime.search("Service")
+    seed_id = seeded["results"][0]["entity_id"]
     publishing = threading.Event()
     release = threading.Event()
 
@@ -1560,6 +1569,8 @@ def test_local_reads_are_served_while_the_snapshot_is_publishing(
     assert publishing.wait(20)
     during_status = runtime.status()
     during_query = runtime.runtime.query_guard()
+    during_search = runtime.runtime.search("Service")
+    during_context = runtime.runtime.context([seed_id])
     held_open = explicit_job_active()
     release.set()
     runtime.runtime.join_workers(timeout=30)
@@ -1571,6 +1582,13 @@ def test_local_reads_are_served_while_the_snapshot_is_publishing(
     assert during_status["fresh"] is True
     assert "code_graph_rebuilding" not in during_status.get("warnings", [])
     assert "error" not in during_query
+    assert during_search["fresh"] is True
+    assert during_search["results"]
+    assert "error" not in during_search
+    assert during_context["fresh"] is True
+    assert during_context["nodes"]
+    assert "error" not in during_context
+    assert "code_graph_rebuilding" not in during_context.get("warnings", [])
     # ... and the session that owns the job handle stays alive for it.
     assert held_open is True
     assert after_status["state"] == "ready"

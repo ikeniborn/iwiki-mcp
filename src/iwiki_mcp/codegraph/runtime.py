@@ -1977,7 +1977,7 @@ class CodeGraphRuntime:
                     after = dict(_metadata(self.paths.metadata))
                     if (
                         before != after
-                        or _BUILD_WORKERS.is_active(self._worker_domain_key)
+                        or _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     ):
                         return _not_ready({
                             **guarded,
@@ -2218,7 +2218,7 @@ class CodeGraphRuntime:
             with code_graph_read_lock(self.paths.lock):
                 before = dict(_metadata(self.paths.metadata))
                 if (
-                    _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     or not exact_ready_metadata(before)
                     or before.get("domain") != self.binding.primary
                     or before.get("state") != "ready"
@@ -2228,7 +2228,7 @@ class CodeGraphRuntime:
                         request,
                         self._with_rebuilding_state(
                             context_guarded,
-                            shared_writer=_BUILD_WORKERS.is_active(
+                            shared_writer=_BUILD_WORKERS.is_indexing(
                                 self._worker_domain_key
                             ),
                         ),
@@ -2263,7 +2263,7 @@ class CodeGraphRuntime:
                         or repository_after != repository
                         or data_version_after != data_version
                         or before != after
-                        or _BUILD_WORKERS.is_active(self._worker_domain_key)
+                        or _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     ):
                         return self._empty_context_response(
                             request,
