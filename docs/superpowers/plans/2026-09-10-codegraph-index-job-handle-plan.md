@@ -4,6 +4,10 @@ stage: plan
 chain:
   intent: docs/superpowers/intents/2026-09-10-codegraph-index-job-handle-intent.md
   spec: docs/superpowers/specs/2026-09-10-codegraph-index-job-handle-design.md
+result_check:
+  verdict: OK
+  plan_hash: 626785116a8d4a75
+  last_run: 2026-09-11
 review:
   plan_hash: 626785116a8d4a75
   last_run: 2026-09-10
