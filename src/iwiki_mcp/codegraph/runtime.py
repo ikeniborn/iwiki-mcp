@@ -187,16 +187,25 @@ class _BuildJob:
         }
 
 
+_TERMINAL_HISTORY = 16
+
+
 class _BuildWorkerRegistry:
     """Own the process's single bounded code-graph build worker."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._job: _BuildJob | None = None
-        # The last build that ended, kept as a small value after its job left
-        # the live slot. Starting a new build does not touch it, so a caller
-        # still holding the previous handle keeps a terminal answer to read.
-        self._terminal: _JobSnapshot | None = None
+        # Terminal snapshots of the builds that already ended, newest last,
+        # keyed by job id. A caller that took a handle must still be able to
+        # learn how *its* build ended, and the builds that follow are not
+        # rare: a query-time auto-rebuild against an unchanged checkout
+        # finishes in well under a second, so a single remembered answer
+        # would routinely be gone before the caller's next poll. Bounded and
+        # evicted oldest-first because nothing here is ever cleaned up
+        # otherwise; a snapshot is a handful of scalars, so the cap can be
+        # generous without the pinning that keeping whole jobs would bring.
+        self._terminal: dict[str, _JobSnapshot] = {}
 
     def start(
         self,
@@ -270,25 +279,39 @@ class _BuildWorkerRegistry:
         """Return the live job for this domain, else its terminal snapshot.
 
         A live job answers first because only it can report `phase` progress;
-        once it ends it leaves the slot and the snapshot it published keeps
-        answering in its place.
+        once it ends it leaves the slot and the newest snapshot for the same
+        domain keeps answering in its place. This is the answer for a caller
+        that names no job -- one that holds an id asks `terminal_by_id`.
         """
         with self._lock:
             job = self._job
             if job is not None and job.domain_key == domain_key:
                 return job
-            terminal = self._terminal
-            if terminal is not None and terminal.domain_key == domain_key:
-                return terminal
-            return None
+            return self._newest_locked(domain_key)
 
     def terminal(self, domain_key) -> _JobSnapshot | None:
-        """Return the last finished build's snapshot, live build or not."""
+        """Return the newest finished build for this domain, live one or not."""
         with self._lock:
-            terminal = self._terminal
-            if terminal is None or terminal.domain_key != domain_key:
-                return None
-            return terminal
+            return self._newest_locked(domain_key)
+
+    def terminal_by_id(self, job_id: str) -> _JobSnapshot | None:
+        """Return the snapshot of one specific finished build, if remembered.
+
+        The lookup a caller holding a handle needs: it asks about its own
+        build rather than about whichever build happens to be the latest.
+        `None` means the build is unknown here -- it is still running, it was
+        never started in this process, or it has aged out of the bounded
+        history -- and the caller falls back to `state`/`fresh`.
+        """
+        with self._lock:
+            return self._terminal.get(job_id)
+
+    def _newest_locked(self, domain_key) -> _JobSnapshot | None:
+        """Return the most recent snapshot for one domain. Lock held."""
+        for snapshot in reversed(self._terminal.values()):
+            if snapshot.domain_key == domain_key:
+                return snapshot
+        return None
 
     def explicit_job(self) -> _BuildJob | None:
         """Return the live job when an explicit build is running.
@@ -324,7 +347,9 @@ class _BuildWorkerRegistry:
                 job, state=state, finished_at=job.finished_at
             )
             job.terminal = snapshot
-            self._terminal = snapshot
+            self._terminal[snapshot.job_id] = snapshot
+            while len(self._terminal) > _TERMINAL_HISTORY:
+                del self._terminal[next(iter(self._terminal))]
             self._release_locked(job)
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:

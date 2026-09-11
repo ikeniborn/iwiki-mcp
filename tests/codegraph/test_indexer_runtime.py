@@ -2361,6 +2361,103 @@ def test_a_new_build_does_not_erase_the_previous_terminal_answer():
     assert registry.terminal(key).job_id == second.job_id
 
 
+def _run_to_completion(registry, key, *, explicit=True, state="ready"):
+    """Start one build that ends immediately and return its job."""
+
+    def target(control, result):
+        result["state"] = state
+
+    job, started = registry.start(
+        key,
+        target,
+        force=True,
+        languages=None,
+        explicit=explicit,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    registry.join(timeout=5)
+    return job
+
+
+def test_a_terminal_answer_survives_a_later_build_finishing():
+    """Remembering only the newest terminal answer is not enough.
+
+    The losing sequence is ordinary, not a corner: a caller takes handle A
+    with `wait_seconds=0`, A finishes, a `wiki_code_search` against a dirty
+    graph starts auto-rebuild B, and B -- a no-op rebuild on an unchanged
+    checkout -- finishes in well under a second. The caller's next poll
+    arrives after B ended, so a single remembered answer is already B's and
+    A's outcome, the whole point of the handle, is unlearnable. Comparing
+    ids only tells the caller that its answer is gone.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    first = _run_to_completion(registry, key, explicit=True)
+    second = _run_to_completion(registry, key, explicit=False)
+
+    remembered = registry.terminal_by_id(first.job_id)
+    assert remembered is not None
+    assert remembered.job_id == first.job_id
+    assert remembered.state == "ready"
+    assert remembered.describe()["finished_at"] is not None
+    # The id-less reader keeps reporting the latest build for the domain.
+    assert registry.current(key).job_id == second.job_id
+    assert registry.terminal_by_id(second.job_id).job_id == second.job_id
+    assert registry.terminal_by_id("0" * 16) is None
+
+
+def test_two_domains_keep_their_own_terminal_answers():
+    """One domain's finished build must not displace another's answer.
+
+    The registry is process-wide while its answers are per domain: with a
+    single remembered snapshot, a build in domain B erased domain A's, and
+    a status call for A silently lost its `job` key entirely.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    docs = ("/tmp/base", "docs")
+    notes = ("/tmp/base", "notes")
+
+    docs_job = _run_to_completion(registry, docs)
+    notes_job = _run_to_completion(registry, notes, state="failed")
+
+    assert registry.current(docs).job_id == docs_job.job_id
+    assert registry.current(docs).state == "ready"
+    assert registry.current(notes).job_id == notes_job.job_id
+    assert registry.current(notes).state == "failed"
+    assert registry.terminal_by_id(docs_job.job_id).domain_key == docs
+    assert registry.current(("/tmp/base", "absent")) is None
+
+
+def test_terminal_history_is_bounded_and_evicts_the_oldest():
+    """Nothing prunes this history, so it has to be capped.
+
+    Keeping every build's snapshot would trade the pinned job graph for an
+    unbounded one. The cap is what makes the by-id lookup affordable.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+    limit = runtime_module._TERMINAL_HISTORY
+
+    jobs = [
+        _run_to_completion(registry, key) for _ in range(limit + 2)
+    ]
+
+    assert len(registry._terminal) == limit
+    assert registry.terminal_by_id(jobs[0].job_id) is None
+    assert registry.terminal_by_id(jobs[1].job_id) is None
+    assert registry.terminal_by_id(jobs[2].job_id).job_id == jobs[2].job_id
+    assert registry.terminal_by_id(jobs[-1].job_id).job_id == jobs[-1].job_id
+    assert registry.current(key).job_id == jobs[-1].job_id
+
+
 def test_describe_never_reports_a_running_job_with_a_finished_timestamp():
     """`finish()` writes its fields in sequence; `describe()` must not mix them.
 
