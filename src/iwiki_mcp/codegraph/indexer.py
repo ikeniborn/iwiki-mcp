@@ -1926,7 +1926,11 @@ class CodeGraphIndexer:
                 # polling client can observe. It has no timing entry of its
                 # own -- `phase_timings_ms` is sealed into the very record
                 # this phase writes, so `publication` is the last span that
-                # can be measured.
+                # can be measured. Deliberately absent from `_PHASE_NAMES`
+                # too, which is the timings vocabulary rather than the phase
+                # one: `set(timings) == set(_PHASE_NAMES)` is validated
+                # against *persisted* metadata, so adding a key there would
+                # invalidate every record an earlier version wrote.
                 _enter(control, "metadata")
                 timings["publication"] = _elapsed_ms(phase)
                 metadata = self._metadata(
