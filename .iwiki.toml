@@ -15,7 +15,13 @@ mode = "strict"
 enabled = true
 languages = ["python"]
 auto_rebuild = "bounded"
-max_rebuild_seconds = 300
+# Query-time budget: how long a search on a dirty graph waits for the rebuild
+# it triggers. Kept short so a stale graph slows one query rather than blocking
+# it -- the caller gets a job descriptor and can poll instead.
+max_rebuild_seconds = 15
+# Explicit wiki_code_index budget. A full rebuild of this repository measures
+# around 75 s, so this leaves room for a cold parse plus publication.
+max_full_rebuild_seconds = 300
 max_file_bytes = 1000000
 max_total_files = 20000
 include_tests = false
