@@ -529,6 +529,22 @@ own answer; a call that detached reads only the job, so `failed` there is what t
 the published graph is still the previous revision. `publish_mode = "sqlite"` publishes
 nothing beyond the build itself, and its job is `ready` whenever the build was.
 
+A waiting call's own `state` keeps describing the local snapshot, which really is `ready`
+when the build finished, so the answer says the publication failed rather than leaving
+you to infer it from `job`: it carries `publication_failed` in `warnings` alongside the
+`publication` result and the `failed` job. Treat that warning, not `state`, as the answer
+to "did my snapshot reach the target".
+
+One known limit follows from the build owning its publication. While a build runs the
+session stays alive — that is what keeps the job handle readable — and the publication is
+part of the build, so a target that stops answering holds the process open for as long as
+the transport lets it. There is no separate publication deadline: `mcp` bounds every
+remote call at a 30-second connect and 300-second read timeout, and `postgres` at the
+server's configured `statement_timeout_ms` (at most 300 seconds), so the worst case is
+those per-call bounds multiplied by the number of batches a snapshot needs, not an
+indefinite hang. A stuck publication is visible as a job that stays `running` long after
+its build's phases stopped advancing.
+
 Pass the handle you hold back as `wiki_code_status(job_id=…)` and the answer describes
 that build and no other, so a later build — a query-time auto-rebuild, say — cannot take
 over the report underneath you. Called without `job_id` the answer reports the domain's
