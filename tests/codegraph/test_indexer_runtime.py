@@ -4171,6 +4171,18 @@ def test_attached_descriptor_reports_progress_only_while_running(monkeypatch):
         assert live_answer["job"]["phases_done"] == list(
             live.control.phases_done
         )
+        # Naming the running build is the polling loop's own call, and it
+        # must reach the live job rather than fall through to the terminal
+        # history, which cannot hold a build that has not ended.
+        by_id = attach_job(key, live.job_id, {"state": "rebuilding"})
+        assert by_id["job"] == live_answer["job"]
+        assert "job_unknown" not in by_id.get("warnings", [])
+        # The same id is still nobody else's business.
+        elsewhere = attach_job(
+            ("/tmp/base", "notes"), live.job_id, {"state": "ready"}
+        )
+        assert "job" not in elsewhere
+        assert "job_unknown" in elsewhere["warnings"]
     finally:
         release.set()
         registry.join(timeout=5)
