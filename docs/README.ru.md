@@ -511,9 +511,10 @@ graph configuration is invalid", "code": "invalid_config", "field": "wait_second
 "rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for this
 job"}`, а build продолжает работать без отмены. Если параметр не передан — по
 умолчанию, и именно так вызывали до появления этой функции — дедлайн ожидания
-совпадает с собственным дедлайном build, поэтому build, всё ещё выполняющийся к этому
-моменту, отвечает `busy`; единственное отличие от прежнего поведения в том, что build
-за этим ответом `busy` больше не отменяется. Опрашивайте `wiki_code_status`, чей ответ
+совпадает с собственным дедлайном build. Build, всё ещё выполняющийся к этому моменту,
+отвечает `busy` — кроме случая, когда он уже вошёл в publication: тогда ответом всё
+равно будет дескриптор `{"state": "rebuilding", …, "job": {...}}`. Единственное отличие
+от прежнего поведения в том, что build за этим ответом `busy` больше не отменяется. Опрашивайте `wiki_code_status`, чей ответ
 несёт тот же дескриптор `job` (`id`, `state`, `started_at` и `finished_at` после
 завершения, а также `phase`/`phases_done`, пока состояние `running`), пока job не
 достигнет `ready` или `failed` — но job привязан к сессии сервера, так что новый
@@ -540,7 +541,7 @@ schema-v1 несовместим и заменяется детерминиро�
 | Инструмент | Контракт |
 | --- | --- |
 | `wiki_code_status` | Возвращает настройку, состояние, freshness и diagnostics локального кэша, а также дескриптор `job`, пока build выполняется или только что завершился. |
-| `wiki_code_index` | Запрашивает полный rebuild для настроенных `languages`; `force` может перестроить уже current кэш. `wait_seconds` (передайте `0` для немедленного дескриптора job) ограничивает, сколько вызов ждёт build, никогда его не отменяя: ответ — `rebuilding` с дескриптором `job`, если `wait_seconds < max_full_rebuild_seconds`, или `busy`, если параметр не передан (по умолчанию) и build всё ещё выполняется к своему собственному дедлайну. |
+| `wiki_code_index` | Запрашивает полный rebuild для настроенных `languages`; `force` может перестроить уже current кэш. `wait_seconds` (передайте `0` для немедленного дескриптора job) ограничивает, сколько вызов ждёт build, никогда его не отменяя: ответ — `rebuilding` с дескриптором `job`, если `wait_seconds < max_full_rebuild_seconds`; если параметр не передан (по умолчанию) и build всё ещё выполняется к своему собственному дедлайну — `busy`, когда он не вошёл в publication, и тот же дескриптор `rebuilding`, когда вошёл. |
 | `wiki_code_search` | Ищет typed file, module и symbol entities с optional kind, path, language и limit filters. |
 | `wiki_code_context` | Расширяет точные typed entity-ID `seeds` через bounded relations; source по умолчанию выключен. |
 

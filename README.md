@@ -510,9 +510,11 @@ The answer at expiry depends on how long you waited. When `wait_seconds` is less
 `{"state": "rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for
 this job"}` and the build keeps running, uncancelled. Omitting `wait_seconds` — the
 default, and what every caller used before this feature existed — makes the wait
-deadline equal the build's own deadline, so a build still running when that deadline
-arrives answers `busy` instead; the only change from before this feature is that the
-build underneath that `busy` answer is no longer cancelled. Poll `wiki_code_status`,
+deadline equal the build's own deadline. A build still running when that deadline
+arrives answers `busy`, unless it has already entered publication, in which case it
+still gets the `{"state": "rebuilding", …, "job": {...}}` descriptor; the only change
+from before this feature is that the build underneath that `busy` answer is no longer
+cancelled. Poll `wiki_code_status`,
 whose answer carries the same `job` descriptor (`id`, `state`, `started_at`, and
 `finished_at` once terminal, plus `phase`/`phases_done` while still `running`) until the
 job reaches `ready` or `failed` — but the job is session-scoped, so a new process (a
@@ -539,7 +541,7 @@ documented under distributed publication below:
 | Tool | Contract |
 | --- | --- |
 | `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished. |
-| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` (pass `0` for an immediate job handle) bounds how long the call waits for that build without ever cancelling it: the answer is `rebuilding` with a `job` descriptor when `wait_seconds < max_full_rebuild_seconds`, or `busy` when omitted (the default) and the build is still running at its own deadline. |
+| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` (pass `0` for an immediate job handle) bounds how long the call waits for that build without ever cancelling it: the answer is `rebuilding` with a `job` descriptor when `wait_seconds < max_full_rebuild_seconds`, or, when omitted (the default), `busy` if the build is still running at its own deadline without having entered publication — and the `rebuilding` descriptor if it has. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
 
