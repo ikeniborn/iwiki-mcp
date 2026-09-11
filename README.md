@@ -543,7 +543,9 @@ The descriptor does not depend on `code_graph.read_mode`. The build belongs to t
 process, not to the snapshot a reader answered from, so a local server reports it whether
 reads come from the local SQLite cache (`sqlite`) or from a published snapshot over MCP
 (`mcp`). A hosted PostgreSQL server runs no local build — `wiki_code_index` answers
-`source_unavailable` there — and its `wiki_code_status` carries no `job`.
+`source_unavailable` there — and its `wiki_code_status` carries no `job`; it issues no
+handles either, so a `job_id` presented to it is unknown by construction and answers
+`job_unknown` exactly as a local server does for an id it never issued.
 
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
@@ -563,7 +565,7 @@ documented under distributed publication below:
 
 | Tool | Contract |
 | --- | --- |
-| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished — under every `read_mode`. Optional `job_id` reports that one build instead of the domain's current one; an unknown id answers normally with `job_unknown` in `warnings`. |
+| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished. A local server reports the job whichever reader `read_mode` selected; a hosted PostgreSQL server runs no build and carries none. Optional `job_id` reports that one build instead of the domain's current one; an id this server does not know answers normally with `job_unknown` in `warnings`. |
 | `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` (pass `0` for an immediate job handle) bounds how long the call waits for that build without ever cancelling it: the answer is `rebuilding` with a `job` descriptor when `wait_seconds < max_full_rebuild_seconds`, or, when omitted (the default), `busy` if the build is still running at its own deadline without having entered publication — and the `rebuilding` descriptor if it has. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
