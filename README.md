@@ -519,6 +519,16 @@ whose answer carries the same `job` descriptor (`id`, `state`, `started_at`, and
 `finished_at` once terminal, plus `phase`/`phases_done` while still `running`) until the
 job reaches `ready` or `failed`.
 
+The build publishes its own snapshot, whether or not you are still waiting for it: under
+`publish_mode = "postgres"` or `"mcp"` a detached build activates the remote snapshot
+itself, as the last thing it does before reporting a terminal state. The job's state is
+therefore the publication's state too — a build that indexed but could not publish ends
+`failed`, not `ready`, even though the local snapshot it produced is complete. A call
+that waited for its build still gets the publication result under `publication` in its
+own answer; a call that detached reads only the job, so `failed` there is what tells you
+the published graph is still the previous revision. `publish_mode = "sqlite"` publishes
+nothing beyond the build itself, and its job is `ready` whenever the build was.
+
 Pass the handle you hold back as `wiki_code_status(job_id=…)` and the answer describes
 that build and no other, so a later build — a query-time auto-rebuild, say — cannot take
 over the report underneath you. Called without `job_id` the answer reports the domain's
