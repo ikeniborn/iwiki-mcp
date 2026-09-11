@@ -517,14 +517,30 @@ from before this feature is that the build underneath that `busy` answer is no l
 cancelled. Poll `wiki_code_status`,
 whose answer carries the same `job` descriptor (`id`, `state`, `started_at`, and
 `finished_at` once terminal, plus `phase`/`phases_done` while still `running`) until the
-job reaches `ready` or `failed` — but the job is session-scoped, so a new process (a
-server restart, a fresh stdio connection) reports no `job` key at all; a poller must fall
-back to `state`/`fresh` rather than wait forever for a terminal job that no longer exists
-in that process. Within one process the `job` key reports the build running now, and the
-last one that finished when none is running — a single build at a time, so always check
-the `id` against the handle you hold: a different `id` means another build (a query-time
-auto-rebuild, say) has since taken over the report, and your own build's outcome is no
-longer what the answer describes. Fall back to `state`/`fresh` there too.
+job reaches `ready` or `failed`.
+
+Pass the handle you hold back as `wiki_code_status(job_id=…)` and the answer describes
+that build and no other, so a later build — a query-time auto-rebuild, say — cannot take
+over the report underneath you. Called without `job_id` the answer reports the domain's
+current build: the one running now, and the last one that finished when none is running.
+A single build runs at a time, so when you poll without the handle, always check the
+returned `id` against the one you hold — a different `id` means your own build's outcome
+is no longer what the answer describes.
+
+The job is session-scoped either way. A new process (a server restart, a fresh stdio
+connection) knows no build and reports no `job` key at all, and neither does a `job_id`
+that has aged out of the process's bounded history of recent builds (16, shared across
+every domain that process builds for) — an unknown id is not an error, so the answer
+keeps its normal shape and adds `job_unknown` to its `warnings`. Fall back to
+`state`/`fresh` in both cases rather than wait forever for a terminal job that no longer
+exists in that process. An answer that carries `error` never carries a `job`: the error
+describes the graph, not the build.
+
+The descriptor does not depend on `code_graph.read_mode`. The build belongs to this
+process, not to the snapshot a reader answered from, so a local server reports it whether
+reads come from the local SQLite cache (`sqlite`) or from a published snapshot over MCP
+(`mcp`). A hosted PostgreSQL server runs no local build — `wiki_code_index` answers
+`source_unavailable` there — and its `wiki_code_status` carries no `job`.
 
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
@@ -544,7 +560,7 @@ documented under distributed publication below:
 
 | Tool | Contract |
 | --- | --- |
-| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished. |
+| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished — under every `read_mode`. Optional `job_id` reports that one build instead of the domain's current one; an unknown id answers normally with `job_unknown` in `warnings`. |
 | `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` (pass `0` for an immediate job handle) bounds how long the call waits for that build without ever cancelling it: the answer is `rebuilding` with a `job` descriptor when `wait_seconds < max_full_rebuild_seconds`, or, when omitted (the default), `busy` if the build is still running at its own deadline without having entered publication — and the `rebuilding` descriptor if it has. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
