@@ -545,12 +545,21 @@ publication is attempted, and the failure is a `publication_failed` one (`exit 1
 One known limit follows from the build owning its publication. While a build runs the
 session stays alive — that is what keeps the job handle readable — and the publication is
 part of the build, so a target that stops answering holds the process open for as long as
-the transport lets it. There is no separate publication deadline: `mcp` bounds every
-remote call at a 30-second connect and 300-second read timeout, and `postgres` at the
-server's configured `statement_timeout_ms` (at most 300 seconds), so the worst case is
-those per-call bounds multiplied by the number of batches a snapshot needs, not an
-indefinite hang. A stuck publication is visible as a job that stays `running` long after
-its build's phases stopped advancing.
+its transport allows. Local reads are not held with it: once the graph is written the
+build stops counting as a rebuild, so `wiki_code_status` and `wiki_code_search` answer
+from the finished local snapshot throughout the publication.
+
+There is no separate publication deadline, and the two targets are bounded differently.
+`mcp` bounds every remote call at a 30-second connect and 300-second read timeout, so
+its worst case is those per-call bounds times the number of batches a snapshot needs.
+`postgres` has no timeout of its own on this path: the publication connects over a DSN
+carrying no timeout option and sets only a lock timeout, so a database that accepts the
+connection and then stops answering blocks the publication indefinitely. That path is
+reached only by the one-shot `iwiki-mcp code publish` — `wiki_code_index` answers
+`source_unavailable` on a PostgreSQL binding — so it hangs that command rather than an
+MCP session, and it was equally unbounded before the publication moved into the build.
+A stuck publication is visible as a job that stays `running` long after its build's
+phases stopped advancing; ending the client process ends it.
 
 Pass the handle you hold back as `wiki_code_status(job_id=…)` and the answer describes
 that build and no other, so a later build — a query-time auto-rebuild, say — cannot take
