@@ -21,6 +21,7 @@ from iwiki_mcp.codegraph.linking import WikiSelectorResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.runtime import (
+    _BUILD_WORKERS,
     CodeGraphRuntime,
     shutdown_code_graph_workers,
 )
@@ -487,11 +488,27 @@ def seed_binding(tmp_path):
     )
 
 
+def _reset_build_worker_registry() -> None:
+    """Drop live workers and the process-global terminal job history.
+
+    The history is bounded and shared across every domain a process builds
+    for, and `_evict_locked` prefers evicting from a domain that holds more
+    than one snapshot. Snapshots left behind by earlier tests therefore fill
+    the cap and make the *second* build of the test currently running evict
+    that test's own first one -- so a test that asks for a superseded build
+    by id passes alone and fails in a full run. Clear it so each test owns
+    its registry.
+    """
+    shutdown_code_graph_workers(timeout=5)
+    with _BUILD_WORKERS._lock:
+        _BUILD_WORKERS._terminal.clear()
+
+
 @pytest.fixture(autouse=True)
 def reset_code_graph_worker_registry():
-    shutdown_code_graph_workers(timeout=5)
+    _reset_build_worker_registry()
     yield
-    shutdown_code_graph_workers(timeout=5)
+    _reset_build_worker_registry()
 
 
 @pytest.fixture

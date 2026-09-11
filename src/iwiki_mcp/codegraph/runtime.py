@@ -455,6 +455,84 @@ class _BuildWorkerRegistry:
 _BUILD_WORKERS = _BuildWorkerRegistry()
 
 
+def worker_domain_key(binding: CodeGraphSource) -> tuple[str, str]:
+    """Derive the build registry's key for one bound domain.
+
+    A build belongs to the wiki base it publishes into and the primary
+    domain it indexes, so the tool layer can name the very job a runtime
+    started without holding -- or rebuilding -- that runtime.
+    """
+    return (str(Path(binding.base).absolute()), binding.primary or "")
+
+
+def _resolve_job(
+    domain_key: tuple[str, str], job_id: str | None
+) -> _BuildJob | _JobSnapshot | None:
+    """Find the job an answer should describe, by id or by domain.
+
+    Without an id the domain's current job answers: the live one while a
+    build runs, its newest terminal snapshot afterwards. With an id only
+    that build answers -- the history first, because a finished build has
+    left the live slot and whatever occupies it now is someone else's.
+    """
+    if job_id is None:
+        return _BUILD_WORKERS.current(domain_key)
+    remembered = _BUILD_WORKERS.terminal_by_id(job_id)
+    if remembered is not None:
+        return remembered
+    live = _BUILD_WORKERS.current(domain_key)
+    return live if live is not None and live.job_id == job_id else None
+
+
+def _warned(status: dict[str, object], warning: str) -> dict[str, object]:
+    """Add one warning without mutating the reader's own answer."""
+    existing = status.get("warnings")
+    warnings = list(existing) if isinstance(existing, list) else []
+    if warning not in warnings:
+        warnings.append(warning)
+    return {**status, "warnings": warnings}
+
+
+def attach_job(
+    domain_key: tuple[str, str],
+    job_id: str | None,
+    status: dict[str, object],
+) -> dict[str, object]:
+    """Attach this process's job descriptor to a non-error status answer.
+
+    Lives at the tool layer rather than inside any one reader: the job is a
+    fact about this process, not about the snapshot a `read_mode` selected,
+    so `wiki_code_status` answers with it whichever reader produced
+    `status`. An error answer explains why the graph cannot be read;
+    attaching a job to it would wrongly suggest the error belongs to that
+    job, and here -- above every branch that merges an error onto a status
+    -- is the one place that invariant can actually hold.
+
+    A named `job_id` that nothing knows is not an error: it may simply have
+    aged out of the bounded history, and the graph status the caller also
+    asked for is still valid. The answer keeps its shape, carries no job,
+    and says so with `job_unknown`.
+    """
+    if "error" in status:
+        return status
+    job = _resolve_job(domain_key, job_id)
+    if job is None:
+        return status if job_id is None else _warned(status, "job_unknown")
+    descriptor = job.describe()
+    # Read `state` once from the descriptor rather than re-reading
+    # `job.state`: the worker can finish between the two reads, and a
+    # second, later read could see "ready" after `describe()` already
+    # captured "running" -- leaving `phase`/`phases_done` off an answer
+    # that still claims `state: "running"`, a shape the README promises
+    # cannot occur. The same read is what keeps `control` a live-job-only
+    # attribute: a terminal snapshot never describes itself as running,
+    # and owns no `control` to read.
+    if descriptor["state"] == "running":
+        descriptor["phase"] = job.control.phase
+        descriptor["phases_done"] = list(job.control.phases_done)
+    return {**status, "job": descriptor}
+
+
 def explicit_job_active() -> bool:
     """Report whether an explicit `wiki_code_index` job is still running.
 
@@ -531,7 +609,7 @@ def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
 def _rebuilding_job_answer(job: _BuildJob) -> dict[str, object]:
     """Answer a caller whose wait ended while its build kept running."""
     descriptor = job.describe()
-    # Same single-read gate `_with_job` applies: progress fields belong to a
+    # Same single-read gate `attach_job` applies: progress fields belong to a
     # running descriptor only. The worker publishes terminality from inside
     # its own `finally`, while its thread is still alive, so this is reachable
     # for a caller whose wait expires in that window -- and `phase` beside a
@@ -678,10 +756,7 @@ class CodeGraphRuntime:
         self._configuration_error: CodeGraphConfigError | None = None
         self._initialization_error = False
         self._unsafe_location = False
-        self._worker_domain_key = (
-            str(Path(binding.base).absolute()),
-            binding.primary or "",
-        )
+        self._worker_domain_key = worker_domain_key(binding)
         self._parser_version = ""
         self._grammar_version = ""
         self._adapter_version = ""
@@ -1119,39 +1194,20 @@ class CodeGraphRuntime:
         )
         return header, rows
 
-    def _with_job(self, status: dict[str, object]) -> dict[str, object]:
-        """Attach this process's job descriptor to a non-error status answer.
-
-        An error answer explains why the graph cannot be read; attaching a
-        job descriptor to it would wrongly suggest the error belongs to
-        that job, so only an answer carrying no `error` key gets one.
-        """
-        if "error" in status:
-            return status
-        job = _BUILD_WORKERS.current(self._worker_domain_key)
-        if job is None:
-            return status
-        descriptor = job.describe()
-        # Read `state` once from the descriptor rather than re-reading
-        # `job.state`: the worker can finish between the two reads, and a
-        # second, later read could see "ready" after `describe()` already
-        # captured "running" -- leaving `phase`/`phases_done` off an answer
-        # that still claims `state: "running"`, a shape the README promises
-        # cannot occur. The same read is what keeps `control` a live-job-only
-        # attribute: a terminal snapshot never describes itself as running.
-        if descriptor["state"] == "running":
-            descriptor["phase"] = job.control.phase
-            descriptor["phases_done"] = list(job.control.phases_done)
-        return {**status, "job": descriptor}
-
     def status(self) -> dict[str, object]:
-        """Read metadata and compatible schema only; never discover or parse."""
+        """Read metadata and compatible schema only; never discover or parse.
+
+        The answer describes the graph and nothing else. The build job that
+        may be running behind it is attached above, by `wiki_code_status`
+        (`attach_job`), so every `read_mode` reports it alike and no branch
+        that merges an error onto a status can carry a job with it.
+        """
         unavailable = self._unavailable()
         if unavailable is not None:
-            return self._with_job({
+            return {
                 **unavailable,
                 "enabled": unavailable.get("code") != "not_configured",
-            })
+            }
         assert self.paths is not None and self._store is not None
         normalization_versions = self._normalization_versions()
         for _attempt in range(4):
@@ -1167,11 +1223,11 @@ class CodeGraphRuntime:
                     )
                     after = dict(_metadata(self.paths.metadata))
             except Timeout:
-                return self._with_job(self._shared_rebuilding_status(
+                return self._shared_rebuilding_status(
                     before, normalization_versions
-                ))
+                )
             except CodeGraphStoreError:
-                return self._with_job(self._store_failure_status())
+                return self._store_failure_status()
             if locked_metadata != after:
                 continue
             if "error" in status:
@@ -1181,18 +1237,18 @@ class CodeGraphRuntime:
                 _pending_final_verify(after)
             ):
                 if self._local_build_active():
-                    return self._with_job(self._with_rebuilding_state(
+                    return self._with_rebuilding_state(
                         status, shared_writer=True
-                    ))
+                    )
                 try:
                     recovered = self._recover_stale_metadata(after)
                 except CodeGraphStoreError:
-                    return self._with_job(self._store_failure_status())
+                    return self._store_failure_status()
                 if recovered:
                     continue
-                return self._with_job(self._with_rebuilding_state(
+                return self._with_rebuilding_state(
                     status, shared_writer=True
-                ))
+                )
             if metadata_state == "failed":
                 failed = {
                     **status,
@@ -1206,7 +1262,7 @@ class CodeGraphRuntime:
                 }
                 failed.pop("duration_ms", None)
                 failed.pop("phase_timings_ms", None)
-                return self._with_job(failed)
+                return failed
             metadata_revision = after.get("revision")
             if (
                 metadata_state == "ready"
@@ -1214,7 +1270,7 @@ class CodeGraphRuntime:
                 and status.get("revision") != metadata_revision
             ):
                 continue
-            return self._with_job(status)
+            return status
         metadata = dict(_metadata(self.paths.metadata))
         try:
             with code_graph_read_lock(self.paths.lock):
@@ -1224,33 +1280,33 @@ class CodeGraphRuntime:
                     normalization_versions=normalization_versions,
                 )
         except Timeout:
-            return self._with_job(self._shared_rebuilding_status(
+            return self._shared_rebuilding_status(
                 metadata, normalization_versions
-            ))
+            )
         except CodeGraphStoreError:
-            return self._with_job(self._store_failure_status())
+            return self._store_failure_status()
         metadata = current
         if (
             metadata.get("state") in {"rebuilding", "recovering"}
             or _pending_final_verify(metadata)
         ):
             if self._local_build_active():
-                return self._with_job(
-                    self._with_rebuilding_state(status, shared_writer=True)
+                return self._with_rebuilding_state(
+                    status, shared_writer=True
                 )
             try:
                 recovered = self._recover_stale_metadata(metadata)
             except CodeGraphStoreError:
-                return self._with_job(self._store_failure_status())
+                return self._store_failure_status()
             if recovered:
-                return self._with_job(self._read_status(
+                return self._read_status(
                     persisted_metadata=_metadata(self.paths.metadata),
                     normalization_versions=normalization_versions,
-                ))
-            return self._with_job(self._with_rebuilding_state(
+                )
+            return self._with_rebuilding_state(
                 status, shared_writer=True
-            ))
-        return self._with_job(status)
+            )
+        return status
 
     def _shared_rebuilding_status(
         self,

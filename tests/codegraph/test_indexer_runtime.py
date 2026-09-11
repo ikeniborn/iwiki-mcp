@@ -40,7 +40,9 @@ from iwiki_mcp.codegraph.runtime import (
     _BUILD_WORKERS,
     _BuildJob,
     CodeGraphRuntime,
+    attach_job,
     explicit_job_active,
+    worker_domain_key,
 )
 from iwiki_mcp.codegraph.query import CodeGraphQuery, CodeGraphQueryError
 from iwiki_mcp.codegraph.schema import (
@@ -2527,7 +2529,7 @@ def test_describe_never_reports_a_terminal_state_without_a_timestamp(
     """The mirror of the race above, and just as reachable.
 
     `describe()` decides its whole answer on one unsynchronised read of
-    `terminal`, and `_with_job` -- i.e. `wiki_code_status` -- holds the live
+    `terminal`, and `attach_job` -- i.e. `wiki_code_status` -- holds the live
     job after `current()` has released the registry lock. If `finish()` wrote
     the job's own `state` before publishing the snapshot, a reader landing in
     between would take the running branch and emit a terminal `state` with no
@@ -2697,7 +2699,7 @@ def test_eviction_spares_a_domains_last_remaining_answer():
 
 
 def test_rebuilding_answer_omits_progress_once_the_job_is_terminal():
-    """`phase` beside a terminal `state` is the shape `_with_job` forbids.
+    """`phase` beside a terminal `state` is the shape `attach_job` forbids.
 
     Reachable because the worker publishes terminality from inside its own
     `finally`, while its thread is still alive -- exactly the condition under
@@ -4067,15 +4069,113 @@ def test_adding_javascript_changes_the_configured_language_fingerprint():
     assert without != with_js
 
 
-def test_status_carries_the_terminal_job(seed_runtime):
+def test_attaching_the_terminal_job_to_a_status_answer(seed_runtime):
+    """`status()` is the reader's answer; the tool layer attaches the job.
+
+    The runtime no longer decorates its own status, so a job descriptor
+    reaches a caller only through `attach_job` -- which is what
+    `wiki_code_status` calls whatever `read_mode` selected the reader.
+    """
     runtime = seed_runtime
     built = runtime.index(force=True)
 
     assert built["state"] == "ready"
     status = runtime.status()
-    assert status["job"]["state"] == "ready"
-    assert status["job"]["id"] == built["job"]["id"]
-    assert "finished_at" in status["job"]
+    assert "job" not in status
+    attached = attach_job(
+        worker_domain_key(runtime.binding), None, status
+    )
+    assert attached["job"]["state"] == "ready"
+    assert attached["job"]["id"] == built["job"]["id"]
+    assert "finished_at" in attached["job"]
+
+
+def test_query_guard_error_answer_carries_no_job(seed_runtime):
+    """F3: the invariant belongs where the error is known -- not below it.
+
+    `query_guard` merges `error`/`code` onto a status answer, so as long as
+    `status()` attached the job itself the guard produced exactly the shape
+    "a job is never attached to an error answer" forbids.
+    """
+    runtime = seed_runtime.with_state("failed")
+
+    status = runtime.status()
+    answer = runtime.query_guard()
+
+    # The domain does have a job to attach -- the build `with_state` ran.
+    assert _BUILD_WORKERS.current(
+        worker_domain_key(runtime.binding)
+    ) is not None
+    assert "error" not in status
+    assert "error" in answer
+    assert "job" not in answer
+
+
+def test_attached_descriptor_reports_progress_only_while_running(monkeypatch):
+    """Ruling 5: the `running` guard moved with the attachment.
+
+    A terminal answer comes from a `_JobSnapshot`, which owns no `control`
+    at all -- reading progress off it would raise rather than degrade, so
+    the single `state` read from the descriptor is what keeps the terminal
+    branch from touching it.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    monkeypatch.setattr(runtime_module, "_BUILD_WORKERS", registry)
+    key = ("/tmp/base", "docs")
+    release = threading.Event()
+    running_now = threading.Event()
+
+    def blocking_target(control, result):
+        running_now.set()
+        assert release.wait(timeout=5)
+        result["state"] = "ready"
+
+    live, started = registry.start(
+        key,
+        blocking_target,
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    assert running_now.wait(timeout=5)
+    try:
+        live_answer = attach_job(key, None, {"state": "rebuilding"})
+        assert live_answer["job"]["state"] == "running"
+        assert live_answer["job"]["phase"] == live.control.phase
+        assert live_answer["job"]["phases_done"] == list(
+            live.control.phases_done
+        )
+    finally:
+        release.set()
+        registry.join(timeout=5)
+
+    snapshot = registry.terminal_by_id(live.job_id)
+    assert snapshot is not None
+    assert not hasattr(snapshot, "control")
+    terminal_answer = attach_job(key, None, {"state": "ready"})
+    assert terminal_answer["job"]["state"] == "ready"
+    assert "phase" not in terminal_answer["job"]
+    assert "phases_done" not in terminal_answer["job"]
+
+
+def test_attach_job_leaves_an_error_answer_alone(monkeypatch):
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    monkeypatch.setattr(runtime_module, "_BUILD_WORKERS", registry)
+    key = ("/tmp/base", "docs")
+    job = _run_to_completion(registry, key)
+
+    failure = {"error": "code graph is busy", "code": "busy"}
+    assert attach_job(key, None, failure) == failure
+    # Not even a named id reaches an error answer -- and no `job_unknown`
+    # warning is invented for one either.
+    assert attach_job(key, job.job_id, failure) == failure
+    assert attach_job(key, "0" * 16, failure) == failure
 
 
 def test_out_of_range_wait_seconds_is_refused(seed_runtime):

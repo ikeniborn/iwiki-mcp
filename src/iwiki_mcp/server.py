@@ -1754,9 +1754,34 @@ def _code_publication_service(binding):
     )
 
 
+_CodeJobId = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Optional build handle: the `job.id` a previous `wiki_code_index` "
+            "answer returned. Omit it to report the domain's current build -- "
+            "the one running now, or the last one that finished. Supplied, the "
+            "answer describes that build and no other, so a poller is not "
+            "misled by a later build that took over the report. An id this "
+            "process does not know (never issued, or aged out of its bounded "
+            "history) is not an error: the graph status is returned as usual "
+            "with no `job` key and `job_unknown` in `warnings`."
+        )
+    ),
+]
+
+
 @_safe
 @_code_safe
-def wiki_code_status() -> dict:
+def wiki_code_status(job_id: _CodeJobId = None) -> dict:
+    """Report the code graph's state, plus this process's build job.
+
+    The job is attached here rather than inside a reader: `code_graph.read_mode`
+    decides which reader answers, but the build belongs to this process either
+    way, so a poller sees the same `job` descriptor under every mode. The
+    hosted PostgreSQL branch below is a server where `wiki_code_index` answers
+    `source_unavailable` and no local build can exist, so it gets none.
+    """
     bind = _resolved_binding()
     if _is_postgres(bind):
         if _code_binding_blocked():
@@ -1766,7 +1791,13 @@ def wiki_code_status() -> dict:
         return _defaulted_scope_answer(_postgres_code_reader(bind).status())
     if bind.primary is None:
         return _missing_code_primary()
-    return _codegraph_application.code_reader(bind).status()
+    return _codegraph_runtime.attach_job(
+        _codegraph_runtime.worker_domain_key(
+            _codegraph_application.source_context(bind)
+        ),
+        job_id,
+        _codegraph_application.code_reader(bind).status(),
+    )
 
 
 @_safe

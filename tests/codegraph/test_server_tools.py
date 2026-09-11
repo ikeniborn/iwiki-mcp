@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from importlib.metadata import version
+import json
 from pathlib import Path
 import sqlite3
 import time
@@ -860,7 +861,13 @@ async def test_fastmcp_registry_has_exact_code_tools():
     assert set(
         tools["wiki_code_refresh_links"].inputSchema["properties"]
     ) == {"domain"}
-    assert set(tools["wiki_code_status"].inputSchema.get("properties", {})) == set()
+    # A new parameter is not a new tool: the job handle is optional and the
+    # schema has to say what it is, since the answer never repeats it.
+    status_properties = tools["wiki_code_status"].inputSchema["properties"]
+    assert set(status_properties) == {"job_id"}
+    assert status_properties["job_id"]["default"] is None
+    assert "wiki_code_index" in status_properties["job_id"]["description"]
+    assert "job_unknown" in status_properties["job_id"]["description"]
     assert set(tools["wiki_code_index"].inputSchema["properties"]) == {
         "force", "languages", "wait_seconds",
     }
@@ -1246,3 +1253,113 @@ def test_sqlite_read_mode_keeps_every_read_answer_byte_identical(
     assert answers() == default
     assert default[0]["state"] == "ready"
     assert default[1]["results"] and default[2]["nodes"]
+
+
+class _FakeRemoteResult:
+    def __init__(self, payload):
+        self.content = [
+            type("Text", (), {"type": "text", "text": json.dumps(payload)})()
+        ]
+        self.isError = False
+
+
+class _FakeRemoteSession:
+    """Answer `wiki_code_status` from a published snapshot, like the remote."""
+
+    def __init__(self, status):
+        self.calls = []
+        self._status = status
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, name, arguments=None):
+        self.calls.append(name)
+        return _FakeRemoteResult(
+            self._status if name == "wiki_code_status" else {"state": "ready"}
+        )
+
+
+class _FakeRemoteConnection:
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+@pytest.fixture
+def remote_read_binding(seed_binding, monkeypatch):
+    """Bind the seed project with `read_mode = "mcp"` and a fake remote.
+
+    The same shape this repository's own `.iwiki.toml` uses: builds stay
+    local (`publish_mode` defaults to `sqlite`) while every read is answered
+    by `PublishedSnapshotReader`, which never goes through the runtime.
+    """
+    config = Path(seed_binding.project_dir) / ".iwiki.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + 'read_mode = "mcp"\n',
+        encoding="utf-8",
+    )
+    session = _FakeRemoteSession({"state": "ready", "fresh": True})
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MCP_URL", "https://wiki.example/mcp")
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MCP_TOKEN", "fixture-not-a-real-token")
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.mcp_adapter._official_session",
+        lambda url, headers: _FakeRemoteConnection(session),
+    )
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    return session
+
+
+def test_status_carries_the_job_under_a_remote_read_mode(remote_read_binding):
+    """F2: the job must survive a reader that is not the local runtime.
+
+    `read_mode = "mcp"` answers from the published snapshot, so the runtime
+    that started the build never sees the status answer. Attaching the job
+    below that seam made the documented polling loop non-terminating for
+    exactly the configuration this repository ships.
+    """
+    built = server.wiki_code_index(force=True)
+    assert built["state"] == "ready"
+
+    answer = server.wiki_code_status()
+
+    # The answer is the remote's, not the local runtime's.
+    assert remote_read_binding.calls.count("wiki_code_status") == 1
+    assert answer["state"] == "ready"
+    assert answer["fresh"] is True
+    assert answer["job"]["id"] == built["job"]["id"]
+    assert answer["job"]["state"] == "ready"
+    assert "finished_at" in answer["job"]
+
+
+def test_status_job_id_answers_about_a_superseded_build(remote_read_binding):
+    """F7 residue: a handle must outlive the build that replaced it."""
+    first = server.wiki_code_index(force=True)
+    second = server.wiki_code_index(force=True)
+    assert first["job"]["id"] != second["job"]["id"]
+
+    latest = server.wiki_code_status()
+    mine = server.wiki_code_status(job_id=first["job"]["id"])
+
+    assert latest["job"]["id"] == second["job"]["id"]
+    assert mine["job"]["id"] == first["job"]["id"]
+    assert mine["job"]["state"] == "ready"
+    assert "job_unknown" not in mine.get("warnings", [])
+
+
+def test_unknown_job_id_warns_and_keeps_the_graph_answer(remote_read_binding):
+    """An aged-out id is not an error: the graph status is still valid."""
+    assert server.wiki_code_index(force=True)["state"] == "ready"
+
+    answer = server.wiki_code_status(job_id="0" * 16)
+
+    assert answer["state"] == "ready"
+    assert answer["fresh"] is True
+    assert "job" not in answer
+    assert "job_unknown" in answer["warnings"]
+    assert "error" not in answer
