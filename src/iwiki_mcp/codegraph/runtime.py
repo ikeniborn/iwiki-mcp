@@ -84,6 +84,42 @@ class CodeGraphSource(Protocol):
     primary: str | None
 
 
+class _JobSnapshot:
+    """Terminal record of a finished build, free of the job's object graph.
+
+    The registry remembers this instead of the finished `_BuildJob` so the
+    live slot can be cleared the moment a build ends: keeping the job would
+    pin its `control`, its `result` dict and the runtime that produced them
+    for the rest of a long-lived stdio session. It carries only what a poller
+    reads, and `thread` is `None` because a terminal record owns no worker.
+    """
+
+    thread: threading.Thread | None = None
+
+    def __init__(
+        self,
+        job: "_BuildJob",
+        *,
+        state: str,
+        finished_at: float,
+    ) -> None:
+        self.domain_key = job.domain_key
+        self.job_id = job.job_id
+        self.started_at = job.started_at
+        self.explicit = job.explicit
+        self.state = state
+        self.finished_at = finished_at
+
+    def describe(self) -> dict[str, object]:
+        """Return the frozen caller-visible descriptor for this finished job."""
+        return {
+            "id": self.job_id,
+            "state": self.state,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
+
 class _BuildJob:
     def __init__(
         self,
@@ -92,6 +128,7 @@ class _BuildJob:
         force: bool,
         languages: list[str] | None,
         explicit: bool,
+        build_deadline: float,
     ) -> None:
         self.domain_key = domain_key
         self.job_id = secrets.token_hex(8)
@@ -101,9 +138,15 @@ class _BuildJob:
         self.force = force
         self.languages = None if languages is None else tuple(languages)
         self.explicit = explicit
+        # The monotonic deadline this build was started with. A caller that
+        # joined the job did not choose it, so every judgement about whether
+        # the *running* build can still publish must read it from here rather
+        # than from the joining caller's own budget.
+        self.build_deadline = build_deadline
         self.control = BuildControl()
         self.result: dict[str, object] = {}
         self.thread: threading.Thread | None = None
+        self.terminal: _JobSnapshot | None = None
 
     def matches(
         self, *, force: bool, languages: list[str] | None, explicit: bool
@@ -124,15 +167,24 @@ class _BuildJob:
         )
 
     def describe(self) -> dict[str, object]:
-        """Return the caller-visible descriptor for this job."""
-        described: dict[str, object] = {
+        """Return the caller-visible descriptor for this job.
+
+        One unsynchronised read of `terminal` decides the whole answer. The
+        registry publishes that snapshot under its lock, after the terminal
+        fields are already in place, so a descriptor is either wholly running
+        or wholly terminal. Reassembling it here from `state` and
+        `finished_at` instead would read two fields `finish()` writes in
+        sequence, and could emit a `running` job that already carries a
+        `finished_at`.
+        """
+        terminal = self.terminal
+        if terminal is not None:
+            return terminal.describe()
+        return {
             "id": self.job_id,
             "state": self.state,
             "started_at": self.started_at,
         }
-        if self.finished_at is not None:
-            described["finished_at"] = self.finished_at
-        return described
 
 
 class _BuildWorkerRegistry:
@@ -141,9 +193,20 @@ class _BuildWorkerRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._job: _BuildJob | None = None
+        # The last build that ended, kept as a small value after its job left
+        # the live slot. Starting a new build does not touch it, so a caller
+        # still holding the previous handle keeps a terminal answer to read.
+        self._terminal: _JobSnapshot | None = None
 
     def start(
-        self, domain_key, target, *, force=False, languages=None, explicit=False
+        self,
+        domain_key,
+        target,
+        *,
+        force=False,
+        languages=None,
+        explicit=False,
+        build_deadline: float,
     ):
         """Start a build, or join the live one that matches this request.
 
@@ -168,7 +231,11 @@ class _BuildWorkerRegistry:
                     return live, False
                 return None, False
             job = _BuildJob(
-                domain_key, force=force, languages=languages, explicit=explicit
+                domain_key,
+                force=force,
+                languages=languages,
+                explicit=explicit,
+                build_deadline=build_deadline,
             )
 
             def run() -> None:
@@ -200,12 +267,28 @@ class _BuildWorkerRegistry:
             return job, True
 
     def current(self, domain_key):
-        """Return the live or last terminal job for this domain, if any."""
+        """Return the live job for this domain, else its terminal snapshot.
+
+        A live job answers first because only it can report `phase` progress;
+        once it ends it leaves the slot and the snapshot it published keeps
+        answering in its place.
+        """
         with self._lock:
             job = self._job
-            if job is None or job.domain_key != domain_key:
+            if job is not None and job.domain_key == domain_key:
+                return job
+            terminal = self._terminal
+            if terminal is not None and terminal.domain_key == domain_key:
+                return terminal
+            return None
+
+    def terminal(self, domain_key) -> _JobSnapshot | None:
+        """Return the last finished build's snapshot, live build or not."""
+        with self._lock:
+            terminal = self._terminal
+            if terminal is None or terminal.domain_key != domain_key:
                 return None
-            return job
+            return terminal
 
     def explicit_job(self) -> _BuildJob | None:
         """Return the live job when an explicit build is running.
@@ -226,16 +309,23 @@ class _BuildWorkerRegistry:
         return job
 
     def finish(self, job: _BuildJob, state: str) -> None:
-        """Record a terminal state without dropping the job from the slot."""
+        """Record the terminal state, publish its snapshot, free the slot."""
         with self._lock:
-            if job.state == "running":
-                # `finished_at` must be visible before the state flip that
-                # reveals terminality: a reader obtained through `current()`
-                # reads both fields without the lock, so a concurrent reader
-                # must never observe a terminal `state` with `finished_at`
-                # still `None`.
-                job.finished_at = time.time()
-                job.state = state
+            if job.terminal is not None:
+                return
+            job.finished_at = time.time()
+            job.state = state
+            # Build the snapshot exactly once, here, while the lock is held:
+            # it is the only place a terminal answer is assembled, so no
+            # reader ever has to re-combine `state` with `finished_at`.
+            # Publishing it last also orders the job's own fields ahead of
+            # the single read `describe()` makes.
+            snapshot = _JobSnapshot(
+                job, state=state, finished_at=job.finished_at
+            )
+            job.terminal = snapshot
+            self._terminal = snapshot
+            self._release_locked(job)
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:
         with self._lock:
@@ -263,12 +353,22 @@ class _BuildWorkerRegistry:
             self.release(job)
 
     def release(self, job: _BuildJob) -> None:
-        """No-op kept for call-site compatibility.
+        """Drop a finished job from the live slot."""
+        with self._lock:
+            self._release_locked(job)
 
-        The terminal job now stays in the slot so `current()` can keep
-        reporting it after completion; Task 3 removes this method's
-        remaining callers.
+    def _release_locked(self, job: _BuildJob) -> None:
+        """Clear the live slot, but only for a job that has already ended.
+
+        Terminality is the condition rather than thread liveness: the worker
+        clears its own slot from inside its `finally`, where its thread is by
+        definition still alive, while a caller that merely gave up waiting
+        must never evict the build it is still waiting on. Once the slot is
+        clear nothing reaches the job's `control`, its `result`, or the
+        runtime behind them -- the terminal snapshot answers instead.
         """
+        if self._job is job and job.terminal is not None:
+            self._job = None
 
     def shutdown(self, timeout: float = 1.0) -> None:
         with self._lock:
@@ -959,7 +1059,8 @@ class CodeGraphRuntime:
         # second, later read could see "ready" after `describe()` already
         # captured "running" -- leaving `phase`/`phases_done` off an answer
         # that still claims `state: "running"`, a shape the README promises
-        # cannot occur.
+        # cannot occur. The same read is what keeps `control` a live-job-only
+        # attribute: a terminal snapshot never describes itself as running.
         if descriptor["state"] == "running":
             descriptor["phase"] = job.control.phase
             descriptor["phases_done"] = list(job.control.phases_done)
@@ -1253,6 +1354,7 @@ class CodeGraphRuntime:
                 force=force,
                 languages=languages,
                 explicit=not cancel_on_wait,
+                build_deadline=build_deadline,
             )
         except Exception:
             return _rebuild_failed()
@@ -1271,7 +1373,7 @@ class CodeGraphRuntime:
                 LOGGER.info("code_graph_build code=busy")
                 return self._busy_response()
             if (
-                time.monotonic() >= build_deadline
+                time.monotonic() >= job.build_deadline
                 and not job.control.publication_attempted.is_set()
             ):
                 # `enter_publication` refuses once the build deadline has
@@ -1282,6 +1384,12 @@ class CodeGraphRuntime:
                 # rather than `entered` keeps the observation monotone: the
                 # flag is set before the gate decides, so a build that goes on
                 # to publish is never mistaken for a doomed one.
+                #
+                # The deadline read here is the *running job's*, not this
+                # caller's: a caller that joined someone else's build carries
+                # its own, later budget, and judging by that would hand back a
+                # descriptor for a build already past the publication gate's
+                # cutoff -- a job that can only ever end busy or failed.
                 LOGGER.info("code_graph_build code=busy")
                 return self._busy_response()
             LOGGER.info("code_graph_build code=rebuilding job=%s", job.job_id)
