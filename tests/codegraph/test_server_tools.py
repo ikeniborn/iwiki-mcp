@@ -357,6 +357,10 @@ def test_wiki_code_index_returns_rebuilding_job_when_wait_expires_first(
     )
 
     answer = server.wiki_code_index(force=True, wait_seconds=0)
+    # Own the worker this test detached: left running it outlives the test
+    # file, and the build it carries would then race the next one for the
+    # single build slot.
+    runtime_module._BUILD_WORKERS.join(timeout=30)
 
     assert answer["state"] == "rebuilding"
     assert answer["fresh"] is False
