@@ -1535,6 +1535,47 @@ def test_worker_records_a_raised_publication_as_a_failed_job(
     assert "code_graph_publish code=publication_failed" in caplog.text
 
 
+def test_local_reads_are_served_while_the_snapshot_is_publishing(
+    seed_runtime,
+):
+    """R3/I1: publishing is not rebuilding, and the graph is readable.
+
+    Combination defect: the publication runs on the build worker, and every
+    local read consults the registry's liveness. Read as "a build is running"
+    it refuses `wiki_code_status` and `wiki_code_search` for the whole remote
+    publication -- minutes, on a large graph -- over a local snapshot that is
+    complete. The session must still be held open for that same window, which
+    is the other half of what the liveness answered before it was split.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    publishing = threading.Event()
+    release = threading.Event()
+
+    def blocking_publish() -> dict[str, object]:
+        publishing.set()
+        release.wait(20)
+        return {"state": "ready"}
+
+    out = runtime.index(force=True, wait_seconds=0, publish=blocking_publish)
+    assert publishing.wait(20)
+    during_status = runtime.status()
+    during_query = runtime.runtime.query_guard()
+    held_open = explicit_job_active()
+    release.set()
+    runtime.runtime.join_workers(timeout=30)
+    after_status = runtime.status()
+
+    assert out["state"] == "rebuilding"
+    # The local graph is finished and readable while the publication runs.
+    assert during_status["state"] == "ready"
+    assert during_status["fresh"] is True
+    assert "code_graph_rebuilding" not in during_status.get("warnings", [])
+    assert "error" not in during_query
+    # ... and the session that owns the job handle stays alive for it.
+    assert held_open is True
+    assert after_status["state"] == "ready"
+
+
 def test_a_cancelled_build_publishes_nothing(seed_runtime, monkeypatch):
     """R3/F1: only a build that produced a ready snapshot publishes.
 

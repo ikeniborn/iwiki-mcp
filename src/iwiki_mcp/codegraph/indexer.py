@@ -207,6 +207,15 @@ class BuildControl:
         self._publication_gate = threading.Lock()
         self._phase: str | None = None
         self._phases_done: list[str] = []
+        # Whether the build is still writing this domain's graph. It is
+        # cleared by whoever runs a post-build snapshot publication: by then
+        # the local graph is written, complete, and readable, and only work
+        # against a remote target remains. Two different questions are asked
+        # about a running build -- "is this graph being rebuilt?", which gates
+        # local reads, and "is work in flight?", which holds the session open
+        # -- and they stop coinciding exactly here. This answers the first;
+        # the worker thread's own liveness answers the second.
+        self.indexing = True
 
     @property
     def phase(self) -> str | None:

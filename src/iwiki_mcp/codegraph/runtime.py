@@ -436,17 +436,47 @@ class _BuildWorkerRegistry:
                     for job_id, snapshot in self._terminal.items()
                     if per_domain[snapshot.domain_key] > 1
                 ),
-                next(iter(self._terminal)),
+                None,
             )
+            if evicted is None:
+                # Only now, when no domain holds a spare: `next(iter(...))` as
+                # the default argument would be evaluated on every pass,
+                # including the common one the generator answers.
+                evicted = next(iter(self._terminal))
             del self._terminal[evicted]
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:
+        """Report whether a worker for this domain is still alive.
+
+        Thread liveness, publication included: the question asked by anything
+        that must not pre-empt a worker that still exists. Readers asking
+        whether the *graph* is being rewritten want `is_indexing`.
+        """
         with self._lock:
             return bool(
                 self._job is not None
                 and self._job.domain_key == domain_key
                 and self._job.thread is not None
                 and self._job.thread.is_alive()
+            )
+
+    def is_indexing(self, domain_key: tuple[str, str]) -> bool:
+        """Report whether a live build is still writing this domain's graph.
+
+        The predicate every local read consults. It stops being true when the
+        build hands its finished snapshot to a publication: from that moment
+        the local graph is complete and readable, and refusing reads until the
+        remote publication returns would report a working graph as unavailable
+        for as long as that publication takes. The worker is still alive then,
+        which is what `is_active` and `explicit_job_active` keep answering.
+        """
+        with self._lock:
+            return bool(
+                self._job is not None
+                and self._job.domain_key == domain_key
+                and self._job.thread is not None
+                and self._job.thread.is_alive()
+                and self._job.control.indexing
             )
 
     @property
@@ -1001,7 +1031,7 @@ class CodeGraphRuntime:
     ) -> dict[str, object]:
         if (
             not shared_writer
-            and not _BUILD_WORKERS.is_active(self._worker_domain_key)
+            and not _BUILD_WORKERS.is_indexing(self._worker_domain_key)
         ):
             return status
         return {
@@ -1558,6 +1588,12 @@ class CodeGraphRuntime:
             # timed out, or failed -- publishes nothing.
             if publish is None or result.get("state") != "ready":
                 return
+            # The graph is written and complete from here on; what remains
+            # happens against a remote target. Local reads must stop being
+            # refused at this point rather than at thread death, or a batched
+            # remote publication reports a working local graph as
+            # `rebuilding` for its entire duration.
+            control.indexing = False
             try:
                 published = publish()
             except Exception:
@@ -1842,7 +1878,7 @@ class CodeGraphRuntime:
             with code_graph_read_lock(self.paths.lock):
                 before = dict(_metadata(self.paths.metadata))
                 if (
-                    _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     or not exact_ready_metadata(before)
                     or before.get("domain") != self.binding.primary
                     or before.get("state") != "ready"
@@ -1851,7 +1887,7 @@ class CodeGraphRuntime:
                     return _not_ready({
                         **self._with_rebuilding_state(
                             guarded,
-                            shared_writer=_BUILD_WORKERS.is_active(
+                            shared_writer=_BUILD_WORKERS.is_indexing(
                                 self._worker_domain_key
                             ),
                         ),
