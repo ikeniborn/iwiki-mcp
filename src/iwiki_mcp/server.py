@@ -147,7 +147,13 @@ class IdleFastMCP(FastMCP):
         if self._idle_timeout_seconds == 0:
             await super().run_stdio_async()
             return
-        tracker = IdleTracker()
+        # An explicit `wiki_code_index` build outlives the tool call that
+        # started it, so the idle timer has to see it: without this the
+        # server can shut down mid-build and cancel the very job whose
+        # handle it just handed the caller.
+        tracker = IdleTracker(
+            has_background_work=_codegraph_runtime.explicit_job_active
+        )
         self._idle_tracker = tracker
         try:
             async with stdio_server() as (read_stream, write_stream):

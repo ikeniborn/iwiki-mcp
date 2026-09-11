@@ -659,6 +659,14 @@ idle limit. The timeout resets for every incoming message and waits for an activ
 tool call to finish; a later tool call requires the client to reconnect or spawn
 a fresh server process.
 
+The wait also blocks while an explicit `wiki_code_index` build is still running,
+because that build outlives the tool call that started it: `IdleTracker` polls
+`codegraph.runtime.explicit_job_active()` once a second and treats a live explicit
+job as activity. A query-time auto-rebuild is deliberately excluded — counting it
+would let any search against a dirty graph take an open-ended lease on the process
+— and a predicate that raises is read as "no background work", so a broken
+predicate can only shorten the server's life, never pin it open.
+
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
 sequenceDiagram

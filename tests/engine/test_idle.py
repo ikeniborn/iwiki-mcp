@@ -46,6 +46,46 @@ async def test_idle_tracker_resets_on_activity():
 
 
 @pytest.mark.anyio
+async def test_idle_waits_while_background_work_is_declared():
+    """A declared background job is activity even with no call in flight.
+
+    The stdio server hands `wiki_code_index` a job handle and lets the build
+    run on after the caller's wait expires; shutting the process down on the
+    idle timer would cancel the very build that handle points at.
+    """
+    working = {"value": True}
+    tracker = IdleTracker(has_background_work=lambda: working["value"])
+
+    with anyio.move_on_after(0.3) as scope:
+        await tracker.wait_until_idle(0)
+    assert scope.cancel_called is True
+
+    working["value"] = False
+    with anyio.move_on_after(1.0) as scope:
+        await tracker.wait_until_idle(0)
+    assert scope.cancel_called is False
+
+
+@pytest.mark.anyio
+async def test_idle_tracker_survives_a_raising_background_predicate():
+    """A predicate that raises must not take the server loop down with it.
+
+    Unanswerable is treated as "no background work": that degrades to the
+    timer-only behaviour the tracker had before, which is bounded, rather
+    than pinning the process open on a predicate that can never answer.
+    """
+    def broken() -> bool:
+        raise RuntimeError("registry unavailable")
+
+    tracker = IdleTracker(has_background_work=broken)
+
+    with anyio.move_on_after(1.0) as scope:
+        await tracker.wait_until_idle(0)
+
+    assert scope.cancel_called is False
+
+
+@pytest.mark.anyio
 async def test_idle_tracker_waits_for_active_call_to_finish():
     tracker = IdleTracker()
     tracker.begin_call()

@@ -1202,7 +1202,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `IWIKI_IDLE_TIMEOUT_SECONDS` | `1800` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0` disables the limit. Active tool calls are allowed to finish. A client that needs the server later must reconnect or start a new MCP process. |
+| `IWIKI_IDLE_TIMEOUT_SECONDS` | `1800` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0` disables the limit. Active tool calls are allowed to finish, and so is a code-graph build started by `wiki_code_index` whose caller already took its job handle. A query-time auto-rebuild does not hold the process open. A client that needs the server later must reconnect or start a new MCP process. |
 
 **Search tuning**
 

@@ -34,7 +34,11 @@ from iwiki_mcp.codegraph.linking import SelectorError, SelectorSnapshotChanged
 from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
-from iwiki_mcp.codegraph.runtime import _BUILD_WORKERS, CodeGraphRuntime
+from iwiki_mcp.codegraph.runtime import (
+    _BUILD_WORKERS,
+    CodeGraphRuntime,
+    explicit_job_active,
+)
 from iwiki_mcp.codegraph.query import CodeGraphQuery, CodeGraphQueryError
 from iwiki_mcp.codegraph.schema import (
     SCHEMA_VERSION,
@@ -3677,6 +3681,81 @@ def test_matching_second_call_joins_the_live_job(seed_runtime, monkeypatch):
         for thread in threading.enumerate()
     ) == 1
 
+    runtime.runtime.join_workers(timeout=10)
+
+
+def test_explicit_index_job_is_idle_activity(seed_runtime, monkeypatch):
+    """The detached explicit build is what the idle timer must see.
+
+    The caller took its job handle and returned, so no tool call is in
+    flight any more; only this predicate stands between the running build
+    and an idle shutdown that would cancel it.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=10)
+    release_build = threading.Event()
+    build_paused = threading.Event()
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        build_paused.set()
+        assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    answer = runtime.index(force=True, wait_seconds=0)
+
+    assert answer["job"]["state"] == "running"
+    assert build_paused.is_set()
+    assert explicit_job_active() is True
+
+    release_build.set()
+    runtime.runtime.join_workers(timeout=10)
+
+    # A finished job stops being activity: the slot keeps it for
+    # `wiki_code_status` to report, but it no longer holds the server open.
+    assert explicit_job_active() is False
+
+
+def test_query_time_rebuild_is_not_idle_activity(seed_runtime, monkeypatch):
+    """A search-driven rebuild must never hold the stdio server open.
+
+    `query_guard`'s auto-rebuild is started by a query, not by an operator:
+    counting it as activity would let any search against a dirty graph take
+    an open-ended lease on the process.
+    """
+    runtime = seed_runtime.with_state(
+        "dirty", auto_rebuild="bounded", max_rebuild_seconds=1
+    )
+
+    # Park the auto-rebuild in its first phase so the worker thread is
+    # provably still alive when the predicate is asked -- otherwise a build
+    # that simply finished first would make this test vacuous.
+    release_build = threading.Event()
+    build_paused = threading.Event()
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        build_paused.set()
+        assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    runtime.query_guard()
+
+    assert build_paused.is_set()
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert job is not None
+    assert job.thread.is_alive() is True
+    assert job.explicit is False
+    assert explicit_job_active() is False
+
+    release_build.set()
     runtime.runtime.join_workers(timeout=10)
 
 

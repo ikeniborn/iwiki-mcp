@@ -207,6 +207,24 @@ class _BuildWorkerRegistry:
                 return None
             return job
 
+    def explicit_job(self) -> _BuildJob | None:
+        """Return the live job when an explicit build is running.
+
+        Deliberately lock-free, unlike every other reader here: the caller is
+        the stdio server's idle predicate, which runs on the event loop that
+        serves the whole session and must never wait on a lock. Each field it
+        reads is written before the job becomes reachable through `_job`, and
+        a single attribute read is atomic, so the worst answer is one moment
+        stale -- which a one-second poll already tolerates.
+        """
+        job = self._job
+        if job is None or not job.explicit:
+            return None
+        thread = job.thread
+        if thread is None or not thread.is_alive():
+            return None
+        return job
+
     def finish(self, job: _BuildJob, state: str) -> None:
         """Record a terminal state without dropping the job from the slot."""
         with self._lock:
@@ -263,6 +281,16 @@ class _BuildWorkerRegistry:
 
 
 _BUILD_WORKERS = _BuildWorkerRegistry()
+
+
+def explicit_job_active() -> bool:
+    """Report whether an explicit `wiki_code_index` job is still running.
+
+    Only an explicit build counts: a query-time auto-rebuild is started by a
+    search, and letting one hold the stdio server open would turn any query
+    against a dirty graph into an open-ended lease on the process.
+    """
+    return _BUILD_WORKERS.explicit_job() is not None
 
 
 def shutdown_code_graph_workers(timeout: float = 1.0) -> None:
