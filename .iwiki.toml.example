@@ -95,6 +95,10 @@ publication_session_ttl_seconds = 900
 staging_retention_seconds = 86400
 # Positive maximum staging sessions removed by one cleanup pass.
 staging_cleanup_limit = 100
+# Positive age in seconds before a snapshot superseded by a newer publication
+# can be removed, and the positive maximum removed by one cleanup pass.
+superseded_retention_seconds = 86400
+superseded_cleanup_limit = 2
 
 # MCP mode needs IWIKI_CODE_GRAPH_MCP_URL and IWIKI_CODE_GRAPH_MCP_TOKEN.
 # PostgreSQL mode needs IWIKI_DB_PASSWORD, IWIKI_EMBED_MODEL, and
