@@ -531,10 +531,13 @@ The job is session-scoped either way. A new process (a server restart, a fresh s
 connection) knows no build and reports no `job` key at all, and neither does a `job_id`
 that has aged out of the process's bounded history of recent builds (16, shared across
 every domain that process builds for) — an unknown id is not an error, so the answer
-keeps its normal shape and adds `job_unknown` to its `warnings`. Fall back to
-`state`/`fresh` in both cases rather than wait forever for a terminal job that no longer
-exists in that process. An answer that carries `error` never carries a `job`: the error
-describes the graph, not the build.
+keeps its normal shape and adds `job_unknown` to its `warnings`. A handle is also
+unknown to a session bound to a different primary: a build belongs to exactly one domain,
+and `wiki_code_status` reports only builds of the domain it is bound to, so a rebound
+session is never told its graph is `ready` on the strength of another domain's build.
+Fall back to `state`/`fresh` in each of those cases rather than wait forever for a
+terminal job this process cannot answer for. An answer that carries `error` never
+carries a `job`: the error describes the graph, not the build.
 
 The descriptor does not depend on `code_graph.read_mode`. The build belongs to this
 process, not to the snapshot a reader answered from, so a local server reports it whether
