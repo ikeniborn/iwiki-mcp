@@ -411,6 +411,12 @@ def test_wiki_code_status_reports_a_failed_publication_as_a_failed_job(
     assert polled["job"]["id"] == answer["job"]["id"]
     assert polled["job"]["state"] == "failed"
     assert "error" not in polled
+    # The polled answer is the detached caller's only channel, and its graph
+    # status cannot show this failure either: the local snapshot really is
+    # ready and the published one is a revision behind. It carries the same
+    # warning rather than leaving the caller to cross-reference `job`.
+    assert polled["state"] == "ready"
+    assert "publication_failed" in polled["warnings"]
 
 
 @pytest.mark.parametrize(

@@ -109,6 +109,11 @@ class _JobSnapshot:
         self.explicit = job.explicit
         self.state = state
         self.finished_at = finished_at
+        # Why this build failed, for the one reason a poller cannot see in
+        # the graph status it asked for: the snapshot is locally complete and
+        # the published one is not. Captured here, as a scalar, rather than by
+        # keeping the result dict the snapshot exists to let go of.
+        self.publication_failed = _publication_failed(job.result)
 
     def describe(self) -> dict[str, object]:
         """Return the frozen caller-visible descriptor for this finished job."""
@@ -192,6 +197,17 @@ class _BuildJob:
             "started_at": self.started_at,
         }
 
+    @property
+    def publication_failed(self) -> bool:
+        """Report a finished build's publication failure, never a live one's.
+
+        Reads `terminal` exactly once, for the reason `describe()` does: a
+        running build has no publication outcome yet, and the snapshot is the
+        one place the finished one is recorded.
+        """
+        terminal = self.terminal
+        return terminal is not None and terminal.publication_failed
+
 
 _TERMINAL_HISTORY = 16
 #: What a build records for itself when its publication raised. Mirrors the
@@ -201,6 +217,24 @@ _TERMINAL_HISTORY = 16
 _PUBLICATION_FAILED = {"state": "failed", "error": "publication_failed"}
 
 
+def _publication_failed(result: Mapping[str, object]) -> bool:
+    """Report whether a build's publication did not reach `ready`.
+
+    `publication` is absent -- not empty -- when nothing was asked to publish:
+    `publish_mode = "sqlite"` selects no publisher, so no callback is
+    installed and the key never appears. A mode whose publisher cannot be
+    built is not this case; it raises on the caller's thread before any build
+    starts.
+    """
+    publication = result.get("publication")
+    if publication is None:
+        return False
+    return not (
+        isinstance(publication, Mapping)
+        and publication.get("state") == "ready"
+    )
+
+
 def _terminal_state(result: Mapping[str, object]) -> str:
     """Decide a finished build's terminal state, its publication included.
 
@@ -208,22 +242,10 @@ def _terminal_state(result: Mapping[str, object]) -> str:
     `ready`: under a publishing `publish_mode` the graph a reader answers
     from is still the old one, and a caller polling its handle must not be
     told `ready` on the strength of a local index alone.
-
-    `publication` is absent -- not empty -- when nothing was asked to publish
-    (`publish_mode = "sqlite"`, or a mode whose publisher could not be
-    selected), and then the build's own state is the whole answer.
     """
     if result.get("state") != "ready":
         return "failed"
-    publication = result.get("publication")
-    if publication is None:
-        return "ready"
-    return (
-        "ready"
-        if isinstance(publication, Mapping)
-        and publication.get("state") == "ready"
-        else "failed"
-    )
+    return "failed" if _publication_failed(result) else "ready"
 
 
 class _BuildWorkerRegistry:
@@ -628,7 +650,18 @@ def attach_job(
     if descriptor["state"] == "running":
         descriptor["phase"] = job.control.phase
         descriptor["phases_done"] = list(job.control.phases_done)
-    return {**status, "job": descriptor}
+    answer = {**status, "job": descriptor}
+    # The detached poller's channel, and the one case where the graph status
+    # it asked for cannot show the failure: the local snapshot is complete and
+    # the published one is a revision behind, so `state` here reads `ready`
+    # beside a `failed` job. `wiki_code_index`'s own answer says this in its
+    # warnings; this is the same fact, on the answer that the feature's whole
+    # point is to be read instead.
+    return (
+        _warned(answer, "publication_failed")
+        if job.publication_failed
+        else answer
+    )
 
 
 def explicit_job_active() -> bool:
