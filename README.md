@@ -1034,6 +1034,15 @@ Ordinary Wiki pages and explicit `type: specification` pages coexist in every do
 Ordinary Wiki pages keep their existing write, index, search, and lint behavior in all
 specification modes and never require a code graph.
 
+The page type is what admits a scenario: only a page whose `type` normalizes to
+`specification` is parsed into the projection. An `iwiki-gwt` fence anywhere else is
+stored as ordinary Markdown and is never projected, searched, or resolved, so
+`wiki_write_page` and `wiki_update_page` answer with a `warning` when a scenario lands
+on such a page, and `wiki_lint` reports it as the advisory section finding
+`unprojected_scenario`. Neither blocks the write — a documentation example that quotes
+the fence is legitimate — but the fence language is the marker of intent, so quote
+examples as ```` ```toml ```` when they are illustrations rather than scenarios.
+
 Local Git and local PostgreSQL read the project policy from `.iwiki.toml`:
 
 ```toml
