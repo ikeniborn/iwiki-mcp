@@ -546,8 +546,9 @@ One known limit follows from the build owning its publication. While a build run
 session stays alive — that is what keeps the job handle readable — and the publication is
 part of the build, so a target that stops answering holds the process open for as long as
 its transport allows. Local reads are not held with it: once the graph is written the
-build stops counting as a rebuild, so `wiki_code_status` and `wiki_code_search` answer
-from the finished local snapshot throughout the publication.
+build stops counting as a rebuild, so all three read tools — `wiki_code_status`,
+`wiki_code_search` and `wiki_code_context` — answer from the finished local snapshot
+throughout the publication, exactly as they would with no build running.
 
 There is no separate publication deadline, and the two targets are bounded differently.
 `mcp` bounds every remote call at a 30-second connect and 300-second read timeout, so
