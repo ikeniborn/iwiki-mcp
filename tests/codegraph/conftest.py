@@ -21,6 +21,7 @@ from iwiki_mcp.codegraph.linking import WikiSelectorResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.runtime import (
+    _BUILD_WORKERS,
     CodeGraphRuntime,
     shutdown_code_graph_workers,
 )
@@ -106,6 +107,7 @@ def _write_config(project: Path, base: Path, **overrides) -> None:
         "max_file_bytes": 1_000_000,
         "max_total_files": 100,
         "include_tests": True,
+        "publish_mode": None,
         **overrides,
     }
     languages = ", ".join(json.dumps(item) for item in values["languages"])
@@ -125,6 +127,8 @@ def _write_config(project: Path, base: Path, **overrides) -> None:
         lines.append(
             f"max_full_rebuild_seconds = {values['max_full_rebuild_seconds']}"
         )
+    if values["publish_mode"] is not None:
+        lines.append(f"publish_mode = {json.dumps(values['publish_mode'])}")
     lines.extend(
         (
             f"max_file_bytes = {values['max_file_bytes']}",
@@ -166,8 +170,16 @@ class RuntimeHarness:
     def status(self):
         return self.runtime.status()
 
-    def index(self, *, force=False, languages=None):
-        return self.runtime.index(force=force, languages=languages)
+    def index(
+        self, *, force=False, languages=None, wait_seconds=None,
+        publish=None,
+    ):
+        return self.runtime.index(
+            force=force,
+            languages=languages,
+            wait_seconds=wait_seconds,
+            publish=publish,
+        )
 
     def query_guard(self):
         return self.runtime.query_guard()
@@ -388,7 +400,7 @@ class FakeRuntime:
         self.database_accesses.append("status")
         return {"domain": self.binding.primary, "state": self.state}
 
-    def index(self, *, force=False, languages=None):
+    def index(self, *, force=False, languages=None, publish=None):
         self.calls.append(("index", {"force": force, "languages": languages}))
         self.build_attempts += 1
         if self._failure:
@@ -485,11 +497,27 @@ def seed_binding(tmp_path):
     )
 
 
+def _reset_build_worker_registry() -> None:
+    """Drop live workers and the process-global terminal job history.
+
+    The history is bounded and shared across every domain a process builds
+    for, and `_evict_locked` prefers evicting from a domain that holds more
+    than one snapshot. Snapshots left behind by earlier tests therefore fill
+    the cap and make the *second* build of the test currently running evict
+    that test's own first one -- so a test that asks for a superseded build
+    by id passes alone and fails in a full run. Clear it so each test owns
+    its registry.
+    """
+    shutdown_code_graph_workers(timeout=5)
+    with _BUILD_WORKERS._lock:
+        _BUILD_WORKERS._terminal.clear()
+
+
 @pytest.fixture(autouse=True)
 def reset_code_graph_worker_registry():
-    shutdown_code_graph_workers(timeout=5)
+    _reset_build_worker_registry()
     yield
-    shutdown_code_graph_workers(timeout=5)
+    _reset_build_worker_registry()
 
 
 @pytest.fixture

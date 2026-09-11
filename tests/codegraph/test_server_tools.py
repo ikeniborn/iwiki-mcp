@@ -4,14 +4,17 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from importlib.metadata import version
+import json
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
 from iwiki_mcp import server
 from iwiki_mcp.codegraph import application as application_module
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph import store as codegraph_store
 from iwiki_mcp.codegraph.context import CodeGraphContextError
 from iwiki_mcp.codegraph.languages.bash import BashAdapter
 from iwiki_mcp.codegraph.models import CodeGraphError
@@ -28,12 +31,16 @@ class _FakeRuntime:
         self.calls.append(f"status:{self.binding.primary}")
         return {"domain": self.binding.primary}
 
-    def index(self, *, force=False, languages=None):
+    def index(
+        self, *, force=False, languages=None, wait_seconds=None,
+        publish=None,
+    ):
         self.calls.append(f"index:{self.binding.primary}")
         return {
             "domain": self.binding.primary,
             "force": force,
             "languages": languages,
+            "wait_seconds": wait_seconds,
         }
 
     def search(self, query, *, kinds=None, path=None, languages=None, limit=20):
@@ -207,7 +214,10 @@ def test_wiki_code_index_delegates_and_preserves_tool_payload(
             "state": "ready", "snapshot_revision": "sha256:remote"
         },
     }
-    assert calls == [(seed_binding, {"force": True, "languages": ["python"]})]
+    assert calls == [(
+        seed_binding,
+        {"force": True, "languages": ["python"], "wait_seconds": None},
+    )]
 
 
 def test_wiki_code_index_keeps_sqlite_result_flat(seed_binding, monkeypatch):
@@ -284,13 +294,129 @@ def test_index_handler_accepts_every_known_language(seed_binding, monkeypatch):
         "languages"
     ] == ["python", "typescript"]
     assert "error" not in server.wiki_code_index(languages=["typescript"])
-    assert calls[-1] == (seed_binding, {"force": False, "languages": ["typescript"]})
+    assert calls[-1] == (
+        seed_binding,
+        {"force": False, "languages": ["typescript"], "wait_seconds": None},
+    )
 
     assert server.wiki_code_index(languages=["bash"])["languages"] == ["bash"]
-    assert calls[-1] == (seed_binding, {"force": False, "languages": ["bash"]})
+    assert calls[-1] == (
+        seed_binding,
+        {"force": False, "languages": ["bash"], "wait_seconds": None},
+    )
 
     assert server.wiki_code_index()["languages"] is None
-    assert calls[-1] == (seed_binding, {"force": False, "languages": None})
+    assert calls[-1] == (
+        seed_binding,
+        {"force": False, "languages": None, "wait_seconds": None},
+    )
+
+
+def test_wiki_code_index_reports_out_of_range_wait_seconds(
+    seed_binding, monkeypatch
+):
+    # Ruling from review: a `CodeGraphQueryError` raised by `runtime.index`'s
+    # own `wait_seconds` validation must reach the caller as a typed answer,
+    # never as a raised exception -- but it must use the codebase's one
+    # existing `invalid_config` dialect (fixed generic "error" string, no raw
+    # exception text, `field` naming the parameter via `sanitized_error` /
+    # `_invalid_config`), the same shape `languages` already gets, rather
+    # than a bespoke dict. This also pins that `_whitelisted_field` accepts
+    # "wait_seconds" (`field` would be silently dropped otherwise).
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+
+    expected = {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "field": "wait_seconds",
+        "hint": "inspect code_graph project configuration",
+    }
+    assert server.wiki_code_index(wait_seconds=-1) == expected
+    assert server.wiki_code_index(wait_seconds=10_000) == expected
+
+
+def test_wiki_code_index_returns_rebuilding_job_when_wait_expires_first(
+    seed_binding, monkeypatch
+):
+    # Requirement carried from review: `wiki_code_index`'s answer shape
+    # changed for real callers -- a wait expiring after publication entry
+    # now returns {state: "rebuilding", fresh, job, hint} where it used to
+    # return {error, code: "busy", hint}. No server-level test covered
+    # this; `wiki_code_index` builds its own runtime internally, so the
+    # publish slowdown has to be patched at the store class rather than on
+    # one runtime's instance.
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    real_publish = codegraph_store.CodeGraphStore.publish_metadata
+
+    def slow_publish(self, *args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_store.CodeGraphStore, "publish_metadata", slow_publish
+    )
+
+    answer = server.wiki_code_index(force=True, wait_seconds=0)
+    # Own the worker this test detached: left running it outlives the test
+    # file, and the build it carries would then race the next one for the
+    # single build slot.
+    runtime_module._BUILD_WORKERS.join(timeout=30)
+
+    assert answer["state"] == "rebuilding"
+    assert answer["fresh"] is False
+    assert answer["job"]["state"] == "running"
+    assert answer["hint"] == "poll wiki_code_status for this job"
+    assert "error" not in answer
+
+
+def test_wiki_code_status_reports_a_failed_publication_as_a_failed_job(
+    seed_runtime, monkeypatch
+):
+    """R3/F1: a build that indexed but could not publish is not `ready`.
+
+    The poller's whole protocol is the job's terminal state, so a refused
+    publication has to reach it -- otherwise the caller is told `ready` while
+    the published graph is still the old revision.
+    """
+    harness = seed_runtime.with_config(publish_mode="mcp")
+    monkeypatch.setattr(
+        server.base, "resolve_binding", lambda: harness.binding
+    )
+    refused = []
+
+    class RefusingPublisher:
+        def begin(self, header):
+            refused.append(header.repository_id)
+            return {"error": "snapshot_conflict", "hint": "retry publication"}
+
+    monkeypatch.setattr(
+        server._codegraph_application,
+        "publisher_for",
+        lambda *_args, **_kwargs: RefusingPublisher(),
+    )
+
+    answer = server.wiki_code_index(force=True)
+    polled = server.wiki_code_status(job_id=answer["job"]["id"])
+
+    assert refused == ["project"]
+    assert answer["publication"] == {
+        "error": "snapshot_conflict",
+        "hint": "retry publication",
+    }
+    # The answer's own `state` still describes the local snapshot, which is
+    # ready, so it has to say on its own that the publication did not happen
+    # -- a caller reading `state` alone must not be told the build succeeded.
+    assert answer["state"] == "ready"
+    assert "publication_failed" in answer["warnings"]
+    assert polled["job"]["id"] == answer["job"]["id"]
+    assert polled["job"]["state"] == "failed"
+    assert "error" not in polled
+    # The polled answer is the detached caller's only channel, and its graph
+    # status cannot show this failure either: the local snapshot really is
+    # ready and the published one is a revision behind. It carries the same
+    # warning rather than leaving the caller to cross-reference `job`.
+    assert polled["state"] == "ready"
+    assert "publication_failed" in polled["warnings"]
 
 
 @pytest.mark.parametrize(
@@ -792,10 +918,29 @@ async def test_fastmcp_registry_has_exact_code_tools():
     assert set(
         tools["wiki_code_refresh_links"].inputSchema["properties"]
     ) == {"domain"}
-    assert set(tools["wiki_code_status"].inputSchema.get("properties", {})) == set()
+    # A new parameter is not a new tool: the job handle is optional and the
+    # schema has to say what it is, since the answer never repeats it.
+    status_properties = tools["wiki_code_status"].inputSchema["properties"]
+    assert set(status_properties) == {"job_id"}
+    assert status_properties["job_id"]["default"] is None
+    assert "wiki_code_index" in status_properties["job_id"]["description"]
+    assert "job_unknown" in status_properties["job_id"]["description"]
     assert set(tools["wiki_code_index"].inputSchema["properties"]) == {
-        "force", "languages",
+        "force", "languages", "wait_seconds",
     }
+    index_properties = tools["wiki_code_index"].inputSchema["properties"]
+    assert index_properties["wait_seconds"]["default"] is None
+    # Same reason the handle carries one: the range and what the answer
+    # becomes at expiry lived only in README prose, where a caller reading
+    # the schema never sees them.
+    assert (
+        "max_full_rebuild_seconds"
+        in index_properties["wait_seconds"]["description"]
+    )
+    assert "rebuilding" in index_properties["wait_seconds"]["description"]
+    assert (
+        "wiki_code_status" in index_properties["wait_seconds"]["description"]
+    )
     assert set(tools["wiki_code_search"].inputSchema["properties"]) == {
         "query", "kinds", "path", "languages", "limit",
     }
@@ -1175,3 +1320,273 @@ def test_sqlite_read_mode_keeps_every_read_answer_byte_identical(
     assert answers() == default
     assert default[0]["state"] == "ready"
     assert default[1]["results"] and default[2]["nodes"]
+
+
+class _FakeRemoteResult:
+    def __init__(self, payload):
+        self.content = [
+            type("Text", (), {"type": "text", "text": json.dumps(payload)})()
+        ]
+        self.isError = False
+
+
+class _FakeRemoteSession:
+    """Answer `wiki_code_status` from a published snapshot, like the remote."""
+
+    def __init__(self, status):
+        self.calls = []
+        self._status = status
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, name, arguments=None):
+        self.calls.append(name)
+        return _FakeRemoteResult(
+            self._status if name == "wiki_code_status" else {"state": "ready"}
+        )
+
+
+class _FakeRemoteConnection:
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+@pytest.fixture
+def remote_read_binding(seed_binding, monkeypatch):
+    """Bind the seed project with `read_mode = "mcp"` and a fake remote.
+
+    The same shape this repository's own `.iwiki.toml` uses: builds stay
+    local (`publish_mode` defaults to `sqlite`) while every read is answered
+    by `PublishedSnapshotReader`, which never goes through the runtime.
+    """
+    config = Path(seed_binding.project_dir) / ".iwiki.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + 'read_mode = "mcp"\n',
+        encoding="utf-8",
+    )
+    session = _FakeRemoteSession({"state": "ready", "fresh": True})
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MCP_URL", "https://wiki.example/mcp")
+    monkeypatch.setenv("IWIKI_CODE_GRAPH_MCP_TOKEN", "fixture-not-a-real-token")
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.mcp_adapter._official_session",
+        lambda url, headers: _FakeRemoteConnection(session),
+    )
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    return session
+
+
+def test_status_carries_the_job_under_a_remote_read_mode(remote_read_binding):
+    """F2: the job must survive a reader that is not the local runtime.
+
+    `read_mode = "mcp"` answers from the published snapshot, so the runtime
+    that started the build never sees the status answer. Attaching the job
+    below that seam made the documented polling loop non-terminating for
+    exactly the configuration this repository ships.
+    """
+    built = server.wiki_code_index(force=True)
+    assert built["state"] == "ready"
+
+    answer = server.wiki_code_status()
+
+    # The answer is the remote's, not the local runtime's.
+    assert remote_read_binding.calls.count("wiki_code_status") == 1
+    assert answer["state"] == "ready"
+    assert answer["fresh"] is True
+    assert answer["job"]["id"] == built["job"]["id"]
+    assert answer["job"]["state"] == "ready"
+    assert "finished_at" in answer["job"]
+
+
+def test_status_job_id_answers_about_a_superseded_build(remote_read_binding):
+    """F7 residue: a handle must outlive the build that replaced it."""
+    first = server.wiki_code_index(force=True)
+    second = server.wiki_code_index(force=True)
+    assert first["job"]["id"] != second["job"]["id"]
+
+    latest = server.wiki_code_status()
+    mine = server.wiki_code_status(job_id=first["job"]["id"])
+
+    assert latest["job"]["id"] == second["job"]["id"]
+    assert mine["job"]["id"] == first["job"]["id"]
+    assert mine["job"]["state"] == "ready"
+    assert "job_unknown" not in mine.get("warnings", [])
+
+
+class _StubStatusReader:
+    """Stand in for a hosted snapshot reader with one canned status."""
+
+    def __init__(self, status):
+        self._status = status
+
+    def status(self):
+        return dict(self._status)
+
+
+def _hosted_binding():
+    return server.base.PostgresBinding(
+        host="localhost",
+        port=5432,
+        database="iwiki_test",
+        user="tester",
+        sslmode="disable",
+        iwiki_id="iwiki-test",
+        read=("project",),
+        write=("project",),
+        primary="project",
+        project_dir="/tmp/does-not-matter",
+        embed_model="test-embed",
+        embed_dimensions=2,
+        rerank_model="test-rerank",
+        password="secret",
+    )
+
+
+def test_running_build_is_polled_by_its_own_handle(
+    remote_read_binding, monkeypatch
+):
+    """The documented loop, end to end: hand back an id, poll it live.
+
+    `wiki_code_index(wait_seconds=0)` returns while the build runs, and the
+    caller polls `wiki_code_status(job_id=…)` before it ends. That poll must
+    reach the *live* job -- the terminal history cannot hold a build that has
+    not finished -- and report its progress. Without the live half of the
+    lookup every such poll answers `job_unknown`, which is the F2 class of
+    silent failure all over again.
+    """
+    real_publish = codegraph_store.CodeGraphStore.publish_metadata
+
+    def slow_publish(self, *args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_store.CodeGraphStore, "publish_metadata", slow_publish
+    )
+
+    started = server.wiki_code_index(force=True, wait_seconds=0)
+    assert started["state"] == "rebuilding"
+    handle = started["job"]["id"]
+
+    try:
+        polled = server.wiki_code_status(job_id=handle)
+
+        assert polled["job"]["id"] == handle
+        assert polled["job"]["state"] == "running"
+        assert "finished_at" not in polled["job"]
+        assert polled["job"]["phases_done"]
+        assert polled["job"]["phase"] is not None
+        assert "job_unknown" not in polled.get("warnings", [])
+    finally:
+        runtime_module._BUILD_WORKERS.join(timeout=15)
+
+
+def test_a_handle_less_poll_never_warns_about_an_unknown_job(
+    remote_read_binding
+):
+    """`job_unknown` answers an unknown *id*, not the absence of a build.
+
+    Nothing was built in this process, so there is no job to report -- but
+    the caller named none either, so there is nothing unknown to warn about.
+    Warning here would contradict the parameter's own schema description and
+    both READMEs.
+    """
+    answer = server.wiki_code_status()
+
+    assert answer["state"] == "ready"
+    assert "job" not in answer
+    assert "warnings" not in answer
+
+
+def test_hosted_status_reports_a_named_handle_as_unknown(monkeypatch):
+    """A hosted server issues no handles, so every id it is shown is unknown.
+
+    `wiki_code_index` answers `source_unavailable` there, so no build can
+    exist -- which makes `job_unknown` the honest answer rather than a
+    special case, and keeps the parameter's description true of both
+    branches.
+    """
+    binding = _hosted_binding()
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    monkeypatch.setattr(server, "_code_binding_blocked", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "_postgres_code_reader",
+        lambda _binding: _StubStatusReader({"state": "ready", "fresh": True}),
+    )
+
+    unnamed = server.wiki_code_status()
+    named = server.wiki_code_status(job_id="0" * 16)
+
+    assert unnamed == {"state": "ready", "fresh": True}
+    assert named["state"] == "ready"
+    assert "job" not in named
+    assert named["warnings"] == ["job_unknown"]
+
+
+def test_hosted_status_never_warns_on_an_error_answer(monkeypatch):
+    """The no-job-on-an-error rule holds on the hosted branch too."""
+    binding = _hosted_binding()
+    failure = {
+        "error": "code graph snapshot is stale",
+        "code": "stale_snapshot",
+    }
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    monkeypatch.setattr(server, "_code_binding_blocked", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "_postgres_code_reader",
+        lambda _binding: _StubStatusReader(failure),
+    )
+
+    assert server.wiki_code_status(job_id="0" * 16) == failure
+
+
+def test_job_id_from_another_domain_is_unknown_after_a_rebind(
+    remote_read_binding, seed_binding, monkeypatch
+):
+    """A handle names a build, and a build belongs to exactly one domain.
+
+    The dangerous answer is not the leak, it is the false positive: a
+    session that rebound to another primary would otherwise be told
+    `state: "ready"` for a build that indexed a different domain, and
+    conclude its own graph is built. The id-addressed lookup asks the same
+    question as `current()`, only more precisely -- so it must not be the
+    looser of the two.
+    """
+    built = server.wiki_code_index(force=True)
+    assert built["state"] == "ready"
+
+    (Path(seed_binding.base) / "backend").mkdir()
+    rebound = replace(seed_binding, primary="backend")
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: rebound)
+
+    answer = server.wiki_code_status(job_id=built["job"]["id"])
+
+    assert answer["state"] == "ready"
+    assert "job" not in answer
+    assert "job_unknown" in answer["warnings"]
+    # The build itself is untouched: its own domain still answers for it.
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    assert server.wiki_code_status(
+        job_id=built["job"]["id"]
+    )["job"]["id"] == built["job"]["id"]
+
+
+def test_unknown_job_id_warns_and_keeps_the_graph_answer(remote_read_binding):
+    """An aged-out id is not an error: the graph status is still valid."""
+    assert server.wiki_code_index(force=True)["state"] == "ready"
+
+    answer = server.wiki_code_status(job_id="0" * 16)
+
+    assert answer["state"] == "ready"
+    assert answer["fresh"] is True
+    assert "job" not in answer
+    assert "job_unknown" in answer["warnings"]
+    assert "error" not in answer

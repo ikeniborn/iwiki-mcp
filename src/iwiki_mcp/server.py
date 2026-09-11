@@ -147,7 +147,13 @@ class IdleFastMCP(FastMCP):
         if self._idle_timeout_seconds == 0:
             await super().run_stdio_async()
             return
-        tracker = IdleTracker()
+        # An explicit `wiki_code_index` build outlives the tool call that
+        # started it, so the idle timer has to see it: without this the
+        # server can shut down mid-build and cancel the very job whose
+        # handle it just handed the caller.
+        tracker = IdleTracker(
+            has_background_work=_codegraph_runtime.explicit_job_active
+        )
         self._idle_tracker = tracker
         try:
             async with stdio_server() as (read_stream, write_stream):
@@ -1748,19 +1754,78 @@ def _code_publication_service(binding):
     )
 
 
+_CodeJobId = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Optional build handle: the `job.id` a previous `wiki_code_index` "
+            "answer returned. Omit it to report the domain's current build -- "
+            "the one running now, or the last one that finished. Supplied, the "
+            "answer describes that build and no other, so a poller is not "
+            "misled by a later build that took over the report. An id this "
+            "server cannot answer for -- never issued, aged out of its "
+            "bounded history, or naming a build of another domain -- is not "
+            "an error: the graph status is returned as usual with no `job` "
+            "key and `job_unknown` in `warnings`."
+        )
+    ),
+]
+
+
 @_safe
 @_code_safe
-def wiki_code_status() -> dict:
+def wiki_code_status(job_id: _CodeJobId = None) -> dict:
+    """Report the code graph's state, plus this process's build job.
+
+    The job is attached here rather than inside a reader: `code_graph.read_mode`
+    decides which reader answers, but the build belongs to this process either
+    way, so a poller sees the same `job` descriptor under every mode. The
+    hosted PostgreSQL branch below is a server where `wiki_code_index` answers
+    `source_unavailable` and no local build can exist, so it carries no job --
+    and therefore knows no handle, which makes `job_unknown` its honest answer
+    to a named `job_id` rather than a silent omission.
+    """
     bind = _resolved_binding()
     if _is_postgres(bind):
         if _code_binding_blocked():
             return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
-        return _defaulted_scope_answer(_postgres_code_reader(bind).status())
+        hosted = _defaulted_scope_answer(_postgres_code_reader(bind).status())
+        # Not a registry lookup: a hosted server issues no handles at all, so
+        # every id presented to it is unknown by construction. Consulting the
+        # process registry here could only match a build some *other*,
+        # local binding started.
+        return hosted if job_id is None else _codegraph_runtime.job_unknown(
+            hosted
+        )
     if bind.primary is None:
         return _missing_code_primary()
-    return _codegraph_application.code_reader(bind).status()
+    return _codegraph_runtime.attach_job(
+        _codegraph_runtime.worker_domain_key(
+            _codegraph_application.source_context(bind)
+        ),
+        job_id,
+        _codegraph_application.code_reader(bind).status(),
+    )
+
+
+_CodeWaitSeconds = Annotated[
+    float | None,
+    Field(
+        description=(
+            "Optional seconds to wait for the build before answering. Between "
+            "`0` and the project's `max_full_rebuild_seconds`; a value below "
+            "`0.5` is floored to `0.5`, and one out of range is refused as "
+            "`invalid_config`. Omit it to wait for the build's own deadline. "
+            "When the wait expires first the answer is `{\"state\": "
+            "\"rebuilding\", \"job\": {...}}` and the build keeps running, "
+            "uncancelled: it publishes its own snapshot and records its "
+            "outcome on the job, which `wiki_code_status(job_id=…)` reports "
+            "as `ready` or `failed`."
+        )
+    ),
+]
 
 
 @_safe
@@ -1768,6 +1833,7 @@ def wiki_code_status() -> dict:
 def wiki_code_index(
     force: bool = False,
     languages: list[str] | None = None,
+    wait_seconds: _CodeWaitSeconds = None,
 ) -> dict:
     if languages is not None and (
         not languages
@@ -1783,7 +1849,7 @@ def wiki_code_index(
     if bind.primary is None:
         return _missing_code_primary()
     return _codegraph_application.index_and_publish(
-        bind, force=force, languages=languages
+        bind, force=force, languages=languages, wait_seconds=wait_seconds
     ).tool_result()
 
 

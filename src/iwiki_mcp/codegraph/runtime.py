@@ -7,9 +7,10 @@ import json
 import logging
 from pathlib import Path
 import re
+import secrets
 import threading
 import time
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from filelock import Timeout
 
@@ -74,6 +75,7 @@ _PHASE_NAMES = (
     "publication",
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INDEX_GRACE_SECONDS = 0.5
 
 
 class CodeGraphSource(Protocol):
@@ -82,12 +84,168 @@ class CodeGraphSource(Protocol):
     primary: str | None
 
 
+class _JobSnapshot:
+    """Terminal record of a finished build, free of the job's object graph.
+
+    The registry remembers this instead of the finished `_BuildJob` so the
+    live slot can be cleared the moment a build ends: keeping the job would
+    pin its `control`, its `result` dict and the runtime that produced them
+    for the rest of a long-lived stdio session. It carries only what a poller
+    reads, and `thread` is `None` because a terminal record owns no worker.
+    """
+
+    thread: threading.Thread | None = None
+
+    def __init__(
+        self,
+        job: "_BuildJob",
+        *,
+        state: str,
+        finished_at: float,
+    ) -> None:
+        self.domain_key = job.domain_key
+        self.job_id = job.job_id
+        self.started_at = job.started_at
+        self.explicit = job.explicit
+        self.state = state
+        self.finished_at = finished_at
+        # Why this build failed, for the one reason a poller cannot see in
+        # the graph status it asked for: the snapshot is locally complete and
+        # the published one is not. Captured here, as a scalar, rather than by
+        # keeping the result dict the snapshot exists to let go of.
+        self.publication_failed = _publication_failed(job.result)
+
+    def describe(self) -> dict[str, object]:
+        """Return the frozen caller-visible descriptor for this finished job."""
+        return {
+            "id": self.job_id,
+            "state": self.state,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+        }
+
+
 class _BuildJob:
-    def __init__(self, domain_key: tuple[str, str]) -> None:
+    def __init__(
+        self,
+        domain_key: tuple[str, str],
+        *,
+        force: bool,
+        languages: list[str] | None,
+        explicit: bool,
+        build_deadline: float,
+    ) -> None:
         self.domain_key = domain_key
+        self.job_id = secrets.token_hex(8)
+        self.started_at = time.time()
+        self.finished_at: float | None = None
+        self.state = "running"
+        self.force = force
+        self.languages = None if languages is None else tuple(languages)
+        self.explicit = explicit
+        # The monotonic deadline this build was started with. A caller that
+        # joined the job did not choose it, so every judgement about whether
+        # the *running* build can still publish must read it from here rather
+        # than from the joining caller's own budget.
+        self.build_deadline = build_deadline
         self.control = BuildControl()
         self.result: dict[str, object] = {}
         self.thread: threading.Thread | None = None
+        self.terminal: _JobSnapshot | None = None
+
+    def matches(
+        self, *, force: bool, languages: list[str] | None, explicit: bool
+    ) -> bool:
+        """Report whether a new request asks for the work this job is doing.
+
+        Provenance is part of the request: an explicit `wiki_code_index` call
+        and a query-time auto-rebuild carry different build deadlines and a
+        different `restore_prior_on_abort` policy even when `force` and
+        `languages` happen to agree, so joining across that boundary would
+        silently hand one caller the other's deadline and abort policy.
+        """
+        requested = None if languages is None else tuple(languages)
+        return (
+            self.force == force
+            and self.languages == requested
+            and self.explicit == explicit
+        )
+
+    def describe(self) -> dict[str, object]:
+        """Return the caller-visible descriptor for this job.
+
+        Exactly one unsynchronised read -- of `terminal` -- decides the whole
+        answer, and the live branch then reads nothing else off the job. That
+        is what makes the descriptor atomic, not the order `finish()` writes
+        in: a second read could land after `finish()` published the snapshot
+        *and* set `job.state`, and would report a terminal state with no
+        `finished_at`. The write order only narrows that gap; removing the
+        read closes it.
+
+        The literal `"running"` is this branch's actual meaning rather than a
+        stand-in for `self.state`: the branch is reached only when no snapshot
+        was published, and an unpublished snapshot is precisely a job that has
+        not reached a terminal state. `state`/`finished_at` on the job stay
+        for direct readers after a join; they are never part of a descriptor.
+        """
+        terminal = self.terminal
+        if terminal is not None:
+            return terminal.describe()
+        return {
+            "id": self.job_id,
+            "state": "running",
+            "started_at": self.started_at,
+        }
+
+    @property
+    def publication_failed(self) -> bool:
+        """Report a finished build's publication failure, never a live one's.
+
+        Reads `terminal` exactly once, for the reason `describe()` does: a
+        running build has no publication outcome yet, and the snapshot is the
+        one place the finished one is recorded.
+        """
+        terminal = self.terminal
+        return terminal is not None and terminal.publication_failed
+
+
+_TERMINAL_HISTORY = 16
+#: What a build records for itself when its publication raised. Mirrors the
+#: shape `application.publish_snapshot` returns when it detects an
+#: unpublishable result, so a caller reading `publication` sees one dialect
+#: whichever way the publication failed -- and never the exception's text.
+_PUBLICATION_FAILED = {"state": "failed", "error": "publication_failed"}
+
+
+def _publication_failed(result: Mapping[str, object]) -> bool:
+    """Report whether a build's publication did not reach `ready`.
+
+    `publication` is absent -- not empty -- when nothing was asked to publish:
+    `publish_mode = "sqlite"` selects no publisher, so no callback is
+    installed and the key never appears. A mode whose publisher cannot be
+    built is not this case; it raises on the caller's thread before any build
+    starts.
+    """
+    publication = result.get("publication")
+    if publication is None:
+        return False
+    return not (
+        isinstance(publication, Mapping)
+        and publication.get("state") == "ready"
+    )
+
+
+def _terminal_state(result: Mapping[str, object]) -> str:
+    """Decide a finished build's terminal state, its publication included.
+
+    A build that indexed but could not publish its snapshot is `failed`, not
+    `ready`: under a publishing `publish_mode` the graph a reader answers
+    from is still the old one, and a caller polling its handle must not be
+    told `ready` on the strength of a local index alone.
+    """
+    if result.get("state") != "ready":
+        return "failed"
+    return "failed" if _publication_failed(result) else "ready"
 
 
 class _BuildWorkerRegistry:
@@ -96,19 +254,70 @@ class _BuildWorkerRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._job: _BuildJob | None = None
+        # Terminal snapshots of the builds that already ended, newest last,
+        # keyed by job id. A caller that took a handle must still be able to
+        # learn how *its* build ended, and the builds that follow are not
+        # rare: a query-time auto-rebuild against an unchanged checkout
+        # finishes in well under a second, so a single remembered answer
+        # would routinely be gone before the caller's next poll. Bounded
+        # because nothing here is ever cleaned up otherwise; a snapshot is a
+        # handful of scalars, so the cap can be generous without the pinning
+        # that keeping whole jobs would bring. The cap is shared across every
+        # domain this process builds for -- see `_evict_locked` for what that
+        # costs and what it protects.
+        self._terminal: dict[str, _JobSnapshot] = {}
 
-    def start(self, domain_key, target):
+    def start(
+        self,
+        domain_key,
+        target,
+        *,
+        force=False,
+        languages=None,
+        explicit=False,
+        build_deadline: float,
+    ):
+        """Start a build, or join the live one that matches this request.
+
+        Returns `(job, started)`: `started` is True only when this call
+        created and started the thread, False when it handed back someone
+        else's already-running job (a join) or refused (`job is None`).
+        Cancellation on wait expiry is a starter-only privilege, so callers
+        must branch on `started` rather than reconstruct it later.
+        """
         with self._lock:
-            if (
-                self._job is not None
+            live = (
+                self._job
+                if self._job is not None
                 and self._job.thread is not None
                 and self._job.thread.is_alive()
-            ):
-                return None
-            job = _BuildJob(domain_key)
+                else None
+            )
+            if live is not None:
+                if live.domain_key == domain_key and live.matches(
+                    force=force, languages=languages, explicit=explicit
+                ):
+                    return live, False
+                return None, False
+            job = _BuildJob(
+                domain_key,
+                force=force,
+                languages=languages,
+                explicit=explicit,
+                build_deadline=build_deadline,
+            )
 
             def run() -> None:
-                target(job.control, job.result)
+                # The worker owns the terminal state: a caller that detached
+                # at its wait expiry never comes back to record it, and
+                # `finished_at` must be when the build ended rather than
+                # whenever some caller happened to return. The target
+                # publishes before it returns, so the publication's outcome is
+                # already in `result` when `_terminal_state` reads it.
+                try:
+                    target(job.control, job.result)
+                finally:
+                    self.finish(job, _terminal_state(job.result))
 
             job.thread = threading.Thread(
                 target=run,
@@ -121,15 +330,175 @@ class _BuildWorkerRegistry:
             except Exception:
                 self._job = None
                 raise
-            return job
+            return job, True
+
+    def current(self, domain_key):
+        """Return the live job for this domain, else its terminal snapshot.
+
+        A live job answers first because only it can report `phase` progress;
+        once it ends it leaves the slot and the newest snapshot for the same
+        domain keeps answering in its place. This is the answer for a caller
+        that names no job -- one that holds an id asks `terminal_by_id`.
+        """
+        with self._lock:
+            job = self._job
+            if job is not None and job.domain_key == domain_key:
+                return job
+            return self._newest_locked(domain_key)
+
+    def terminal(self, domain_key) -> _JobSnapshot | None:
+        """Return the newest finished build for this domain, live one or not."""
+        with self._lock:
+            return self._newest_locked(domain_key)
+
+    def terminal_by_id(
+        self, domain_key, job_id: str
+    ) -> _JobSnapshot | None:
+        """Return one domain's specific finished build, if remembered.
+
+        The lookup a caller holding a handle needs: it asks about its own
+        build rather than about whichever build happens to be the latest.
+        `None` means the build is unknown here -- it is still running, it was
+        never started in this process, or it has aged out of the bounded
+        history -- and the caller falls back to `state`/`fresh`.
+
+        `domain_key` is required even though the id alone would find the
+        snapshot, and the check lives here rather than at any call site
+        because this is the one place every future caller must pass
+        through. A build belongs to exactly one domain, so answering across
+        domains would not merely widen the answer -- it would tell a session
+        that rebound to another primary that its graph is `ready` because a
+        build for some *other* primary finished. This lookup asks `current`'s
+        question more precisely; it must not be the looser of the two.
+        """
+        with self._lock:
+            snapshot = self._terminal.get(job_id)
+            if snapshot is None or snapshot.domain_key != domain_key:
+                return None
+            return snapshot
+
+    def _newest_locked(self, domain_key) -> _JobSnapshot | None:
+        """Return the most recent snapshot for one domain. Lock held."""
+        for snapshot in reversed(self._terminal.values()):
+            if snapshot.domain_key == domain_key:
+                return snapshot
+        return None
+
+    def explicit_job(self) -> _BuildJob | None:
+        """Return the live job when an explicit build is running.
+
+        Deliberately lock-free, unlike every other reader here: the caller is
+        the stdio server's idle predicate, which runs on the event loop that
+        serves the whole session and must never wait on a lock. Each field it
+        reads is written before the job becomes reachable through `_job`, and
+        a single attribute read is atomic, so the worst answer is one moment
+        stale -- which a one-second poll already tolerates.
+        """
+        job = self._job
+        if job is None or not job.explicit:
+            return None
+        thread = job.thread
+        if thread is None or not thread.is_alive():
+            return None
+        return job
+
+    def finish(self, job: _BuildJob, state: str) -> None:
+        """Record the terminal state, publish its snapshot, free the slot."""
+        with self._lock:
+            # Exactly once per job. The worker records the terminal state from
+            # its own `finally`; the caller-side call after a completed join
+            # only ever repeats that fact, and repeating it must not restamp
+            # `finished_at` to whenever that caller happened to return.
+            if job.terminal is not None:
+                return
+            # Build the snapshot exactly once, here, while the lock is held:
+            # it is the only place a terminal answer is assembled, so no
+            # reader ever has to re-combine `state` with `finished_at`.
+            finished_at = time.time()
+            snapshot = _JobSnapshot(
+                job, state=state, finished_at=finished_at
+            )
+            # Publish it *first*, before the job's own fields. What makes a
+            # descriptor atomic is `describe()` reading `terminal` and nothing
+            # else (see its docstring); this order is the second half of that
+            # bargain, keeping the loose `state` from ever being the newer of
+            # the two facts. A reader that did consult `job.state` would, in
+            # the opposite order, see a terminal state with no `finished_at`
+            # -- the mirror of the race this snapshot exists to close, and one
+            # the READMEs forbid just as firmly.
+            job.terminal = snapshot
+            job.state = state
+            job.finished_at = finished_at
+            self._terminal[snapshot.job_id] = snapshot
+            self._evict_locked()
+            self._release_locked(job)
+
+    def _evict_locked(self) -> None:
+        """Hold the history to its cap, sparing a domain's last answer.
+
+        The cap is global, not per domain: a per-domain cap would make total
+        retention grow with every domain a session rebinds through, which is
+        the unbounded growth this history is capped to avoid. The cost is
+        that one busy domain can push another's snapshots out, so eviction
+        prefers the oldest snapshot of a domain that still has more than one
+        and falls back to the global oldest only when every domain holds
+        exactly one. A domain therefore keeps its most recent answer -- the
+        one a poller holding a handle is most likely to ask for -- until the
+        cap can only be met by taking someone's last.
+        """
+        while len(self._terminal) > _TERMINAL_HISTORY:
+            per_domain: dict[tuple[str, str], int] = {}
+            for snapshot in self._terminal.values():
+                per_domain[snapshot.domain_key] = (
+                    per_domain.get(snapshot.domain_key, 0) + 1
+                )
+            evicted = next(
+                (
+                    job_id
+                    for job_id, snapshot in self._terminal.items()
+                    if per_domain[snapshot.domain_key] > 1
+                ),
+                None,
+            )
+            if evicted is None:
+                # Only now, when no domain holds a spare: `next(iter(...))` as
+                # the default argument would be evaluated on every pass,
+                # including the common one the generator answers.
+                evicted = next(iter(self._terminal))
+            del self._terminal[evicted]
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:
+        """Report whether a worker for this domain is still alive.
+
+        Thread liveness, publication included: the question asked by anything
+        that must not pre-empt a worker that still exists. Readers asking
+        whether the *graph* is being rewritten want `is_indexing`.
+        """
         with self._lock:
             return bool(
                 self._job is not None
                 and self._job.domain_key == domain_key
                 and self._job.thread is not None
                 and self._job.thread.is_alive()
+            )
+
+    def is_indexing(self, domain_key: tuple[str, str]) -> bool:
+        """Report whether a live build is still writing this domain's graph.
+
+        The predicate every local read consults. It stops being true when the
+        build hands its finished snapshot to a publication: from that moment
+        the local graph is complete and readable, and refusing reads until the
+        remote publication returns would report a working graph as unavailable
+        for as long as that publication takes. The worker is still alive then,
+        which is what `is_active` and `explicit_job_active` keep answering.
+        """
+        with self._lock:
+            return bool(
+                self._job is not None
+                and self._job.domain_key == domain_key
+                and self._job.thread is not None
+                and self._job.thread.is_alive()
+                and self._job.control.indexing
             )
 
     @property
@@ -149,13 +518,22 @@ class _BuildWorkerRegistry:
             self.release(job)
 
     def release(self, job: _BuildJob) -> None:
+        """Drop a finished job from the live slot."""
         with self._lock:
-            if (
-                self._job is job
-                and job.thread is not None
-                and not job.thread.is_alive()
-            ):
-                self._job = None
+            self._release_locked(job)
+
+    def _release_locked(self, job: _BuildJob) -> None:
+        """Clear the live slot, but only for a job that has already ended.
+
+        Terminality is the condition rather than thread liveness: the worker
+        clears its own slot from inside its `finally`, where its thread is by
+        definition still alive, while a caller that merely gave up waiting
+        must never evict the build it is still waiting on. Once the slot is
+        clear nothing reaches the job's `control`, its `result`, or the
+        runtime behind them -- the terminal snapshot answers instead.
+        """
+        if self._job is job and job.terminal is not None:
+            self._job = None
 
     def shutdown(self, timeout: float = 1.0) -> None:
         with self._lock:
@@ -168,6 +546,132 @@ class _BuildWorkerRegistry:
 
 
 _BUILD_WORKERS = _BuildWorkerRegistry()
+
+
+def worker_domain_key(binding: CodeGraphSource) -> tuple[str, str]:
+    """Derive the build registry's key for one bound domain.
+
+    A build belongs to the wiki base it publishes into and the primary
+    domain it indexes, so the tool layer can name the very job a runtime
+    started without holding -- or rebuilding -- that runtime.
+    """
+    return (str(Path(binding.base).absolute()), binding.primary or "")
+
+
+def _resolve_job(
+    domain_key: tuple[str, str], job_id: str | None
+) -> _BuildJob | _JobSnapshot | None:
+    """Find the job an answer should describe, by id or by domain.
+
+    Without an id the domain's current job answers: the live one while a
+    build runs, its newest terminal snapshot afterwards. With an id only
+    that build answers -- the history first, because a finished build has
+    left the live slot and whatever occupies it now is someone else's.
+
+    Both lookups are scoped to `domain_key`, and neither is scoped here:
+    `current` and `terminal_by_id` own that themselves, so no caller of
+    either can widen it.
+    """
+    if job_id is None:
+        return _BUILD_WORKERS.current(domain_key)
+    remembered = _BUILD_WORKERS.terminal_by_id(domain_key, job_id)
+    if remembered is not None:
+        return remembered
+    live = _BUILD_WORKERS.current(domain_key)
+    return live if live is not None and live.job_id == job_id else None
+
+
+def _warned(status: dict[str, object], warning: str) -> dict[str, object]:
+    """Add one warning without mutating the reader's own answer.
+
+    `warnings` is assumed to be a list when present -- that is what every
+    producer on this path emits, and what the remote reader's JSON decodes
+    to. A value of any other shape is *replaced*, not preserved: this is an
+    assumption, not a check, and a caller that starts emitting a tuple or a
+    bare string would lose it silently. Handle it here if that ever becomes
+    reachable rather than discovering it downstream.
+    """
+    existing = status.get("warnings")
+    warnings = list(existing) if isinstance(existing, list) else []
+    if warning not in warnings:
+        warnings.append(warning)
+    return {**status, "warnings": warnings}
+
+
+def job_unknown(status: dict[str, object]) -> dict[str, object]:
+    """Report a named handle as unknown, leaving the answer otherwise whole.
+
+    The one place the warning's name is spelled, so the local branch's
+    "never issued, aged out, or another domain's" and the hosted branch's
+    "this server issues no handles at all" stay the same answer to the
+    caller. An error answer is left alone for the same reason it carries no
+    job: it describes the graph, not the handle.
+    """
+    return status if "error" in status else _warned(status, "job_unknown")
+
+
+def attach_job(
+    domain_key: tuple[str, str],
+    job_id: str | None,
+    status: dict[str, object],
+) -> dict[str, object]:
+    """Attach this process's job descriptor to a non-error status answer.
+
+    Lives at the tool layer rather than inside any one reader: the job is a
+    fact about this process, not about the snapshot a `read_mode` selected,
+    so `wiki_code_status` answers with it whichever reader produced
+    `status`. An error answer explains why the graph cannot be read;
+    attaching a job to it would wrongly suggest the error belongs to that
+    job, and here -- above every branch that merges an error onto a status
+    -- is the one place that invariant can actually hold.
+
+    A named `job_id` that nothing knows is not an error: it may simply have
+    aged out of the bounded history, and the graph status the caller also
+    asked for is still valid. The answer keeps its shape, carries no job,
+    and says so with `job_unknown`.
+    """
+    if "error" in status:
+        return status
+    job = _resolve_job(domain_key, job_id)
+    if job is None:
+        # A caller that named no handle has nothing unknown to be warned
+        # about: `job_unknown` answers an unknown *id*, never the plain
+        # absence of a build, which `state`/`fresh` already report.
+        return status if job_id is None else job_unknown(status)
+    descriptor = job.describe()
+    # Read `state` once from the descriptor rather than re-reading
+    # `job.state`: the worker can finish between the two reads, and a
+    # second, later read could see "ready" after `describe()` already
+    # captured "running" -- leaving `phase`/`phases_done` off an answer
+    # that still claims `state: "running"`, a shape the README promises
+    # cannot occur. The same read is what keeps `control` a live-job-only
+    # attribute: a terminal snapshot never describes itself as running,
+    # and owns no `control` to read.
+    if descriptor["state"] == "running":
+        descriptor["phase"] = job.control.phase
+        descriptor["phases_done"] = list(job.control.phases_done)
+    answer = {**status, "job": descriptor}
+    # The detached poller's channel, and the one case where the graph status
+    # it asked for cannot show the failure: the local snapshot is complete and
+    # the published one is a revision behind, so `state` here reads `ready`
+    # beside a `failed` job. `wiki_code_index`'s own answer says this in its
+    # warnings; this is the same fact, on the answer that the feature's whole
+    # point is to be read instead.
+    return (
+        _warned(answer, "publication_failed")
+        if job.publication_failed
+        else answer
+    )
+
+
+def explicit_job_active() -> bool:
+    """Report whether an explicit `wiki_code_index` job is still running.
+
+    Only an explicit build counts: a query-time auto-rebuild is started by a
+    search, and letting one hold the stdio server open would turn any query
+    against a dirty graph into an open-ended lease on the process.
+    """
+    return _BUILD_WORKERS.explicit_job() is not None
 
 
 def shutdown_code_graph_workers(timeout: float = 1.0) -> None:
@@ -230,6 +734,25 @@ def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
         "error": "language not available in the active snapshot",
         "code": "unsupported_language",
         "hint": "the active snapshot declares: " + declared,
+    }
+
+
+def _rebuilding_job_answer(job: _BuildJob) -> dict[str, object]:
+    """Answer a caller whose wait ended while its build kept running."""
+    descriptor = job.describe()
+    # Same single-read gate `attach_job` applies: progress fields belong to a
+    # running descriptor only. The worker publishes terminality from inside
+    # its own `finally`, while its thread is still alive, so this is reachable
+    # for a caller whose wait expires in that window -- and `phase` beside a
+    # terminal `state` is the one shape the READMEs promise cannot occur.
+    if descriptor["state"] == "running":
+        descriptor["phase"] = job.control.phase
+        descriptor["phases_done"] = list(job.control.phases_done)
+    return {
+        "state": "rebuilding",
+        "fresh": False,
+        "job": descriptor,
+        "hint": "poll wiki_code_status for this job",
     }
 
 
@@ -364,10 +887,7 @@ class CodeGraphRuntime:
         self._configuration_error: CodeGraphConfigError | None = None
         self._initialization_error = False
         self._unsafe_location = False
-        self._worker_domain_key = (
-            str(Path(binding.base).absolute()),
-            binding.primary or "",
-        )
+        self._worker_domain_key = worker_domain_key(binding)
         self._parser_version = ""
         self._grammar_version = ""
         self._adapter_version = ""
@@ -544,7 +1064,7 @@ class CodeGraphRuntime:
     ) -> dict[str, object]:
         if (
             not shared_writer
-            and not _BUILD_WORKERS.is_active(self._worker_domain_key)
+            and not _BUILD_WORKERS.is_indexing(self._worker_domain_key)
         ):
             return status
         return {
@@ -806,7 +1326,13 @@ class CodeGraphRuntime:
         return header, rows
 
     def status(self) -> dict[str, object]:
-        """Read metadata and compatible schema only; never discover or parse."""
+        """Read metadata and compatible schema only; never discover or parse.
+
+        The answer describes the graph and nothing else. The build job that
+        may be running behind it is attached above, by `wiki_code_status`
+        (`attach_job`), so every `read_mode` reports it alike and no branch
+        that merges an error onto a status can carry a job with it.
+        """
         unavailable = self._unavailable()
         if unavailable is not None:
             return {
@@ -896,7 +1422,9 @@ class CodeGraphRuntime:
             or _pending_final_verify(metadata)
         ):
             if self._local_build_active():
-                return self._with_rebuilding_state(status, shared_writer=True)
+                return self._with_rebuilding_state(
+                    status, shared_writer=True
+                )
             try:
                 recovered = self._recover_stale_metadata(metadata)
             except CodeGraphStoreError:
@@ -1039,11 +1567,14 @@ class CodeGraphRuntime:
         *,
         force: bool,
         languages: list[str] | None,
-        deadline: float,
+        build_deadline: float,
+        wait_deadline: float,
         restore_prior_on_abort: bool,
+        cancel_on_wait: bool,
+        publish: Callable[[], dict[str, object]] | None = None,
     ) -> dict[str, object]:
         assert self._indexer is not None
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= build_deadline:
             return self._busy_response()
 
         def run_build(
@@ -1054,7 +1585,7 @@ class CodeGraphRuntime:
                 built = self._indexer.build(
                     force=force,
                     languages=languages,
-                    deadline=deadline,
+                    deadline=build_deadline,
                     restore_prior_on_abort=restore_prior_on_abort,
                     control=control,
                 )
@@ -1082,29 +1613,123 @@ class CodeGraphRuntime:
             except Exception:
                 LOGGER.error("code_graph_build code=rebuild_failed")
                 result.update(_rebuild_failed())
+            # The build publishes its own snapshot, on this thread, before it
+            # reports terminality: a caller that detached at its wait expiry
+            # is not there to publish for it, and leaving the publication to
+            # whoever calls next would keep the remote graph stale for an
+            # unbounded time. A build that never reached `ready` -- cancelled,
+            # timed out, or failed -- publishes nothing.
+            if publish is None or result.get("state") != "ready":
+                return
+            # The graph is written and complete from here on; what remains
+            # happens against a remote target. Local reads must stop being
+            # refused at this point rather than at thread death, or a batched
+            # remote publication reports a working local graph as
+            # `rebuilding` for its entire duration.
+            control.indexing = False
+            try:
+                published = publish()
+            except Exception:
+                # Nobody is watching this thread, so the failure has to be
+                # recorded rather than raised, and in the same redacted style
+                # every other worker failure uses: the exception's text never
+                # reaches a log line or a tool answer.
+                LOGGER.error("code_graph_publish code=publication_failed")
+                published = dict(_PUBLICATION_FAILED)
+            # Recorded unconditionally: a caller installs this callback only
+            # when it has a target to publish to, so whatever came back is the
+            # publication's outcome. A mode with nothing to publish passes no
+            # callback at all and leaves the key absent, which is what lets
+            # `_terminal_state` tell "did not publish" from "published badly".
+            result["publication"] = published
+            if _terminal_state(result) != "ready":
+                # The third signal, beside the `failed` job and the
+                # publication itself. This answer's own `state` still reports
+                # the local snapshot, which really is ready, so without a
+                # warning a caller reading `state` alone is told the build
+                # succeeded while the published graph is still the previous
+                # revision -- the very silence this whole path exists to end.
+                # No client should have to cross-reference two fields to learn
+                # that what it asked for did not happen.
+                result.update(_warned(result, "publication_failed"))
         try:
-            job = _BUILD_WORKERS.start(
+            job, started = _BUILD_WORKERS.start(
                 self._worker_domain_key,
                 run_build,
+                force=force,
+                languages=languages,
+                explicit=not cancel_on_wait,
+                build_deadline=build_deadline,
             )
         except Exception:
             return _rebuild_failed()
         if job is None or job.thread is None:
             return self._busy_response()
-        job.thread.join(max(0.0, deadline - time.monotonic()))
+        job.thread.join(max(0.0, wait_deadline - time.monotonic()))
         if job.thread.is_alive():
-            job.control.cancel()
-            LOGGER.info("code_graph_build code=busy")
-            return self._busy_response()
-        _BUILD_WORKERS.release(job)
-        return job.result or _rebuild_failed()
+            if cancel_on_wait:
+                # Cancellation on wait expiry is a starter-only privilege: a
+                # caller that only joined someone else's job never asked for
+                # this work and must not cut it short out from under whoever
+                # did. A joined caller still answers busy -- it just leaves
+                # the build it does not own running.
+                if started:
+                    job.control.cancel()
+                LOGGER.info("code_graph_build code=busy")
+                return self._busy_response()
+            if (
+                time.monotonic() >= job.build_deadline
+                and not job.control.publication_attempted.is_set()
+            ):
+                # `enter_publication` refuses once the build deadline has
+                # passed, so a build that has not even reached the gate can no
+                # longer publish anything: there is no job worth polling. The
+                # caller keeps today's `busy`, and the doomed worker unwinds on
+                # its own instead of being cancelled. Reading `attempted`
+                # rather than `entered` keeps the observation monotone: the
+                # flag is set before the gate decides, so a build that goes on
+                # to publish is never mistaken for a doomed one.
+                #
+                # The deadline read here is the *running job's*, not this
+                # caller's: a caller that joined someone else's build carries
+                # its own, later budget, and judging by that would hand back a
+                # descriptor for a build already past the publication gate's
+                # cutoff -- a job that can only ever end busy or failed.
+                LOGGER.info("code_graph_build code=busy")
+                return self._busy_response()
+            LOGGER.info("code_graph_build code=rebuilding job=%s", job.job_id)
+            return _rebuilding_job_answer(job)
+        ready = job.result.get("state") == "ready"
+        # The worker recorded the terminal state as it ended; this idempotent
+        # call only ever repeats that fact -- through the same decision, so a
+        # build whose publication failed is `failed` here too, however the
+        # index answer below describes the snapshot it did produce.
+        _BUILD_WORKERS.finish(job, _terminal_state(job.result))
+        if not ready:
+            # A build that ended without a report answers with today's error
+            # shape, field for field: those dicts are a pinned contract.
+            return job.result or _rebuild_failed()
+        answer = dict(job.result)
+        answer["job"] = job.describe()
+        return answer
 
     def index(
         self,
         *,
         force: bool = False,
         languages: list[str] | None = None,
+        wait_seconds: float | None = None,
+        publish: Callable[[], dict[str, object]] | None = None,
     ) -> dict[str, object]:
+        """Build the graph, publishing the snapshot the build produced.
+
+        `publish` is the caller's publication step, run by the build worker
+        after a `ready` build and before the job reports terminality. Its
+        answer is returned under `publication` -- the one place a caller reads
+        it from, whether the build finished within `wait_seconds` or long
+        after the caller detached. A caller with nothing to publish to passes
+        no callback, and the key stays absent.
+        """
         if languages is not None and (
             not languages
             or any(language not in KNOWN_LANGUAGES for language in languages)
@@ -1118,12 +1743,29 @@ class CodeGraphRuntime:
             self.config.max_full_rebuild_seconds
             or self.config.max_rebuild_seconds
         )
-        deadline = time.monotonic() + full_rebuild_seconds
+        if wait_seconds is not None and (
+            wait_seconds < 0 or wait_seconds > full_rebuild_seconds
+        ):
+            raise CodeGraphQueryError(
+                "wait_seconds must be between 0 and "
+                f"{full_rebuild_seconds}",
+                parameter="wait_seconds",
+            )
+        started = time.monotonic()
+        build_deadline = started + full_rebuild_seconds
+        wait_budget = (
+            full_rebuild_seconds
+            if wait_seconds is None
+            else max(float(wait_seconds), _INDEX_GRACE_SECONDS)
+        )
         return self._index_with_deadline(
             force=force,
             languages=languages,
-            deadline=deadline,
+            build_deadline=build_deadline,
+            wait_deadline=started + wait_budget,
             restore_prior_on_abort=False,
+            cancel_on_wait=False,
+            publish=publish,
         )
 
     def query_guard(
@@ -1220,8 +1862,10 @@ class CodeGraphRuntime:
             rebuilt = self._index_with_deadline(
                 force=False,
                 languages=None,
-                deadline=deadline,
+                build_deadline=deadline,
+                wait_deadline=deadline,
                 restore_prior_on_abort=True,
+                cancel_on_wait=True,
             )
             if rebuilt.get("state") == "ready":
                 return {**self.status(), "results": []}
@@ -1267,7 +1911,7 @@ class CodeGraphRuntime:
             with code_graph_read_lock(self.paths.lock):
                 before = dict(_metadata(self.paths.metadata))
                 if (
-                    _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     or not exact_ready_metadata(before)
                     or before.get("domain") != self.binding.primary
                     or before.get("state") != "ready"
@@ -1276,7 +1920,7 @@ class CodeGraphRuntime:
                     return _not_ready({
                         **self._with_rebuilding_state(
                             guarded,
-                            shared_writer=_BUILD_WORKERS.is_active(
+                            shared_writer=_BUILD_WORKERS.is_indexing(
                                 self._worker_domain_key
                             ),
                         ),
@@ -1333,7 +1977,7 @@ class CodeGraphRuntime:
                     after = dict(_metadata(self.paths.metadata))
                     if (
                         before != after
-                        or _BUILD_WORKERS.is_active(self._worker_domain_key)
+                        or _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     ):
                         return _not_ready({
                             **guarded,
@@ -1574,7 +2218,7 @@ class CodeGraphRuntime:
             with code_graph_read_lock(self.paths.lock):
                 before = dict(_metadata(self.paths.metadata))
                 if (
-                    _BUILD_WORKERS.is_active(self._worker_domain_key)
+                    _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     or not exact_ready_metadata(before)
                     or before.get("domain") != self.binding.primary
                     or before.get("state") != "ready"
@@ -1584,7 +2228,7 @@ class CodeGraphRuntime:
                         request,
                         self._with_rebuilding_state(
                             context_guarded,
-                            shared_writer=_BUILD_WORKERS.is_active(
+                            shared_writer=_BUILD_WORKERS.is_indexing(
                                 self._worker_domain_key
                             ),
                         ),
@@ -1619,7 +2263,7 @@ class CodeGraphRuntime:
                         or repository_after != repository
                         or data_version_after != data_version
                         or before != after
-                        or _BUILD_WORKERS.is_active(self._worker_domain_key)
+                        or _BUILD_WORKERS.is_indexing(self._worker_domain_key)
                     ):
                         return self._empty_context_response(
                             request,

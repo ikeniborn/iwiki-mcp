@@ -1,9 +1,12 @@
+from contextlib import asynccontextmanager
 from dataclasses import replace
 import sys
 
+import anyio
 import pytest
 
 from iwiki_mcp import server
+from iwiki_mcp.codegraph import runtime as codegraph_runtime
 from iwiki_mcp.engine.config import Config, ConfigError
 from iwiki_mcp.engine.embed import EmbedError
 from iwiki_mcp.storage import PostgresBinding
@@ -424,6 +427,46 @@ def test_help_exits_offline_without_loading_or_probing(monkeypatch, capsys):
     assert exc.value.code == 0
     assert "usage:" in captured.out
     assert captured.err == ""
+
+
+@pytest.mark.anyio
+async def test_run_stdio_async_declares_the_code_graph_job_as_activity(monkeypatch):
+    """The idle tracker must be given the explicit-build predicate.
+
+    `IdleTracker`'s declared-work branch and `explicit_job_active` are each
+    covered on their own, and both stay green if this construction is
+    reverted to a bare `IdleTracker()` -- which would silently un-implement
+    R7 and let the server shut down mid-build, cancelling the very job whose
+    handle `wiki_code_index` just handed the caller. This is the line that
+    joins the two halves, so it is asserted here rather than inferred.
+    """
+    captured = {}
+    real_tracker = server.IdleTracker
+
+    def recording_tracker(*args, **kwargs):
+        captured["has_background_work"] = kwargs.get("has_background_work")
+        return real_tracker(*args, **kwargs)
+
+    @asynccontextmanager
+    async def fake_stdio_server():
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive:
+            yield receive, send
+
+    async def serve_until_cancelled(*_args, **_kwargs):
+        await anyio.sleep(30)
+
+    monkeypatch.setattr(server, "IdleTracker", recording_tracker)
+    monkeypatch.setattr(server, "stdio_server", fake_stdio_server)
+    monkeypatch.setattr(server.mcp._mcp_server, "run", serve_until_cancelled)
+    monkeypatch.setattr(server.mcp, "_idle_timeout_seconds", 0.01)
+
+    await server.mcp.run_stdio_async()
+
+    assert (
+        captured["has_background_work"]
+        is codegraph_runtime.explicit_job_active
+    )
 
 
 def test_unexpected_probe_error_propagates(monkeypatch):

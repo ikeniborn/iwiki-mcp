@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import replace
+import gc
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+import weakref
 
 import pytest
 from filelock import Timeout
@@ -34,8 +36,16 @@ from iwiki_mcp.codegraph.linking import SelectorError, SelectorSnapshotChanged
 from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
-from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
-from iwiki_mcp.codegraph.query import CodeGraphQuery
+from iwiki_mcp.codegraph.runtime import (
+    _BUILD_WORKERS,
+    _BuildJob,
+    CodeGraphRuntime,
+    attach_job,
+    explicit_job_active,
+    shutdown_code_graph_workers,
+    worker_domain_key,
+)
+from iwiki_mcp.codegraph.query import CodeGraphQuery, CodeGraphQueryError
 from iwiki_mcp.codegraph.schema import (
     SCHEMA_VERSION,
     CodeGraphStoreError,
@@ -642,6 +652,40 @@ def test_build_reports_observability_without_source_text(seed_runtime):
     assert "return str(value)" not in str(out)
     assert str(seed_runtime.project_dir) not in str(out)
     assert seed_runtime.status()["phase_timings_ms"] == out["phase_timings_ms"]
+
+
+def test_build_control_reports_phases_including_zero_millisecond_ones():
+    from iwiki_mcp.codegraph.indexer import BuildControl
+
+    control = BuildControl()
+    assert control.phase is None
+    assert control.phases_done == ()
+
+    control.enter_phase("discovery")
+    assert control.phase == "discovery"
+
+    control.enter_phase("normalization")
+    control.enter_phase("resolution")
+    assert control.phase == "resolution"
+    assert control.phases_done == ("discovery", "normalization")
+
+
+def test_real_build_records_metadata_as_its_last_phase(seed_runtime):
+    from iwiki_mcp.codegraph.indexer import BuildControl
+
+    control = BuildControl()
+    built = seed_runtime.runtime._indexer.build(force=True, control=control)
+
+    assert built["state"] == "ready"
+    # The final step writes the metadata record, and says so. It used to
+    # re-enter `publication`, leaving `phase` equal to a value already in
+    # `phases_done` -- a contradiction a polling client can observe.
+    assert control.phase == "metadata"
+    assert control.phase not in control.phases_done
+    assert control.phases_done[-1] == "final_verification"
+    assert "publication" in control.phases_done
+    assert "discovery" in control.phases_done
+    assert "normalization" in control.phases_done
 
 
 def test_build_rows_is_portable_and_does_not_publish(seed_runtime):
@@ -1403,7 +1447,10 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
 def test_slow_metadata_publication_respects_absolute_deadline(
     seed_runtime, monkeypatch
 ):
-    runtime = seed_runtime.with_config(max_rebuild_seconds=1)
+    # Two seconds of budget so the build reliably reaches the publication gate
+    # before the caller's wait expires; the two slowed publications outlast the
+    # budget from wherever that entry lands.
+    runtime = seed_runtime.with_config(max_rebuild_seconds=2)
     first = runtime.index(force=True)
     runtime.project_file("src/pkg/service.py").write_text(
         "def changed_during_metadata_publish():\n    return None\n",
@@ -1432,10 +1479,19 @@ def test_slow_metadata_publication_respects_absolute_deadline(
 
     out = runtime.index(force=True)
     during = runtime.status()
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    detached_cancelled = job.control.cancelled.is_set()
     runtime.runtime.join_workers(timeout=3)
     status = runtime.status()
 
-    assert out["code"] == "busy"
+    # The wait expired after the build entered publication, so the call hands
+    # back the running job instead of cancelling it into `busy`. Nothing in the
+    # atomic section reads `cancelled`, so the tail below would survive a
+    # reintroduced cancel -- assert on the flag itself.
+    assert out["state"] == "rebuilding"
+    assert out["job"]["state"] == "running"
+    assert detached_cancelled is False
     assert during["state"] == "rebuilding"
     assert during["fresh"] is False
     assert status["state"] == "ready"
@@ -1445,16 +1501,144 @@ def test_slow_metadata_publication_respects_absolute_deadline(
     assert "phase_timings_ms" in status
 
 
+def test_worker_records_a_raised_publication_as_a_failed_job(
+    seed_runtime, monkeypatch, caplog
+):
+    """R3/F1: nothing raw escapes a publication that raised on the worker.
+
+    No caller is watching that thread, so the failure can only be recorded:
+    as a `failed` job, as a redacted `publication`, and as a log line in the
+    same style the build's own failures use.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    secret = "publication-token /absolute/private/path"
+
+    def explode():
+        raise RuntimeError(secret)
+
+    caplog.clear()
+    with caplog.at_level("ERROR", logger="iwiki_mcp.codegraph.runtime"):
+        out = runtime.index(force=True, publish=explode)
+    snapshot = _BUILD_WORKERS.terminal_by_id(
+        runtime.runtime._worker_domain_key, out["job"]["id"]
+    )
+
+    assert out["state"] == "ready"
+    assert out["publication"] == {
+        "state": "failed",
+        "error": "publication_failed",
+    }
+    assert "publication_failed" in out["warnings"]
+    assert snapshot.state == "failed"
+    assert out["job"]["state"] == "failed"
+    assert secret not in caplog.text
+    assert "code_graph_publish code=publication_failed" in caplog.text
+
+
+def test_local_reads_are_served_while_the_snapshot_is_publishing(
+    seed_runtime,
+):
+    """R3/I1: publishing is not rebuilding, and the graph is readable.
+
+    Combination defect: the publication runs on the build worker, and every
+    local read consults the registry's liveness. Read as "a build is running"
+    it refuses reads for the whole remote publication -- minutes, on a large
+    graph -- over a local snapshot that is complete. The session must still be
+    held open for that same window, which is the other half of what the
+    liveness answered before it was split.
+
+    All three read tools are exercised, not just the one whose guard was
+    converted first: `wiki_code_status`, `wiki_code_search` and
+    `wiki_code_context` each consult the predicate at their own sites, and a
+    test that covered only `status()` is exactly what let two of them ship
+    still refusing.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    assert runtime.index(force=True)["state"] == "ready"
+    seeded = runtime.runtime.search("Service")
+    seed_id = seeded["results"][0]["entity_id"]
+    publishing = threading.Event()
+    release = threading.Event()
+
+    def blocking_publish() -> dict[str, object]:
+        publishing.set()
+        release.wait(20)
+        return {"state": "ready"}
+
+    out = runtime.index(force=True, wait_seconds=0, publish=blocking_publish)
+    assert publishing.wait(20)
+    during_status = runtime.status()
+    during_query = runtime.runtime.query_guard()
+    during_search = runtime.runtime.search("Service")
+    during_context = runtime.runtime.context([seed_id])
+    held_open = explicit_job_active()
+    release.set()
+    runtime.runtime.join_workers(timeout=30)
+    after_status = runtime.status()
+
+    assert out["state"] == "rebuilding"
+    # The local graph is finished and readable while the publication runs.
+    assert during_status["state"] == "ready"
+    assert during_status["fresh"] is True
+    assert "code_graph_rebuilding" not in during_status.get("warnings", [])
+    assert "error" not in during_query
+    assert during_search["fresh"] is True
+    assert during_search["results"]
+    assert "error" not in during_search
+    assert during_context["fresh"] is True
+    assert during_context["nodes"]
+    assert "error" not in during_context
+    assert "code_graph_rebuilding" not in during_context.get("warnings", [])
+    # ... and the session that owns the job handle stays alive for it.
+    assert held_open is True
+    assert after_status["state"] == "ready"
+
+
+def test_a_cancelled_build_publishes_nothing(seed_runtime, monkeypatch):
+    """R3/F1: only a build that produced a ready snapshot publishes.
+
+    Cancellation and deadline behaviour is unchanged by the worker-side
+    publication -- a build cut short still ends `failed`, and must never
+    reach a publication target with a snapshot it did not finish.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
+    published = []
+    real_discover = codegraph_indexer.discover_sources
+
+    def slow_discover(*args, **kwargs):
+        time.sleep(1.0)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(codegraph_indexer, "discover_sources", slow_discover)
+
+    out = runtime.index(
+        force=True,
+        wait_seconds=0,
+        publish=lambda: published.append("published") or {"state": "ready"},
+    )
+    shutdown_code_graph_workers(timeout=30)
+    snapshot = _BUILD_WORKERS.terminal_by_id(
+        runtime.runtime._worker_domain_key, out["job"]["id"]
+    )
+
+    assert out["state"] == "rebuilding"
+    assert published == []
+    assert snapshot.state == "failed"
+
+
 def test_expired_final_ready_metadata_is_not_published(
     seed_runtime, monkeypatch
 ):
-    runtime = seed_runtime.with_config(max_rebuild_seconds=1)
+    # Two seconds of budget so the build reliably reaches the publication gate
+    # before the caller's wait expires, and a final publication slow enough to
+    # still be running when it does.
+    runtime = seed_runtime.with_config(max_rebuild_seconds=2)
     real_publish = runtime.runtime._indexer.store.publish_metadata
 
     def slow_final_publish(metadata_path, staging, **kwargs):
         payload = json.loads(Path(staging).read_text(encoding="utf-8"))
         if payload["state"] == "ready":
-            time.sleep(1.05)
+            time.sleep(2.05)
         return real_publish(metadata_path, staging, **kwargs)
 
     monkeypatch.setattr(
@@ -1466,10 +1650,13 @@ def test_expired_final_ready_metadata_is_not_published(
     out = runtime.index(force=True)
     persisted = json.loads(runtime.paths.metadata.read_text(encoding="utf-8"))
     during = runtime.status()
-    runtime.runtime.join_workers(timeout=3)
+    runtime.runtime.join_workers(timeout=5)
     status = runtime.status()
 
-    assert out["code"] == "busy"
+    # The wait expired inside the publication the build had already entered,
+    # so the call hands back the running job instead of cancelling it.
+    assert out["state"] == "rebuilding"
+    assert out["job"]["state"] == "running"
     assert persisted["state"] == "rebuilding"
     assert "duration_ms" not in persisted
     assert "phase_timings_ms" not in persisted
@@ -2140,6 +2327,564 @@ def test_process_worker_registry_caps_four_domains_at_one(
 
     assert sum(result.get("code") == "busy" for result in results) == 3
     assert runtimes[0].active_workers == 0
+
+
+def test_registry_keeps_the_last_terminal_job():
+    """A finished build keeps answering -- through its snapshot, not itself."""
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    def target(control, result):
+        result["state"] = "ready"
+
+    job, started = registry.start(
+        key,
+        target,
+        force=True,
+        languages=None,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    job.thread.join(timeout=5)
+    registry.finish(job, "ready")
+
+    remembered = registry.current(key)
+    assert remembered is not job
+    assert remembered is registry.terminal(key)
+    assert remembered.job_id == job.job_id
+    assert remembered.state == "ready"
+    assert remembered.finished_at is not None
+    assert registry.is_active(key) is False
+    assert registry.active_count == 0
+    described = remembered.describe()
+    assert described["id"] == job.job_id
+    assert described["state"] == "ready"
+    assert len(described["id"]) == 16
+
+
+def test_publication_attempt_is_announced_before_the_gate_decides(tmp_path):
+    """A refused attempt still leaves the monotone flag set.
+
+    The wait-expiry guard reads `publication_attempted` to decide whether a
+    build past its deadline can still publish. If the flag were set only after
+    the gate admitted the build, a worker descheduled between the deadline
+    check and the flag would be reported `busy` while going on to publish.
+    """
+    admitted = codegraph_indexer.BuildControl()
+    admitted.enter_publication(
+        deadline=time.monotonic() + 60, lock_path=tmp_path / "lock"
+    )
+
+    assert admitted.publication_attempted.is_set()
+    assert admitted.publication_entered.is_set()
+
+    refused = codegraph_indexer.BuildControl()
+    with pytest.raises(Timeout):
+        refused.enter_publication(
+            deadline=time.monotonic() - 1, lock_path=tmp_path / "lock"
+        )
+
+    assert refused.publication_attempted.is_set()
+    assert refused.publication_entered.is_set() is False
+
+
+def test_a_finished_job_is_released_and_becomes_collectable():
+    """The registry must not pin a finished build's object graph.
+
+    A terminal job reachable from the slot keeps its `control`, its `result`
+    dict and -- through the build closure -- the runtime, indexer and store
+    that produced them alive for the whole life of a long-lived stdio
+    session. The snapshot the registry keeps instead carries no such
+    reference, so the job itself must be collectable once the caller lets go.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    class _Payload:
+        """Stands in for the build report the runtime hands back."""
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    def target(control, result):
+        result["state"] = "ready"
+        result["payload"] = _Payload()
+
+    job, started = registry.start(
+        key,
+        target,
+        force=True,
+        languages=None,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    registry.join(timeout=5)
+
+    assert registry.is_active(key) is False
+    assert registry.active_count == 0
+    remembered = registry.current(key)
+    assert remembered is not job
+    assert not hasattr(remembered, "control")
+    assert not hasattr(remembered, "result")
+
+    dead = weakref.ref(job)
+    reported = weakref.ref(job.result["payload"])
+    del job, remembered
+    gc.collect()
+
+    assert dead() is None
+    assert reported() is None
+
+
+def test_a_new_build_does_not_erase_the_previous_terminal_answer():
+    """One live slot must not double as the record of what already finished.
+
+    A caller holding a handle for build A is polling for A's outcome. Any
+    query against a dirty graph can start build B in the meantime, and with a
+    single slot B's start would silently replace A -- leaving the poller a
+    descriptor for a job it never asked about and no way to ever learn how A
+    ended. The terminal snapshot is what survives that start.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    def first_target(control, result):
+        result["state"] = "ready"
+
+    first, started = registry.start(
+        key,
+        first_target,
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    registry.join(timeout=5)
+    finished = registry.terminal(key)
+    assert finished.job_id == first.job_id
+    assert finished.state == "ready"
+
+    release_second = threading.Event()
+
+    def second_target(control, result):
+        assert release_second.wait(timeout=5)
+        result["state"] = "ready"
+
+    second, started = registry.start(
+        key,
+        second_target,
+        force=False,
+        languages=None,
+        explicit=False,
+        build_deadline=time.monotonic() + 10,
+    )
+    try:
+        assert started is True
+        assert second.job_id != first.job_id
+        # The live build answers `current()` -- only it can report progress --
+        # but the answer for the finished one is still there to be read.
+        assert registry.current(key) is second
+        assert registry.terminal(key) is finished
+        assert finished.state == "ready"
+    finally:
+        release_second.set()
+        registry.join(timeout=5)
+
+    assert registry.terminal(key).job_id == second.job_id
+
+
+def _run_to_completion(registry, key, *, explicit=True, state="ready"):
+    """Start one build that ends immediately and return its job."""
+
+    def target(control, result):
+        result["state"] = state
+
+    job, started = registry.start(
+        key,
+        target,
+        force=True,
+        languages=None,
+        explicit=explicit,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    registry.join(timeout=5)
+    return job
+
+
+def test_a_terminal_answer_survives_a_later_build_finishing():
+    """Remembering only the newest terminal answer is not enough.
+
+    The losing sequence is ordinary, not a corner: a caller takes handle A
+    with `wait_seconds=0`, A finishes, a `wiki_code_search` against a dirty
+    graph starts auto-rebuild B, and B -- a no-op rebuild on an unchanged
+    checkout -- finishes in well under a second. The caller's next poll
+    arrives after B ended, so a single remembered answer is already B's and
+    A's outcome, the whole point of the handle, is unlearnable. Comparing
+    ids only tells the caller that its answer is gone.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    first = _run_to_completion(registry, key, explicit=True)
+    second = _run_to_completion(registry, key, explicit=False)
+
+    remembered = registry.terminal_by_id(key, first.job_id)
+    assert remembered is not None
+    assert remembered.job_id == first.job_id
+    assert remembered.state == "ready"
+    assert remembered.describe()["finished_at"] is not None
+    # The id-less reader keeps reporting the latest build for the domain.
+    assert registry.current(key).job_id == second.job_id
+    assert registry.terminal_by_id(key, second.job_id).job_id == second.job_id
+    assert registry.terminal_by_id(key, "0" * 16) is None
+
+
+def test_two_domains_keep_their_own_terminal_answers():
+    """One domain's finished build must not displace another's answer.
+
+    The registry is process-wide while its answers are per domain: with a
+    single remembered snapshot, a build in domain B erased domain A's, and
+    a status call for A silently lost its `job` key entirely.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    docs = ("/tmp/base", "docs")
+    notes = ("/tmp/base", "notes")
+
+    docs_job = _run_to_completion(registry, docs)
+    notes_job = _run_to_completion(registry, notes, state="failed")
+
+    assert registry.current(docs).job_id == docs_job.job_id
+    assert registry.current(docs).state == "ready"
+    assert registry.current(notes).job_id == notes_job.job_id
+    assert registry.current(notes).state == "failed"
+    assert registry.terminal_by_id(docs, docs_job.job_id).domain_key == docs
+    assert registry.current(("/tmp/base", "absent")) is None
+
+
+def test_terminal_by_id_never_answers_across_domains():
+    """The by-id lookup is domain-scoped, like every other reader here.
+
+    An id is globally unique, so an unscoped lookup would answer -- and
+    report a `ready` build of *another* domain to a session that rebound.
+    The registry owns the check because it is the only place every future
+    caller must pass through.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    docs = ("/tmp/base", "docs")
+    notes = ("/tmp/base", "notes")
+    docs_job = _run_to_completion(registry, docs)
+
+    assert registry.terminal_by_id(docs, docs_job.job_id) is not None
+    assert registry.terminal_by_id(notes, docs_job.job_id) is None
+    assert registry.terminal_by_id(("/other/base", "docs"), docs_job.job_id) is None
+
+
+def test_terminal_history_is_bounded_and_evicts_the_oldest():
+    """Nothing prunes this history, so it has to be capped.
+
+    Keeping every build's snapshot would trade the pinned job graph for an
+    unbounded one. The cap is what makes the by-id lookup affordable.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+    limit = runtime_module._TERMINAL_HISTORY
+
+    jobs = [
+        _run_to_completion(registry, key) for _ in range(limit + 2)
+    ]
+
+    assert len(registry._terminal) == limit
+    assert registry.terminal_by_id(key, jobs[0].job_id) is None
+    assert registry.terminal_by_id(key, jobs[1].job_id) is None
+    assert registry.terminal_by_id(key, jobs[2].job_id).job_id == jobs[2].job_id
+    assert registry.terminal_by_id(
+        key, jobs[-1].job_id
+    ).job_id == jobs[-1].job_id
+    assert registry.current(key).job_id == jobs[-1].job_id
+
+
+def test_describe_never_reports_a_running_job_with_a_finished_timestamp():
+    """A descriptor must never mix a running state with a finished timestamp.
+
+    `describe()` answers from the published snapshot alone; the job's own
+    `state`/`finished_at` are for direct readers and must not leak into a
+    descriptor on their own. Reproduced by setting `finished_at` while no
+    snapshot is published -- which is what a descriptor reassembled from
+    those two fields would turn into `{"state": "running", "finished_at":
+    <ts>}`, a shape no poller can interpret.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    job = runtime_module._BuildJob(
+        ("/tmp/base", "docs"),
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    job.finished_at = time.time()
+
+    described = job.describe()
+
+    assert described["state"] == "running"
+    assert "finished_at" not in described
+    assert job.terminal is None
+
+
+def test_the_live_descriptor_branch_never_consults_the_jobs_own_state():
+    """The live branch must report `running` without reading `job.state`.
+
+    `describe()` reads `terminal`, finds it unset, and then has to say
+    something about the state. Reading `job.state` there is a *second*
+    unsynchronised read: `finish()` publishes the snapshot and sets
+    `job.state` as two adjacent stores, so a reader that passes the first
+    check before them and reaches the second after both reports a terminal
+    state with no `finished_at` -- the shape the whole snapshot exists to
+    prevent. Reordering the writer only narrows that gap; the reader has to
+    stop taking the second look.
+
+    The state built here is exactly what that gap produces, and it needs no
+    threads: `terminal` still unset, `state` already terminal.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    job = runtime_module._BuildJob(
+        ("/tmp/base", "docs"),
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    job.state = "ready"
+
+    described = job.describe()
+
+    assert job.terminal is None
+    assert described["state"] == "running"
+    assert "finished_at" not in described
+
+
+def test_describe_never_reports_a_terminal_state_without_a_timestamp(
+    monkeypatch
+):
+    """The mirror of the race above, and just as reachable.
+
+    `describe()` decides its whole answer on one unsynchronised read of
+    `terminal`, and `attach_job` -- i.e. `wiki_code_status` -- holds the live
+    job after `current()` has released the registry lock. If `finish()` wrote
+    the job's own `state` before publishing the snapshot, a reader landing in
+    between would take the running branch and emit a terminal `state` with no
+    `finished_at`, which the READMEs forbid ("`finished_at` once terminal").
+    The window is opened here where the reviewer found it: inside
+    `_JobSnapshot.__init__`, on the worker's real terminal path.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+    in_window = threading.Event()
+    let_go = threading.Event()
+    real_init = runtime_module._JobSnapshot.__init__
+
+    def slow_init(self, job, *, state, finished_at):
+        in_window.set()
+        assert let_go.wait(timeout=5)
+        real_init(self, job, state=state, finished_at=finished_at)
+
+    monkeypatch.setattr(runtime_module._JobSnapshot, "__init__", slow_init)
+
+    def target(control, result):
+        result["state"] = "ready"
+
+    job, started = registry.start(
+        key,
+        target,
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    try:
+        assert started is True
+        assert in_window.wait(timeout=5)
+        described = job.describe()
+
+        assert described["state"] == "running"
+        assert "finished_at" not in described
+    finally:
+        let_go.set()
+        registry.join(timeout=5)
+
+    settled = job.describe()
+    assert settled["state"] == "ready"
+    assert settled["finished_at"] is not None
+
+
+def test_a_timed_out_join_leaves_the_running_build_in_the_slot():
+    """Only a terminal job may be evicted from the live slot.
+
+    `join(timeout)` and `shutdown(timeout)` both reach `release()` with finite
+    budgets, so both can reach it while the build is still running. Clearing
+    the slot there would let the very next `start()` spawn a second worker
+    beside the first, breaking the one invariant the registry exists to keep.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+    release_build = threading.Event()
+
+    def blocked_target(control, result):
+        assert release_build.wait(timeout=5)
+        result["state"] = "ready"
+
+    def second_target(control, result):  # pragma: no cover - must never run
+        pytest.fail("a second build worker was started")
+
+    job, started = registry.start(
+        key,
+        blocked_target,
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    try:
+        assert started is True
+        registry.join(timeout=0.05)  # expires; the build is still blocked
+
+        assert job.thread.is_alive() is True
+        assert registry._job is job
+        assert registry.is_active(key) is True
+
+        joined, started_again = registry.start(
+            key,
+            second_target,
+            force=True,
+            languages=None,
+            explicit=True,
+            build_deadline=time.monotonic() + 10,
+        )
+
+        assert started_again is False
+        assert joined is job
+        assert sum(
+            thread.name == "iwiki-code-graph-build"
+            for thread in threading.enumerate()
+        ) == 1
+    finally:
+        release_build.set()
+        registry.join(timeout=5)
+
+    assert registry._job is None
+    assert registry.terminal_by_id(key, job.job_id).state == "ready"
+
+
+def test_finish_records_the_terminal_state_exactly_once():
+    """The worker owns `finished_at`; a later caller must not restamp it.
+
+    `_index_with_deadline` calls `finish()` again after a completed join, and
+    that repeat has to be inert: `finished_at` must be when the build ended,
+    not whenever some caller happened to come back.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    job = _run_to_completion(registry, key)
+    published = job.terminal
+    stamped = job.finished_at
+    time.sleep(0.01)
+
+    # A different state makes the repeat visible if it is not ignored.
+    registry.finish(job, "failed")
+
+    assert job.terminal is published
+    assert job.finished_at == stamped
+    assert job.state == "ready"
+    assert job.describe()["finished_at"] == stamped
+    assert registry.terminal_by_id(key, job.job_id) is published
+    assert len(registry._terminal) == 1
+
+
+def test_eviction_spares_a_domains_last_remaining_answer():
+    """A busy domain must not evict another domain's only answer.
+
+    The cap is global on purpose -- a per-domain cap grows without bound in
+    the number of domains a session rebinds through -- so the protection has
+    to come from the eviction order instead: take the oldest snapshot of a
+    domain that still has more than one, and only fall back to the global
+    oldest when every domain holds exactly one.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    docs = ("/tmp/base", "docs")
+    notes = ("/tmp/base", "notes")
+    limit = runtime_module._TERMINAL_HISTORY
+
+    only_docs_answer = _run_to_completion(registry, docs)
+    crowd = [
+        _run_to_completion(registry, notes) for _ in range(limit + 1)
+    ]
+
+    assert len(registry._terminal) == limit
+    # The oldest snapshot overall belongs to `docs` and is its only one.
+    assert registry.terminal_by_id(docs, only_docs_answer.job_id) is not None
+    assert registry.current(docs).job_id == only_docs_answer.job_id
+    # `notes` paid for its own crowding instead.
+    assert registry.terminal_by_id(notes, crowd[0].job_id) is None
+    assert registry.terminal_by_id(notes, crowd[1].job_id) is None
+    assert registry.current(notes).job_id == crowd[-1].job_id
+
+
+def test_rebuilding_answer_omits_progress_once_the_job_is_terminal():
+    """`phase` beside a terminal `state` is the shape `attach_job` forbids.
+
+    Reachable because the worker publishes terminality from inside its own
+    `finally`, while its thread is still alive -- exactly the condition under
+    which a caller whose wait expired takes this answer.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs")
+
+    running = runtime_module._BuildJob(
+        key,
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    live_answer = runtime_module._rebuilding_job_answer(running)
+
+    assert live_answer["job"]["state"] == "running"
+    assert live_answer["job"]["phase"] == running.control.phase
+    assert live_answer["job"]["phases_done"] == list(
+        running.control.phases_done
+    )
+
+    finished = _run_to_completion(registry, key)
+    terminal_answer = runtime_module._rebuilding_job_answer(finished)
+
+    assert terminal_answer["job"]["state"] == "ready"
+    assert "phase" not in terminal_answer["job"]
+    assert "phases_done" not in terminal_answer["job"]
 
 
 def test_secure_descriptor_path_falls_back_to_dev_fd(monkeypatch):
@@ -3075,7 +3820,10 @@ def test_slow_git_setup_is_bounded_and_cannot_publish_after_cancel(
 def test_timeout_after_atomic_entry_finishes_non_ready_then_ready(
     ready_runtime, monkeypatch
 ):
-    runtime = ready_runtime.with_config(max_rebuild_seconds=1)
+    # Two seconds of budget so the build reliably reaches the blocked
+    # replacement -- the atomic entry this test is about -- before the caller's
+    # wait expires.
+    runtime = ready_runtime.with_config(max_rebuild_seconds=2)
     previous = runtime.status()["revision"]
     runtime.project_file("src/pkg/service.py").write_text(
         "def changed_during_publication():\n    return None\n",
@@ -3097,13 +3845,23 @@ def test_timeout_after_atomic_entry_finishes_non_ready_then_ready(
     out = runtime.index(force=True)
     elapsed = time.monotonic() - started
     during = runtime.status()
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    detached_cancelled = job.control.cancelled.is_set()
     release.set()
     runtime.runtime.join_workers(timeout=3)
     after = runtime.status()
 
     assert entered.is_set()
-    assert out["code"] == "busy"
-    assert elapsed < 1.5
+    # The wait expired after the atomic entry, so the caller receives the
+    # running job; the build finishes it under the writer lock regardless.
+    # The atomic section ignores `cancelled`, so only the flag itself can tell
+    # a detached caller from a cancelling one.
+    assert out["state"] == "rebuilding"
+    assert out["job"]["state"] == "running"
+    assert detached_cancelled is False
+    assert job.state == "ready"
+    assert elapsed < 2.5
     assert during["state"] == "rebuilding"
     assert during["fresh"] is False
     assert after["state"] == "ready"
@@ -3463,3 +4221,676 @@ def test_adding_javascript_changes_the_configured_language_fingerprint():
     without = parser_fingerprint(languages=("python",), **common)
     with_js = parser_fingerprint(languages=("python", "javascript"), **common)
     assert without != with_js
+
+
+def test_attaching_the_terminal_job_to_a_status_answer(seed_runtime):
+    """`status()` is the reader's answer; the tool layer attaches the job.
+
+    The runtime no longer decorates its own status, so a job descriptor
+    reaches a caller only through `attach_job` -- which is what
+    `wiki_code_status` calls whatever `read_mode` selected the reader.
+    """
+    runtime = seed_runtime
+    built = runtime.index(force=True)
+
+    assert built["state"] == "ready"
+    status = runtime.status()
+    assert "job" not in status
+    attached = attach_job(
+        worker_domain_key(runtime.binding), None, status
+    )
+    assert attached["job"]["state"] == "ready"
+    assert attached["job"]["id"] == built["job"]["id"]
+    assert "finished_at" in attached["job"]
+
+
+def test_query_guard_error_answer_carries_no_job(seed_runtime):
+    """F3: the invariant belongs where the error is known -- not below it.
+
+    `query_guard` merges `error`/`code` onto a status answer, so as long as
+    `status()` attached the job itself the guard produced exactly the shape
+    "a job is never attached to an error answer" forbids.
+    """
+    runtime = seed_runtime.with_state("failed")
+
+    status = runtime.status()
+    answer = runtime.query_guard()
+
+    # The domain does have a job to attach -- the build `with_state` ran.
+    assert _BUILD_WORKERS.current(
+        worker_domain_key(runtime.binding)
+    ) is not None
+    assert "error" not in status
+    assert "error" in answer
+    assert "job" not in answer
+
+
+def test_attached_descriptor_reports_progress_only_while_running(monkeypatch):
+    """Ruling 5: the `running` guard moved with the attachment.
+
+    A terminal answer comes from a `_JobSnapshot`, which owns no `control`
+    at all -- reading progress off it would raise rather than degrade, so
+    the single `state` read from the descriptor is what keeps the terminal
+    branch from touching it.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    monkeypatch.setattr(runtime_module, "_BUILD_WORKERS", registry)
+    key = ("/tmp/base", "docs")
+    release = threading.Event()
+    running_now = threading.Event()
+
+    def blocking_target(control, result):
+        running_now.set()
+        assert release.wait(timeout=5)
+        result["state"] = "ready"
+
+    live, started = registry.start(
+        key,
+        blocking_target,
+        force=True,
+        languages=None,
+        explicit=True,
+        build_deadline=time.monotonic() + 10,
+    )
+    assert started is True
+    assert running_now.wait(timeout=5)
+    try:
+        live_answer = attach_job(key, None, {"state": "rebuilding"})
+        assert live_answer["job"]["state"] == "running"
+        assert live_answer["job"]["phase"] == live.control.phase
+        assert live_answer["job"]["phases_done"] == list(
+            live.control.phases_done
+        )
+        # Naming the running build is the polling loop's own call, and it
+        # must reach the live job rather than fall through to the terminal
+        # history, which cannot hold a build that has not ended.
+        by_id = attach_job(key, live.job_id, {"state": "rebuilding"})
+        assert by_id["job"] == live_answer["job"]
+        assert "job_unknown" not in by_id.get("warnings", [])
+        # The same id is still nobody else's business.
+        elsewhere = attach_job(
+            ("/tmp/base", "notes"), live.job_id, {"state": "ready"}
+        )
+        assert "job" not in elsewhere
+        assert "job_unknown" in elsewhere["warnings"]
+    finally:
+        release.set()
+        registry.join(timeout=5)
+
+    snapshot = registry.terminal_by_id(key, live.job_id)
+    assert snapshot is not None
+    assert not hasattr(snapshot, "control")
+    terminal_answer = attach_job(key, None, {"state": "ready"})
+    assert terminal_answer["job"]["state"] == "ready"
+    assert "phase" not in terminal_answer["job"]
+    assert "phases_done" not in terminal_answer["job"]
+
+
+def test_attach_job_leaves_an_error_answer_alone(monkeypatch):
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    monkeypatch.setattr(runtime_module, "_BUILD_WORKERS", registry)
+    key = ("/tmp/base", "docs")
+    job = _run_to_completion(registry, key)
+
+    failure = {"error": "code graph is busy", "code": "busy"}
+    assert attach_job(key, None, failure) == failure
+    # Not even a named id reaches an error answer -- and no `job_unknown`
+    # warning is invented for one either.
+    assert attach_job(key, job.job_id, failure) == failure
+    assert attach_job(key, "0" * 16, failure) == failure
+
+
+def test_out_of_range_wait_seconds_is_refused(seed_runtime):
+    runtime = seed_runtime
+    with pytest.raises(CodeGraphQueryError) as too_low:
+        runtime.index(wait_seconds=-1)
+    with pytest.raises(CodeGraphQueryError) as too_high:
+        runtime.index(wait_seconds=10_000)
+
+    # `parameter` is what `sanitized_error`/`_invalid_config` turn into the
+    # tool answer's `field` -- without it the server-level answer would
+    # silently fall back to the fully generic invalid_config dict.
+    assert too_low.value.parameter == "wait_seconds"
+    assert too_high.value.parameter == "wait_seconds"
+
+
+def test_wait_expiry_returns_the_job_and_the_build_still_reaches_ready(
+    seed_runtime, monkeypatch
+):
+    # A build budget the slowed publication fits inside: the caller's wait
+    # expires long before the build's own deadline, so only the removed
+    # cancellation could end this run anywhere but `ready`.
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=10)
+    store = runtime.runtime._indexer.store
+    real_publish = store.publish_metadata
+
+    def slow_publish(*args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish_metadata", slow_publish)
+
+    answer = runtime.index(force=True, wait_seconds=0)
+
+    assert answer["state"] == "rebuilding"
+    assert answer["job"]["state"] == "running"
+    assert len(answer["job"]["id"]) == 16
+    assert "error" not in answer
+
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    assert job.job_id == answer["job"]["id"]
+    assert not job.control.cancelled.is_set()
+
+    runtime.runtime.join_workers(timeout=10)
+    assert runtime.status()["state"] == "ready"
+    # The detached caller never comes back, so the worker itself has to record
+    # the terminal state -- otherwise the job it handed out stays `running`
+    # forever and `wiki_code_status` reports a finished build as live.
+    assert job.state == "ready"
+    assert job.finished_at is not None
+    assert job.describe()["state"] == "ready"
+
+
+def test_matching_second_call_joins_the_live_job(seed_runtime, monkeypatch):
+    runtime = seed_runtime
+    store = runtime.runtime._indexer.store
+    real_publish = store.publish_metadata
+
+    def slow_publish(*args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish_metadata", slow_publish)
+
+    first = runtime.index(force=True, wait_seconds=0)
+    second = runtime.index(force=True, wait_seconds=0)
+    mismatched = runtime.index(force=True, languages=["python"], wait_seconds=0)
+
+    assert first["job"]["id"] == second["job"]["id"]
+    assert mismatched["code"] == "busy"
+    assert sum(
+        thread.name == "iwiki-code-graph-build"
+        for thread in threading.enumerate()
+    ) == 1
+
+    runtime.runtime.join_workers(timeout=10)
+
+
+def test_explicit_index_job_is_idle_activity(seed_runtime, monkeypatch):
+    """The detached explicit build is what the idle timer must see.
+
+    The caller took its job handle and returned, so no tool call is in
+    flight any more; only this predicate stands between the running build
+    and an idle shutdown that would cancel it.
+    """
+    runtime = seed_runtime.with_config(max_full_rebuild_seconds=10)
+    release_build = threading.Event()
+    build_paused = threading.Event()
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        build_paused.set()
+        assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    answer = runtime.index(force=True, wait_seconds=0)
+
+    # Always release: a failing assertion below would otherwise leave the
+    # worker parked for the full 5-second wait and log a rebuild failure at
+    # teardown, burying the assertion that actually failed.
+    try:
+        assert answer["job"]["state"] == "running"
+        assert build_paused.is_set()
+        assert explicit_job_active() is True
+    finally:
+        release_build.set()
+        runtime.runtime.join_workers(timeout=10)
+
+    # A finished job stops being activity: its snapshot stays for
+    # `wiki_code_status` to report, but it no longer holds the server open.
+    assert explicit_job_active() is False
+
+
+def test_query_time_rebuild_is_not_idle_activity(seed_runtime, monkeypatch):
+    """A search-driven rebuild must never hold the stdio server open.
+
+    `query_guard`'s auto-rebuild is started by a query, not by an operator:
+    counting it as activity would let any search against a dirty graph take
+    an open-ended lease on the process.
+    """
+    runtime = seed_runtime.with_state(
+        "dirty", auto_rebuild="bounded", max_rebuild_seconds=1
+    )
+
+    # Park the auto-rebuild in its first phase so the worker thread is
+    # provably still alive when the predicate is asked -- otherwise a build
+    # that simply finished first would make this test vacuous.
+    release_build = threading.Event()
+    build_paused = threading.Event()
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        build_paused.set()
+        assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    runtime.query_guard()
+
+    # Always release, for the same reason as the explicit case above.
+    try:
+        assert build_paused.is_set()
+        job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+        assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+        assert job is not None
+        assert job.thread.is_alive() is True
+        assert job.explicit is False
+        assert explicit_job_active() is False
+    finally:
+        release_build.set()
+        runtime.runtime.join_workers(timeout=10)
+
+
+def test_query_guard_refused_join_leaves_the_explicit_build_uncancelled(
+    seed_runtime, monkeypatch
+):
+    """A query-time auto-rebuild that loses the race for an explicit build
+    must not touch that build's `control` on its own (much shorter) wait
+    expiry.
+
+    Historical note: before `explicit` joined `force`/`languages` in
+    `_BuildJob.matches`, this exact race let `query_guard`'s call *join* the
+    explicit job and this test caught an unconditional `job.control.cancel()`
+    on that path. Now that provenance is part of the match, a request shaped
+    like `query_guard`'s (`explicit=False`) can no longer join an
+    `explicit=True` job at all -- it takes the `busy`-refusal path instead
+    (pinned precisely, via `_BUILD_WORKERS.start`'s own return, by
+    `test_query_guard_style_request_never_joins_an_explicit_build` below).
+    This test still earns its place: it drives the same race through the
+    real, public `query_guard()` entry point and confirms the outward
+    guarantee that matters to a caller -- the explicit build's `control` is
+    never touched and the build still reaches `ready`, regardless of which
+    internal path (join-then-expire or refuse-outright) produced that
+    guarantee.
+    """
+    runtime = seed_runtime.with_state(
+        "dirty",
+        auto_rebuild="bounded",
+        max_rebuild_seconds=1,
+        max_full_rebuild_seconds=10,
+    )
+
+    # Keep the real build blocked (well past every deadline below) so the
+    # worker thread stays alive throughout the whole race.
+    build_paused = threading.Event()
+    release_build = threading.Event()
+    discover_calls = {"count": 0}
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        discover_calls["count"] += 1
+        if discover_calls["count"] == 1:
+            build_paused.set()
+            assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    # Pause query_guard's own call right after it has decided (from
+    # status() == "dirty") to attempt a rebuild, but before it reaches
+    # `_BUILD_WORKERS.start()` -- so the explicit caller below can win the
+    # worker slot first and query_guard is left to join it.
+    real_index_with_deadline = runtime.runtime._index_with_deadline
+    guard_ready = threading.Event()
+    release_guard = threading.Event()
+
+    def paused_index_with_deadline(**kwargs):
+        if kwargs.get("cancel_on_wait"):
+            guard_ready.set()
+            assert release_guard.wait(timeout=5)
+        return real_index_with_deadline(**kwargs)
+
+    monkeypatch.setattr(
+        runtime.runtime, "_index_with_deadline", paused_index_with_deadline
+    )
+
+    guard_result: dict[str, object] = {}
+
+    def call_query_guard():
+        guard_result["answer"] = runtime.query_guard()
+
+    guard_thread = threading.Thread(target=call_query_guard)
+    guard_thread.start()
+    assert guard_ready.wait(timeout=5)
+
+    # The explicit caller starts the build and owns it -- query_guard's
+    # thread is still paused before it could have raced it for the slot.
+    explicit = runtime.index(wait_seconds=0)
+    assert build_paused.is_set()
+    assert explicit["state"] == "rebuilding"
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    assert job is not None
+    assert job.job_id == explicit["job"]["id"]
+
+    # Let query_guard's call proceed: same domain and default force/languages
+    # as the explicit build, but `explicit=False` mismatches its
+    # `explicit=True`, so `_BUILD_WORKERS.start` refuses it (`busy`) rather
+    # than joining -- it never starts a second build either.
+    release_guard.set()
+    guard_thread.join(timeout=10)
+
+    assert discover_calls["count"] == 1  # refused, not joined; no 2nd build
+    assert guard_result["answer"]["state"] == "rebuilding"
+    assert "error" in guard_result["answer"]
+    assert job.control.cancelled.is_set() is False
+
+    release_build.set()
+    runtime.runtime.join_workers(timeout=10)
+
+    assert job.control.cancelled.is_set() is False
+    assert job.state == "ready"
+    assert runtime.status()["state"] == "ready"
+
+
+def test_query_guard_style_request_never_joins_an_explicit_build(
+    seed_runtime, monkeypatch
+):
+    """Provenance is part of a join match.
+
+    An explicit `wiki_code_index()` call and `query_guard`'s bounded
+    auto-rebuild can share `force`/`languages` and still disagree on the
+    build deadline (`max_full_rebuild_seconds` vs. `max_rebuild_seconds`) and
+    on `restore_prior_on_abort` (False vs. True). A request styled like
+    `query_guard`'s must therefore never join an already-running explicit
+    build -- it has to answer busy exactly as it did before joining existed,
+    the same way an explicit request must never join a live auto-rebuild.
+    """
+    runtime = seed_runtime.with_state(
+        "dirty",
+        auto_rebuild="bounded",
+        max_rebuild_seconds=2,
+        max_full_rebuild_seconds=10,
+    )
+
+    # Keep the real build blocked so the worker thread stays alive across
+    # the whole race below.
+    build_paused = threading.Event()
+    release_build = threading.Event()
+    discover_calls = {"count": 0}
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        discover_calls["count"] += 1
+        if discover_calls["count"] == 1:
+            build_paused.set()
+            assert release_build.wait(timeout=5)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    # Pause query_guard's call right after it has decided (from
+    # status() == "dirty") to attempt a rebuild, but before it reaches
+    # `_BUILD_WORKERS.start()` -- so the explicit caller below can win the
+    # worker slot first, exactly as in the round-1 race.
+    real_index_with_deadline = runtime.runtime._index_with_deadline
+    guard_ready = threading.Event()
+    release_guard = threading.Event()
+
+    def paused_index_with_deadline(**kwargs):
+        if kwargs.get("cancel_on_wait"):
+            guard_ready.set()
+            assert release_guard.wait(timeout=5)
+        return real_index_with_deadline(**kwargs)
+
+    monkeypatch.setattr(
+        runtime.runtime, "_index_with_deadline", paused_index_with_deadline
+    )
+
+    # Record every `_BUILD_WORKERS.start()` call's own return value -- the
+    # only place "joined vs. refused" is unambiguous, since `query_guard`'s
+    # public answer re-reads `status()` (which reports "rebuilding" as long
+    # as *any* job for this domain is live) regardless of which happened.
+    start_calls: list[tuple[bool, object]] = []
+    real_start = _BUILD_WORKERS.start
+
+    def recording_start(*args, **kwargs):
+        result = real_start(*args, **kwargs)
+        start_calls.append((kwargs.get("explicit"), result))
+        return result
+
+    monkeypatch.setattr(_BUILD_WORKERS, "start", recording_start)
+
+    guard_result: dict[str, object] = {}
+
+    def call_query_guard():
+        guard_result["answer"] = runtime.query_guard()
+
+    guard_thread = threading.Thread(target=call_query_guard)
+    guard_thread.start()
+    assert guard_ready.wait(timeout=5)
+
+    # The explicit caller starts the build and owns it as `explicit=True`.
+    explicit = runtime.index(wait_seconds=0)
+    assert build_paused.is_set()
+    assert explicit["state"] == "rebuilding"
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    assert job is not None
+    assert job.job_id == explicit["job"]["id"]
+    assert job.explicit is True
+
+    # Release query_guard's call: it now tries to join the live job with
+    # `explicit=False` (query_guard's own provenance) and must be refused.
+    release_guard.set()
+    guard_thread.join(timeout=10)
+
+    assert discover_calls["count"] == 1  # no second build was ever started
+    assert sum(
+        thread.name == "iwiki-code-graph-build"
+        for thread in threading.enumerate()
+    ) == 1
+
+    query_guard_start_results = [
+        result for explicit_flag, result in start_calls
+        if explicit_flag is False
+    ]
+    assert len(query_guard_start_results) == 1
+    assert query_guard_start_results[0] == (None, False)
+    assert guard_result["answer"].get("state") != "ready"
+    assert job.control.cancelled.is_set() is False
+
+    release_build.set()
+    runtime.runtime.join_workers(timeout=10)
+
+    assert job.control.cancelled.is_set() is False
+    assert job.explicit is True
+    assert job.state == "ready"
+    assert runtime.status()["state"] == "ready"
+
+
+def test_two_query_guard_style_callers_join_without_cancelling_the_starter(
+    seed_runtime, monkeypatch
+):
+    """The only scenario left that can reach `if started: job.control.cancel()`
+    on the join side: two callers with the SAME provenance (`explicit=False`,
+    i.e. both shaped like `query_guard`'s own bounded auto-rebuild) sharing
+    one build. The starter's budget is long -- it must be free to reach
+    `ready` uninterrupted. A second, short-budget caller then joins the same
+    job (`force`/`languages`/`explicit` all match) and gives up on its own
+    much earlier expiry; because it only joined, it must leave the shared
+    `control` alone rather than cancel the starter's build out from under it.
+
+    `test_joining_query_guard_never_cancels_an_explicit_build` used to be
+    this test, but once `explicit` joined the match in round 2 that scenario
+    (an `explicit=False` caller racing an `explicit=True` one) can no longer
+    join at all -- it now takes the `busy`-refusal path
+    (`test_query_guard_style_request_never_joins_an_explicit_build`) and
+    never reaches this line. Two same-provenance callers are the only
+    remaining way to exercise it.
+    """
+    runtime = seed_runtime
+
+    store = runtime.runtime._indexer.store
+    real_publish = store.publish_metadata
+
+    def slow_publish(*args, **kwargs):
+        time.sleep(1.5)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish_metadata", slow_publish)
+
+    starter_result: dict[str, object] = {}
+
+    def call_starter():
+        starter_result["answer"] = runtime.runtime._index_with_deadline(
+            force=True,
+            languages=None,
+            build_deadline=time.monotonic() + 10,
+            wait_deadline=time.monotonic() + 10,
+            restore_prior_on_abort=True,
+            cancel_on_wait=True,
+        )
+
+    starter_thread = threading.Thread(target=call_starter)
+    starter_thread.start()
+
+    job = None
+    poll_deadline = time.monotonic() + 5
+    while time.monotonic() < poll_deadline:
+        job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+        if job is not None and job.thread is not None and job.thread.is_alive():
+            break
+        time.sleep(0.01)
+    assert job is not None
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    assert job.thread.is_alive()
+    assert job.explicit is False  # cancel_on_wait=True -> query-guard-shaped
+
+    # A second, short-budget query-guard-shaped caller joins the same job
+    # (matching force/languages/explicit) and gives up quickly.
+    joined = runtime.runtime._index_with_deadline(
+        force=True,
+        languages=None,
+        build_deadline=time.monotonic() + 0.5,
+        wait_deadline=time.monotonic() + 0.5,
+        restore_prior_on_abort=True,
+        cancel_on_wait=True,
+    )
+
+    assert joined["code"] == "busy"
+    assert sum(
+        thread.name == "iwiki-code-graph-build"
+        for thread in threading.enumerate()
+    ) == 1
+    # The joiner's own expiry must not have cancelled the shared build.
+    assert job.control.cancelled.is_set() is False
+
+    starter_thread.join(timeout=15)
+
+    assert job.control.cancelled.is_set() is False
+    assert starter_result["answer"]["state"] == "ready"
+    assert job.state == "ready"
+    assert runtime.status()["state"] == "ready"
+
+
+def test_wait_expiry_is_judged_against_the_running_builds_deadline(
+    seed_runtime, monkeypatch
+):
+    """A joiner must not measure someone else's build by its own budget.
+
+    The doomed-build guard exists because `enter_publication` refuses a build
+    whose deadline has passed: such a build can only end busy or failed, so
+    there is no job worth handing out. A caller that joined a build started
+    with a much shorter deadline carries its own, later one -- judging by that
+    would hand back a descriptor and tell the caller to poll a build that is
+    already past the publication gate's cutoff.
+    """
+    runtime = seed_runtime
+    build_paused = threading.Event()
+    release_build = threading.Event()
+    real_discover = codegraph_indexer.discover_sources
+
+    def pausing_discover(*args, **kwargs):
+        build_paused.set()
+        assert release_build.wait(timeout=10)
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_indexer, "discover_sources", pausing_discover
+    )
+
+    # The starter runs with a short build deadline and detaches once its own
+    # wait expires; the build itself stays parked, past that deadline and
+    # nowhere near the publication gate.
+    starter_result: dict[str, object] = {}
+
+    def call_starter():
+        starter_result["answer"] = runtime.runtime._index_with_deadline(
+            force=True,
+            languages=None,
+            build_deadline=time.monotonic() + 0.2,
+            wait_deadline=time.monotonic() + 0.2,
+            restore_prior_on_abort=False,
+            cancel_on_wait=False,
+        )
+
+    starter_thread = threading.Thread(target=call_starter)
+    starter_thread.start()
+    assert build_paused.wait(timeout=5)
+    starter_thread.join(timeout=5)
+
+    assert starter_result["answer"]["code"] == "busy"
+    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
+    assert job is not None and job.thread.is_alive()
+    assert job.control.publication_attempted.is_set() is False
+
+    # The joiner's own budget is long; the build it joins is already doomed.
+    joined = runtime.runtime._index_with_deadline(
+        force=True,
+        languages=None,
+        build_deadline=time.monotonic() + 30,
+        wait_deadline=time.monotonic() + 0.3,
+        restore_prior_on_abort=False,
+        cancel_on_wait=False,
+    )
+
+    try:
+        assert joined["code"] == "busy"
+        assert "job" not in joined
+        # Only the starter may cancel, and it had already detached.
+        assert job.control.cancelled.is_set() is False
+    finally:
+        release_build.set()
+        runtime.runtime.join_workers(timeout=15)
+
+
+def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
+    runtime = seed_runtime
+    assert runtime.index(force=True)["state"] == "ready"
+
+    started = time.monotonic()
+    answer = runtime.index(wait_seconds=0)
+    elapsed = time.monotonic() - started
+
+    assert answer["state"] == "ready"
+    assert answer["no_op"] is True
+    assert "job" not in answer or answer["job"]["state"] == "ready"
+    assert elapsed < 1.0

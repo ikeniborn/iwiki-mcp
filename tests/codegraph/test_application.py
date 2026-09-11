@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from iwiki_mcp.codegraph import application
+from iwiki_mcp.codegraph import runtime as codegraph_runtime
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.mcp_adapter import (
     ENDPOINT_ENV,
@@ -12,7 +14,13 @@ from iwiki_mcp.codegraph.mcp_adapter import (
     TOKEN_ENV,
 )
 from iwiki_mcp.codegraph.publication import PublicationSession, SnapshotHeader
-from iwiki_mcp.codegraph.runtime import CodeGraphRuntime, sanitized_error
+from iwiki_mcp.codegraph.query import CodeGraphQueryError
+from iwiki_mcp.codegraph.runtime import (
+    _BUILD_WORKERS,
+    CodeGraphRuntime,
+    sanitized_error,
+)
+from iwiki_mcp.codegraph.store import CodeGraphStore
 from iwiki_mcp.storage import GitBinding, PostgresBinding
 from iwiki_mcp.specifications import UnavailableSpecificationGraphResolver
 
@@ -75,6 +83,20 @@ def _exported_snapshot():
         graph_payload_revision=_PAYLOAD_REVISION,
     )
     return header, rows
+
+
+def _indexed(built, publish):
+    """Answer the way the real runtime does: a ready build publishes itself.
+
+    `CodeGraphRuntime.index` hands its build worker the publication callback
+    and returns the result under `publication`, so a fake runtime that swallowed
+    the callback would let `index_and_publish` pass its "publication" test
+    without anything ever publishing.
+    """
+    if publish is None or built.get("state") != "ready":
+        return built
+    published = publish()
+    return {**built, "publication": published} if published else built
 
 
 class SnapshotRuntime:
@@ -561,8 +583,13 @@ def test_safe_adapter_failure_preserves_mcp_mode_and_aborts_once(
     class Runtime(SnapshotRuntime):
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
-            return {"state": "ready", "revision": _LOCAL_REVISION}
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
+            return _indexed(
+                {"state": "ready", "revision": _LOCAL_REVISION}, publish
+            )
 
     runtime = Runtime()
     monkeypatch.setattr(
@@ -912,17 +939,30 @@ def test_outcome_ready_revision_and_tool_result_semantics(
     assert outcome.tool_result() == tool_result
 
 
-def test_non_ready_index_never_selects_or_publishes_target(
+def test_non_ready_index_never_publishes_to_the_target(
     tmp_path, monkeypatch
 ):
+    """A build that never reached `ready` must not begin a publication.
+
+    The invariant is about publishing, not about selecting: the publisher is
+    constructed before the build so that a missing endpoint or token is
+    reported as the configuration error it is, and construction opens no
+    connection and begins no session. What must not happen is a *call* on it.
+    """
     calls = []
+    publisher = RecordingPublisher()
 
     class Runtime:
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
             calls.append(("index", force, languages))
-            return {"state": "failed", "revision": None}
+            return _indexed(
+                {"state": "failed", "revision": None}, publish
+            )
 
     monkeypatch.setattr(
         application,
@@ -932,7 +972,7 @@ def test_non_ready_index_never_selects_or_publishes_target(
     monkeypatch.setattr(
         application,
         "publisher_for",
-        lambda *_args, **_kwargs: pytest.fail("publisher must not be selected"),
+        lambda *_args, **_kwargs: publisher,
     )
 
     outcome = application.index_and_publish(
@@ -940,23 +980,99 @@ def test_non_ready_index_never_selects_or_publishes_target(
     )
 
     assert calls == [("index", True, ["python"])]
+    assert publisher.calls == []
     assert outcome.publish_mode == "mcp"
     assert outcome.publication == {}
     assert not outcome.ready
 
 
-def test_failed_sqlite_index_does_not_export_or_select_publisher(
+def test_index_and_publish_threads_wait_seconds_to_the_runtime(
     tmp_path, monkeypatch
 ):
-    """Recovery preservation is covered by test_cancellation_before_publication."""
     calls = []
 
     class Runtime:
         config = CodeGraphConfig(publish_mode="sqlite")
 
-        def index(self, *, force=False, languages=None):
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
+            calls.append(("index", force, languages, wait_seconds))
+            return _indexed(
+                {"state": "ready", "revision": _LOCAL_REVISION}, publish
+            )
+
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
+
+    outcome = application.index_and_publish(
+        _git_binding(tmp_path), wait_seconds=3.5
+    )
+
+    assert calls == [("index", False, None, 3.5)]
+    assert outcome.index == {"state": "ready", "revision": _LOCAL_REVISION}
+
+
+def test_out_of_range_wait_seconds_propagates_for_the_tool_layer_to_sanitize(
+    tmp_path, monkeypatch
+):
+    # Ruling from review: `index_and_publish` must not hand-build a second
+    # error dialect for `CodeGraphQueryError` -- it stays uncaught here (like
+    # `CodeGraphConfigError` and friends already are) and falls through to
+    # the generic `except Exception: if not redact_failures: raise`, so a
+    # direct caller with `redact_failures=False` sees the raised exception.
+    # The tool layer (`wiki_code_index`'s `_code_safe` decorator) is what
+    # turns it into a sanitized answer -- see the server-level coverage in
+    # test_server_tools.py.
+    class Runtime:
+        config = CodeGraphConfig(publish_mode="sqlite")
+
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
+            raise CodeGraphQueryError(
+                "wait_seconds must be between 0 and 10",
+                parameter="wait_seconds",
+            )
+
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
+
+    with pytest.raises(CodeGraphQueryError):
+        application.index_and_publish(_git_binding(tmp_path), wait_seconds=-1)
+
+
+def test_failed_sqlite_index_does_not_export_or_publish(
+    tmp_path, monkeypatch
+):
+    """Recovery preservation is covered by test_cancellation_before_publication.
+
+    `publisher_for` is left unpatched on purpose: SQLite really has no
+    publication target, so the real selection answers `None`, no callback is
+    installed, and `export_snapshot` -- the first thing any publication does
+    -- is never reached.
+    """
+    calls = []
+
+    class Runtime:
+        config = CodeGraphConfig(publish_mode="sqlite")
+
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
             calls.append(("index", force, languages))
-            return {"state": "failed", "code": "rebuild_failed"}
+            return _indexed(
+                {"state": "failed", "code": "rebuild_failed"}, publish
+            )
 
         def export_snapshot(self):
             pytest.fail("failed SQLite rebuild must not export a snapshot")
@@ -966,14 +1082,6 @@ def test_failed_sqlite_index_does_not_export_or_select_publisher(
         "code_runtime",
         lambda _source, *, environ=None: Runtime(),
     )
-    monkeypatch.setattr(
-        application,
-        "publisher_for",
-        lambda *_args, **_kwargs: pytest.fail(
-            "failed SQLite rebuild must not create a publisher"
-        ),
-    )
-
     outcome = application.index_and_publish(_git_binding(tmp_path))
 
     assert calls == [("index", False, None)]
@@ -987,8 +1095,13 @@ def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
     class Runtime:
         config = CodeGraphConfig(publish_mode="sqlite")
 
-        def index(self, *, force=False, languages=None):
-            return {"state": "ready", "revision": _LOCAL_REVISION}
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
+            return _indexed(
+                {"state": "ready", "revision": _LOCAL_REVISION}, publish
+            )
 
         def export_snapshot(self):
             raise AssertionError("SQLite must not export a snapshot")
@@ -1019,9 +1132,14 @@ def test_ready_external_index_publishes_through_selected_target(
     class Runtime(SnapshotRuntime):
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
+        def index(
+            self, *, force=False, languages=None, wait_seconds=None,
+            publish=None,
+        ):
             calls.append(("index", force, languages))
-            return {"state": "ready", "revision": _LOCAL_REVISION}
+            return _indexed(
+                {"state": "ready", "revision": _LOCAL_REVISION}, publish
+            )
 
     runtime = Runtime()
     monkeypatch.setattr(
@@ -1048,14 +1166,187 @@ def test_ready_external_index_publishes_through_selected_target(
         environ=environment,
     )
 
+    # The publisher is selected before the build rather than after it: its
+    # construction is the configuration check for the endpoint and token, and
+    # a configuration error must reach the caller as one instead of being
+    # discovered on a worker thread that can only record it as a runtime
+    # failure. The publication itself still happens after the build, inside
+    # `index`, which is what the publisher's own calls below show.
     assert calls == [
         ("runtime", environment),
-        ("index", True, ["python"]),
         ("publisher", "git", "mcp", environment),
+        ("index", True, ["python"]),
     ]
+    assert [call[0] for call in publisher.calls].count("finalize") == 1
     assert outcome.ready
     assert outcome.snapshot_revision == _REMOTE_REVISION
     assert outcome.duration_ms >= 0
+
+
+def test_detached_build_publishes_after_the_caller_took_its_handle(
+    seed_runtime, monkeypatch
+):
+    """R3/F1: a build that outlives `wait_seconds` must still publish.
+
+    The publication used to be the caller's, and ran only when `index`
+    returned `ready`. A build that detached returned `rebuilding` instead, so
+    under `publish_mode = "mcp"` nothing ever published: the job reached
+    `ready`, the caller believed it, and the hosted snapshot stayed the old
+    one with no error anywhere. The assertion is against the publisher, not
+    the tool answer, because the tool answer is exactly what was not wrong.
+    """
+    harness = seed_runtime.with_config(
+        publish_mode="mcp", max_full_rebuild_seconds=30
+    )
+    publisher = RecordingPublisher()
+    monkeypatch.setattr(
+        application, "publisher_for", lambda *_args, **_kwargs: publisher
+    )
+    real_publish_metadata = CodeGraphStore.publish_metadata
+
+    def slow_publish_metadata(self, *args, **kwargs):
+        time.sleep(0.4)
+        return real_publish_metadata(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CodeGraphStore, "publish_metadata", slow_publish_metadata
+    )
+    domain_key = codegraph_runtime.worker_domain_key(
+        application.source_context(harness.binding)
+    )
+
+    outcome = application.index_and_publish(
+        harness.binding, force=True, wait_seconds=0
+    )
+
+    assert outcome.index["state"] == "rebuilding"
+    assert outcome.publication == {}
+    job_id = outcome.index["job"]["id"]
+
+    _BUILD_WORKERS.join(timeout=30)
+
+    assert [call[0] for call in publisher.calls].count("begin") == 1
+    assert [call[0] for call in publisher.calls].count("finalize") == 1
+    assert any(call[0] == "batch" for call in publisher.calls)
+    assert _BUILD_WORKERS.terminal_by_id(domain_key, job_id).state == "ready"
+
+
+def test_detached_publication_failure_ends_the_job_as_failed(
+    seed_runtime, monkeypatch
+):
+    """R3/F1: a build that indexed but could not publish is not `ready`.
+
+    The local snapshot is fine; the published one is still the old revision,
+    so a caller polling the handle must not be told the build succeeded.
+    """
+    harness = seed_runtime.with_config(
+        publish_mode="mcp", max_full_rebuild_seconds=30
+    )
+    publisher = RecordingPublisher(
+        finalize_result={"error": "snapshot_conflict"}
+    )
+    monkeypatch.setattr(
+        application, "publisher_for", lambda *_args, **_kwargs: publisher
+    )
+    real_publish_metadata = CodeGraphStore.publish_metadata
+
+    def slow_publish_metadata(self, *args, **kwargs):
+        time.sleep(0.4)
+        return real_publish_metadata(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CodeGraphStore, "publish_metadata", slow_publish_metadata
+    )
+    domain_key = codegraph_runtime.worker_domain_key(
+        application.source_context(harness.binding)
+    )
+
+    outcome = application.index_and_publish(
+        harness.binding, force=True, wait_seconds=0
+    )
+    job_id = outcome.index["job"]["id"]
+    _BUILD_WORKERS.join(timeout=30)
+
+    assert [call[0] for call in publisher.calls].count("finalize") == 1
+    assert _BUILD_WORKERS.terminal_by_id(domain_key, job_id).state == "failed"
+
+
+def test_missing_publication_credentials_refuse_before_any_build(
+    seed_runtime,
+):
+    """R3: a missing endpoint or token is a configuration failure, exit 2.
+
+    The behavioural guard for the wave's final ruling. Nothing is mocked
+    here: a real project configured for `publish_mode = "mcp"`, a real empty
+    environment, the real CLI entry point. Selecting the publisher before the
+    build is what keeps `CodeGraphAdapterError` on the caller's thread, where
+    it becomes `invalid_config` and exit 2 -- discovered on the worker it
+    could only ever be a runtime publication failure (exit 1), and a
+    deployment branching on the two would retry forever against a credential
+    no retry can supply.
+    """
+    from io import StringIO
+
+    from iwiki_mcp import admin
+
+    harness = seed_runtime.with_config(publish_mode="mcp")
+    project = str(harness.project_dir)
+    domain_key = codegraph_runtime.worker_domain_key(
+        application.source_context(harness.binding)
+    )
+    stdout, stderr = StringIO(), StringIO()
+
+    assert harness.status()["state"] == "missing"
+
+    code = admin.run(
+        ["code", "publish", "--project", project, "--json"],
+        stdout=stdout,
+        stderr=stderr,
+        environ={},
+    )
+
+    assert code == 2
+    assert json.loads(stdout.getvalue()) == {
+        "state": "failed",
+        "publish_mode": "mcp",
+        "error": "invalid_config",
+        "duration_ms": 0,
+    }
+    assert stderr.getvalue() == ""
+    # No build ran: the graph is untouched and no job was ever started.
+    assert harness.status()["state"] == "missing"
+    assert not harness.paths.database.is_file()
+    assert _BUILD_WORKERS.current(domain_key) is None
+
+
+def test_synchronous_build_still_reports_its_publication(
+    seed_runtime, monkeypatch
+):
+    """The waiting caller reads the publication out of the build's answer.
+
+    Same single path as the detached case -- the build publishes and reports
+    what happened -- so the outcome a caller that waited sees is unchanged:
+    the publication result, and the revision it activated.
+    """
+    harness = seed_runtime.with_config(publish_mode="mcp")
+    publisher = RecordingPublisher()
+    monkeypatch.setattr(
+        application, "publisher_for", lambda *_args, **_kwargs: publisher
+    )
+    domain_key = codegraph_runtime.worker_domain_key(
+        application.source_context(harness.binding)
+    )
+
+    outcome = application.index_and_publish(harness.binding, force=True)
+
+    assert outcome.index["state"] == "ready"
+    assert "publication" not in outcome.index
+    assert outcome.publication["state"] == "ready"
+    assert outcome.ready
+    assert outcome.snapshot_revision == _REMOTE_REVISION
+    assert _BUILD_WORKERS.terminal_by_id(
+        domain_key, outcome.index["job"]["id"]
+    ).state == "ready"
 
 
 # -- read_mode routing (R6) ------------------------------------------------

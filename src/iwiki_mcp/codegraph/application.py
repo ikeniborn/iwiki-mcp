@@ -637,7 +637,17 @@ def index_and_publish(
     languages: list[str] | None = None,
     environ: Mapping[str, str] | None = None,
     redact_failures: bool = False,
+    wait_seconds: float | None = None,
 ) -> CodeGraphPublishOutcome:
+    """Build the project's graph and publish the snapshot it produced.
+
+    The build publishes itself, through the callback below: a caller that
+    detached at its `wait_seconds` expiry is no longer here to publish for it,
+    and a detached build that never published would leave the hosted snapshot
+    stale with nothing anywhere reporting it. There is deliberately one
+    publication path, not one per wait outcome -- this call reads the result
+    out of what the build returned.
+    """
     started = time.monotonic()
     runtime = code_runtime(
         source_context(binding),
@@ -650,15 +660,54 @@ def index_and_publish(
     config = runtime.config
     mode = None if config is None else config.publish_mode
     failure_category = None
+
     try:
         if config is not None:
             validate_target(binding, config.publish_mode)
-        indexed = runtime.index(force=force, languages=languages)
-        publication: dict[str, object] = {}
-        if config is not None and indexed.get("state") == "ready":
-            publisher = publisher_for(binding, config, environ=environ)
-            if publisher is not None:
-                publication = publish_snapshot(runtime, publisher, config)
+        # Select the publisher on *this* thread, before the build starts.
+        # Selecting it is `validate_target` plus object construction: no
+        # connection is opened, no request is sent, no session begins --
+        # `RemoteMcpTransport.__init__` reads two environment values and
+        # `PostgresCodeGraphStore.__init__` stores a DSN and a factory it does
+        # not call. So this keeps the invariant that matters (a build which
+        # never reaches `ready` publishes nothing) while leaving the one
+        # failure it *can* raise -- a missing endpoint or token, which is a
+        # configuration error -- on the caller's thread, where it becomes an
+        # `invalid_config` answer and the CLI's exit 2. Discovered on the
+        # worker instead, it could only ever be recorded as a runtime
+        # publication failure, and a deployment would retry forever against a
+        # configuration error retrying cannot fix.
+        publisher = (
+            None
+            if config is None
+            else publisher_for(binding, config, environ=environ)
+        )
+
+        def publish() -> dict[str, object]:
+            """Publish the snapshot the build just produced.
+
+            Runs on the build worker's thread, after a `ready` build and
+            before the job reports terminality. Installed only when a
+            publisher exists, so reaching it always means there is something
+            to publish to.
+            """
+            assert config is not None and publisher is not None
+            return publish_snapshot(runtime, publisher, config)
+
+        # `CodeGraphQueryError` (raised by `runtime.index`'s own `wait_seconds`
+        # validation) is deliberately not caught here: it falls through to
+        # the generic `except Exception` below like any other `CodeGraphError`
+        # and reaches the caller as a raised exception when `redact_failures`
+        # is `False`. The tool layer (`wiki_code_index`'s `_code_safe`
+        # decorator) turns it into the same sanitized `invalid_config` answer
+        # every other typed graph failure gets via `sanitized_error`.
+        indexed = dict(runtime.index(
+            force=force,
+            languages=languages,
+            wait_seconds=wait_seconds,
+            publish=None if publisher is None else publish,
+        ))
+        publication: dict[str, object] = indexed.pop("publication", {})
     except (
         wiki_base.BaseError,
         codegraph_config.CodeGraphConfigError,

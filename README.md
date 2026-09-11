@@ -493,6 +493,103 @@ query-time budget. `typescript_type_boost` (default `false`) opts into an isolat
 best-effort TypeScript Compiler API subprocess for type resolution; its absence or failure
 never blocks indexing — the Tree-sitter baseline always runs.
 
+`wiki_code_index` also accepts an optional `wait_seconds`, bounding how long the call
+waits for the build it starts (or joins) before returning — the build itself keeps
+running toward its own `max_full_rebuild_seconds` deadline regardless of how long the
+caller waited. It must be between `0` and `max_full_rebuild_seconds`; an out-of-range
+value is refused with the same generic `invalid_config` shape every other bad parameter
+gets — `{"error": "code graph configuration is invalid", "code": "invalid_config",
+"field": "wait_seconds", "hint": "inspect code_graph project configuration"}` — the
+accepted range is not repeated in the answer, only here in this documentation. A value
+below `0.5` is silently floored to `0.5` seconds. Pass `wait_seconds=0` to get a job
+handle back in well under a second instead of waiting for the build; poll
+`wiki_code_status` with that handle until the job reaches `ready` or `failed`.
+
+The answer at expiry depends on how long you waited. When `wait_seconds` is less than
+`max_full_rebuild_seconds` and the wait expires first, the answer is
+`{"state": "rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for
+this job"}` and the build keeps running, uncancelled. Omitting `wait_seconds` — the
+default, and what every caller used before this feature existed — makes the wait
+deadline equal the build's own deadline. A build still running when that deadline
+arrives answers `busy`, unless it has already entered publication, in which case it
+still gets the `{"state": "rebuilding", …, "job": {...}}` descriptor; the only change
+from before this feature is that the build underneath that `busy` answer is no longer
+cancelled. Poll `wiki_code_status`,
+whose answer carries the same `job` descriptor (`id`, `state`, `started_at`, and
+`finished_at` once terminal, plus `phase`/`phases_done` while still `running`) until the
+job reaches `ready` or `failed`.
+
+The build publishes its own snapshot, whether or not you are still waiting for it: under
+`publish_mode = "postgres"` or `"mcp"` a detached build activates the remote snapshot
+itself, as the last thing it does before reporting a terminal state. The job's state is
+therefore the publication's state too — a build that indexed but could not publish ends
+`failed`, not `ready`, even though the local snapshot it produced is complete. A call
+that waited for its build still gets the publication result under `publication` in its
+own answer; a call that detached reads only the job, so `failed` there is what tells you
+the published graph is still the previous revision. `publish_mode = "sqlite"` publishes
+nothing beyond the build itself, and its job is `ready` whenever the build was.
+
+A waiting call's own `state` keeps describing the local snapshot, which really is `ready`
+when the build finished, so the answer says the publication failed rather than leaving
+you to infer it from `job`: it carries `publication_failed` in `warnings` alongside the
+`publication` result and the `failed` job. Treat that warning, not `state`, as the answer
+to "did my snapshot reach the target".
+
+A publication target that is missing its configuration is refused before the build
+starts, not after it: `wiki_code_index` answers `invalid_config` — and `iwiki-mcp code
+publish` exits `2` — without indexing, because an absent `IWIKI_CODE_GRAPH_MCP_URL` or
+`IWIKI_CODE_GRAPH_MCP_TOKEN` is a configuration error no rebuild can resolve. A target
+that is configured but unreachable is the other case: there the build runs, the
+publication is attempted, and the failure is a `publication_failed` one (`exit 1`).
+
+One known limit follows from the build owning its publication. While a build runs the
+session stays alive — that is what keeps the job handle readable — and the publication is
+part of the build, so a target that stops answering holds the process open for as long as
+its transport allows. Local reads are not held with it: once the graph is written the
+build stops counting as a rebuild, so all three read tools — `wiki_code_status`,
+`wiki_code_search` and `wiki_code_context` — answer from the finished local snapshot
+throughout the publication, exactly as they would with no build running.
+
+There is no separate publication deadline, and the two targets are bounded differently.
+`mcp` bounds every remote call at a 30-second connect and 300-second read timeout, so
+its worst case is those per-call bounds times the number of batches a snapshot needs.
+`postgres` has no timeout of its own on this path: the publication connects over a DSN
+carrying no timeout option and sets only a lock timeout, so a database that accepts the
+connection and then stops answering blocks the publication indefinitely. That path is
+reached only by the one-shot `iwiki-mcp code publish` — `wiki_code_index` answers
+`source_unavailable` on a PostgreSQL binding — so it hangs that command rather than an
+MCP session, and it was equally unbounded before the publication moved into the build.
+A stuck publication is visible as a job that stays `running` long after its build's
+phases stopped advancing; ending the client process ends it.
+
+Pass the handle you hold back as `wiki_code_status(job_id=…)` and the answer describes
+that build and no other, so a later build — a query-time auto-rebuild, say — cannot take
+over the report underneath you. Called without `job_id` the answer reports the domain's
+current build: the one running now, and the last one that finished when none is running.
+A single build runs at a time, so when you poll without the handle, always check the
+returned `id` against the one you hold — a different `id` means your own build's outcome
+is no longer what the answer describes.
+
+The job is session-scoped either way. A new process (a server restart, a fresh stdio
+connection) knows no build and reports no `job` key at all, and neither does a `job_id`
+that has aged out of the process's bounded history of recent builds (16, shared across
+every domain that process builds for) — an unknown id is not an error, so the answer
+keeps its normal shape and adds `job_unknown` to its `warnings`. A handle is also
+unknown to a session bound to a different primary: a build belongs to exactly one domain,
+and `wiki_code_status` reports only builds of the domain it is bound to, so a rebound
+session is never told its graph is `ready` on the strength of another domain's build.
+Fall back to `state`/`fresh` in each of those cases rather than wait forever for a
+terminal job this process cannot answer for. An answer that carries `error` never
+carries a `job`: the error describes the graph, not the build.
+
+The descriptor does not depend on `code_graph.read_mode`. The build belongs to this
+process, not to the snapshot a reader answered from, so a local server reports it whether
+reads come from the local SQLite cache (`sqlite`) or from a published snapshot over MCP
+(`mcp`). A hosted PostgreSQL server runs no local build — `wiki_code_index` answers
+`source_unavailable` there — and its `wiki_code_status` carries no `job`; it issues no
+handles either, so a `job_id` presented to it is unknown by construction and answers
+`job_unknown` exactly as a local server does for an id it never issued.
+
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
 If both are omitted, the Python-only default remains in effect and no Bash files are
@@ -511,8 +608,8 @@ documented under distributed publication below:
 
 | Tool | Contract |
 | --- | --- |
-| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics. |
-| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. |
+| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished. A local server reports the job whichever reader `read_mode` selected; a hosted PostgreSQL server runs no build and carries none. Optional `job_id` reports that one build instead of the domain's current one; an id this server does not know answers normally with `job_unknown` in `warnings`. |
+| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` (pass `0` for an immediate job handle) bounds how long the call waits for that build without ever cancelling it: the answer is `rebuilding` with a `job` descriptor when `wait_seconds < max_full_rebuild_seconds`, or, when omitted (the default), `busy` if the build is still running at its own deadline without having entered publication — and the `rebuilding` descriptor if it has. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
 
@@ -1196,7 +1293,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `IWIKI_IDLE_TIMEOUT_SECONDS` | `1800` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0` disables the limit. Active tool calls are allowed to finish. A client that needs the server later must reconnect or start a new MCP process. |
+| `IWIKI_IDLE_TIMEOUT_SECONDS` | `86400` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0` disables the limit. Active tool calls are allowed to finish, and so is a code-graph build started by `wiki_code_index` whose caller already took its job handle. A query-time auto-rebuild does not hold the process open. A client that needs the server later must reconnect or start a new MCP process. |
 
 **Search tuning**
 

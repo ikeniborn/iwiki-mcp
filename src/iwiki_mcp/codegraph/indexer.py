@@ -85,6 +85,12 @@ KNOWN_WARNING_CODES = frozenset({
     "metrics_incomplete",
     "module_name_unavailable",
     "parse_error",
+    # Never persisted today -- it is written onto the in-memory build answer
+    # after the metadata record is sealed -- but listed so the answer-level
+    # and persisted vocabularies stay one vocabulary. A future path that
+    # routed a build answer's warnings through `sanitize_warning_codes` would
+    # otherwise drop exactly the warning that says the publication failed.
+    "publication_failed",
     "secret_excluded",
     "symlink_excluded",
     "typescript_boost_unavailable",
@@ -202,8 +208,40 @@ class BuildControl:
 
     def __init__(self) -> None:
         self.cancelled = threading.Event()
+        self.publication_attempted = threading.Event()
         self.publication_entered = threading.Event()
         self._publication_gate = threading.Lock()
+        self._phase: str | None = None
+        self._phases_done: list[str] = []
+        # Whether the build is still writing this domain's graph. It is
+        # cleared by whoever runs a post-build snapshot publication: by then
+        # the local graph is written, complete, and readable, and only work
+        # against a remote target remains. Two different questions are asked
+        # about a running build -- "is this graph being rebuilt?", which gates
+        # local reads, and "is work in flight?", which holds the session open
+        # -- and they stop coinciding exactly here. This answers the first;
+        # the worker thread's own liveness answers the second.
+        self.indexing = True
+
+    @property
+    def phase(self) -> str | None:
+        return self._phase
+
+    @property
+    def phases_done(self) -> tuple[str, ...]:
+        return tuple(self._phases_done)
+
+    def enter_phase(self, name: str) -> float:
+        """Mark the phase the build is entering and return its start time.
+
+        The phase marker exists because `phase_timings_ms` cannot answer this:
+        `_elapsed_ms` rounds to whole milliseconds over a map pre-seeded with
+        zeros, so a fast phase is indistinguishable from one never run.
+        """
+        if self._phase is not None:
+            self._phases_done.append(self._phase)
+        self._phase = name
+        return time.monotonic()
 
     def cancel(self) -> None:
         if self._publication_gate.acquire(blocking=False):
@@ -221,6 +259,11 @@ class BuildControl:
         lock_path: Path,
     ) -> None:
         self._publication_gate.acquire()
+        # Announce the attempt before the gate decides, so an observer that
+        # samples this flag at the deadline instant can never conclude "this
+        # build cannot publish" about a build that is about to. The flag is
+        # monotone and says nothing about the decision itself.
+        self.publication_attempted.set()
         if self.cancelled.is_set() or time.monotonic() >= deadline:
             self._publication_gate.release()
             raise Timeout(str(lock_path))
@@ -290,6 +333,13 @@ class WikiSelectorResolver(Protocol):
 
 def _elapsed_ms(started: float) -> int:
     return max(0, round((time.monotonic() - started) * 1000))
+
+
+def _enter(control: BuildControl | None, name: str) -> float:
+    """Stamp the phase start, recording it on the control when there is one."""
+    if control is None:
+        return time.monotonic()
+    return control.enter_phase(name)
 
 
 def _check_deadline(deadline: float | None, lock_path: Path) -> None:
@@ -1370,7 +1420,7 @@ class CodeGraphIndexer:
                 _check_deadline(deadline, self.paths.lock)
 
             check_control()
-            phase = time.monotonic()
+            phase = _enter(control, "discovery")
             discovered = discover_sources(
                 self.project_dir,
                 config,
@@ -1379,7 +1429,7 @@ class CodeGraphIndexer:
             timings["discovery"] = _elapsed_ms(phase)
             check_control()
 
-            phase = time.monotonic()
+            phase = _enter(control, "fingerprint")
             commit = current_git_commit(self.project_dir)
             fingerprints = compose_fingerprints(
                 discovered.files,
@@ -1400,17 +1450,17 @@ class CodeGraphIndexer:
             timings["fingerprint"] = _elapsed_ms(phase)
             check_control()
 
-            phase = time.monotonic()
+            phase = _enter(control, "parsing")
             parsed_files, parser_warnings, adapters = self._parse(
                 discovered, config
             )
             timings["parsing"] = _elapsed_ms(phase)
-            normalization_started = time.monotonic()
+            normalization_started = _enter(control, "normalization")
             parsed_files = tuple(parsed_files)
             timings["normalization"] = _elapsed_ms(normalization_started)
             check_control()
 
-            phase = time.monotonic()
+            phase = _enter(control, "resolution")
             relations, resolver_warnings = self._resolve(parsed_files, adapters)
             relation_rows = self._relation_rows(relations)
             timings["resolution"] = _elapsed_ms(phase)
@@ -1575,7 +1625,7 @@ class CodeGraphIndexer:
                 _check_deadline(deadline, self.paths.lock)
                 self._quarantine_unusable_canonical()
                 _check_deadline(deadline, self.paths.lock)
-                phase = time.monotonic()
+                phase = _enter(control, "discovery")
                 discovered = discover_sources(
                     self.project_dir,
                     config,
@@ -1584,7 +1634,7 @@ class CodeGraphIndexer:
                 timings["discovery"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
 
-                phase = time.monotonic()
+                phase = _enter(control, "fingerprint")
                 fingerprints, commit, _dirty, selector_snapshot = self._fingerprints(
                     discovered,
                     config,
@@ -1667,13 +1717,13 @@ class CodeGraphIndexer:
 
                 staging = self.store.create_staging_path()
                 _check_deadline(deadline, self.paths.lock)
-                phase = time.monotonic()
+                phase = _enter(control, "parsing")
                 parsed_files, parser_warnings, adapters = self._parse(
                     discovered,
                     config,
                 )
                 timings["parsing"] = _elapsed_ms(phase)
-                normalization_started = time.monotonic()
+                normalization_started = _enter(control, "normalization")
                 parsed_files = tuple(parsed_files)
                 timings["normalization"] = _elapsed_ms(
                     normalization_started
@@ -1695,7 +1745,7 @@ class CodeGraphIndexer:
                     indexed_at=indexed_at,
                     normalization_versions=normalization_versions,
                 )
-                phase = time.monotonic()
+                phase = _enter(control, "persistence")
                 staging_store = CodeGraphStore(
                     staging,
                     cache_base=self.cache_base,
@@ -1704,7 +1754,7 @@ class CodeGraphIndexer:
                 timings["persistence"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
 
-                phase = time.monotonic()
+                phase = _enter(control, "resolution")
                 relations, resolver_warnings = self._resolve(
                     parsed_files,
                     adapters,
@@ -1762,7 +1812,7 @@ class CodeGraphIndexer:
                 counts = self._counts(parsed_files, relations)
                 _check_deadline(deadline, self.paths.lock)
 
-                phase = time.monotonic()
+                phase = _enter(control, "validation")
                 while not self.store.canonical_handles_available():
                     if time.monotonic() >= deadline:
                         raise Timeout(str(self.paths.lock))
@@ -1785,7 +1835,7 @@ class CodeGraphIndexer:
                 timings["validation"] = _elapsed_ms(phase)
                 _check_deadline(deadline, self.paths.lock)
 
-                phase = time.monotonic()
+                phase = _enter(control, "publication")
                 if selector_snapshot is not None and callable(verify_selectors):
                     verify_selectors(
                         selector_snapshot, check_control=selector_control
@@ -1841,7 +1891,9 @@ class CodeGraphIndexer:
                     deadline=deadline,
                 )
                 _check_deadline(deadline, self.paths.lock)
-                canonical_verification_started = time.monotonic()
+                canonical_verification_started = _enter(
+                    control, "canonical_verification_1"
+                )
                 self._verify_published(revision)
                 timings["canonical_verification_1"] = _elapsed_ms(
                     canonical_verification_started
@@ -1876,12 +1928,25 @@ class CodeGraphIndexer:
                     deadline=deadline,
                 )
                 _check_deadline(deadline, self.paths.lock)
-                final_verification_started = time.monotonic()
+                final_verification_started = _enter(control, "final_verification")
                 self._verify_published(revision)
                 timings["final_verification"] = _elapsed_ms(
                     final_verification_started
                 )
                 _check_deadline(deadline, self.paths.lock)
+                # The step after final verification writes the build's
+                # metadata record, so it gets its own phase name rather than
+                # re-entering `publication`: re-entering would leave `phase`
+                # equal to a value already in `phases_done`, a contradiction a
+                # polling client can observe. It has no timing entry of its
+                # own -- `phase_timings_ms` is sealed into the very record
+                # this phase writes, so `publication` is the last span that
+                # can be measured. Deliberately absent from `_PHASE_NAMES`
+                # too, which is the timings vocabulary rather than the phase
+                # one: `set(timings) == set(_PHASE_NAMES)` is validated
+                # against *persisted* metadata, so adding a key there would
+                # invalidate every record an earlier version wrote.
+                _enter(control, "metadata")
                 timings["publication"] = _elapsed_ms(phase)
                 metadata = self._metadata(
                     revision=revision,

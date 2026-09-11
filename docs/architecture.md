@@ -653,11 +653,19 @@ Streamable HTTP with PostgreSQL. Admin subcommands load the same server config a
 migrations before their operation, but never start a listener. `--config` overrides
 `IWIKI_SERVER_CONFIG`; `--project` belongs only to the bare local stdio parser.
 
-After startup, the stdio transport exits after 1,800 seconds without an incoming
+After startup, the stdio transport exits after 86,400 seconds without an incoming
 MCP message. Set `IWIKI_IDLE_TIMEOUT_SECONDS=0` to retain the process without an
 idle limit. The timeout resets for every incoming message and waits for an active
 tool call to finish; a later tool call requires the client to reconnect or spawn
 a fresh server process.
+
+The wait also blocks while an explicit `wiki_code_index` build is still running,
+because that build outlives the tool call that started it: `IdleTracker` polls
+`codegraph.runtime.explicit_job_active()` once a second and treats a live explicit
+job as activity. A query-time auto-rebuild is deliberately excluded — counting it
+would let any search against a dirty graph take an open-ended lease on the process
+— and a predicate that raises is read as "no background work", so a broken
+predicate can only shorten the server's life, never pin it open.
 
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
@@ -1137,7 +1145,7 @@ while storage addresses and hosted limits are strict TOML (`postgres.config`); s
 `IWIKI_SCORE_THRESHOLD`, `IWIKI_SEARCH_MODE`, `IWIKI_SEED_*`, `IWIKI_GRAPH_DEPTH`),
 indexing (`IWIKI_CHUNK_SIZE`, `IWIKI_CHUNK_OVERLAP`), and optional
 `IWIKI_CHAT_MODEL` / `IWIKI_RERANK_MODEL`. `IWIKI_IDLE_TIMEOUT_SECONDS` controls
-the stdio idle shutdown and defaults to 1,800 seconds; `0` disables it.
+the stdio idle shutdown and defaults to 86,400 seconds; `0` disables it.
 
 PostgreSQL TOML deliberately excludes passwords and model settings. Local stdio adds
 `storage.iwiki_id`; hosted config forbids it and requires loopback host, normalized

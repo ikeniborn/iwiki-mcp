@@ -1,18 +1,39 @@
 """Inactivity tracking for the stdio MCP lifecycle."""
 from __future__ import annotations
 
+import logging
 import time
+from typing import Callable
 
 import anyio
 
+LOGGER = logging.getLogger(__name__)
+
+#: How often declared background work is re-checked while it runs. The
+#: predicate belongs to another thread's state, so there is nothing to await
+#: on: polling is the whole mechanism.
+BACKGROUND_POLL_SECONDS = 1.0
+
 
 class IdleTracker:
-    """Track incoming MCP activity and running tool calls."""
+    """Track incoming MCP activity, running tool calls, and declared work.
 
-    def __init__(self) -> None:
+    `has_background_work` lets an owner declare work that no tool call is
+    waiting on any more -- a code-graph build whose caller already took its
+    job handle and returned. It is polled, never awaited, and must answer
+    without blocking: `wait_until_idle` runs on the event loop that serves
+    the whole session.
+    """
+
+    def __init__(
+        self,
+        has_background_work: Callable[[], bool] | None = None,
+    ) -> None:
         self._active_calls = 0
         self._last_activity = time.monotonic()
         self._changed = anyio.Event()
+        self._has_background_work = has_background_work
+        self._background_work_unanswerable = False
 
     def touch(self) -> None:
         self._last_activity = time.monotonic()
@@ -31,11 +52,59 @@ class IdleTracker:
         self._changed = anyio.Event()
         changed.set()
 
+    def _background_work_declared(self) -> bool:
+        """Ask the predicate, treating an unanswerable one as "no work".
+
+        The predicate runs on the event loop that owns the stdio session, so
+        an exception escaping here would cancel the wait and take the server
+        down -- a worse outcome than the one the predicate exists to prevent.
+        Falling back to False degrades to the timer-only behaviour this
+        tracker had before it existed: a bounded shutdown, which still hands
+        the build its cooperative cancellation, rather than a process pinned
+        open forever by a predicate that can never answer.
+
+        That fallback is silent by construction, though, and a predicate that
+        raises is a programming bug rather than a transient blip: it will
+        raise on every poll for the life of the process, quietly leaving the
+        tracker back at its pre-declaration behaviour. So the first failure
+        per tracker is a warning -- visible once -- and every later one drops
+        to debug, which keeps the per-poll repetition out of the client's
+        stderr.
+        """
+        if self._has_background_work is None:
+            return False
+        try:
+            return bool(self._has_background_work())
+        except Exception:
+            if self._background_work_unanswerable:
+                LOGGER.debug("background work predicate failed", exc_info=True)
+            else:
+                self._background_work_unanswerable = True
+                LOGGER.warning(
+                    "background work predicate failed; idle shutdown falls "
+                    "back to the inactivity timer alone",
+                    exc_info=True,
+                )
+            return False
+
     async def wait_until_idle(self, timeout_seconds: int) -> None:
-        """Return only after a quiet period with no tool call in progress."""
+        """Return after a quiet period with no call and no declared work."""
         while True:
             if self._active_calls:
                 await self._changed.wait()
+                continue
+            if self._background_work_declared():
+                # Declared work is activity, so the idle countdown starts
+                # when that work *ends*. Without this the timestamp keeps
+                # ageing through a long build, and the session can shut down
+                # the instant the build finishes -- taking the job handle
+                # with it before the caller's next poll can read the terminal
+                # state, which is exactly the case a detached build exists
+                # for. Set directly rather than through `touch()`: nothing is
+                # waiting on the change event, and signalling every poll
+                # would churn it for no reader.
+                self._last_activity = time.monotonic()
+                await anyio.sleep(BACKGROUND_POLL_SECONDS)
                 continue
             remaining = self._last_activity + timeout_seconds - time.monotonic()
             if remaining <= 0:
