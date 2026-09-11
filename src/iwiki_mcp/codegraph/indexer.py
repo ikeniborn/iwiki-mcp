@@ -85,6 +85,12 @@ KNOWN_WARNING_CODES = frozenset({
     "metrics_incomplete",
     "module_name_unavailable",
     "parse_error",
+    # Never persisted today -- it is written onto the in-memory build answer
+    # after the metadata record is sealed -- but listed so the answer-level
+    # and persisted vocabularies stay one vocabulary. A future path that
+    # routed a build answer's warnings through `sanitize_warning_codes` would
+    # otherwise drop exactly the warning that says the publication failed.
+    "publication_failed",
     "secret_excluded",
     "symlink_excluded",
     "typescript_boost_unavailable",
