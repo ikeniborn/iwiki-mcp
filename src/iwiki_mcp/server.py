@@ -1810,12 +1810,30 @@ def wiki_code_status(job_id: _CodeJobId = None) -> dict:
     )
 
 
+_CodeWaitSeconds = Annotated[
+    float | None,
+    Field(
+        description=(
+            "Optional seconds to wait for the build before answering. Between "
+            "`0` and the project's `max_full_rebuild_seconds`; a value below "
+            "`0.5` is floored to `0.5`, and one out of range is refused as "
+            "`invalid_config`. Omit it to wait for the build's own deadline. "
+            "When the wait expires first the answer is `{\"state\": "
+            "\"rebuilding\", \"job\": {...}}` and the build keeps running, "
+            "uncancelled: it publishes its own snapshot and records its "
+            "outcome on the job, which `wiki_code_status(job_id=…)` reports "
+            "as `ready` or `failed`."
+        )
+    ),
+]
+
+
 @_safe
 @_code_safe
 def wiki_code_index(
     force: bool = False,
     languages: list[str] | None = None,
-    wait_seconds: float | None = None,
+    wait_seconds: _CodeWaitSeconds = None,
 ) -> dict:
     if languages is not None and (
         not languages

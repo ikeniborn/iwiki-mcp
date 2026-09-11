@@ -913,9 +913,19 @@ async def test_fastmcp_registry_has_exact_code_tools():
     assert set(tools["wiki_code_index"].inputSchema["properties"]) == {
         "force", "languages", "wait_seconds",
     }
-    assert tools["wiki_code_index"].inputSchema["properties"][
-        "wait_seconds"
-    ]["default"] is None
+    index_properties = tools["wiki_code_index"].inputSchema["properties"]
+    assert index_properties["wait_seconds"]["default"] is None
+    # Same reason the handle carries one: the range and what the answer
+    # becomes at expiry lived only in README prose, where a caller reading
+    # the schema never sees them.
+    assert (
+        "max_full_rebuild_seconds"
+        in index_properties["wait_seconds"]["description"]
+    )
+    assert "rebuilding" in index_properties["wait_seconds"]["description"]
+    assert (
+        "wiki_code_status" in index_properties["wait_seconds"]["description"]
+    )
     assert set(tools["wiki_code_search"].inputSchema["properties"]) == {
         "query", "kinds", "path", "languages", "limit",
     }
