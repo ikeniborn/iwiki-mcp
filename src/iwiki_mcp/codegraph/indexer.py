@@ -1919,7 +1919,15 @@ class CodeGraphIndexer:
                     final_verification_started
                 )
                 _check_deadline(deadline, self.paths.lock)
-                _enter(control, "publication")
+                # The step after final verification writes the build's
+                # metadata record, so it gets its own phase name rather than
+                # re-entering `publication`: re-entering would leave `phase`
+                # equal to a value already in `phases_done`, a contradiction a
+                # polling client can observe. It has no timing entry of its
+                # own -- `phase_timings_ms` is sealed into the very record
+                # this phase writes, so `publication` is the last span that
+                # can be measured.
+                _enter(control, "metadata")
                 timings["publication"] = _elapsed_ms(phase)
                 metadata = self._metadata(
                     revision=revision,

@@ -670,14 +670,20 @@ def test_build_control_reports_phases_including_zero_millisecond_ones():
     assert control.phases_done == ("discovery", "normalization")
 
 
-def test_real_build_records_publication_as_its_last_phase(seed_runtime):
+def test_real_build_records_metadata_as_its_last_phase(seed_runtime):
     from iwiki_mcp.codegraph.indexer import BuildControl
 
     control = BuildControl()
     built = seed_runtime.runtime._indexer.build(force=True, control=control)
 
     assert built["state"] == "ready"
-    assert control.phase == "publication"
+    # The final step writes the metadata record, and says so. It used to
+    # re-enter `publication`, leaving `phase` equal to a value already in
+    # `phases_done` -- a contradiction a polling client can observe.
+    assert control.phase == "metadata"
+    assert control.phase not in control.phases_done
+    assert control.phases_done[-1] == "final_verification"
+    assert "publication" in control.phases_done
     assert "discovery" in control.phases_done
     assert "normalization" in control.phases_done
 
