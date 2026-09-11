@@ -35,7 +35,7 @@ from iwiki_mcp.codegraph import location as codegraph_location
 from iwiki_mcp.codegraph.location import CodeGraphLocationResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
 from iwiki_mcp.codegraph.runtime import _BUILD_WORKERS, CodeGraphRuntime
-from iwiki_mcp.codegraph.query import CodeGraphQuery
+from iwiki_mcp.codegraph.query import CodeGraphQuery, CodeGraphQueryError
 from iwiki_mcp.codegraph.schema import (
     SCHEMA_VERSION,
     CodeGraphStoreError,
@@ -3591,6 +3591,25 @@ def test_adding_javascript_changes_the_configured_language_fingerprint():
     without = parser_fingerprint(languages=("python",), **common)
     with_js = parser_fingerprint(languages=("python", "javascript"), **common)
     assert without != with_js
+
+
+def test_status_carries_the_terminal_job(seed_runtime):
+    runtime = seed_runtime
+    built = runtime.index(force=True)
+
+    assert built["state"] == "ready"
+    status = runtime.status()
+    assert status["job"]["state"] == "ready"
+    assert status["job"]["id"] == built["job"]["id"]
+    assert "finished_at" in status["job"]
+
+
+def test_out_of_range_wait_seconds_is_refused(seed_runtime):
+    runtime = seed_runtime
+    with pytest.raises(CodeGraphQueryError):
+        runtime.index(wait_seconds=-1)
+    with pytest.raises(CodeGraphQueryError):
+        runtime.index(wait_seconds=10_000)
 
 
 def test_wait_expiry_returns_the_job_and_the_build_still_reaches_ready(

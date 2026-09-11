@@ -211,8 +211,13 @@ class _BuildWorkerRegistry:
         """Record a terminal state without dropping the job from the slot."""
         with self._lock:
             if job.state == "running":
-                job.state = state
+                # `finished_at` must be visible before the state flip that
+                # reveals terminality: a reader obtained through `current()`
+                # reads both fields without the lock, so a concurrent reader
+                # must never observe a terminal `state` with `finished_at`
+                # still `None`.
                 job.finished_at = time.time()
+                job.state = state
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:
         with self._lock:
@@ -908,14 +913,32 @@ class CodeGraphRuntime:
         )
         return header, rows
 
+    def _with_job(self, status: dict[str, object]) -> dict[str, object]:
+        """Attach this process's job descriptor to a non-error status answer.
+
+        An error answer explains why the graph cannot be read; attaching a
+        job descriptor to it would wrongly suggest the error belongs to
+        that job, so only an answer carrying no `error` key gets one.
+        """
+        if "error" in status:
+            return status
+        job = _BUILD_WORKERS.current(self._worker_domain_key)
+        if job is None:
+            return status
+        descriptor = job.describe()
+        if job.state == "running":
+            descriptor["phase"] = job.control.phase
+            descriptor["phases_done"] = list(job.control.phases_done)
+        return {**status, "job": descriptor}
+
     def status(self) -> dict[str, object]:
         """Read metadata and compatible schema only; never discover or parse."""
         unavailable = self._unavailable()
         if unavailable is not None:
-            return {
+            return self._with_job({
                 **unavailable,
                 "enabled": unavailable.get("code") != "not_configured",
-            }
+            })
         assert self.paths is not None and self._store is not None
         normalization_versions = self._normalization_versions()
         for _attempt in range(4):
@@ -931,11 +954,11 @@ class CodeGraphRuntime:
                     )
                     after = dict(_metadata(self.paths.metadata))
             except Timeout:
-                return self._shared_rebuilding_status(
+                return self._with_job(self._shared_rebuilding_status(
                     before, normalization_versions
-                )
+                ))
             except CodeGraphStoreError:
-                return self._store_failure_status()
+                return self._with_job(self._store_failure_status())
             if locked_metadata != after:
                 continue
             if "error" in status:
@@ -945,18 +968,18 @@ class CodeGraphRuntime:
                 _pending_final_verify(after)
             ):
                 if self._local_build_active():
-                    return self._with_rebuilding_state(
+                    return self._with_job(self._with_rebuilding_state(
                         status, shared_writer=True
-                    )
+                    ))
                 try:
                     recovered = self._recover_stale_metadata(after)
                 except CodeGraphStoreError:
-                    return self._store_failure_status()
+                    return self._with_job(self._store_failure_status())
                 if recovered:
                     continue
-                return self._with_rebuilding_state(
+                return self._with_job(self._with_rebuilding_state(
                     status, shared_writer=True
-                )
+                ))
             if metadata_state == "failed":
                 failed = {
                     **status,
@@ -970,7 +993,7 @@ class CodeGraphRuntime:
                 }
                 failed.pop("duration_ms", None)
                 failed.pop("phase_timings_ms", None)
-                return failed
+                return self._with_job(failed)
             metadata_revision = after.get("revision")
             if (
                 metadata_state == "ready"
@@ -978,7 +1001,7 @@ class CodeGraphRuntime:
                 and status.get("revision") != metadata_revision
             ):
                 continue
-            return status
+            return self._with_job(status)
         metadata = dict(_metadata(self.paths.metadata))
         try:
             with code_graph_read_lock(self.paths.lock):
@@ -988,31 +1011,33 @@ class CodeGraphRuntime:
                     normalization_versions=normalization_versions,
                 )
         except Timeout:
-            return self._shared_rebuilding_status(
+            return self._with_job(self._shared_rebuilding_status(
                 metadata, normalization_versions
-            )
+            ))
         except CodeGraphStoreError:
-            return self._store_failure_status()
+            return self._with_job(self._store_failure_status())
         metadata = current
         if (
             metadata.get("state") in {"rebuilding", "recovering"}
             or _pending_final_verify(metadata)
         ):
             if self._local_build_active():
-                return self._with_rebuilding_state(status, shared_writer=True)
+                return self._with_job(
+                    self._with_rebuilding_state(status, shared_writer=True)
+                )
             try:
                 recovered = self._recover_stale_metadata(metadata)
             except CodeGraphStoreError:
-                return self._store_failure_status()
+                return self._with_job(self._store_failure_status())
             if recovered:
-                return self._read_status(
+                return self._with_job(self._read_status(
                     persisted_metadata=_metadata(self.paths.metadata),
                     normalization_versions=normalization_versions,
-                )
-            return self._with_rebuilding_state(
+                ))
+            return self._with_job(self._with_rebuilding_state(
                 status, shared_writer=True
-            )
-        return status
+            ))
+        return self._with_job(status)
 
     def _shared_rebuilding_status(
         self,

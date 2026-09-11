@@ -6,12 +6,14 @@ from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
 from iwiki_mcp import server
 from iwiki_mcp.codegraph import application as application_module
 from iwiki_mcp.codegraph import runtime as runtime_module
+from iwiki_mcp.codegraph import store as codegraph_store
 from iwiki_mcp.codegraph.context import CodeGraphContextError
 from iwiki_mcp.codegraph.languages.bash import BashAdapter
 from iwiki_mcp.codegraph.models import CodeGraphError
@@ -28,12 +30,13 @@ class _FakeRuntime:
         self.calls.append(f"status:{self.binding.primary}")
         return {"domain": self.binding.primary}
 
-    def index(self, *, force=False, languages=None):
+    def index(self, *, force=False, languages=None, wait_seconds=None):
         self.calls.append(f"index:{self.binding.primary}")
         return {
             "domain": self.binding.primary,
             "force": force,
             "languages": languages,
+            "wait_seconds": wait_seconds,
         }
 
     def search(self, query, *, kinds=None, path=None, languages=None, limit=20):
@@ -207,7 +210,10 @@ def test_wiki_code_index_delegates_and_preserves_tool_payload(
             "state": "ready", "snapshot_revision": "sha256:remote"
         },
     }
-    assert calls == [(seed_binding, {"force": True, "languages": ["python"]})]
+    assert calls == [(
+        seed_binding,
+        {"force": True, "languages": ["python"], "wait_seconds": None},
+    )]
 
 
 def test_wiki_code_index_keeps_sqlite_result_flat(seed_binding, monkeypatch):
@@ -284,13 +290,75 @@ def test_index_handler_accepts_every_known_language(seed_binding, monkeypatch):
         "languages"
     ] == ["python", "typescript"]
     assert "error" not in server.wiki_code_index(languages=["typescript"])
-    assert calls[-1] == (seed_binding, {"force": False, "languages": ["typescript"]})
+    assert calls[-1] == (
+        seed_binding,
+        {"force": False, "languages": ["typescript"], "wait_seconds": None},
+    )
 
     assert server.wiki_code_index(languages=["bash"])["languages"] == ["bash"]
-    assert calls[-1] == (seed_binding, {"force": False, "languages": ["bash"]})
+    assert calls[-1] == (
+        seed_binding,
+        {"force": False, "languages": ["bash"], "wait_seconds": None},
+    )
 
     assert server.wiki_code_index()["languages"] is None
-    assert calls[-1] == (seed_binding, {"force": False, "languages": None})
+    assert calls[-1] == (
+        seed_binding,
+        {"force": False, "languages": None, "wait_seconds": None},
+    )
+
+
+def test_wiki_code_index_reports_out_of_range_wait_seconds(
+    seed_binding, monkeypatch
+):
+    # Requirement carried from review: a `CodeGraphQueryError` raised by
+    # `runtime.index`'s own `wait_seconds` validation must reach the caller
+    # as a typed error dict naming the field and its accepted range, never
+    # as a raised exception and never as the generic invalid_config answer
+    # that hides which parameter and range were violated.
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+
+    answer = server.wiki_code_index(wait_seconds=-1)
+
+    assert answer["code"] == "invalid_config"
+    assert answer["field"] == "wait_seconds"
+    assert answer["error"].startswith("wait_seconds must be between 0 and")
+
+    too_large = server.wiki_code_index(wait_seconds=10_000)
+
+    assert too_large["code"] == "invalid_config"
+    assert too_large["field"] == "wait_seconds"
+    assert too_large["error"].startswith("wait_seconds must be between 0 and")
+
+
+def test_wiki_code_index_returns_rebuilding_job_when_wait_expires_first(
+    seed_binding, monkeypatch
+):
+    # Requirement carried from review: `wiki_code_index`'s answer shape
+    # changed for real callers -- a wait expiring after publication entry
+    # now returns {state: "rebuilding", fresh, job, hint} where it used to
+    # return {error, code: "busy", hint}. No server-level test covered
+    # this; `wiki_code_index` builds its own runtime internally, so the
+    # publish slowdown has to be patched at the store class rather than on
+    # one runtime's instance.
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    real_publish = codegraph_store.CodeGraphStore.publish_metadata
+
+    def slow_publish(self, *args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_store.CodeGraphStore, "publish_metadata", slow_publish
+    )
+
+    answer = server.wiki_code_index(force=True, wait_seconds=0)
+
+    assert answer["state"] == "rebuilding"
+    assert answer["fresh"] is False
+    assert answer["job"]["state"] == "running"
+    assert answer["hint"] == "poll wiki_code_status for this job"
+    assert "error" not in answer
 
 
 @pytest.mark.parametrize(
@@ -794,8 +862,11 @@ async def test_fastmcp_registry_has_exact_code_tools():
     ) == {"domain"}
     assert set(tools["wiki_code_status"].inputSchema.get("properties", {})) == set()
     assert set(tools["wiki_code_index"].inputSchema["properties"]) == {
-        "force", "languages",
+        "force", "languages", "wait_seconds",
     }
+    assert tools["wiki_code_index"].inputSchema["properties"][
+        "wait_seconds"
+    ]["default"] is None
     assert set(tools["wiki_code_search"].inputSchema["properties"]) == {
         "query", "kinds", "path", "languages", "limit",
     }

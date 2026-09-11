@@ -493,6 +493,20 @@ exclude = []
 best-effort-подпроцесс TypeScript Compiler API для резолвинга типов; его отсутствие
 или сбой никогда не блокирует индексацию — Tree-sitter baseline всегда выполняется.
 
+`wiki_code_index` также принимает опциональный `wait_seconds` — он ограничивает, сколько
+вызов ждёт build, который он запустил (или к которому присоединился), прежде чем
+вернуться: сам build продолжает работать до собственного дедлайна
+`max_full_rebuild_seconds` независимо от того, сколько ждал вызывающий. Значение должно
+быть между `0` и `max_full_rebuild_seconds`; значение вне диапазона отклоняется с
+`{"error", "code": "invalid_config", "field": "wait_seconds", "hint"}`, называющим
+допустимый диапазон. Если параметр не передан, ожидание длится весь бюджет full rebuild,
+как раньше. Если ожидание истекает раньше, чем build завершится, ответ — `{"state":
+"rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for this
+job"}` вместо отмены build. Опрашивайте `wiki_code_status`, чей ответ несёт тот же
+дескриптор `job` (`id`, `state`, `started_at` и `finished_at` после завершения, а также
+`phase`/`phases_done`, пока состояние `running`), пока job не достигнет `ready` или
+`failed`.
+
 Bash включается только явно. Либо добавьте `bash` в постоянную настройку
 `code_graph.languages`, как выше, либо запросите одноразовый rebuild через
 `wiki_code_index(languages=["bash"])`. Если не выбран ни один способ, остаётся
@@ -511,8 +525,8 @@ schema-v1 несовместим и заменяется детерминиро�
 
 | Инструмент | Контракт |
 | --- | --- |
-| `wiki_code_status` | Возвращает настройку, состояние, freshness и diagnostics локального кэша. |
-| `wiki_code_index` | Запрашивает полный rebuild для настроенных `languages`; `force` может перестроить уже current кэш. |
+| `wiki_code_status` | Возвращает настройку, состояние, freshness и diagnostics локального кэша, а также дескриптор `job`, пока build выполняется или только что завершился. |
+| `wiki_code_index` | Запрашивает полный rebuild для настроенных `languages`; `force` может перестроить уже current кэш. `wait_seconds` ограничивает, сколько вызов ждёт этот build, прежде чем ответить `rebuilding` с дескриптором `job` вместо отмены build. |
 | `wiki_code_search` | Ищет typed file, module и symbol entities с optional kind, path, language и limit filters. |
 | `wiki_code_context` | Расширяет точные typed entity-ID `seeds` через bounded relations; source по умолчанию выключен. |
 

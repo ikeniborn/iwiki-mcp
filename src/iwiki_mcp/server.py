@@ -1768,6 +1768,7 @@ def wiki_code_status() -> dict:
 def wiki_code_index(
     force: bool = False,
     languages: list[str] | None = None,
+    wait_seconds: float | None = None,
 ) -> dict:
     if languages is not None and (
         not languages
@@ -1783,7 +1784,7 @@ def wiki_code_index(
     if bind.primary is None:
         return _missing_code_primary()
     return _codegraph_application.index_and_publish(
-        bind, force=force, languages=languages
+        bind, force=force, languages=languages, wait_seconds=wait_seconds
     ).tool_result()
 
 

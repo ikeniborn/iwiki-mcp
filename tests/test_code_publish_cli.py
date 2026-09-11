@@ -94,7 +94,7 @@ def _run_post_resolution_failure(
     class Runtime:
         config = CodeGraphConfig(publish_mode=mode)
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             raise failure
 
     monkeypatch.setattr(
@@ -554,7 +554,7 @@ def test_publish_project_redacted_failure_has_no_raw_exception_chain(
     class Runtime:
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             raise RuntimeError(secret)
 
     monkeypatch.setattr(

@@ -12,6 +12,7 @@ from iwiki_mcp.codegraph.mcp_adapter import (
     TOKEN_ENV,
 )
 from iwiki_mcp.codegraph.publication import PublicationSession, SnapshotHeader
+from iwiki_mcp.codegraph.query import CodeGraphQueryError
 from iwiki_mcp.codegraph.runtime import CodeGraphRuntime, sanitized_error
 from iwiki_mcp.storage import GitBinding, PostgresBinding
 from iwiki_mcp.specifications import UnavailableSpecificationGraphResolver
@@ -561,7 +562,7 @@ def test_safe_adapter_failure_preserves_mcp_mode_and_aborts_once(
     class Runtime(SnapshotRuntime):
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             return {"state": "ready", "revision": _LOCAL_REVISION}
 
     runtime = Runtime()
@@ -920,7 +921,7 @@ def test_non_ready_index_never_selects_or_publishes_target(
     class Runtime:
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             calls.append(("index", force, languages))
             return {"state": "failed", "revision": None}
 
@@ -945,6 +946,69 @@ def test_non_ready_index_never_selects_or_publishes_target(
     assert not outcome.ready
 
 
+def test_index_and_publish_threads_wait_seconds_to_the_runtime(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class Runtime:
+        config = CodeGraphConfig(publish_mode="sqlite")
+
+        def index(self, *, force=False, languages=None, wait_seconds=None):
+            calls.append(("index", force, languages, wait_seconds))
+            return {"state": "ready", "revision": _LOCAL_REVISION}
+
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
+
+    outcome = application.index_and_publish(
+        _git_binding(tmp_path), wait_seconds=3.5
+    )
+
+    assert calls == [("index", False, None, 3.5)]
+    assert outcome.index == {"state": "ready", "revision": _LOCAL_REVISION}
+
+
+def test_out_of_range_wait_seconds_becomes_a_typed_answer_not_an_exception(
+    tmp_path, monkeypatch
+):
+    # Requirement carried from review: `runtime.index` raises
+    # `CodeGraphQueryError` for an out-of-range `wait_seconds`, and
+    # `index_and_publish` used to have no except clause for it -- with
+    # `redact_failures=False` (the direct `wiki_code_index` path) that fell
+    # through to `except Exception: raise`, so the caller saw a raised
+    # exception instead of a typed answer naming the field and its range.
+    class Runtime:
+        config = CodeGraphConfig(publish_mode="sqlite")
+
+        def index(self, *, force=False, languages=None, wait_seconds=None):
+            raise CodeGraphQueryError(
+                "wait_seconds must be between 0 and 10"
+            )
+
+    monkeypatch.setattr(
+        application,
+        "code_runtime",
+        lambda _source, *, environ=None: Runtime(),
+    )
+
+    outcome = application.index_and_publish(
+        _git_binding(tmp_path), wait_seconds=-1
+    )
+
+    assert outcome.index == {
+        "error": "wait_seconds must be between 0 and 10",
+        "code": "invalid_config",
+        "field": "wait_seconds",
+        "hint": "call wiki_code_index again with wait_seconds inside the accepted range",
+    }
+    assert outcome.publication == {}
+    assert not outcome.ready
+
+
 def test_failed_sqlite_index_does_not_export_or_select_publisher(
     tmp_path, monkeypatch
 ):
@@ -954,7 +1018,7 @@ def test_failed_sqlite_index_does_not_export_or_select_publisher(
     class Runtime:
         config = CodeGraphConfig(publish_mode="sqlite")
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             calls.append(("index", force, languages))
             return {"state": "failed", "code": "rebuild_failed"}
 
@@ -987,7 +1051,7 @@ def test_sqlite_index_uses_only_atomic_runtime_path(tmp_path, monkeypatch):
     class Runtime:
         config = CodeGraphConfig(publish_mode="sqlite")
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             return {"state": "ready", "revision": _LOCAL_REVISION}
 
         def export_snapshot(self):
@@ -1019,7 +1083,7 @@ def test_ready_external_index_publishes_through_selected_target(
     class Runtime(SnapshotRuntime):
         config = CodeGraphConfig(publish_mode="mcp")
 
-        def index(self, *, force=False, languages=None):
+        def index(self, *, force=False, languages=None, wait_seconds=None):
             calls.append(("index", force, languages))
             return {"state": "ready", "revision": _LOCAL_REVISION}
 

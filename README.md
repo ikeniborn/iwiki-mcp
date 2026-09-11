@@ -493,6 +493,18 @@ query-time budget. `typescript_type_boost` (default `false`) opts into an isolat
 best-effort TypeScript Compiler API subprocess for type resolution; its absence or failure
 never blocks indexing — the Tree-sitter baseline always runs.
 
+`wiki_code_index` also accepts an optional `wait_seconds`, bounding how long the call
+waits for the build it starts (or joins) before returning — the build itself keeps
+running toward its own `max_full_rebuild_seconds` deadline regardless of how long the
+caller waited. It must be between `0` and `max_full_rebuild_seconds`; an out-of-range
+value is refused with `{"error", "code": "invalid_config", "field": "wait_seconds",
+"hint"}` naming the accepted range. Omitting it waits for the full rebuild budget, as
+before. When the wait expires before the build finishes, the answer is `{"state":
+"rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for this
+job"}` instead of cancelling the build. Poll `wiki_code_status`, whose answer carries the
+same `job` descriptor (`id`, `state`, `started_at`, and `finished_at` once terminal, plus
+`phase`/`phases_done` while still `running`) until the job reaches `ready` or `failed`.
+
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
 If both are omitted, the Python-only default remains in effect and no Bash files are
@@ -511,8 +523,8 @@ documented under distributed publication below:
 
 | Tool | Contract |
 | --- | --- |
-| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics. |
-| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. |
+| `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished. |
+| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` bounds how long the call waits for that build before answering `rebuilding` with a `job` descriptor instead of cancelling it. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
 
