@@ -1569,8 +1569,19 @@ class CodeGraphRuntime:
                 published = dict(_PUBLICATION_FAILED)
             # An empty answer is the "no publisher for this mode" no-op: the
             # key stays absent so the build's own state decides terminality.
-            if published:
-                result["publication"] = published
+            if not published:
+                return
+            result["publication"] = published
+            if _terminal_state(result) != "ready":
+                # The third signal, beside the `failed` job and the
+                # publication itself. This answer's own `state` still reports
+                # the local snapshot, which really is ready, so without a
+                # warning a caller reading `state` alone is told the build
+                # succeeded while the published graph is still the previous
+                # revision -- the very silence this whole path exists to end.
+                # No client should have to cross-reference two fields to learn
+                # that what it asked for did not happen.
+                result.update(_warned(result, "publication_failed"))
         try:
             job, started = _BUILD_WORKERS.start(
                 self._worker_domain_key,

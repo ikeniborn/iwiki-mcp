@@ -1528,6 +1528,7 @@ def test_worker_records_a_raised_publication_as_a_failed_job(
         "state": "failed",
         "error": "publication_failed",
     }
+    assert "publication_failed" in out["warnings"]
     assert snapshot.state == "failed"
     assert out["job"]["state"] == "failed"
     assert secret not in caplog.text

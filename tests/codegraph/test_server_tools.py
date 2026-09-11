@@ -403,6 +403,11 @@ def test_wiki_code_status_reports_a_failed_publication_as_a_failed_job(
         "error": "snapshot_conflict",
         "hint": "retry publication",
     }
+    # The answer's own `state` still describes the local snapshot, which is
+    # ready, so it has to say on its own that the publication did not happen
+    # -- a caller reading `state` alone must not be told the build succeeded.
+    assert answer["state"] == "ready"
+    assert "publication_failed" in answer["warnings"]
     assert polled["job"]["id"] == answer["job"]["id"]
     assert polled["job"]["state"] == "failed"
     assert "error" not in polled
