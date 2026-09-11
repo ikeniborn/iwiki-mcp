@@ -1763,9 +1763,10 @@ _CodeJobId = Annotated[
             "the one running now, or the last one that finished. Supplied, the "
             "answer describes that build and no other, so a poller is not "
             "misled by a later build that took over the report. An id this "
-            "process does not know (never issued, or aged out of its bounded "
-            "history) is not an error: the graph status is returned as usual "
-            "with no `job` key and `job_unknown` in `warnings`."
+            "server cannot answer for -- never issued, aged out of its "
+            "bounded history, or naming a build of another domain -- is not "
+            "an error: the graph status is returned as usual with no `job` "
+            "key and `job_unknown` in `warnings`."
         )
     ),
 ]
@@ -1780,7 +1781,9 @@ def wiki_code_status(job_id: _CodeJobId = None) -> dict:
     decides which reader answers, but the build belongs to this process either
     way, so a poller sees the same `job` descriptor under every mode. The
     hosted PostgreSQL branch below is a server where `wiki_code_index` answers
-    `source_unavailable` and no local build can exist, so it gets none.
+    `source_unavailable` and no local build can exist, so it carries no job --
+    and therefore knows no handle, which makes `job_unknown` its honest answer
+    to a named `job_id` rather than a silent omission.
     """
     bind = _resolved_binding()
     if _is_postgres(bind):
@@ -1788,7 +1791,14 @@ def wiki_code_status(job_id: _CodeJobId = None) -> dict:
             return dict(_CODE_BINDING_NOT_SELECTED)
         if bind.primary is None:
             return _missing_code_primary()
-        return _defaulted_scope_answer(_postgres_code_reader(bind).status())
+        hosted = _defaulted_scope_answer(_postgres_code_reader(bind).status())
+        # Not a registry lookup: a hosted server issues no handles at all, so
+        # every id presented to it is unknown by construction. Consulting the
+        # process registry here could only match a build some *other*,
+        # local binding started.
+        return hosted if job_id is None else _codegraph_runtime.job_unknown(
+            hosted
+        )
     if bind.primary is None:
         return _missing_code_primary()
     return _codegraph_runtime.attach_job(

@@ -1352,6 +1352,135 @@ def test_status_job_id_answers_about_a_superseded_build(remote_read_binding):
     assert "job_unknown" not in mine.get("warnings", [])
 
 
+class _StubStatusReader:
+    """Stand in for a hosted snapshot reader with one canned status."""
+
+    def __init__(self, status):
+        self._status = status
+
+    def status(self):
+        return dict(self._status)
+
+
+def _hosted_binding():
+    return server.base.PostgresBinding(
+        host="localhost",
+        port=5432,
+        database="iwiki_test",
+        user="tester",
+        sslmode="disable",
+        iwiki_id="iwiki-test",
+        read=("project",),
+        write=("project",),
+        primary="project",
+        project_dir="/tmp/does-not-matter",
+        embed_model="test-embed",
+        embed_dimensions=2,
+        rerank_model="test-rerank",
+        password="secret",
+    )
+
+
+def test_running_build_is_polled_by_its_own_handle(
+    remote_read_binding, monkeypatch
+):
+    """The documented loop, end to end: hand back an id, poll it live.
+
+    `wiki_code_index(wait_seconds=0)` returns while the build runs, and the
+    caller polls `wiki_code_status(job_id=…)` before it ends. That poll must
+    reach the *live* job -- the terminal history cannot hold a build that has
+    not finished -- and report its progress. Without the live half of the
+    lookup every such poll answers `job_unknown`, which is the F2 class of
+    silent failure all over again.
+    """
+    real_publish = codegraph_store.CodeGraphStore.publish_metadata
+
+    def slow_publish(self, *args, **kwargs):
+        time.sleep(1.05)
+        return real_publish(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        codegraph_store.CodeGraphStore, "publish_metadata", slow_publish
+    )
+
+    started = server.wiki_code_index(force=True, wait_seconds=0)
+    assert started["state"] == "rebuilding"
+    handle = started["job"]["id"]
+
+    try:
+        polled = server.wiki_code_status(job_id=handle)
+
+        assert polled["job"]["id"] == handle
+        assert polled["job"]["state"] == "running"
+        assert "finished_at" not in polled["job"]
+        assert polled["job"]["phases_done"]
+        assert polled["job"]["phase"] is not None
+        assert "job_unknown" not in polled.get("warnings", [])
+    finally:
+        runtime_module._BUILD_WORKERS.join(timeout=15)
+
+
+def test_a_handle_less_poll_never_warns_about_an_unknown_job(
+    remote_read_binding
+):
+    """`job_unknown` answers an unknown *id*, not the absence of a build.
+
+    Nothing was built in this process, so there is no job to report -- but
+    the caller named none either, so there is nothing unknown to warn about.
+    Warning here would contradict the parameter's own schema description and
+    both READMEs.
+    """
+    answer = server.wiki_code_status()
+
+    assert answer["state"] == "ready"
+    assert "job" not in answer
+    assert "warnings" not in answer
+
+
+def test_hosted_status_reports_a_named_handle_as_unknown(monkeypatch):
+    """A hosted server issues no handles, so every id it is shown is unknown.
+
+    `wiki_code_index` answers `source_unavailable` there, so no build can
+    exist -- which makes `job_unknown` the honest answer rather than a
+    special case, and keeps the parameter's description true of both
+    branches.
+    """
+    binding = _hosted_binding()
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    monkeypatch.setattr(server, "_code_binding_blocked", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "_postgres_code_reader",
+        lambda _binding: _StubStatusReader({"state": "ready", "fresh": True}),
+    )
+
+    unnamed = server.wiki_code_status()
+    named = server.wiki_code_status(job_id="0" * 16)
+
+    assert unnamed == {"state": "ready", "fresh": True}
+    assert named["state"] == "ready"
+    assert "job" not in named
+    assert named["warnings"] == ["job_unknown"]
+
+
+def test_hosted_status_never_warns_on_an_error_answer(monkeypatch):
+    """The no-job-on-an-error rule holds on the hosted branch too."""
+    binding = _hosted_binding()
+    failure = {
+        "error": "code graph snapshot is stale",
+        "code": "stale_snapshot",
+    }
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
+    monkeypatch.setattr(server, "_code_binding_blocked", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "_postgres_code_reader",
+        lambda _binding: _StubStatusReader(failure),
+    )
+
+    assert server.wiki_code_status(job_id="0" * 16) == failure
+
+
 def test_job_id_from_another_domain_is_unknown_after_a_rebind(
     remote_read_binding, seed_binding, monkeypatch
 ):

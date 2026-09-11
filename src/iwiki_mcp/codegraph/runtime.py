@@ -503,12 +503,32 @@ def _resolve_job(
 
 
 def _warned(status: dict[str, object], warning: str) -> dict[str, object]:
-    """Add one warning without mutating the reader's own answer."""
+    """Add one warning without mutating the reader's own answer.
+
+    `warnings` is assumed to be a list when present -- that is what every
+    producer on this path emits, and what the remote reader's JSON decodes
+    to. A value of any other shape is *replaced*, not preserved: this is an
+    assumption, not a check, and a caller that starts emitting a tuple or a
+    bare string would lose it silently. Handle it here if that ever becomes
+    reachable rather than discovering it downstream.
+    """
     existing = status.get("warnings")
     warnings = list(existing) if isinstance(existing, list) else []
     if warning not in warnings:
         warnings.append(warning)
     return {**status, "warnings": warnings}
+
+
+def job_unknown(status: dict[str, object]) -> dict[str, object]:
+    """Report a named handle as unknown, leaving the answer otherwise whole.
+
+    The one place the warning's name is spelled, so the local branch's
+    "never issued, aged out, or another domain's" and the hosted branch's
+    "this server issues no handles at all" stay the same answer to the
+    caller. An error answer is left alone for the same reason it carries no
+    job: it describes the graph, not the handle.
+    """
+    return status if "error" in status else _warned(status, "job_unknown")
 
 
 def attach_job(
@@ -535,7 +555,10 @@ def attach_job(
         return status
     job = _resolve_job(domain_key, job_id)
     if job is None:
-        return status if job_id is None else _warned(status, "job_unknown")
+        # A caller that named no handle has nothing unknown to be warned
+        # about: `job_unknown` answers an unknown *id*, never the plain
+        # absence of a build, which `state`/`fresh` already report.
+        return status if job_id is None else job_unknown(status)
     descriptor = job.describe()
     # Read `state` once from the descriptor rather than re-reading
     # `job.state`: the worker can finish between the two reads, and a
