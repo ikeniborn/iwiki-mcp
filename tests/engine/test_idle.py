@@ -4,6 +4,7 @@ import time
 import anyio
 import pytest
 
+from iwiki_mcp.engine import idle
 from iwiki_mcp.engine.config import Config, ConfigError
 from iwiki_mcp.engine.idle import IdleTracker
 
@@ -65,6 +66,38 @@ async def test_idle_waits_while_background_work_is_declared():
     with anyio.move_on_after(1.0) as scope:
         await tracker.wait_until_idle(0)
     assert scope.cancel_called is False
+
+
+@pytest.mark.anyio
+async def test_idle_countdown_starts_when_background_work_ends(monkeypatch):
+    """R3/F5: the caller gets the full idle budget to read its job handle.
+
+    Polling the predicate used to leave `_last_activity` ageing through the
+    whole build, so a build longer than the idle timeout let the session shut
+    down the instant it ended -- taking the job handle with it before the
+    caller's next poll could read the terminal state. The longer the build,
+    the more certain the loss, which is the exact case a detached build
+    exists for.
+    """
+    monkeypatch.setattr(idle, "BACKGROUND_POLL_SECONDS", 0.05)
+    polls = {"count": 0}
+    ended = {}
+
+    def working() -> bool:
+        polls["count"] += 1
+        if polls["count"] <= 6:
+            return True
+        ended.setdefault("at", time.monotonic())
+        return False
+
+    tracker = IdleTracker(has_background_work=working)
+
+    await tracker.wait_until_idle(0.2)
+
+    # The work ran for ~0.3s, longer than the 0.2s timeout: without the
+    # refresh the countdown is already spent when it ends and this returns
+    # immediately.
+    assert time.monotonic() - ended["at"] >= 0.15
 
 
 @pytest.mark.anyio

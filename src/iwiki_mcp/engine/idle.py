@@ -94,6 +94,16 @@ class IdleTracker:
                 await self._changed.wait()
                 continue
             if self._background_work_declared():
+                # Declared work is activity, so the idle countdown starts
+                # when that work *ends*. Without this the timestamp keeps
+                # ageing through a long build, and the session can shut down
+                # the instant the build finishes -- taking the job handle
+                # with it before the caller's next poll can read the terminal
+                # state, which is exactly the case a detached build exists
+                # for. Set directly rather than through `touch()`: nothing is
+                # waiting on the change event, and signalling every poll
+                # would churn it for no reader.
+                self._last_activity = time.monotonic()
                 await anyio.sleep(BACKGROUND_POLL_SECONDS)
                 continue
             remaining = self._last_activity + timeout_seconds - time.monotonic()
