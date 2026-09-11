@@ -520,7 +520,11 @@ whose answer carries the same `job` descriptor (`id`, `state`, `started_at`, and
 job reaches `ready` or `failed` — but the job is session-scoped, so a new process (a
 server restart, a fresh stdio connection) reports no `job` key at all; a poller must fall
 back to `state`/`fresh` rather than wait forever for a terminal job that no longer exists
-in that process.
+in that process. Within one process the `job` key reports the build running now, and the
+last one that finished when none is running — a single build at a time, so always check
+the `id` against the handle you hold: a different `id` means another build (a query-time
+auto-rebuild, say) has since taken over the report, and your own build's outcome is no
+longer what the answer describes. Fall back to `state`/`fresh` there too.
 
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
