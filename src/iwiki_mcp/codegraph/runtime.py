@@ -201,10 +201,12 @@ class _BuildWorkerRegistry:
         # learn how *its* build ended, and the builds that follow are not
         # rare: a query-time auto-rebuild against an unchanged checkout
         # finishes in well under a second, so a single remembered answer
-        # would routinely be gone before the caller's next poll. Bounded and
-        # evicted oldest-first because nothing here is ever cleaned up
-        # otherwise; a snapshot is a handful of scalars, so the cap can be
-        # generous without the pinning that keeping whole jobs would bring.
+        # would routinely be gone before the caller's next poll. Bounded
+        # because nothing here is ever cleaned up otherwise; a snapshot is a
+        # handful of scalars, so the cap can be generous without the pinning
+        # that keeping whole jobs would bring. The cap is shared across every
+        # domain this process builds for -- see `_evict_locked` for what that
+        # costs and what it protects.
         self._terminal: dict[str, _JobSnapshot] = {}
 
     def start(
@@ -334,23 +336,61 @@ class _BuildWorkerRegistry:
     def finish(self, job: _BuildJob, state: str) -> None:
         """Record the terminal state, publish its snapshot, free the slot."""
         with self._lock:
+            # Exactly once per job. The worker records the terminal state from
+            # its own `finally`; the caller-side call after a completed join
+            # only ever repeats that fact, and repeating it must not restamp
+            # `finished_at` to whenever that caller happened to return.
             if job.terminal is not None:
                 return
-            job.finished_at = time.time()
-            job.state = state
             # Build the snapshot exactly once, here, while the lock is held:
             # it is the only place a terminal answer is assembled, so no
             # reader ever has to re-combine `state` with `finished_at`.
-            # Publishing it last also orders the job's own fields ahead of
-            # the single read `describe()` makes.
+            finished_at = time.time()
             snapshot = _JobSnapshot(
-                job, state=state, finished_at=job.finished_at
+                job, state=state, finished_at=finished_at
             )
+            # Publish it *first*. `describe()` decides its whole answer on one
+            # unsynchronised read of `terminal`, so that assignment is the
+            # single step from a wholly running descriptor to a wholly
+            # terminal one. Writing the job's own `state` first would open the
+            # mirror of the race this snapshot exists to close: a reader
+            # landing in between would see a terminal `state` with no
+            # `finished_at`, which the READMEs forbid just as firmly.
             job.terminal = snapshot
+            job.state = state
+            job.finished_at = finished_at
             self._terminal[snapshot.job_id] = snapshot
-            while len(self._terminal) > _TERMINAL_HISTORY:
-                del self._terminal[next(iter(self._terminal))]
+            self._evict_locked()
             self._release_locked(job)
+
+    def _evict_locked(self) -> None:
+        """Hold the history to its cap, sparing a domain's last answer.
+
+        The cap is global, not per domain: a per-domain cap would make total
+        retention grow with every domain a session rebinds through, which is
+        the unbounded growth this history is capped to avoid. The cost is
+        that one busy domain can push another's snapshots out, so eviction
+        prefers the oldest snapshot of a domain that still has more than one
+        and falls back to the global oldest only when every domain holds
+        exactly one. A domain therefore keeps its most recent answer -- the
+        one a poller holding a handle is most likely to ask for -- until the
+        cap can only be met by taking someone's last.
+        """
+        while len(self._terminal) > _TERMINAL_HISTORY:
+            per_domain: dict[tuple[str, str], int] = {}
+            for snapshot in self._terminal.values():
+                per_domain[snapshot.domain_key] = (
+                    per_domain.get(snapshot.domain_key, 0) + 1
+                )
+            evicted = next(
+                (
+                    job_id
+                    for job_id, snapshot in self._terminal.items()
+                    if per_domain[snapshot.domain_key] > 1
+                ),
+                next(iter(self._terminal)),
+            )
+            del self._terminal[evicted]
 
     def is_active(self, domain_key: tuple[str, str]) -> bool:
         with self._lock:
@@ -484,8 +524,14 @@ def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
 def _rebuilding_job_answer(job: _BuildJob) -> dict[str, object]:
     """Answer a caller whose wait ended while its build kept running."""
     descriptor = job.describe()
-    descriptor["phase"] = job.control.phase
-    descriptor["phases_done"] = list(job.control.phases_done)
+    # Same single-read gate `_with_job` applies: progress fields belong to a
+    # running descriptor only. The worker publishes terminality from inside
+    # its own `finally`, while its thread is still alive, so this is reachable
+    # for a caller whose wait expires in that window -- and `phase` beside a
+    # terminal `state` is the one shape the READMEs promise cannot occur.
+    if descriptor["state"] == "running":
+        descriptor["phase"] = job.control.phase
+        descriptor["phases_done"] = list(job.control.phases_done)
     return {
         "state": "rebuilding",
         "fresh": False,
