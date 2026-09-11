@@ -3765,19 +3765,27 @@ def test_query_time_rebuild_is_not_idle_activity(seed_runtime, monkeypatch):
         runtime.runtime.join_workers(timeout=10)
 
 
-def test_joining_query_guard_never_cancels_an_explicit_build(
+def test_query_guard_refused_join_leaves_the_explicit_build_uncancelled(
     seed_runtime, monkeypatch
 ):
-    """A query-time auto-rebuild that joins someone else's job must not
-    cancel it on its own (much shorter) wait expiry: cancellation belongs to
-    whoever started the build, never to a caller that only joined it.
+    """A query-time auto-rebuild that loses the race for an explicit build
+    must not touch that build's `control` on its own (much shorter) wait
+    expiry.
 
-    The race this pins: `query_guard` reads `status() == "dirty"` and
-    decides to attempt its own bounded rebuild, but before it reaches
-    `_BUILD_WORKERS.start()` an explicit `index()` call wins the slot and
-    starts the build. `query_guard`'s call then joins that live job instead
-    of starting a second one -- and must not cancel a build it never asked
-    for just because its own, much shorter budget runs out first.
+    Historical note: before `explicit` joined `force`/`languages` in
+    `_BuildJob.matches`, this exact race let `query_guard`'s call *join* the
+    explicit job and this test caught an unconditional `job.control.cancel()`
+    on that path. Now that provenance is part of the match, a request shaped
+    like `query_guard`'s (`explicit=False`) can no longer join an
+    `explicit=True` job at all -- it takes the `busy`-refusal path instead
+    (pinned precisely, via `_BUILD_WORKERS.start`'s own return, by
+    `test_query_guard_style_request_never_joins_an_explicit_build` below).
+    This test still earns its place: it drives the same race through the
+    real, public `query_guard()` entry point and confirms the outward
+    guarantee that matters to a caller -- the explicit build's `control` is
+    never touched and the build still reaches `ready`, regardless of which
+    internal path (join-then-expire or refuse-outright) produced that
+    guarantee.
     """
     runtime = seed_runtime.with_state(
         "dirty",
@@ -3840,12 +3848,14 @@ def test_joining_query_guard_never_cancels_an_explicit_build(
     assert job is not None
     assert job.job_id == explicit["job"]["id"]
 
-    # Let query_guard's call proceed: it joins the live job (same domain,
-    # same default force/languages) and waits out its own 1-second budget.
+    # Let query_guard's call proceed: same domain and default force/languages
+    # as the explicit build, but `explicit=False` mismatches its
+    # `explicit=True`, so `_BUILD_WORKERS.start` refuses it (`busy`) rather
+    # than joining -- it never starts a second build either.
     release_guard.set()
     guard_thread.join(timeout=10)
 
-    assert discover_calls["count"] == 1  # joining never started a 2nd build
+    assert discover_calls["count"] == 1  # refused, not joined; no 2nd build
     assert guard_result["answer"]["state"] == "rebuilding"
     assert "error" in guard_result["answer"]
     assert job.control.cancelled.is_set() is False
@@ -3971,6 +3981,90 @@ def test_query_guard_style_request_never_joins_an_explicit_build(
 
     assert job.control.cancelled.is_set() is False
     assert job.explicit is True
+    assert job.state == "ready"
+    assert runtime.status()["state"] == "ready"
+
+
+def test_two_query_guard_style_callers_join_without_cancelling_the_starter(
+    seed_runtime, monkeypatch
+):
+    """The only scenario left that can reach `if started: job.control.cancel()`
+    on the join side: two callers with the SAME provenance (`explicit=False`,
+    i.e. both shaped like `query_guard`'s own bounded auto-rebuild) sharing
+    one build. The starter's budget is long -- it must be free to reach
+    `ready` uninterrupted. A second, short-budget caller then joins the same
+    job (`force`/`languages`/`explicit` all match) and gives up on its own
+    much earlier expiry; because it only joined, it must leave the shared
+    `control` alone rather than cancel the starter's build out from under it.
+
+    `test_joining_query_guard_never_cancels_an_explicit_build` used to be
+    this test, but once `explicit` joined the match in round 2 that scenario
+    (an `explicit=False` caller racing an `explicit=True` one) can no longer
+    join at all -- it now takes the `busy`-refusal path
+    (`test_query_guard_style_request_never_joins_an_explicit_build`) and
+    never reaches this line. Two same-provenance callers are the only
+    remaining way to exercise it.
+    """
+    runtime = seed_runtime
+
+    store = runtime.runtime._indexer.store
+    real_publish = store.publish_metadata
+
+    def slow_publish(*args, **kwargs):
+        time.sleep(1.5)
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish_metadata", slow_publish)
+
+    starter_result: dict[str, object] = {}
+
+    def call_starter():
+        starter_result["answer"] = runtime.runtime._index_with_deadline(
+            force=True,
+            languages=None,
+            build_deadline=time.monotonic() + 10,
+            wait_deadline=time.monotonic() + 10,
+            restore_prior_on_abort=True,
+            cancel_on_wait=True,
+        )
+
+    starter_thread = threading.Thread(target=call_starter)
+    starter_thread.start()
+
+    job = None
+    poll_deadline = time.monotonic() + 5
+    while time.monotonic() < poll_deadline:
+        job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+        if job is not None and job.thread is not None and job.thread.is_alive():
+            break
+        time.sleep(0.01)
+    assert job is not None
+    assert job.thread.is_alive()
+    assert job.explicit is False  # cancel_on_wait=True -> query-guard-shaped
+
+    # A second, short-budget query-guard-shaped caller joins the same job
+    # (matching force/languages/explicit) and gives up quickly.
+    joined = runtime.runtime._index_with_deadline(
+        force=True,
+        languages=None,
+        build_deadline=time.monotonic() + 0.5,
+        wait_deadline=time.monotonic() + 0.5,
+        restore_prior_on_abort=True,
+        cancel_on_wait=True,
+    )
+
+    assert joined["code"] == "busy"
+    assert sum(
+        thread.name == "iwiki-code-graph-build"
+        for thread in threading.enumerate()
+    ) == 1
+    # The joiner's own expiry must not have cancelled the shared build.
+    assert job.control.cancelled.is_set() is False
+
+    starter_thread.join(timeout=15)
+
+    assert job.control.cancelled.is_set() is False
+    assert starter_result["answer"]["state"] == "ready"
     assert job.state == "ready"
     assert runtime.status()["state"] == "ready"
 

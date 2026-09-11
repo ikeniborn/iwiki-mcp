@@ -500,13 +500,25 @@ caller waited. It must be between `0` and `max_full_rebuild_seconds`; an out-of-
 value is refused with the same generic `invalid_config` shape every other bad parameter
 gets — `{"error": "code graph configuration is invalid", "code": "invalid_config",
 "field": "wait_seconds", "hint": "inspect code_graph project configuration"}` — the
-accepted range is not repeated in the answer, only here in this documentation. Omitting
-`wait_seconds` waits for the full rebuild budget, as before. When the wait expires before
-the build finishes, the answer is `{"state": "rebuilding", "fresh": false, "job": {...},
-"hint": "poll wiki_code_status for this job"}` instead of cancelling the build. Poll
-`wiki_code_status`, whose answer carries the same `job` descriptor (`id`, `state`,
-`started_at`, and `finished_at` once terminal, plus `phase`/`phases_done` while still
-`running`) until the job reaches `ready` or `failed`.
+accepted range is not repeated in the answer, only here in this documentation. A value
+below `0.5` is silently floored to `0.5` seconds. Pass `wait_seconds=0` to get a job
+handle back in well under a second instead of waiting for the build; poll
+`wiki_code_status` with that handle until the job reaches `ready` or `failed`.
+
+The answer at expiry depends on how long you waited. When `wait_seconds` is less than
+`max_full_rebuild_seconds` and the wait expires first, the answer is
+`{"state": "rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for
+this job"}` and the build keeps running, uncancelled. Omitting `wait_seconds` — the
+default, and what every caller used before this feature existed — makes the wait
+deadline equal the build's own deadline, so a build still running when that deadline
+arrives answers `busy` instead; the only change from before this feature is that the
+build underneath that `busy` answer is no longer cancelled. Poll `wiki_code_status`,
+whose answer carries the same `job` descriptor (`id`, `state`, `started_at`, and
+`finished_at` once terminal, plus `phase`/`phases_done` while still `running`) until the
+job reaches `ready` or `failed` — but the job is session-scoped, so a new process (a
+server restart, a fresh stdio connection) reports no `job` key at all; a poller must fall
+back to `state`/`fresh` rather than wait forever for a terminal job that no longer exists
+in that process.
 
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.
@@ -527,7 +539,7 @@ documented under distributed publication below:
 | Tool | Contract |
 | --- | --- |
 | `wiki_code_status` | Reports local cache configuration, state, freshness, and diagnostics, plus a `job` descriptor while a build is running or just finished. |
-| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` bounds how long the call waits for that build before answering `rebuilding` with a `job` descriptor instead of cancelling it. |
+| `wiki_code_index` | Requests a full rebuild for the configured `languages`; `force` may rebuild an otherwise current cache. `wait_seconds` (pass `0` for an immediate job handle) bounds how long the call waits for that build without ever cancelling it: the answer is `rebuilding` with a `job` descriptor when `wait_seconds < max_full_rebuild_seconds`, or `busy` when omitted (the default) and the build is still running at its own deadline. |
 | `wiki_code_search` | Searches typed file, module, and symbol entities with optional kind, path, language, and limit filters. |
 | `wiki_code_context` | Expands exact typed entity-ID `seeds` through bounded relations; source inclusion defaults to `false`. |
 

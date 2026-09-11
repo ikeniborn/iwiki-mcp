@@ -954,7 +954,13 @@ class CodeGraphRuntime:
         if job is None:
             return status
         descriptor = job.describe()
-        if job.state == "running":
+        # Read `state` once from the descriptor rather than re-reading
+        # `job.state`: the worker can finish between the two reads, and a
+        # second, later read could see "ready" after `describe()` already
+        # captured "running" -- leaving `phase`/`phases_done` off an answer
+        # that still claims `state: "running"`, a shape the README promises
+        # cannot occur.
+        if descriptor["state"] == "running":
             descriptor["phase"] = job.control.phase
             descriptor["phases_done"] = list(job.control.phases_done)
         return {**status, "job": descriptor}
