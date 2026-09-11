@@ -535,6 +535,13 @@ you to infer it from `job`: it carries `publication_failed` in `warnings` alongs
 `publication` result and the `failed` job. Treat that warning, not `state`, as the answer
 to "did my snapshot reach the target".
 
+A publication target that is missing its configuration is refused before the build
+starts, not after it: `wiki_code_index` answers `invalid_config` — and `iwiki-mcp code
+publish` exits `2` — without indexing, because an absent `IWIKI_CODE_GRAPH_MCP_URL` or
+`IWIKI_CODE_GRAPH_MCP_TOKEN` is a configuration error no rebuild can resolve. A target
+that is configured but unreachable is the other case: there the build runs, the
+publication is attempted, and the failure is a `publication_failed` one (`exit 1`).
+
 One known limit follows from the build owning its publication. While a build runs the
 session stays alive — that is what keeps the job handle readable — and the publication is
 part of the build, so a target that stops answering holds the process open for as long as
