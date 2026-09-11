@@ -1567,10 +1567,11 @@ class CodeGraphRuntime:
                 # reaches a log line or a tool answer.
                 LOGGER.error("code_graph_publish code=publication_failed")
                 published = dict(_PUBLICATION_FAILED)
-            # An empty answer is the "no publisher for this mode" no-op: the
-            # key stays absent so the build's own state decides terminality.
-            if not published:
-                return
+            # Recorded unconditionally: a caller installs this callback only
+            # when it has a target to publish to, so whatever came back is the
+            # publication's outcome. A mode with nothing to publish passes no
+            # callback at all and leaves the key absent, which is what lets
+            # `_terminal_state` tell "did not publish" from "published badly".
             result["publication"] = published
             if _terminal_state(result) != "ready":
                 # The third signal, beside the `failed` job and the
@@ -1654,12 +1655,11 @@ class CodeGraphRuntime:
         """Build the graph, publishing the snapshot the build produced.
 
         `publish` is the caller's publication step, run by the build worker
-        after a `ready` build and before the job reports terminality. It
-        answers with the publication result (`{}` when the configured mode
-        has nothing to publish to), which this call returns under
-        `publication` -- the one place a caller reads it from, whether the
-        build finished within `wait_seconds` or long after the caller
-        detached.
+        after a `ready` build and before the job reports terminality. Its
+        answer is returned under `publication` -- the one place a caller reads
+        it from, whether the build finished within `wait_seconds` or long
+        after the caller detached. A caller with nothing to publish to passes
+        no callback, and the key stays absent.
         """
         if languages is not None and (
             not languages

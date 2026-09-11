@@ -939,10 +939,18 @@ def test_outcome_ready_revision_and_tool_result_semantics(
     assert outcome.tool_result() == tool_result
 
 
-def test_non_ready_index_never_selects_or_publishes_target(
+def test_non_ready_index_never_publishes_to_the_target(
     tmp_path, monkeypatch
 ):
+    """A build that never reached `ready` must not begin a publication.
+
+    The invariant is about publishing, not about selecting: the publisher is
+    constructed before the build so that a missing endpoint or token is
+    reported as the configuration error it is, and construction opens no
+    connection and begins no session. What must not happen is a *call* on it.
+    """
     calls = []
+    publisher = RecordingPublisher()
 
     class Runtime:
         config = CodeGraphConfig(publish_mode="mcp")
@@ -964,7 +972,7 @@ def test_non_ready_index_never_selects_or_publishes_target(
     monkeypatch.setattr(
         application,
         "publisher_for",
-        lambda *_args, **_kwargs: pytest.fail("publisher must not be selected"),
+        lambda *_args, **_kwargs: publisher,
     )
 
     outcome = application.index_and_publish(
@@ -972,6 +980,7 @@ def test_non_ready_index_never_selects_or_publishes_target(
     )
 
     assert calls == [("index", True, ["python"])]
+    assert publisher.calls == []
     assert outcome.publish_mode == "mcp"
     assert outcome.publication == {}
     assert not outcome.ready
@@ -1041,10 +1050,16 @@ def test_out_of_range_wait_seconds_propagates_for_the_tool_layer_to_sanitize(
         application.index_and_publish(_git_binding(tmp_path), wait_seconds=-1)
 
 
-def test_failed_sqlite_index_does_not_export_or_select_publisher(
+def test_failed_sqlite_index_does_not_export_or_publish(
     tmp_path, monkeypatch
 ):
-    """Recovery preservation is covered by test_cancellation_before_publication."""
+    """Recovery preservation is covered by test_cancellation_before_publication.
+
+    `publisher_for` is left unpatched on purpose: SQLite really has no
+    publication target, so the real selection answers `None`, no callback is
+    installed, and `export_snapshot` -- the first thing any publication does
+    -- is never reached.
+    """
     calls = []
 
     class Runtime:
@@ -1067,14 +1082,6 @@ def test_failed_sqlite_index_does_not_export_or_select_publisher(
         "code_runtime",
         lambda _source, *, environ=None: Runtime(),
     )
-    monkeypatch.setattr(
-        application,
-        "publisher_for",
-        lambda *_args, **_kwargs: pytest.fail(
-            "failed SQLite rebuild must not create a publisher"
-        ),
-    )
-
     outcome = application.index_and_publish(_git_binding(tmp_path))
 
     assert calls == [("index", False, None)]
@@ -1159,11 +1166,18 @@ def test_ready_external_index_publishes_through_selected_target(
         environ=environment,
     )
 
+    # The publisher is selected before the build rather than after it: its
+    # construction is the configuration check for the endpoint and token, and
+    # a configuration error must reach the caller as one instead of being
+    # discovered on a worker thread that can only record it as a runtime
+    # failure. The publication itself still happens after the build, inside
+    # `index`, which is what the publisher's own calls below show.
     assert calls == [
         ("runtime", environment),
-        ("index", True, ["python"]),
         ("publisher", "git", "mcp", environment),
+        ("index", True, ["python"]),
     ]
+    assert [call[0] for call in publisher.calls].count("finalize") == 1
     assert outcome.ready
     assert outcome.snapshot_revision == _REMOTE_REVISION
     assert outcome.duration_ms >= 0

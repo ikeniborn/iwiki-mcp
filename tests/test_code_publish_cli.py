@@ -90,6 +90,12 @@ def _run_post_resolution_failure(
     )
     monkeypatch.setattr(application, "source_context", lambda _binding: object())
     monkeypatch.setattr(application, "validate_target", lambda *_args: None)
+    # The publisher is selected before the build, so this bare `object()`
+    # binding would not survive a real selection. The subject here is what the
+    # *index* step's failure becomes, so keep the selection inert.
+    monkeypatch.setattr(
+        application, "publisher_for", lambda *_args, **_kwargs: object()
+    )
 
     class Runtime:
         config = CodeGraphConfig(publish_mode=mode)
