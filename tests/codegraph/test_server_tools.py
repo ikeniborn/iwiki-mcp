@@ -1352,6 +1352,37 @@ def test_status_job_id_answers_about_a_superseded_build(remote_read_binding):
     assert "job_unknown" not in mine.get("warnings", [])
 
 
+def test_job_id_from_another_domain_is_unknown_after_a_rebind(
+    remote_read_binding, seed_binding, monkeypatch
+):
+    """A handle names a build, and a build belongs to exactly one domain.
+
+    The dangerous answer is not the leak, it is the false positive: a
+    session that rebound to another primary would otherwise be told
+    `state: "ready"` for a build that indexed a different domain, and
+    conclude its own graph is built. The id-addressed lookup asks the same
+    question as `current()`, only more precisely -- so it must not be the
+    looser of the two.
+    """
+    built = server.wiki_code_index(force=True)
+    assert built["state"] == "ready"
+
+    (Path(seed_binding.base) / "backend").mkdir()
+    rebound = replace(seed_binding, primary="backend")
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: rebound)
+
+    answer = server.wiki_code_status(job_id=built["job"]["id"])
+
+    assert answer["state"] == "ready"
+    assert "job" not in answer
+    assert "job_unknown" in answer["warnings"]
+    # The build itself is untouched: its own domain still answers for it.
+    monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
+    assert server.wiki_code_status(
+        job_id=built["job"]["id"]
+    )["job"]["id"] == built["job"]["id"]
+
+
 def test_unknown_job_id_warns_and_keeps_the_graph_answer(remote_read_binding):
     """An aged-out id is not an error: the graph status is still valid."""
     assert server.wiki_code_index(force=True)["state"] == "ready"

@@ -2403,15 +2403,15 @@ def test_a_terminal_answer_survives_a_later_build_finishing():
     first = _run_to_completion(registry, key, explicit=True)
     second = _run_to_completion(registry, key, explicit=False)
 
-    remembered = registry.terminal_by_id(first.job_id)
+    remembered = registry.terminal_by_id(key, first.job_id)
     assert remembered is not None
     assert remembered.job_id == first.job_id
     assert remembered.state == "ready"
     assert remembered.describe()["finished_at"] is not None
     # The id-less reader keeps reporting the latest build for the domain.
     assert registry.current(key).job_id == second.job_id
-    assert registry.terminal_by_id(second.job_id).job_id == second.job_id
-    assert registry.terminal_by_id("0" * 16) is None
+    assert registry.terminal_by_id(key, second.job_id).job_id == second.job_id
+    assert registry.terminal_by_id(key, "0" * 16) is None
 
 
 def test_two_domains_keep_their_own_terminal_answers():
@@ -2434,8 +2434,28 @@ def test_two_domains_keep_their_own_terminal_answers():
     assert registry.current(docs).state == "ready"
     assert registry.current(notes).job_id == notes_job.job_id
     assert registry.current(notes).state == "failed"
-    assert registry.terminal_by_id(docs_job.job_id).domain_key == docs
+    assert registry.terminal_by_id(docs, docs_job.job_id).domain_key == docs
     assert registry.current(("/tmp/base", "absent")) is None
+
+
+def test_terminal_by_id_never_answers_across_domains():
+    """The by-id lookup is domain-scoped, like every other reader here.
+
+    An id is globally unique, so an unscoped lookup would answer -- and
+    report a `ready` build of *another* domain to a session that rebound.
+    The registry owns the check because it is the only place every future
+    caller must pass through.
+    """
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    docs = ("/tmp/base", "docs")
+    notes = ("/tmp/base", "notes")
+    docs_job = _run_to_completion(registry, docs)
+
+    assert registry.terminal_by_id(docs, docs_job.job_id) is not None
+    assert registry.terminal_by_id(notes, docs_job.job_id) is None
+    assert registry.terminal_by_id(("/other/base", "docs"), docs_job.job_id) is None
 
 
 def test_terminal_history_is_bounded_and_evicts_the_oldest():
@@ -2455,10 +2475,12 @@ def test_terminal_history_is_bounded_and_evicts_the_oldest():
     ]
 
     assert len(registry._terminal) == limit
-    assert registry.terminal_by_id(jobs[0].job_id) is None
-    assert registry.terminal_by_id(jobs[1].job_id) is None
-    assert registry.terminal_by_id(jobs[2].job_id).job_id == jobs[2].job_id
-    assert registry.terminal_by_id(jobs[-1].job_id).job_id == jobs[-1].job_id
+    assert registry.terminal_by_id(key, jobs[0].job_id) is None
+    assert registry.terminal_by_id(key, jobs[1].job_id) is None
+    assert registry.terminal_by_id(key, jobs[2].job_id).job_id == jobs[2].job_id
+    assert registry.terminal_by_id(
+        key, jobs[-1].job_id
+    ).job_id == jobs[-1].job_id
     assert registry.current(key).job_id == jobs[-1].job_id
 
 
@@ -2636,7 +2658,7 @@ def test_a_timed_out_join_leaves_the_running_build_in_the_slot():
         registry.join(timeout=5)
 
     assert registry._job is None
-    assert registry.terminal_by_id(job.job_id).state == "ready"
+    assert registry.terminal_by_id(key, job.job_id).state == "ready"
 
 
 def test_finish_records_the_terminal_state_exactly_once():
@@ -2663,7 +2685,7 @@ def test_finish_records_the_terminal_state_exactly_once():
     assert job.finished_at == stamped
     assert job.state == "ready"
     assert job.describe()["finished_at"] == stamped
-    assert registry.terminal_by_id(job.job_id) is published
+    assert registry.terminal_by_id(key, job.job_id) is published
     assert len(registry._terminal) == 1
 
 
@@ -2690,11 +2712,11 @@ def test_eviction_spares_a_domains_last_remaining_answer():
 
     assert len(registry._terminal) == limit
     # The oldest snapshot overall belongs to `docs` and is its only one.
-    assert registry.terminal_by_id(only_docs_answer.job_id) is not None
+    assert registry.terminal_by_id(docs, only_docs_answer.job_id) is not None
     assert registry.current(docs).job_id == only_docs_answer.job_id
     # `notes` paid for its own crowding instead.
-    assert registry.terminal_by_id(crowd[0].job_id) is None
-    assert registry.terminal_by_id(crowd[1].job_id) is None
+    assert registry.terminal_by_id(notes, crowd[0].job_id) is None
+    assert registry.terminal_by_id(notes, crowd[1].job_id) is None
     assert registry.current(notes).job_id == crowd[-1].job_id
 
 
@@ -4153,7 +4175,7 @@ def test_attached_descriptor_reports_progress_only_while_running(monkeypatch):
         release.set()
         registry.join(timeout=5)
 
-    snapshot = registry.terminal_by_id(live.job_id)
+    snapshot = registry.terminal_by_id(key, live.job_id)
     assert snapshot is not None
     assert not hasattr(snapshot, "control")
     terminal_answer = attach_job(key, None, {"state": "ready"})

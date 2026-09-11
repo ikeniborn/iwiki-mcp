@@ -302,17 +302,31 @@ class _BuildWorkerRegistry:
         with self._lock:
             return self._newest_locked(domain_key)
 
-    def terminal_by_id(self, job_id: str) -> _JobSnapshot | None:
-        """Return the snapshot of one specific finished build, if remembered.
+    def terminal_by_id(
+        self, domain_key, job_id: str
+    ) -> _JobSnapshot | None:
+        """Return one domain's specific finished build, if remembered.
 
         The lookup a caller holding a handle needs: it asks about its own
         build rather than about whichever build happens to be the latest.
         `None` means the build is unknown here -- it is still running, it was
         never started in this process, or it has aged out of the bounded
         history -- and the caller falls back to `state`/`fresh`.
+
+        `domain_key` is required even though the id alone would find the
+        snapshot, and the check lives here rather than at any call site
+        because this is the one place every future caller must pass
+        through. A build belongs to exactly one domain, so answering across
+        domains would not merely widen the answer -- it would tell a session
+        that rebound to another primary that its graph is `ready` because a
+        build for some *other* primary finished. This lookup asks `current`'s
+        question more precisely; it must not be the looser of the two.
         """
         with self._lock:
-            return self._terminal.get(job_id)
+            snapshot = self._terminal.get(job_id)
+            if snapshot is None or snapshot.domain_key != domain_key:
+                return None
+            return snapshot
 
     def _newest_locked(self, domain_key) -> _JobSnapshot | None:
         """Return the most recent snapshot for one domain. Lock held."""
@@ -474,10 +488,14 @@ def _resolve_job(
     build runs, its newest terminal snapshot afterwards. With an id only
     that build answers -- the history first, because a finished build has
     left the live slot and whatever occupies it now is someone else's.
+
+    Both lookups are scoped to `domain_key`, and neither is scoped here:
+    `current` and `terminal_by_id` own that themselves, so no caller of
+    either can widen it.
     """
     if job_id is None:
         return _BUILD_WORKERS.current(domain_key)
-    remembered = _BUILD_WORKERS.terminal_by_id(job_id)
+    remembered = _BUILD_WORKERS.terminal_by_id(domain_key, job_id)
     if remembered is not None:
         return remembered
     live = _BUILD_WORKERS.current(domain_key)
