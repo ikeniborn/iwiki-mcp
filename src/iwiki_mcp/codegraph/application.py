@@ -35,7 +35,7 @@ from .publication import (
     SnapshotPublisher,
     iter_snapshot_batches,
 )
-from .query import CodeGraphQueryError, validate_search_request
+from .query import validate_search_request
 from .store import _is_canonical_revision
 from .sqlite_adapter import SqliteCodeGraphReader
 from iwiki_mcp.specifications import (
@@ -654,21 +654,16 @@ def index_and_publish(
     try:
         if config is not None:
             validate_target(binding, config.publish_mode)
-        try:
-            indexed = runtime.index(
-                force=force, languages=languages, wait_seconds=wait_seconds
-            )
-        except CodeGraphQueryError as exc:
-            # `runtime.index` only ever raises this for an out-of-range
-            # `wait_seconds`, so the field is unambiguous here -- surface a
-            # typed answer naming it and the accepted range instead of
-            # letting the generic exception handling below redact it away.
-            indexed = {
-                "error": str(exc),
-                "code": "invalid_config",
-                "field": "wait_seconds",
-                "hint": "call wiki_code_index again with wait_seconds inside the accepted range",
-            }
+        # `CodeGraphQueryError` (raised by `runtime.index`'s own `wait_seconds`
+        # validation) is deliberately not caught here: it falls through to
+        # the generic `except Exception` below like any other `CodeGraphError`
+        # and reaches the caller as a raised exception when `redact_failures`
+        # is `False`. The tool layer (`wiki_code_index`'s `_code_safe`
+        # decorator) turns it into the same sanitized `invalid_config` answer
+        # every other typed graph failure gets via `sanitized_error`.
+        indexed = runtime.index(
+            force=force, languages=languages, wait_seconds=wait_seconds
+        )
         publication: dict[str, object] = {}
         if config is not None and indexed.get("state") == "ready":
             publisher = publisher_for(binding, config, environ=environ)

@@ -972,21 +972,24 @@ def test_index_and_publish_threads_wait_seconds_to_the_runtime(
     assert outcome.index == {"state": "ready", "revision": _LOCAL_REVISION}
 
 
-def test_out_of_range_wait_seconds_becomes_a_typed_answer_not_an_exception(
+def test_out_of_range_wait_seconds_propagates_for_the_tool_layer_to_sanitize(
     tmp_path, monkeypatch
 ):
-    # Requirement carried from review: `runtime.index` raises
-    # `CodeGraphQueryError` for an out-of-range `wait_seconds`, and
-    # `index_and_publish` used to have no except clause for it -- with
-    # `redact_failures=False` (the direct `wiki_code_index` path) that fell
-    # through to `except Exception: raise`, so the caller saw a raised
-    # exception instead of a typed answer naming the field and its range.
+    # Ruling from review: `index_and_publish` must not hand-build a second
+    # error dialect for `CodeGraphQueryError` -- it stays uncaught here (like
+    # `CodeGraphConfigError` and friends already are) and falls through to
+    # the generic `except Exception: if not redact_failures: raise`, so a
+    # direct caller with `redact_failures=False` sees the raised exception.
+    # The tool layer (`wiki_code_index`'s `_code_safe` decorator) is what
+    # turns it into a sanitized answer -- see the server-level coverage in
+    # test_server_tools.py.
     class Runtime:
         config = CodeGraphConfig(publish_mode="sqlite")
 
         def index(self, *, force=False, languages=None, wait_seconds=None):
             raise CodeGraphQueryError(
-                "wait_seconds must be between 0 and 10"
+                "wait_seconds must be between 0 and 10",
+                parameter="wait_seconds",
             )
 
     monkeypatch.setattr(
@@ -995,18 +998,8 @@ def test_out_of_range_wait_seconds_becomes_a_typed_answer_not_an_exception(
         lambda _source, *, environ=None: Runtime(),
     )
 
-    outcome = application.index_and_publish(
-        _git_binding(tmp_path), wait_seconds=-1
-    )
-
-    assert outcome.index == {
-        "error": "wait_seconds must be between 0 and 10",
-        "code": "invalid_config",
-        "field": "wait_seconds",
-        "hint": "call wiki_code_index again with wait_seconds inside the accepted range",
-    }
-    assert outcome.publication == {}
-    assert not outcome.ready
+    with pytest.raises(CodeGraphQueryError):
+        application.index_and_publish(_git_binding(tmp_path), wait_seconds=-1)
 
 
 def test_failed_sqlite_index_does_not_export_or_select_publisher(

@@ -497,13 +497,16 @@ never blocks indexing — the Tree-sitter baseline always runs.
 waits for the build it starts (or joins) before returning — the build itself keeps
 running toward its own `max_full_rebuild_seconds` deadline regardless of how long the
 caller waited. It must be between `0` and `max_full_rebuild_seconds`; an out-of-range
-value is refused with `{"error", "code": "invalid_config", "field": "wait_seconds",
-"hint"}` naming the accepted range. Omitting it waits for the full rebuild budget, as
-before. When the wait expires before the build finishes, the answer is `{"state":
-"rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for this
-job"}` instead of cancelling the build. Poll `wiki_code_status`, whose answer carries the
-same `job` descriptor (`id`, `state`, `started_at`, and `finished_at` once terminal, plus
-`phase`/`phases_done` while still `running`) until the job reaches `ready` or `failed`.
+value is refused with the same generic `invalid_config` shape every other bad parameter
+gets — `{"error": "code graph configuration is invalid", "code": "invalid_config",
+"field": "wait_seconds", "hint": "inspect code_graph project configuration"}` — the
+accepted range is not repeated in the answer, only here in this documentation. Omitting
+`wait_seconds` waits for the full rebuild budget, as before. When the wait expires before
+the build finishes, the answer is `{"state": "rebuilding", "fresh": false, "job": {...},
+"hint": "poll wiki_code_status for this job"}` instead of cancelling the build. Poll
+`wiki_code_status`, whose answer carries the same `job` descriptor (`id`, `state`,
+`started_at`, and `finished_at` once terminal, plus `phase`/`phases_done` while still
+`running`) until the job reaches `ready` or `failed`.
 
 Bash is opt-in. Either include `bash` in persistent `code_graph.languages` as above,
 or explicitly request a one-shot rebuild with `wiki_code_index(languages=["bash"])`.

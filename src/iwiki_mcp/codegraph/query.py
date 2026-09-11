@@ -50,9 +50,18 @@ _ENTITY_COLUMNS = (
 
 
 class CodeGraphQueryError(CodeGraphError):
-    """Raised when an entity query violates the public search contract."""
+    """Raised when an entity query violates the public search contract.
+
+    `parameter`, when set, is what `runtime.sanitized_error` turns into the
+    response's `field` -- the caller is told which argument to fix without
+    ever seeing raw exception text (see `runtime._whitelisted_field`).
+    """
 
     code = "invalid_config"
+
+    def __init__(self, message: str, *, parameter: str | None = None) -> None:
+        super().__init__(message)
+        self.parameter = parameter
 
 
 class CodeGraphLanguageUnavailableError(CodeGraphQueryError):

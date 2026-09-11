@@ -311,24 +311,24 @@ def test_index_handler_accepts_every_known_language(seed_binding, monkeypatch):
 def test_wiki_code_index_reports_out_of_range_wait_seconds(
     seed_binding, monkeypatch
 ):
-    # Requirement carried from review: a `CodeGraphQueryError` raised by
-    # `runtime.index`'s own `wait_seconds` validation must reach the caller
-    # as a typed error dict naming the field and its accepted range, never
-    # as a raised exception and never as the generic invalid_config answer
-    # that hides which parameter and range were violated.
+    # Ruling from review: a `CodeGraphQueryError` raised by `runtime.index`'s
+    # own `wait_seconds` validation must reach the caller as a typed answer,
+    # never as a raised exception -- but it must use the codebase's one
+    # existing `invalid_config` dialect (fixed generic "error" string, no raw
+    # exception text, `field` naming the parameter via `sanitized_error` /
+    # `_invalid_config`), the same shape `languages` already gets, rather
+    # than a bespoke dict. This also pins that `_whitelisted_field` accepts
+    # "wait_seconds" (`field` would be silently dropped otherwise).
     monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
 
-    answer = server.wiki_code_index(wait_seconds=-1)
-
-    assert answer["code"] == "invalid_config"
-    assert answer["field"] == "wait_seconds"
-    assert answer["error"].startswith("wait_seconds must be between 0 and")
-
-    too_large = server.wiki_code_index(wait_seconds=10_000)
-
-    assert too_large["code"] == "invalid_config"
-    assert too_large["field"] == "wait_seconds"
-    assert too_large["error"].startswith("wait_seconds must be between 0 and")
+    expected = {
+        "error": "code graph configuration is invalid",
+        "code": "invalid_config",
+        "field": "wait_seconds",
+        "hint": "inspect code_graph project configuration",
+    }
+    assert server.wiki_code_index(wait_seconds=-1) == expected
+    assert server.wiki_code_index(wait_seconds=10_000) == expected
 
 
 def test_wiki_code_index_returns_rebuilding_job_when_wait_expires_first(

@@ -497,10 +497,13 @@ best-effort-подпроцесс TypeScript Compiler API для резолвин
 вызов ждёт build, который он запустил (или к которому присоединился), прежде чем
 вернуться: сам build продолжает работать до собственного дедлайна
 `max_full_rebuild_seconds` независимо от того, сколько ждал вызывающий. Значение должно
-быть между `0` и `max_full_rebuild_seconds`; значение вне диапазона отклоняется с
-`{"error", "code": "invalid_config", "field": "wait_seconds", "hint"}`, называющим
-допустимый диапазон. Если параметр не передан, ожидание длится весь бюджет full rebuild,
-как раньше. Если ожидание истекает раньше, чем build завершится, ответ — `{"state":
+быть между `0` и `max_full_rebuild_seconds`; значение вне диапазона отклоняется тем же
+общим `invalid_config`, что и любой другой некорректный параметр — `{"error": "code
+graph configuration is invalid", "code": "invalid_config", "field": "wait_seconds",
+"hint": "inspect code_graph project configuration"}` — допустимый диапазон в самом
+ответе не повторяется, он указан только здесь, в этой документации. Если параметр не
+передан, ожидание длится весь бюджет full rebuild, как раньше. Если ожидание истекает
+раньше, чем build завершится, ответ — `{"state":
 "rebuilding", "fresh": false, "job": {...}, "hint": "poll wiki_code_status for this
 job"}` вместо отмены build. Опрашивайте `wiki_code_status`, чей ответ несёт тот же
 дескриптор `job` (`id`, `state`, `started_at` и `finished_at` после завершения, а также

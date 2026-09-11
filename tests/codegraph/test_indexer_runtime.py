@@ -3606,10 +3606,16 @@ def test_status_carries_the_terminal_job(seed_runtime):
 
 def test_out_of_range_wait_seconds_is_refused(seed_runtime):
     runtime = seed_runtime
-    with pytest.raises(CodeGraphQueryError):
+    with pytest.raises(CodeGraphQueryError) as too_low:
         runtime.index(wait_seconds=-1)
-    with pytest.raises(CodeGraphQueryError):
+    with pytest.raises(CodeGraphQueryError) as too_high:
         runtime.index(wait_seconds=10_000)
+
+    # `parameter` is what `sanitized_error`/`_invalid_config` turn into the
+    # tool answer's `field` -- without it the server-level answer would
+    # silently fall back to the fully generic invalid_config dict.
+    assert too_low.value.parameter == "wait_seconds"
+    assert too_high.value.parameter == "wait_seconds"
 
 
 def test_wait_expiry_returns_the_job_and_the_build_still_reaches_ready(

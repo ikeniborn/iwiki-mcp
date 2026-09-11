@@ -1289,7 +1289,8 @@ class CodeGraphRuntime:
         ):
             raise CodeGraphQueryError(
                 "wait_seconds must be between 0 and "
-                f"{full_rebuild_seconds}"
+                f"{full_rebuild_seconds}",
+                parameter="wait_seconds",
             )
         started = time.monotonic()
         build_deadline = started + full_rebuild_seconds
