@@ -1,3 +1,4 @@
+import logging
 import time
 
 import anyio
@@ -7,7 +8,7 @@ from iwiki_mcp.engine.config import Config, ConfigError
 from iwiki_mcp.engine.idle import IdleTracker
 
 
-def test_idle_timeout_defaults_to_thirty_minutes(monkeypatch):
+def test_idle_timeout_defaults_to_one_day(monkeypatch):
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("IWIKI_LLM_KEY", "key")
 
@@ -67,22 +68,32 @@ async def test_idle_waits_while_background_work_is_declared():
 
 
 @pytest.mark.anyio
-async def test_idle_tracker_survives_a_raising_background_predicate():
+async def test_idle_tracker_survives_a_raising_background_predicate(caplog):
     """A predicate that raises must not take the server loop down with it.
 
     Unanswerable is treated as "no background work": that degrades to the
     timer-only behaviour the tracker had before, which is bounded, rather
     than pinning the process open on a predicate that can never answer.
+
+    That degradation is invisible from the outside, and a raising predicate
+    raises on every poll forever, so the first failure is announced once at
+    warning and the repetitions stay at debug.
     """
     def broken() -> bool:
         raise RuntimeError("registry unavailable")
 
     tracker = IdleTracker(has_background_work=broken)
+    caplog.set_level(logging.DEBUG, logger="iwiki_mcp.engine.idle")
 
     with anyio.move_on_after(1.0) as scope:
         await tracker.wait_until_idle(0)
+        await tracker.wait_until_idle(0)
 
     assert scope.cancel_called is False
+
+    levels = [record.levelno for record in caplog.records]
+    assert levels == [logging.WARNING, logging.DEBUG]
+    assert "RuntimeError: registry unavailable" in caplog.text
 
 
 @pytest.mark.anyio

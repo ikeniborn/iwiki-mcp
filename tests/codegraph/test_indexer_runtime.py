@@ -3707,12 +3707,16 @@ def test_explicit_index_job_is_idle_activity(seed_runtime, monkeypatch):
 
     answer = runtime.index(force=True, wait_seconds=0)
 
-    assert answer["job"]["state"] == "running"
-    assert build_paused.is_set()
-    assert explicit_job_active() is True
-
-    release_build.set()
-    runtime.runtime.join_workers(timeout=10)
+    # Always release: a failing assertion below would otherwise leave the
+    # worker parked for the full 5-second wait and log a rebuild failure at
+    # teardown, burying the assertion that actually failed.
+    try:
+        assert answer["job"]["state"] == "running"
+        assert build_paused.is_set()
+        assert explicit_job_active() is True
+    finally:
+        release_build.set()
+        runtime.runtime.join_workers(timeout=10)
 
     # A finished job stops being activity: the slot keeps it for
     # `wiki_code_status` to report, but it no longer holds the server open.
@@ -3748,15 +3752,17 @@ def test_query_time_rebuild_is_not_idle_activity(seed_runtime, monkeypatch):
 
     runtime.query_guard()
 
-    assert build_paused.is_set()
-    job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
-    assert job is not None
-    assert job.thread.is_alive() is True
-    assert job.explicit is False
-    assert explicit_job_active() is False
-
-    release_build.set()
-    runtime.runtime.join_workers(timeout=10)
+    # Always release, for the same reason as the explicit case above.
+    try:
+        assert build_paused.is_set()
+        job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+        assert job is not None
+        assert job.thread.is_alive() is True
+        assert job.explicit is False
+        assert explicit_job_active() is False
+    finally:
+        release_build.set()
+        runtime.runtime.join_workers(timeout=10)
 
 
 def test_joining_query_guard_never_cancels_an_explicit_build(

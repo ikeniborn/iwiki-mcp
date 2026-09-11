@@ -33,6 +33,7 @@ class IdleTracker:
         self._last_activity = time.monotonic()
         self._changed = anyio.Event()
         self._has_background_work = has_background_work
+        self._background_work_unanswerable = False
 
     def touch(self) -> None:
         self._last_activity = time.monotonic()
@@ -61,13 +62,29 @@ class IdleTracker:
         tracker had before it existed: a bounded shutdown, which still hands
         the build its cooperative cancellation, rather than a process pinned
         open forever by a predicate that can never answer.
+
+        That fallback is silent by construction, though, and a predicate that
+        raises is a programming bug rather than a transient blip: it will
+        raise on every poll for the life of the process, quietly leaving the
+        tracker back at its pre-declaration behaviour. So the first failure
+        per tracker is a warning -- visible once -- and every later one drops
+        to debug, which keeps the per-poll repetition out of the client's
+        stderr.
         """
         if self._has_background_work is None:
             return False
         try:
             return bool(self._has_background_work())
         except Exception:
-            LOGGER.debug("background work predicate failed", exc_info=True)
+            if self._background_work_unanswerable:
+                LOGGER.debug("background work predicate failed", exc_info=True)
+            else:
+                self._background_work_unanswerable = True
+                LOGGER.warning(
+                    "background work predicate failed; idle shutdown falls "
+                    "back to the inactivity timer alone",
+                    exc_info=True,
+                )
             return False
 
     async def wait_until_idle(self, timeout_seconds: int) -> None:
