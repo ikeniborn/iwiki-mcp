@@ -7,6 +7,32 @@ import iwiki_mcp
 from packaging.requirements import Requirement
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 
+# README.md is the landing page; the reference documentation lives in one module per
+# topic under docs/, each with a Russian `<stem>.ru.md` sibling.
+DOC_MODULES = (
+    "storage-modes",
+    "postgres-setup",
+    "wiki-model",
+    "code-graph",
+    "code-graph-publishing",
+    "specifications",
+    "tools-reference",
+    "env-reference",
+    "okf-compatibility",
+    "benchmarks",
+)
+
+
+def _user_docs(suffix: str = "") -> str:
+    """Concatenate the landing page and every documentation module of one language."""
+    landing = Path("docs/README.ru.md") if suffix else Path("README.md")
+    parts = [landing.read_text(encoding="utf-8")]
+    parts += [
+        Path(f"docs/{stem}{suffix}.md").read_text(encoding="utf-8")
+        for stem in DOC_MODULES
+    ]
+    return "\n".join(parts)
+
 
 def test_package_version_matches_distribution_metadata():
     assert iwiki_mcp.__version__ == version("iwiki-mcp")
@@ -24,11 +50,11 @@ def test_package_metadata_rejects_mcp_v2():
 
 
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.272"
+    assert iwiki_mcp.__version__ == "0.7.273"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
-    text = Path("README.md").read_text(encoding="utf-8")
+    text = _user_docs()
 
     assert all(
         name in text
@@ -50,8 +76,8 @@ def test_user_docs_describe_python_code_graph_mvp_contract():
 
 
 def test_docs_describe_hosted_domain_authority_contract():
-    english = Path("README.md").read_text(encoding="utf-8")
-    russian = Path("docs/README.ru.md").read_text(encoding="utf-8")
+    english = _user_docs()
+    russian = _user_docs(".ru")
     architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
     required = (
         "can_create_domain",
@@ -82,12 +108,12 @@ def test_docs_describe_hosted_domain_authority_contract():
 def test_docs_retain_separate_wiki_and_code_search_workflow():
     documents = (
         (
-            Path("README.md"),
+            Path("docs/code-graph-publishing.md"),
             "`wiki_unified_search` remains intentionally unregistered",
-            "docs/superpowers/evidence/",
+            "superpowers/evidence/",
         ),
         (
-            Path("docs/README.ru.md"),
+            Path("docs/code-graph-publishing.ru.md"),
             "`wiki_unified_search` намеренно не зарегистрирован",
             "superpowers/evidence/",
         ),
@@ -115,10 +141,14 @@ def test_docs_retain_separate_wiki_and_code_search_workflow():
 
 def test_postgres_tool_matrix_includes_section_mutations():
     documents = (
-        (Path("README.md"), "### PostgreSQL MCP tool contract", "Git-only tools"),
         (
-            Path("docs/README.ru.md"),
-            "### Контракт MCP-инструментов PostgreSQL",
+            Path("docs/storage-modes.md"),
+            "## PostgreSQL MCP tool contract",
+            "Git-only tools",
+        ),
+        (
+            Path("docs/storage-modes.ru.md"),
+            "## Контракт MCP-инструментов PostgreSQL",
             "Git-only инструменты",
         ),
     )
@@ -137,8 +167,8 @@ def test_postgres_tool_matrix_includes_section_mutations():
 
 
 def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
-    english = Path("README.md").read_text(encoding="utf-8")
-    russian = Path("docs/README.ru.md").read_text(encoding="utf-8")
+    english = _user_docs()
+    russian = _user_docs(".ru")
     architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
 
     command = "iwiki-mcp code publish --project <checkout> [--json]"
@@ -236,13 +266,13 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
 
     english_publisher = publisher_section(
         english,
-        "### Scheduled publisher operation",
-        "### SQLite snapshot profiles and commit uncertainty",
+        "## Scheduled publisher operation",
+        "## SQLite snapshot profiles and commit uncertainty",
     )
     russian_publisher = publisher_section(
         russian,
-        "### Плановая публикация оператором",
-        "### Профили снапшота SQLite и неопределённость коммита",
+        "## Плановая публикация оператором",
+        "## Профили снапшота SQLite и неопределённость коммита",
     )
     architecture_publisher = publisher_section(
         architecture,
