@@ -104,31 +104,35 @@ def _specification_mode(value: Any) -> SpecificationMode:
 
 
 @dataclass(frozen=True)
-class SpecificationOverride:
+class PolicyOverride:
     iwiki_id: str
-    domain: str
-    mode: SpecificationMode
+    domain: str | None
+    values: Mapping[str, Any]
 
     def __post_init__(self) -> None:
         if not isinstance(self.iwiki_id, str) or not self.iwiki_id.strip():
             raise ConfigError("specification override iwiki_id is invalid")
-        try:
-            valid_domain = validate_domain_identifier(self.domain)
-        except ValueError as exc:
-            raise ConfigError("specification override domain is invalid") from exc
         object.__setattr__(self, "iwiki_id", self.iwiki_id.strip())
-        object.__setattr__(self, "domain", valid_domain)
-        object.__setattr__(self, "mode", _specification_mode(self.mode))
+        if self.domain is not None:
+            try:
+                valid_domain = validate_domain_identifier(self.domain)
+            except ValueError as exc:
+                raise ConfigError("specification override domain is invalid") from exc
+            object.__setattr__(self, "domain", valid_domain)
+        if not isinstance(self.values, Mapping) or not self.values:
+            raise ConfigError("specification override carries no policy value")
+        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+
+
+# Keep the historical name importable for one release.
+SpecificationOverride = PolicyOverride
 
 
 @dataclass(frozen=True)
 class HostedSpecificationsConfig:
     default_mode: SpecificationMode = "optional"
     allow_project_mode: bool = True
-    overrides: tuple[SpecificationOverride, ...] | list[SpecificationOverride] = ()
-    _mode_by_pair: Mapping[tuple[str, str], SpecificationMode] = field(
-        init=False, repr=False, compare=False
-    )
+    overrides: tuple[PolicyOverride, ...] | list[PolicyOverride] = ()
 
     def __post_init__(self) -> None:
         default_mode = _specification_mode(self.default_mode)
@@ -137,21 +141,17 @@ class HostedSpecificationsConfig:
         if not isinstance(self.overrides, (tuple, list)):
             raise ConfigError("specification overrides must be an array")
         overrides = tuple(self.overrides)
-        if any(not isinstance(item, SpecificationOverride) for item in overrides):
+        if any(not isinstance(item, PolicyOverride) for item in overrides):
             raise ConfigError("specification overrides must contain override records")
 
-        modes: dict[tuple[str, str], SpecificationMode] = {}
+        pairs: set[tuple[str, str | None]] = set()
         for override in overrides:
             pair = (override.iwiki_id, override.domain)
-            if pair in modes:
+            if pair in pairs:
                 raise ConfigError("specification overrides contain a duplicate pair")
-            modes[pair] = override.mode
+            pairs.add(pair)
         object.__setattr__(self, "default_mode", default_mode)
         object.__setattr__(self, "overrides", overrides)
-        object.__setattr__(self, "_mode_by_pair", MappingProxyType(modes))
-
-    def mode_for(self, iwiki_id: str, domain: str) -> SpecificationMode:
-        return self._mode_by_pair.get((iwiki_id, domain), self.default_mode)
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "HostedSpecificationsConfig":
@@ -167,26 +167,37 @@ class HostedSpecificationsConfig:
         if not isinstance(raw_overrides, list):
             raise ConfigError("specification overrides must be an array")
 
-        overrides: list[SpecificationOverride] = []
+        overrides: list[PolicyOverride] = []
         for raw_override in raw_overrides:
-            if not isinstance(raw_override, Mapping) or set(raw_override) != {
-                "iwiki_id",
-                "domain",
-                "mode",
-            }:
-                raise ConfigError("specification override fields are invalid")
-            overrides.append(
-                SpecificationOverride(
-                    iwiki_id=raw_override.get("iwiki_id"),
-                    domain=raw_override.get("domain"),
-                    mode=raw_override.get("mode"),
-                )
-            )
+            overrides.append(_policy_override(raw_override))
         return cls(
             default_mode=default_mode,
             allow_project_mode=allow_project_mode,
             overrides=tuple(overrides),
         )
+
+
+def _policy_override(raw: Any) -> "PolicyOverride":
+    """Parse one override record: identity keys plus any subset of policy keys."""
+    from .policy import FIELDS_BY_NAME
+
+    if not isinstance(raw, Mapping) or "iwiki_id" not in raw:
+        raise ConfigError("specification override fields are invalid")
+    allowed = {"iwiki_id", "domain", "mode", *FIELDS_BY_NAME}
+    if set(raw) - allowed:
+        raise ConfigError("specification override fields are invalid")
+    if "mode" in raw and "specification_mode" in raw:
+        raise ConfigError("specification override sets mode twice")
+    values: dict[str, Any] = {}
+    for name, policy_field in FIELDS_BY_NAME.items():
+        key = "mode" if name == "specification_mode" and "mode" in raw else name
+        if key in raw:
+            values[name] = policy_field.parse(raw[key])
+    return PolicyOverride(
+        iwiki_id=raw.get("iwiki_id"),
+        domain=raw.get("domain"),
+        values=values,
+    )
 
 
 @dataclass(frozen=True)

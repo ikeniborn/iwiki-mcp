@@ -4,6 +4,7 @@ from iwiki_mcp.postgres.config import (
     ConfigError,
     HostedCodeGraphConfig,
     HostedSpecificationsConfig,
+    PolicyOverride,
 )
 from iwiki_mcp.postgres.policy import (
     POLICY_FIELDS,
@@ -69,3 +70,57 @@ def test_parse_project_policy_rejects_an_unknown_member():
 def test_parse_project_policy_rejects_an_operator_only_field():
     with pytest.raises(ConfigError):
         parse_project_policy({"require_session_binding": True})
+
+
+def test_tenant_override_applies_to_every_domain():
+    specifications = HostedSpecificationsConfig(
+        overrides=(PolicyOverride("team-wiki", None, {"specification_mode": "disabled"}),)
+    )
+
+    for domain in ("payments", "billing"):
+        resolved = _resolve(specifications=specifications, domain=domain)
+        assert resolved.value("specification_mode") == "disabled"
+        assert resolved.source("specification_mode") == "hosted_override"
+
+
+def test_exact_override_beats_the_tenant_override():
+    specifications = HostedSpecificationsConfig(
+        overrides=(
+            PolicyOverride("team-wiki", None, {"specification_mode": "disabled"}),
+            PolicyOverride("team-wiki", "payments", {"specification_mode": "strict"}),
+        )
+    )
+
+    assert _resolve(specifications=specifications).value("specification_mode") == "strict"
+    assert (
+        _resolve(specifications=specifications, domain="billing").value(
+            "specification_mode"
+        )
+        == "disabled"
+    )
+
+
+def test_inheritance_is_per_field_not_per_record():
+    specifications = HostedSpecificationsConfig(
+        default_mode="optional",
+        overrides=(PolicyOverride("team-wiki", None, {"require_session_binding": True}),),
+    )
+
+    resolved = _resolve(
+        specifications=specifications, project={"specification_mode": "strict"}
+    )
+
+    assert resolved.value("require_session_binding") is True
+    assert resolved.source("require_session_binding") == "hosted_override"
+    assert resolved.value("specification_mode") == "strict"
+    assert resolved.source("specification_mode") == "project"
+
+
+def test_domainless_resolution_uses_the_tenant_override():
+    specifications = HostedSpecificationsConfig(
+        overrides=(PolicyOverride("team-wiki", None, {"require_session_binding": True}),)
+    )
+
+    resolved = _resolve(specifications=specifications, domain=None)
+
+    assert resolved.value("require_session_binding") is True

@@ -1110,13 +1110,15 @@ def _specification_policy_details(
                 (
                     item
                     for item in policy.overrides
-                    if item.iwiki_id == binding.iwiki_id and item.domain == domain
+                    if item.iwiki_id == binding.iwiki_id
+                    and item.domain == domain
+                    and "specification_mode" in item.values
                 ),
                 None,
             )
         )
         if exact is not None:
-            return exact.mode, "hosted_override", False
+            return exact.values["specification_mode"], "hosted_override", False
         default_mode = "optional" if policy is None else policy.default_mode
         project_mode = binding.project_specification_mode
         allow_project_mode = policy is None or policy.allow_project_mode

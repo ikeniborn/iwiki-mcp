@@ -125,12 +125,23 @@ def parse_project_policy(value: Any) -> dict[str, Any]:
 
 
 def _override_value(specifications, iwiki_id: str, domain: str | None, name: str):
-    """Return an operator override for one field, once records can carry one.
-
-    Task 2 replaces this body: the override record only gains its `values`
-    mapping there, so reading it here would depend on a type that does not
-    exist yet.
-    """
+    """Return an exact-pair value first, then the tenant-wide one."""
+    if specifications is None:
+        return None
+    exact = None
+    tenant = None
+    for override in specifications.overrides:
+        if override.iwiki_id != iwiki_id:
+            continue
+        if override.domain is None:
+            tenant = override
+        elif domain is not None and override.domain == domain:
+            exact = override
+    for candidate in (exact, tenant):
+        if candidate is not None:
+            value = candidate.values.get(name)
+            if value is not None:
+                return value
     return None
 
 

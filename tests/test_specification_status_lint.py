@@ -431,7 +431,9 @@ def test_hosted_policy_uses_exact_override_then_default_without_mutation(
     )
     policy = HostedSpecificationsConfig(
         default_mode="optional",
-        overrides=(SpecificationOverride("wiki-a", "docs", "strict"),),
+        overrides=(
+            SpecificationOverride("wiki-a", "docs", {"specification_mode": "strict"}),
+        ),
     )
     binding = server.base.PostgresBinding(
         host="db.invalid",
@@ -472,7 +474,9 @@ def test_hosted_project_mode_tightens_default_per_domain(tmp_path, monkeypatch):
     binding = _hosted_binding(tmp_path, project_mode="strict")
     policy = HostedSpecificationsConfig(
         default_mode="optional",
-        overrides=(SpecificationOverride("wiki-a", "docs", "disabled"),),
+        overrides=(
+            SpecificationOverride("wiki-a", "docs", {"specification_mode": "disabled"}),
+        ),
     )
     monkeypatch.setattr(server, "_HOSTED_SPECIFICATIONS", policy, raising=False)
     token = server._SESSION_BINDING.set(binding)

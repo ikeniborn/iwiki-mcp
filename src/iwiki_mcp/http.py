@@ -30,6 +30,7 @@ from .postgres.auth import (
 )
 from .postgres.config import ConfigError, ServerConfig, load_server_config
 from .postgres.migrations import require_schema_version
+from .postgres.policy import resolve_policy
 from .postgres.store import require_hosted_runtime_principal
 
 
@@ -247,13 +248,10 @@ def _binding(
 ) -> base.PostgresBinding:
     storage = config.storage
     specifications = getattr(config, "specifications", None)
-    specification_mode = "optional"
-    if specifications is not None:
-        specification_mode = (
-            specifications.mode_for(context.iwiki_id, context.primary)
-            if context.primary is not None
-            else specifications.default_mode
-        )
+    code_graph = getattr(config, "code_graph", None)
+    specification_mode = resolve_policy(
+        specifications, code_graph, context.iwiki_id, context.primary, None
+    ).value("specification_mode")
     return base.PostgresBinding(
         host=storage.host,
         port=storage.port,
