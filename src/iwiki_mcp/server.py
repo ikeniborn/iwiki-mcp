@@ -248,6 +248,7 @@ class _HostedBindingState:
         self._selected = selected
         self._effective = effective or selected.get()
         self._auth_context: _postgres_auth.AuthContext | None = None
+        self._token_context: _postgres_auth.AuthContext | None = None
         self._request_lock = anyio.Lock()
         self._session_id: str | None = None
         self._requested_primary: str | None = None
@@ -283,22 +284,35 @@ class _HostedBindingState:
         binding: base.PostgresBinding,
         auth_context: _postgres_auth.AuthContext,
         *,
+        token_context: _postgres_auth.AuthContext | None = None,
         requested_primary: str | None = None,
         primary_substituted: bool = False,
     ) -> None:
         self._effective = binding
         self._auth_context = auth_context
+        self._token_context = token_context
         self._requested_primary = requested_primary
         self._primary_substituted = primary_substituted
 
     def reset_effective(self) -> None:
         self._effective = self._selected.get()
         self._auth_context = None
+        self._token_context = None
         self._requested_primary = None
         self._primary_substituted = False
 
     def auth_context(self) -> _postgres_auth.AuthContext | None:
         return self._auth_context
+
+    def token_context(self) -> _postgres_auth.AuthContext | None:
+        """The request's unnarrowed grants, which bound the selection itself.
+
+        `auth_context` is the selection intersected with those grants, so it
+        cannot authorize a rebind: a selection narrowed once would otherwise
+        be the ceiling for every later one, and the session could never
+        return to a domain the token still holds.
+        """
+        return self._token_context
 
     def request_lock(self):
         return self._request_lock
@@ -540,11 +554,17 @@ def _safe(fn):
                 "error": "PostgreSQL operation failed",
                 "hint": "retry or inspect sanitized server diagnostics",
             }
-        except _postgres_auth.AccessError:
-            return {
+        except _postgres_auth.AccessError as e:
+            refused = {
                 "error": "access_denied",
                 "hint": "the authenticated context does not allow this operation",
             }
+            # `reason` names the caller's own binding relation that refused
+            # the call and never names a domain, a wiki, or another token,
+            # so it stays safe to return to the refused caller.
+            if e.reason is not None:
+                refused["reason"] = e.reason
+            return refused
         except cross_domain.CrossDomainError as e:
             hint = {
                 "write_scope_blocked": "add every visible referrer domain to write",
@@ -4980,15 +5000,31 @@ def _wiki_bind(
             )
         else:
             valid_primary = _validate_domain(primary)
-        if any(domain not in bind.read for domain in valid_read):
+        # Hosted, the token's grants are the ceiling and the current
+        # selection is not: a session that narrowed once must still be able
+        # to select any domain the token holds, including one it just
+        # created. Local stdio keeps `.iwiki.toml` as the ceiling.
+        authority = (
+            session.token_context() if isinstance(session, _HostedBindingState)
+            else None
+        )
+        scope_read = (
+            tuple(authority.read_domains) if authority is not None else bind.read
+        )
+        scope_write = (
+            tuple(authority.write_domains)
+            if authority is not None
+            else bind.write
+        )
+        if any(domain not in scope_read for domain in valid_read):
             return {
                 "error": "read scope is protected",
-                "hint": "wiki_bind may narrow PostgreSQL read scope but cannot expand it",
+                "hint": "wiki_bind may select only domains the caller may read",
             }
-        if any(domain not in bind.write for domain in valid_write):
+        if any(domain not in scope_write for domain in valid_write):
             return {
                 "error": "write scope is protected",
-                "hint": "wiki_bind may narrow PostgreSQL write scope but cannot expand it",
+                "hint": "wiki_bind may select only domains the caller may write",
             }
         if any(domain not in valid_read for domain in valid_write):
             return {
@@ -5003,17 +5039,6 @@ def _wiki_bind(
                 "error": "primary domain must belong to write scope",
                 "hint": "select a primary from the narrowed write scope",
             }
-        existing = set(_postgres_store_for_binding(bind).list_domains())
-        missing = [
-            domain
-            for domain in (*valid_read, *valid_write)
-            if domain not in existing
-        ]
-        if missing:
-            return {
-                "error": f"domain '{missing[0]}' not found",
-                "hint": "ask an administrator to create the domain",
-            }
         narrowed = replace(
             bind,
             read=tuple(dict.fromkeys(valid_read)),
@@ -5025,6 +5050,20 @@ def _wiki_bind(
                 else specification_mode
             ),
         )
+        # Ask about the requested selection, not the current one: a domain
+        # this bind adds back is invisible to a store scoped to the scope
+        # being replaced.
+        existing = set(_postgres_store_for_binding(narrowed).list_domains())
+        missing = [
+            domain
+            for domain in (*valid_read, *valid_write)
+            if domain not in existing
+        ]
+        if missing:
+            return {
+                "error": f"domain '{missing[0]}' not found",
+                "hint": "ask an administrator to create the domain",
+            }
         if isinstance(session, _HostedBindingState):
             session.set(narrowed)
         elif session is not None:

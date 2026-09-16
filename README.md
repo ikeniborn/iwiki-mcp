@@ -185,8 +185,10 @@ not an automatic re-embedding. Embedding and rerank credentials remain server-on
 Every request reloads current token authority. A session keeps its explicit `selected`
 scope separately from the fresh-grant `effective` scope: revocation applies on the next
 request, restored access reappears only when it remained selected, and a new target grant
-does not expand an established session. Only successful `wiki_create_domain` provisioning
-expands the creator's current session. Project initialization still owns local
+does not expand an established session on its own. Only successful `wiki_create_domain`
+provisioning expands the creator's current session; every other grant is selected
+explicitly, because a hosted `wiki_bind` is authorized against the token's current grants
+rather than against the session's current selection. Project initialization still owns local
 `.iwiki.toml` and `.iwikiignore`; the hosted server creates PostgreSQL domain state but
 never writes those project files.
 
@@ -394,6 +396,18 @@ The three grant tools return `unsupported_transport` with actual `storage` and
 `can_create_domain`; it atomically creates the domain plus caller read/write and
 `can_manage_grants` rows, returning `created`, `already_existed`, `domain`, and the
 complete effective session scope. Exact retries are idempotent.
+
+Bootstrap a project domain in this order: bind only the domains that already exist, call
+`wiki_create_domain(name)` — which expands the current session with the new domain and
+makes it the primary — then rebind the full project scope. Binding a scope that names a
+domain the wiki has not provisioned yet is refused by the gate with
+`reason: "domain_not_granted"`, because the authorization gate checks the requested scope
+against the token's current grants and a domain that does not exist grants nothing. That
+reason distinguishes a domain the caller may still create from a revoked grant. A token
+without `can_create_domain` is refused with `reason: "domain_creation_not_allowed"`, and a
+create-capable token naming a domain another token already owns gets the in-band
+`{"error":"access_denied","reason":"domain_not_owned"}`: `can_create_domain` provisions a
+new domain and never claims an existing one.
 
 `wiki_list_domain_grants(domain)` exposes token owner and content/management flags for
 audit. `wiki_set_domain_grant(domain, token_id, can_read, can_write)` and
@@ -785,8 +799,8 @@ then `wiki_code_publish_finalize` or `wiki_code_publish_abort`. None of them acc
 tenant or domain field; the client binds each remote session to the local project's
 `primary` (from `.iwiki.toml`) with `wiki_bind` right after `session.initialize()`, and
 the server derives `iwiki_id` and the bound primary from that session, so the token must
-hold write access to the project's primary domain — `wiki_bind` narrows an already
-granted scope and cannot widen it. A session belongs to the identity that created it:
+hold write access to the project's primary domain — `wiki_bind` selects within an already
+granted scope and cannot exceed it. A session belongs to the identity that created it:
 another token with write access to the same domain cannot append to, abort, or finalize
 it, and a replacement process must start a new session.
 
@@ -1103,8 +1117,10 @@ unchanged:
 {"error":"project configuration cannot be changed automatically","code":"project_config_manual_edit_required","hint":"edit .iwiki.toml manually; populated configuration is never rewritten automatically"}
 ```
 
-PostgreSQL `wiki_bind` remains session-only: it may narrow the configured maximum
-scope. In a hosted HTTP session it can also carry the project's
+PostgreSQL `wiki_bind` remains session-only: local stdio may narrow the configured
+maximum scope and never widen it, while a hosted session may select any subset of the
+token's current grants — narrowing once is not a ceiling, so a session can return to a
+domain it still holds, including one it just created. In a hosted HTTP session it can also carry the project's
 `[specifications].mode` as `specification_mode`; local PostgreSQL stdio rejects that
 parameter. It never changes `.iwiki.toml` or persists the mode. `wiki_create_domain` may bootstrap an empty
 missing Git domain outside the current write list; it creates no page, index, or

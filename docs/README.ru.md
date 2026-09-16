@@ -187,8 +187,10 @@ timeouts. До открытия listener startup проверяет модель
 Каждый запрос заново читает текущие права токена. Сессия хранит явно выбранный
 `selected` scope отдельно от пересечённого со свежими grants `effective` scope:
 revocation действует на следующем запросе, восстановленное право возвращается только
-если домен оставался selected, а новый grant целевого токена не расширяет существующую
-сессию. Только успешный `wiki_create_domain` расширяет текущую сессию creator-токена.
+если домен оставался selected, а новый grant целевого токена сам по себе не расширяет
+существующую сессию. Только успешный `wiki_create_domain` расширяет текущую сессию
+creator-токена; любой другой grant выбирается явно, потому что hosted `wiki_bind`
+авторизуется против текущих grants токена, а не против текущего выбора сессии.
 Локальные `.iwiki.toml` и `.iwikiignore` по-прежнему создаёт и меняет инициализация
 проекта; hosted-сервер создаёт состояние домена в PostgreSQL и эти файлы не пишет.
 
@@ -394,6 +396,18 @@ Git-only инструменты возвращают
 `can_create_domain`, атомарно создаёт домен, read/write grant creator-токена и строку
 `can_manage_grants`, затем возвращает `created`, `already_existed`, `domain` и полный
 effective scope сессии. Точный retry идемпотентен.
+
+Bootstrap нового домена проекта выполняется в таком порядке: сначала bind только тех
+доменов, которые уже существуют, затем `wiki_create_domain(name)` — он расширяет текущую
+сессию новым доменом и делает его primary, — и только потом rebind полного scope проекта.
+Bind scope, который называет ещё не созданный домен, отклоняется gate с
+`reason: "domain_not_granted"`: gate сверяет запрошенный scope с текущими grants токена, а
+несуществующий домен не даёт никаких grants. Этот reason отличает домен, который
+вызывающий ещё может создать, от отозванного grant. Токен без `can_create_domain`
+отклоняется с `reason: "domain_creation_not_allowed"`, а create-capable токен, назвавший
+домен, которым уже владеет другой токен, получает in-band
+`{"error":"access_denied","reason":"domain_not_owned"}`: `can_create_domain` создаёт новый
+домен и никогда не присваивает существующий.
 
 `wiki_list_domain_grants(domain)` показывает owner токена и content/management flags.
 `wiki_set_domain_grant(domain, token_id, can_read, can_write)` и
@@ -798,8 +812,8 @@ optional `IWIKI_RERANK_MODEL`, когда он настроен).
 клиент привязывает каждую удалённую сессию к `primary` локального проекта (из
 `.iwiki.toml`) вызовом `wiki_bind` сразу после `session.initialize()`, и сервер выводит
 `iwiki_id` и связанный primary из этой сессии — поэтому токен обязан иметь право записи
-в primary-домен проекта; `wiki_bind` только сужает уже выданный scope и не может его
-расширить. Сессия принадлежит создавшей её личности: другой токен с правом записи в тот
+в primary-домен проекта; `wiki_bind` выбирает внутри уже выданного scope и не может выйти
+за его пределы. Сессия принадлежит создавшей её личности: другой токен с правом записи в тот
 же домен не может дополнить, прервать или завершить её, а процесс-замена обязан открыть
 новую сессию.
 
@@ -1115,8 +1129,11 @@ primary = "backend"
 {"error":"project configuration cannot be changed automatically","code":"project_config_manual_edit_required","hint":"edit .iwiki.toml manually; populated configuration is never rewritten automatically"}
 ```
 
-Для PostgreSQL `wiki_bind` по-прежнему действует только в текущей сессии: он сужает
-область. В hosted HTTP-сессии он также передаёт проектный `[specifications].mode` как
+Для PostgreSQL `wiki_bind` по-прежнему действует только в текущей сессии: локальный
+stdio сужает настроенную максимальную область и никогда её не расширяет, а hosted-сессия
+выбирает любой поднабор текущих grants токена — однократное сужение не становится
+потолком, поэтому сессия может вернуться к домену, который токен всё ещё держит, включая
+только что созданный. В hosted HTTP-сессии он также передаёт проектный `[specifications].mode` как
 `specification_mode`; local PostgreSQL stdio отклоняет этот параметр. Он никогда не
 меняет `.iwiki.toml` и не сохраняет режим. `wiki_create_domain` может bootstrap-нуть пустой
 отсутствующий Git-домен вне текущего списка write; он не создаёт страницу, индекс

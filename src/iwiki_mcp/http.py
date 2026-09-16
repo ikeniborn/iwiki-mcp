@@ -301,10 +301,15 @@ def _string_domains(value: Any) -> tuple[str, ...]:
     return tuple(item for item in value if isinstance(item, str))
 
 
-def _authorize_tool(context: AuthContext, request: Any) -> None:
+def _authorize_tool(
+    context: AuthContext,
+    request: Any,
+    *,
+    token_context: AuthContext | None = None,
+) -> None:
     if isinstance(request, list):
         for item in request:
-            _authorize_tool(context, item)
+            _authorize_tool(context, item, token_context=token_context)
         return
     if not isinstance(request, dict) or request.get("method") != "tools/call":
         return
@@ -335,7 +340,7 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         return
     if name == "wiki_create_domain":
         if not context.can_create_domain:
-            raise AccessError(403)
+            raise AccessError(403, "domain_creation_not_allowed")
         return
     if name in _DOMAIN_GRANT_TOOLS:
         if "domain" not in arguments:
@@ -401,11 +406,27 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         else:
             read_domains = requested
     elif name == "wiki_bind":
+        # A bind selects a scope; it never exercises one. Authorize it
+        # against the token's own grants rather than the current selection,
+        # or narrowing once would become the ceiling for the whole session
+        # and a caller could never return to a domain it still holds --
+        # including a domain it just created. The only refusal left is a
+        # domain outside those grants, which is attributed so the caller can
+        # tell a domain it may still create from a revoked grant.
         read_domains = _string_domains(arguments.get("read"))
         write_domains = _string_domains(arguments.get("write"))
         primary = arguments.get("primary")
         if isinstance(primary, str):
             write_domains = (*write_domains, primary)
+        try:
+            authorize_domains(
+                token_context or context,
+                read_domains=read_domains,
+                write_domains=write_domains,
+            )
+        except AccessError as exc:
+            raise AccessError(403, "domain_not_granted") from exc
+        return
     authorize_domains(
         context,
         read_domains=read_domains,
@@ -518,6 +539,7 @@ class AuthenticatedMCPMiddleware:
                 state.set_effective(
                     current,
                     effective_context,
+                    token_context=context,
                     requested_primary=requested_primary,
                     primary_substituted=(
                         requested_primary is not None
@@ -528,7 +550,11 @@ class AuthenticatedMCPMiddleware:
                     messages = await _request_messages(receive)
                     request_json = _request_json(messages)
                     try:
-                        _authorize_tool(effective_context, request_json)
+                        _authorize_tool(
+                            effective_context,
+                            request_json,
+                            token_context=context,
+                        )
                     except AccessError as exc:
                         if not isinstance(request_json, dict):
                             raise

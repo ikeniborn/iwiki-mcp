@@ -1178,7 +1178,9 @@ def test_hosted_domain_creation_and_content_grant_lifecycle(hosted_runtime):
             {"domain": "docs"},
             session_id=outsider_session,
         )
-        _assert_tool_denied(denied_create)
+        _assert_tool_denied(
+            denied_create, reason="domain_creation_not_allowed"
+        )
         _assert_tool_denied(denied_list)
 
         malformed_create = _request(
@@ -1390,3 +1392,218 @@ def test_hosted_domain_creation_and_content_grant_lifecycle(hosted_runtime):
         finally:
             runtime.app.auth_store.authenticate = original_authenticate
         assert transaction_denied["error"] == "access_denied"
+
+
+def test_hosted_bind_before_creating_the_project_domain(
+    hosted_runtime, monkeypatch
+):
+    """A project domain the wiki lacks is a create step, not a lost grant.
+
+    A client binds the scope its `.iwiki.toml` names before anything else,
+    so the very first call carries a domain that does not exist yet. The
+    gate refuses it exactly like a revoked grant, which is why the refusal
+    names the relation that answered: the caller can then create the
+    domain it is allowed to create instead of concluding it has no access.
+    """
+    from iwiki_mcp import server
+
+    original_store = server._postgres_store_for_binding
+    monkeypatch.setattr(
+        server,
+        "_postgres_store_for_binding",
+        lambda binding: original_store(binding).with_embedder(
+            lambda _cfg, texts: [[1.0, 0.0, 0.0] for _text in texts]
+        ),
+    )
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    creator = auth.create_token(
+        "wiki-a",
+        "project-creator",
+        read_domains=["docs"],
+        write_domains=["docs"],
+        can_create_domain=True,
+    )
+    rival = auth.create_token(
+        "wiki-a",
+        "rival-creator",
+        read_domains=["docs"],
+        write_domains=["docs"],
+        can_create_domain=True,
+    )
+
+    def initialize(client, token):
+        session_id = _initialize(client, token).headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+        return session_id
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session_id = initialize(client, creator["token"])
+
+        premature = _tool_call(
+            client,
+            creator["token"],
+            "wiki_bind",
+            {
+                "read": ["docs", "notes"],
+                "write": ["docs", "notes"],
+                "primary": "notes",
+            },
+            session_id=session_id,
+        )
+        _assert_tool_denied(premature, reason="domain_not_granted")
+
+        bound = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_bind",
+                {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+                session_id=session_id,
+            )
+        )
+        assert bound["primary"] == "docs"
+
+        created = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_create_domain",
+                {"name": "notes"},
+                session_id=session_id,
+            )
+        )
+        assert created == {
+            "created": "notes",
+            "already_existed": False,
+            "domain": "notes",
+            "read": ["docs", "notes"],
+            "write": ["docs", "notes"],
+            "primary": "notes",
+        }
+
+        # The expanded selection is what makes the rebind the protocol asks
+        # for succeed, and the new domain accepts content immediately.
+        rebound = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_bind",
+                {
+                    "read": ["docs", "notes"],
+                    "write": ["docs", "notes"],
+                    "primary": "notes",
+                },
+                session_id=session_id,
+            )
+        )
+        assert rebound["read"] == ["docs", "notes"]
+        written = _tool_result(
+            _tool_call(
+                client,
+                creator["token"],
+                "wiki_write_page",
+                {
+                    "domain": "notes",
+                    "slug": "concept/start",
+                    "markdown": "# Start\n\n## Overview\nalpha lead.\n",
+                    "type": "concept",
+                },
+                session_id=session_id,
+            )
+        )
+        assert written["page"] == "notes/concept/start.md"
+
+        # A second create-capable token may not claim the existing domain,
+        # and the refusal separates that from a token barred from creating.
+        rival_session = initialize(client, rival["token"])
+        claimed = _tool_result(
+            _tool_call(
+                client,
+                rival["token"],
+                "wiki_create_domain",
+                {"name": "notes"},
+                session_id=rival_session,
+            )
+        )
+        assert claimed == {
+            "error": "access_denied",
+            "hint": "the authenticated context does not allow this operation",
+            "reason": "domain_not_owned",
+        }
+
+
+def test_hosted_bind_reselects_any_granted_domain(hosted_runtime):
+    """Narrowing once must not become the ceiling for the whole session.
+
+    The gate authorizes a bind against the token's grants rather than the
+    current selection, because a bind selects a scope instead of exercising
+    one. Judging it by the selection made a narrowed session unable to
+    return to a domain the token still holds -- including one it had just
+    created -- until the client opened a new session.
+    """
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    token = auth.create_token(
+        "wiki-a",
+        "reselecting-caller",
+        read_domains=["docs", "private"],
+        write_domains=["docs", "private"],
+    )["token"]
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session_id = _initialize(client, token).headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+        narrowed = _tool_result(
+            _tool_call(
+                client,
+                token,
+                "wiki_bind",
+                {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+                session_id=session_id,
+            )
+        )
+        assert narrowed["read"] == ["docs"]
+
+        widened = _tool_result(
+            _tool_call(
+                client,
+                token,
+                "wiki_bind",
+                {
+                    "read": ["docs", "private"],
+                    "write": ["docs", "private"],
+                    "primary": "private",
+                },
+                session_id=session_id,
+            )
+        )
+        assert widened["read"] == ["docs", "private"]
+        assert widened["primary"] == "private"
+        assert _tool_result(
+            _tool_call(client, token, "wiki_status", {}, session_id=session_id)
+        )["read"] == ["docs", "private"]
+
+        # The token's grants stay the ceiling: a domain it never held is
+        # still refused, with the same attributed reason.
+        _assert_tool_denied(
+            _tool_call(
+                client,
+                token,
+                "wiki_bind",
+                {"read": ["docs", "absent"], "write": ["docs"]},
+                session_id=session_id,
+            ),
+            reason="domain_not_granted",
+            binding_source="session",
+        )

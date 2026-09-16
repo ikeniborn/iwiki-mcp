@@ -415,7 +415,11 @@ class AuthStore:
                 )
                 existing = cursor.fetchone()
                 if existing != (True, True, True):
-                    raise AccessError(403)
+                    # The domain is already provisioned for someone else:
+                    # `can_create_domain` never claims an existing one. The
+                    # reason separates that from a token that may not create
+                    # domains at all.
+                    raise AccessError(403, "domain_not_owned")
                 return {"domain": valid_domain, "already_existed": True}
 
     def list_domain_grants(
