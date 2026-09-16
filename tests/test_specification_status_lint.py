@@ -468,6 +468,23 @@ def test_hosted_policy_uses_exact_override_then_default_without_mutation(
         server._SESSION_BINDING.reset(token)
 
 
+def test_domain_scoped_policy_honors_a_tenant_wide_override(tmp_path, monkeypatch):
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig, PolicyOverride
+
+    binding = _hosted_binding(tmp_path)
+    policy = HostedSpecificationsConfig(
+        overrides=(PolicyOverride("wiki-a", None, {"specification_mode": "strict"}),)
+    )
+    monkeypatch.setattr(server, "_HOSTED_SPECIFICATIONS", policy, raising=False)
+    token = server._SESSION_BINDING.set(binding)
+    try:
+        assert server._specification_policy(binding, "docs") == (
+            "strict", "hosted_override"
+        )
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+
 def test_hosted_project_mode_tightens_default_per_domain(tmp_path, monkeypatch):
     from iwiki_mcp.postgres.config import (
         HostedSpecificationsConfig,
@@ -564,6 +581,27 @@ def test_code_binding_gate_reads_the_tenant_override(hosted_session, monkeypatch
 
 
 def test_binding_no_longer_precomputes_a_specification_mode():
-    from iwiki_mcp.postgres.config import HostedSpecificationsConfig
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AuthContext
+    from iwiki_mcp.postgres.config import (
+        HostedServerConfig,
+        HostedSpecificationsConfig,
+        ModelConfig,
+        PostgresConfig,
+        ServerConfig,
+    )
 
-    assert not hasattr(HostedSpecificationsConfig, "mode_for")
+    config = ServerConfig(
+        storage=PostgresConfig(
+            host="127.0.0.1", port=5432, database="iwiki_test",
+            user="iwiki", sslmode="prefer", password="secret",
+        ),
+        models=ModelConfig("fixture-model", 3, ""),
+        server=HostedServerConfig("127.0.0.1", 8765, (), 1, 2, 30_000, 5_000),
+        specifications=HostedSpecificationsConfig(default_mode="strict"),
+    )
+    context = AuthContext("wiki-a", "token-a", ("docs",), ("docs",), "docs")
+
+    binding = http._binding(config, context, "/not-used")
+
+    assert binding.specification_mode == "optional"
