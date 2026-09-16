@@ -30,7 +30,6 @@ from .postgres.auth import (
 )
 from .postgres.config import ConfigError, ServerConfig, load_server_config
 from .postgres.migrations import require_schema_version
-from .postgres.policy import resolve_policy
 from .postgres.store import require_hosted_runtime_principal
 
 
@@ -247,11 +246,6 @@ def _binding(
     config: ServerConfig, context: AuthContext, project_dir: str
 ) -> base.PostgresBinding:
     storage = config.storage
-    specifications = getattr(config, "specifications", None)
-    code_graph = getattr(config, "code_graph", None)
-    specification_mode = resolve_policy(
-        specifications, code_graph, context.iwiki_id, context.primary, None
-    ).value("specification_mode")
     return base.PostgresBinding(
         host=storage.host,
         port=storage.port,
@@ -267,7 +261,6 @@ def _binding(
         embed_model=config.models.embed_model,
         embed_dimensions=config.models.embed_dimensions,
         rerank_model=config.models.rerank_model,
-        specification_mode=specification_mode,
     )
 
 

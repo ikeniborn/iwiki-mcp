@@ -915,14 +915,33 @@ _CODE_BINDING_NOT_SELECTED = {
 }
 
 
+def _resolve_binding_policy(binding, domain: str | None):
+    """Resolve the hosted policy for one bound domain, or for the tenant alone."""
+    from .postgres.policy import resolve_policy
+
+    return resolve_policy(
+        _HOSTED_SPECIFICATIONS,
+        _HOSTED_CODE_GRAPH,
+        binding.iwiki_id,
+        domain,
+        getattr(binding, "project_policy", None),
+    )
+
+
 def _code_binding_blocked() -> bool:
     """Refuse a domain-free code read that fell back to the token default.
 
     Off by default: only a hosted server that opted into
     `code_graph.require_session_binding` turns the visible fallback into a
-    refusal.
+    refusal. `require_session_binding` is operator-only (excluded from
+    `PROJECT_TIER_FIELDS`), so resolving it with `domain=None` cannot be
+    influenced by any project-supplied policy.
     """
-    if not _hosted_code_graph_settings().require_session_binding:
+    binding = _resolved_binding()
+    if not _is_postgres(binding):
+        return False
+    resolved = _resolve_binding_policy(binding, None)
+    if not resolved.value("require_session_binding"):
         return False
     return _hosted_binding_provenance().get("binding_source") == "token_default"
 
@@ -956,12 +975,12 @@ def _hosted_code_graph_settings():
 
 
 def _postgres_code_reader(binding: base.PostgresBinding):
-    settings = _hosted_code_graph_settings()
+    resolved = _resolve_binding_policy(binding, binding.primary)
     return _postgres_codegraph.PostgresCodeGraphReader(
         binding.connection_dsn(),
         binding.iwiki_id,
         binding.primary,
-        max_snapshot_age_seconds=settings.max_snapshot_age_seconds,
+        max_snapshot_age_seconds=resolved.value("max_snapshot_age_seconds"),
     )
 
 
@@ -1093,52 +1112,16 @@ def _specification_store(binding):
     return _GitSpecificationQueryStore(binding)
 
 
-_SPECIFICATION_MODE_RANK = {
-    "disabled": 0,
-    "optional": 1,
-    "strict": 2,
-}
-
-
 def _specification_policy_details(
     binding, domain: str
 ) -> tuple[str, str, bool]:
     if _is_postgres(binding) and _SESSION_BINDING.get() is not None:
-        policy = _HOSTED_SPECIFICATIONS
-        exact = (
-            None
-            if policy is None
-            else next(
-                (
-                    item
-                    for item in policy.overrides
-                    if item.iwiki_id == binding.iwiki_id
-                    and item.domain == domain
-                    and "specification_mode" in item.values
-                ),
-                None,
-            )
+        resolved = _resolve_binding_policy(binding, domain)
+        return (
+            resolved.value("specification_mode"),
+            resolved.source("specification_mode"),
+            "specification_mode" in resolved.suppressed,
         )
-        if exact is not None:
-            return exact.values["specification_mode"], "hosted_override", False
-        default_mode = "optional" if policy is None else policy.default_mode
-        project_mode = (binding.project_policy or {}).get("specification_mode")
-        allow_project_mode = policy is None or policy.allow_project_mode
-        if (
-            project_mode is not None
-            and allow_project_mode
-            and _SPECIFICATION_MODE_RANK[project_mode]
-            >= _SPECIFICATION_MODE_RANK[default_mode]
-        ):
-            return project_mode, "project", False
-        suppressed = project_mode is not None and (
-            not allow_project_mode
-            or _SPECIFICATION_MODE_RANK[project_mode]
-            < _SPECIFICATION_MODE_RANK[default_mode]
-        )
-        return default_mode, (
-            "built_in_default" if policy is None else "hosted_default"
-        ), suppressed
     source = "built_in_default"
     config_path = Path(binding.project_dir) / ".iwiki.toml"
     try:

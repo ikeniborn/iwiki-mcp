@@ -546,3 +546,24 @@ def test_hosted_project_mode_precedes_built_in_default(tmp_path, monkeypatch):
         )
     finally:
         server._SESSION_BINDING.reset(token)
+
+
+def test_code_binding_gate_reads_the_tenant_override(hosted_session, monkeypatch):
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig, PolicyOverride
+
+    hosted_session("token_default")
+    monkeypatch.setattr(
+        server,
+        "_HOSTED_SPECIFICATIONS",
+        HostedSpecificationsConfig(
+            overrides=(PolicyOverride("wiki-a", None, {"require_session_binding": True}),)
+        ),
+    )
+
+    assert server._code_binding_blocked() is True
+
+
+def test_binding_no_longer_precomputes_a_specification_mode():
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig
+
+    assert not hasattr(HostedSpecificationsConfig, "mode_for")
