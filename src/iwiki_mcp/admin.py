@@ -28,6 +28,7 @@ from .postgres.migrations import (
     rollback_v5_compatibility,
     run_migrations,
 )
+from .postgres.policy import resolve_policy
 from .postgres.store import (
     PostgresStore,
     _validate_identifier,
@@ -503,11 +504,23 @@ class AdminService:
         self.auth = AuthStore(self.dsn)
 
     def _store(self, iwiki_id: str) -> PostgresStore:
+        valid_id = _validate_identifier(iwiki_id, "iwiki id")
+
+        def _mode(domain: str) -> str:
+            return resolve_policy(
+                getattr(self.config, "specifications", None),
+                getattr(self.config, "code_graph", None),
+                valid_id,
+                domain,
+                None,
+            ).value("specification_mode")
+
         return PostgresStore(
             self.dsn,
-            _validate_identifier(iwiki_id, "iwiki id"),
+            valid_id,
             self.engine_config,
             embedder=_embed,
+            specification_mode=_mode,
         )
 
     def create_base(self, iwiki_id: str) -> dict:
