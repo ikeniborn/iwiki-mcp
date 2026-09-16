@@ -861,6 +861,16 @@ def wiki_status() -> dict:
                 for domain in domains
             ]
         }
+        if _SESSION_BINDING.get() is not None:
+            result["policy"] = {
+                "domains": [
+                    {
+                        "domain": domain,
+                        **_resolve_binding_policy(bind, domain).as_status(),
+                    }
+                    for domain in bind.read
+                ]
+            }
         return result
     domains = base.list_domains(bind.base)
     result = {

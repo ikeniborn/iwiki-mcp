@@ -605,3 +605,48 @@ def test_binding_no_longer_precomputes_a_specification_mode():
     binding = http._binding(config, context, "/not-used")
 
     assert binding.specification_mode == "optional"
+
+
+def _fake_domain_store(monkeypatch):
+    monkeypatch.setattr(
+        server, "_postgres_store_for_binding",
+        lambda _binding: type(
+            "FakeStore", (), {"list_domains": lambda self: ["payments", "accounts"]}
+        )(),
+    )
+
+
+def test_status_reports_every_policy_field_with_its_source(hosted_session, monkeypatch):
+    hosted_session("session")
+    _fake_domain_store(monkeypatch)
+
+    server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"specification_mode": "strict"},
+    )
+
+    status = server.wiki_status()
+
+    record = status["policy"]["domains"][0]
+    assert record["domain"] == "payments"
+    assert record["specification_mode"] == {"value": "strict", "source": "project"}
+    assert record["require_session_binding"]["source"] in {
+        "hosted_default", "built_in_default",
+    }
+    assert record["suppressed"] == []
+    assert status["specifications"]["domains"][0]["mode"] == "strict"
+
+
+def test_status_names_a_suppressed_field(hosted_session, monkeypatch):
+    hosted_session("session")
+    _fake_domain_store(monkeypatch)
+
+    server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"specification_mode": "disabled"},
+    )
+
+    record = server.wiki_status()["policy"]["domains"][0]
+
+    assert record["specification_mode"]["source"] != "project"
+    assert record["suppressed"] == ["specification_mode"]

@@ -444,6 +444,15 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
                 "scenarios": 0,
                 "bindings": 0,
             }]},
+            # A session is active, so the answer also names the resolved
+            # policy behind that mode, one field at a time.
+            "policy": {"domains": [{
+                "domain": "docs",
+                "specification_mode": {"value": "optional", "source": "hosted_default"},
+                "max_snapshot_age_seconds": {"value": 86400, "source": "hosted_default"},
+                "require_session_binding": {"value": False, "source": "hosted_default"},
+                "suppressed": [],
+            }]},
         }
         assert runtime.config.storage.password not in status.text
         assert "server-only-model-key" not in status.text
