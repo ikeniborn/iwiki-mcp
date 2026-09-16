@@ -125,8 +125,9 @@ continue through the session manager.
 
 Git-only tools fail early with stable `unsupported_storage` data when PostgreSQL is
 active. PostgreSQL update/delete require `expected_revision`; a lost optimistic-lock
-race returns `conflict` and the current revision. See `README.md` for the complete tool
-matrix and operator commands.
+race returns `conflict` and the current revision. See [Tools](tools-reference.md) and
+[PostgreSQL provisioning](postgres-setup.md) for the complete tool matrix and operator
+commands.
 
 ## Optional Python code graph
 
@@ -1140,7 +1141,7 @@ each source against `.iwikiignore` and path-escape before reading it.
 
 Model config and credentials are env-driven (`engine/config.py`, `Config.load()`),
 while storage addresses and hosted limits are strict TOML (`postgres.config`); see the
-`README.md` **Env reference** and deployment examples. Key knobs: embeddings
+[Env reference](env-reference.md) and deployment examples. Key knobs: embeddings
 (`IWIKI_EMBED_MODEL`, `IWIKI_EMBED_DIMENSIONS`), search tuning (`IWIKI_TOP_K`,
 `IWIKI_SCORE_THRESHOLD`, `IWIKI_SEARCH_MODE`, `IWIKI_SEED_*`, `IWIKI_GRAPH_DEPTH`),
 indexing (`IWIKI_CHUNK_SIZE`, `IWIKI_CHUNK_OVERLAP`), and optional

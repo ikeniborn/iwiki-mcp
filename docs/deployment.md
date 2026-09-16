@@ -211,7 +211,7 @@ iwiki-mcp base list --config /opt/iwiki-mcp/admin-server.toml --json
 
 With the same secret-safe boundary, create the base and domains only after the migration
 trigger succeeds. See [PostgreSQL provisioning and least
-privilege](../README.md#postgresql-provisioning-and-least-privilege) for background; do
+privilege](postgres-setup.md) for background; do
 not follow its later token step until this runbook has registered and inspected the exact
 runtime principal.
 
