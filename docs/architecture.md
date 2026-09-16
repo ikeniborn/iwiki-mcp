@@ -274,12 +274,12 @@ allow_project_mode = true
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
 specification_mode = "disabled"          # every domain of this tenant
+require_session_binding = true           # operator-only; domain must stay omitted
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
 domain = "payments"
 mode = "strict"                          # deprecated alias for specification_mode
-require_session_binding = true
 ```
 
 `postgres/policy.py` is the framework-free resolver behind every hosted policy

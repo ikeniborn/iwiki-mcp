@@ -188,10 +188,16 @@ def _policy_override(raw: Any) -> "PolicyOverride":
         raise ConfigError("specification override fields are invalid")
     if "mode" in raw and "specification_mode" in raw:
         raise ConfigError("specification override sets mode twice")
+    domain = raw.get("domain")
     values: dict[str, Any] = {}
     for name, policy_field in FIELDS_BY_NAME.items():
         key = "mode" if name == "specification_mode" and "mode" in raw else name
         if key in raw:
+            if domain is not None and not policy_field.project_tier:
+                raise ConfigError(
+                    f"'{name}' is operator-only and must be set on a "
+                    "tenant-wide override (domain omitted)"
+                )
             values[name] = policy_field.parse(raw[key])
     return PolicyOverride(
         iwiki_id=raw.get("iwiki_id"),

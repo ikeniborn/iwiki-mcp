@@ -1171,12 +1171,12 @@ allow_project_mode = true
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
 specification_mode = "disabled"          # каждый домен этого tenant
+require_session_binding = true           # только операторское поле; domain должен быть опущен
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
 domain = "payments"
 mode = "strict"                          # устаревший алиас для specification_mode
-require_session_binding = true
 ```
 
 Hosted precedence разрешается по каждому полю отдельно: точный override
@@ -1394,7 +1394,7 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 | `wiki_index` | Пересобрать индекс одного домена; по умолчанию использует привязанный домен write, если опущено. |
 | `wiki_list_domains` | Перечислить видимые каталоги доменов в базе с размерами индексов. |
 | `wiki_create_domain` | Создать пустой каталог домена и вернуть, удался ли авто-коммит базы; `index.jsonl` / `log.jsonl` домена создаются лениво в его корне при первой записи или переиндексации. |
-| `wiki_bind` | Сузить PostgreSQL-область и в hosted HTTP-сессии опционально передать объект `project_policy` (`specification_mode`, `max_snapshot_age_seconds`) для этой сессии — только `specification_mode` также через устаревший параметр `specification_mode`, но не оба сразу; local PostgreSQL stdio отклоняет оба параметра, а для Git возвращается `project_config_manual_edit_required`, изменения выполняются вручную. |
+| `wiki_bind` | Сузить PostgreSQL-область и в hosted HTTP-сессии опционально передать объект `project_policy` (`specification_mode`, `max_snapshot_age_seconds`) для этой сессии — только `specification_mode` также через устаревший параметр `specification_mode`, но не оба сразу; последующий вызов `wiki_bind` **заменяет** весь объект `project_policy` целиком, а не сливает его с прежним, поэтому bind, не указавший ранее заданное поле, сбрасывает его к hosted default; local PostgreSQL stdio отклоняет оба параметра, а для Git возвращается `project_config_manual_edit_required`, изменения выполняются вручную. |
 | `wiki_status` | Показать разрешённую базу, каталог проекта, домены read, домен write и доступные домены. |
 | `wiki_lint` | Read-only Markdown-authoritative отчёт: битые/reserved/unavailable-domain ссылки, сироты, stale-страницы, `missing_source` и пробелы секций, а также независимый per-domain SQLite graph parity (`state`, fingerprint, страницы, рёбра, anchors). Он не создаёт и не пересобирает кэш; non-ready или mismatch добавляет подсказку `wiki_index`. |
 | `wiki_remediation_plan` | Сгруппировать текущие lint-находки в read-only план update/delete действий. |

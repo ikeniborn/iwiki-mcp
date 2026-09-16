@@ -42,7 +42,7 @@ def test_project_tier_applies_when_at_least_as_strict():
     assert resolved.suppressed == ()
 
 
-def test_project_tier_suppressed_when_looser_than_hosted_default():
+def test_specification_mode_suppressed_when_looser_than_hosted_default():
     specifications = HostedSpecificationsConfig(default_mode="optional")
 
     resolved = _resolve(
@@ -54,11 +54,78 @@ def test_project_tier_suppressed_when_looser_than_hosted_default():
     assert resolved.suppressed == ("specification_mode",)
 
 
+def test_max_snapshot_age_seconds_project_wins_when_lower_than_hosted_default():
+    code_graph = HostedCodeGraphConfig(max_snapshot_age_seconds=3600)
+
+    resolved = _resolve(
+        code_graph=code_graph, project={"max_snapshot_age_seconds": 60}
+    )
+
+    assert resolved.value("max_snapshot_age_seconds") == 60
+    assert resolved.source("max_snapshot_age_seconds") == "project"
+    assert resolved.suppressed == ()
+
+
+def test_max_snapshot_age_seconds_suppressed_when_higher_than_hosted_default():
+    code_graph = HostedCodeGraphConfig(max_snapshot_age_seconds=3600)
+
+    resolved = _resolve(
+        code_graph=code_graph, project={"max_snapshot_age_seconds": 7200}
+    )
+
+    assert resolved.value("max_snapshot_age_seconds") == 3600
+    assert resolved.source("max_snapshot_age_seconds") == "hosted_default"
+    assert resolved.suppressed == ("max_snapshot_age_seconds",)
+
+
+def test_max_snapshot_age_seconds_zero_is_suppressed_against_nonzero_floor():
+    """`0` disables age rejection, so it is the weakest value, not the strictest."""
+    code_graph = HostedCodeGraphConfig(max_snapshot_age_seconds=3600)
+
+    resolved = _resolve(
+        code_graph=code_graph, project={"max_snapshot_age_seconds": 0}
+    )
+
+    assert resolved.value("max_snapshot_age_seconds") == 3600
+    assert resolved.source("max_snapshot_age_seconds") == "hosted_default"
+    assert resolved.suppressed == ("max_snapshot_age_seconds",)
+
+
+def test_max_snapshot_age_seconds_zero_accepted_when_floor_is_zero():
+    code_graph = HostedCodeGraphConfig(max_snapshot_age_seconds=0)
+
+    resolved = _resolve(
+        code_graph=code_graph, project={"max_snapshot_age_seconds": 0}
+    )
+
+    assert resolved.value("max_snapshot_age_seconds") == 0
+    assert resolved.source("max_snapshot_age_seconds") == "project"
+    assert resolved.suppressed == ()
+
+
 def test_every_field_declares_its_comparison_and_parser():
+    """Guard: every project-tier field must ship its own suppression test.
+
+    Naming convention enforced here: a suppression test for field `<name>`
+    is a module-level `test_*` function whose name contains both `<name>`
+    and the substring `suppressed` (see the `_suppressed_when_*` /
+    `_suppressed_against_*` tests above). A new project-tier field with no
+    such test fails this guard instead of shipping untested.
+    """
+    test_names = [name for name in globals() if name.startswith("test_")]
     for field in POLICY_FIELDS:
         assert callable(field.parse)
         assert callable(field.at_least_as_strict)
         assert field.default_at[0] in {"specifications", "code_graph"}
+        if field.project_tier:
+            matches = [
+                name for name in test_names
+                if field.name in name and "suppressed" in name
+            ]
+            assert matches, (
+                f"project-tier field {field.name!r} has no suppression test; "
+                f"add test_{field.name}_suppressed_..."
+            )
     assert "require_session_binding" not in PROJECT_TIER_FIELDS
 
 

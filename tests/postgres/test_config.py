@@ -410,6 +410,43 @@ def test_hosted_override_rejects_the_alias_beside_the_canonical_key(tmp_path):
         load_server_config(_write_config(tmp_path, text), _runtime_env())
 
 
+def test_hosted_override_rejects_operator_only_field_on_a_domain_record(tmp_path):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    text = (
+        "[specifications]\n"
+        "[[specifications.overrides]]\n"
+        'iwiki_id = "team-wiki"\n'
+        'domain = "payments"\n'
+        'mode = "strict"\n'
+        "require_session_binding = true\n"
+    ) + _server_toml()
+
+    with pytest.raises(ConfigError):
+        load_server_config(_write_config(tmp_path, text), _runtime_env())
+
+
+def test_hosted_override_accepts_operator_only_field_on_a_tenant_record(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
+    text = (
+        "[specifications]\n"
+        "[[specifications.overrides]]\n"
+        'iwiki_id = "team-wiki"\n'
+        'specification_mode = "disabled"\n'
+        "require_session_binding = true\n"
+    ) + _server_toml()
+
+    config = load_server_config(_write_config(tmp_path, text), _runtime_env())
+
+    override = config.specifications.overrides[0]
+    assert override.domain is None
+    assert override.values == {
+        "specification_mode": "disabled",
+        "require_session_binding": True,
+    }
+
+
 def test_hosted_overrides_reject_two_tenant_records(tmp_path):
     from iwiki_mcp.postgres.config import ConfigError, load_server_config
 

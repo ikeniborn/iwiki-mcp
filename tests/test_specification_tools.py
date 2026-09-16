@@ -390,6 +390,18 @@ def test_bind_rejects_an_unknown_project_policy_member(hosted_session):
     assert "project policy" in result["error"]
 
 
+def test_bind_rejects_a_non_mapping_project_policy(hosted_session):
+    hosted_session("session")
+
+    result = server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy=["specification_mode", "strict"],
+    )
+
+    assert "project policy" in result["error"]
+    assert server._resolved_binding().project_policy is None
+
+
 def test_bind_rejects_the_alias_beside_the_object(hosted_session):
     hosted_session("session")
 

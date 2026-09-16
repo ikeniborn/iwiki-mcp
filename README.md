@@ -1158,12 +1158,12 @@ allow_project_mode = true
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
 specification_mode = "disabled"          # every domain of this tenant
+require_session_binding = true           # operator-only; domain must stay omitted
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
 domain = "payments"
 mode = "strict"                          # deprecated alias for specification_mode
-require_session_binding = true
 ```
 
 Hosted precedence is resolved per field: an exact `(iwiki_id, domain)` override, a
@@ -1377,7 +1377,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
 | `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
-| `wiki_bind` | Narrow PostgreSQL scope and, in a hosted HTTP session, optionally carry a project `project_policy` object (`specification_mode`, `max_snapshot_age_seconds`) for that session — `specification_mode` alone via the deprecated `specification_mode` parameter, never both; local PostgreSQL stdio rejects both parameters, while Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
+| `wiki_bind` | Narrow PostgreSQL scope and, in a hosted HTTP session, optionally carry a project `project_policy` object (`specification_mode`, `max_snapshot_age_seconds`) for that session — `specification_mode` alone via the deprecated `specification_mode` parameter, never both; a later `wiki_bind` call **replaces** the whole `project_policy` object rather than merging it, so a bind that omits a field it previously set drops that field back to the hosted default; local PostgreSQL stdio rejects both parameters, while Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
 | `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |

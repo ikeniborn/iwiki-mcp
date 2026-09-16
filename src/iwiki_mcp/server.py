@@ -1101,7 +1101,7 @@ class _PostgresSpecificationQueryStore:
         if any(item.domain != domain for item in attempts):
             raise ValueError("resolution attempt scope mismatch")
         self._store._require_write(domain)
-        if self._store.specification_mode == "disabled":
+        if self._store._mode_for(domain) == "disabled":
             return
         with self._store._connect() as connection:
             with connection.cursor() as cursor:
@@ -4964,6 +4964,11 @@ def _wiki_bind(
     bind = _resolved_binding()
     if _is_postgres(bind):
         global _LOCAL_POSTGRES_BINDING
+        if project_policy is not None and not isinstance(project_policy, dict):
+            return {
+                "error": "project policy must be a table",
+                "hint": f"project policy accepts {', '.join(_policy.PROJECT_TIER_FIELDS)}",
+            }
         if specification_mode is not None and project_policy is not None and (
             "specification_mode" in project_policy
         ):
