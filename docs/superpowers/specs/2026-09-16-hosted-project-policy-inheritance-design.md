@@ -2,7 +2,7 @@
 chain:
   intent: docs/superpowers/intents/2026-09-16-hosted-project-policy-inheritance-intent.md
 review:
-  spec_hash: 99c0e5075b9969a4
+  spec_hash: 1bd28b22a34a9f80
   last_run: 2026-09-16
   phases:
     - name: structure
@@ -24,6 +24,21 @@ review:
         One entity carried two names: sections 3 and 4 call it a tenant override,
         section 9 called it a tenant wildcard.
       fix: Use "tenant override" in section 9.
+      verdict: fixed
+      verdict_at: 2026-09-16
+    - id: F-002
+      phase: consistency
+      severity: CRITICAL
+      section: 5. Transport
+      section_hash: 6ddf56bcee1df059
+      fragment: "rejects `project_policy` the way it already rejects `specification_mode`, with `project_config_manual_edit_required`"
+      text: >-
+        The spec named one refusal where the code gives two. A local PostgreSQL
+        binding answers "requires a hosted session"; only a Git binding reaches
+        project_config_manual_edit_required. Found while writing the plan's
+        Task 3 test.
+      fix: >-
+        State both answers in section 5 and split the row in section 8.
       verdict: fixed
       verdict_at: 2026-09-16
 ---
@@ -206,9 +221,11 @@ wiki_bind(read=…, write=…, primary=…, project_policy={"specification_mode"
   `project_policy["specification_mode"]` is a validation error.
 - The value is session state on `_HostedBindingState`, never persisted, lost on reconnect —
   unchanged from the current `project_specification_mode` behavior.
-- The local stdio PostgreSQL path rejects `project_policy` the way it already rejects
-  `specification_mode`, with `project_config_manual_edit_required`: that server reads
-  `.iwiki.toml` itself.
+- The local stdio path rejects `project_policy` exactly where it already rejects
+  `specification_mode`, and with the same two distinct answers the current code gives: a
+  local PostgreSQL binding answers `project policy requires a hosted session`, while a Git
+  binding falls through to `project_config_manual_edit_required`. That server reads
+  `.iwiki.toml` itself, so a client override would be a second source of truth.
 - `http.py`'s `wiki_bind` authorization is untouched — a policy object selects no domain.
 
 `PostgresBinding.project_specification_mode` is replaced by
@@ -280,7 +297,8 @@ existing block untouched, and it is stated in the operator documentation rather 
 | Unknown member in `project_policy` | bind validation error, previous binding unchanged |
 | Invalid value in `project_policy` | bind validation error, previous binding unchanged |
 | Alias and object member both supplied | bind validation error |
-| `project_policy` on local stdio PostgreSQL | `project_config_manual_edit_required` |
+| `project_policy` on local stdio PostgreSQL | `project policy requires a hosted session` |
+| `project_policy` on a Git binding | `project_config_manual_edit_required` |
 
 ## 9. Testing
 
