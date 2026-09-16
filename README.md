@@ -1157,20 +1157,40 @@ allow_project_mode = true
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
+specification_mode = "disabled"          # every domain of this tenant
+
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
 domain = "payments"
-mode = "strict"
+mode = "strict"                          # deprecated alias for specification_mode
+require_session_binding = true
 ```
 
-Local policy applies to all visible domains. A hosted client passes the project value
-through optional `wiki_bind.specification_mode`. Hosted precedence is exact
-`(iwiki_id, domain)` override, project mode, hosted default, then built-in `optional`.
-The project tier applies only when it is at least as strict as the hosted default and
-`allow_project_mode` is true; otherwise `wiki_status` reports
-`project_mode_suppressed: true`. The value is session-scoped and resolved separately for
-each bound domain. `disabled` stores specification pages as ordinary
-Markdown and disables semantic tools. `optional` stores Markdown, reports advisory
-findings, and projects only valid, complete, unique scenarios. `strict` rejects an
-invalid target specification mutation before page or projection changes.
+Hosted precedence is resolved per field: an exact `(iwiki_id, domain)` override, a
+tenant-wide override with `domain` omitted, the project value carried by
+`wiki_bind(project_policy=…)`, the hosted default, then the built-in value. A key absent
+from a record falls through to the next tier rather than taking the record's other values
+with it. The project tier applies only when its value is at least as strict as the hosted
+default and `allow_project_mode` is true; otherwise `wiki_status` names the field in
+`policy.domains[].suppressed`. `require_session_binding` is operator-only: the gate that
+reads it judges a session that never bound, so a value carried by a bind cannot exist when
+it decides.
+
+Local policy applies to all visible domains; hosted policy is resolved separately for
+each bound domain and is session-scoped. `disabled` stores specification pages as
+ordinary Markdown and disables semantic tools. `optional` stores Markdown, reports
+advisory findings, and projects only valid, complete, unique scenarios. `strict` rejects
+an invalid target specification mutation before page or projection changes.
+
+The three hosted policy fields are `specification_mode`, `max_snapshot_age_seconds`, and
+`require_session_binding`. The first two accept a project value through
+`wiki_bind(project_policy=…)`; `specification_mode` also accepts the deprecated
+`wiki_bind.specification_mode` alias, and passing both is a validation error.
+`require_session_binding` never accepts a project value, by construction rather than by
+exception. `wiki_status`'s `specifications` block still reports only
+`specification_mode`, unchanged; a sibling `policy` block reports every field's resolved
+value and source, so `specification_mode` appears in both — that duplication is the
+deliberate price of not breaking existing readers.
 
 Each scenario is one fenced TOML block inside its H2 section:
 
@@ -1357,7 +1377,7 @@ The snippets reference `.iwiki.toml`, so bind the project (above) first.
 | `wiki_index` | Rebuild one domain index (defaulting to the bound write domain when omitted), commit and push. |
 | `wiki_list_domains` | List visible domain directories in the base with index sizes. |
 | `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
-| `wiki_bind` | Narrow PostgreSQL scope and, in a hosted HTTP session, optionally carry project `specification_mode` (`disabled`, `optional`, or `strict`) for that session; local PostgreSQL stdio rejects this parameter, while Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
+| `wiki_bind` | Narrow PostgreSQL scope and, in a hosted HTTP session, optionally carry a project `project_policy` object (`specification_mode`, `max_snapshot_age_seconds`) for that session — `specification_mode` alone via the deprecated `specification_mode` parameter, never both; local PostgreSQL stdio rejects both parameters, while Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
 | `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |
