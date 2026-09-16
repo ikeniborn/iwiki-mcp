@@ -1,3 +1,37 @@
+---
+review:
+  intent_hash: 4f9e49209ad850f0
+  last_run: 2026-09-16
+  phases:
+    - name: structure
+      status: passed
+    - name: completeness
+      status: passed
+    - name: clarity
+      status: passed
+    - name: consistency
+      status: passed
+    - name: alignment
+      status: passed
+  findings:
+    - id: F-001
+      phase: consistency
+      severity: CRITICAL
+      section: Desired Outcomes
+      section_hash: 2baac5d790c7c7f1
+      fragment: "A project new to the deployment gets its policy from `.iwiki.toml` plus `wiki_bind`"
+      text: >-
+        Outcome 1 promised that a project reaches its declared policy, while the hard
+        constraint allows the project tier to tighten only. The originating case
+        (project `disabled` under hosted default `optional`) is exactly the one the
+        constraint forbids.
+      fix: >-
+        Bound Outcome 1 by the tighten-only rule and state that loosening is reached
+        through the operator's tenant-wide override record, not the project tier.
+      verdict: fixed
+      verdict_at: 2026-09-16
+---
+
 # Intent: hosted-project-policy-inheritance
 
 **Date:** 2026-09-16
@@ -22,10 +56,14 @@ Adding a fourth policy key later must cost one allowlist entry, not a new mechan
 
 ## Desired Outcomes
 
-- A project new to the deployment gets its policy from `.iwiki.toml` plus `wiki_bind`, with
-  no server TOML edit and no restart.
+- A project new to the deployment reaches any policy at least as strict as the resolved
+  hosted value from `.iwiki.toml` plus `wiki_bind`, with no server TOML edit and no restart.
+  Loosening below the hosted value stays an operator decision and is reached through the
+  tenant override below, never through the project tier.
 - One override record with the domain omitted applies to every domain of that `iwiki_id`;
-  an exact `(iwiki_id, domain)` record still wins over it.
+  an exact `(iwiki_id, domain)` record still wins over it. This is what makes the originating
+  case tractable: a tenant that must run below the hosted default costs the operator one
+  record instead of one per bound domain.
 - Inheritance is per field, not per record: a key absent from the project falls through to
   the tenant override, then the hosted default, then the built-in value, independently of
   the keys around it.
