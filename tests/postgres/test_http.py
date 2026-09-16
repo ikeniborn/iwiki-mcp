@@ -1536,3 +1536,74 @@ def test_hosted_bind_before_creating_the_project_domain(
             "hint": "the authenticated context does not allow this operation",
             "reason": "domain_not_owned",
         }
+
+
+def test_hosted_bind_reselects_any_granted_domain(hosted_runtime):
+    """Narrowing once must not become the ceiling for the whole session.
+
+    The gate authorizes a bind against the token's grants rather than the
+    current selection, because a bind selects a scope instead of exercising
+    one. Judging it by the selection made a narrowed session unable to
+    return to a domain the token still holds -- including one it had just
+    created -- until the client opened a new session.
+    """
+    runtime = hosted_runtime.runtime
+    auth = hosted_runtime.auth
+    token = auth.create_token(
+        "wiki-a",
+        "reselecting-caller",
+        read_domains=["docs", "private"],
+        write_domains=["docs", "private"],
+    )["token"]
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session_id = _initialize(client, token).headers["mcp-session-id"]
+        _request(
+            client,
+            token,
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session_id=session_id,
+        )
+        narrowed = _tool_result(
+            _tool_call(
+                client,
+                token,
+                "wiki_bind",
+                {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+                session_id=session_id,
+            )
+        )
+        assert narrowed["read"] == ["docs"]
+
+        widened = _tool_result(
+            _tool_call(
+                client,
+                token,
+                "wiki_bind",
+                {
+                    "read": ["docs", "private"],
+                    "write": ["docs", "private"],
+                    "primary": "private",
+                },
+                session_id=session_id,
+            )
+        )
+        assert widened["read"] == ["docs", "private"]
+        assert widened["primary"] == "private"
+        assert _tool_result(
+            _tool_call(client, token, "wiki_status", {}, session_id=session_id)
+        )["read"] == ["docs", "private"]
+
+        # The token's grants stay the ceiling: a domain it never held is
+        # still refused, with the same attributed reason.
+        _assert_tool_denied(
+            _tool_call(
+                client,
+                token,
+                "wiki_bind",
+                {"read": ["docs", "absent"], "write": ["docs"]},
+                session_id=session_id,
+            ),
+            reason="domain_not_granted",
+            binding_source="session",
+        )
