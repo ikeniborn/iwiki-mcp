@@ -40,6 +40,8 @@ from .postgres import migrations as _postgres_migrations  # noqa: F401
 from .postgres import auth as _postgres_auth  # noqa: F401
 from .postgres import store as _postgres_store  # noqa: F401
 from .postgres import codegraph as _postgres_codegraph  # noqa: F401
+from .postgres import policy as _policy
+from .postgres.config import ConfigError as _PolicyConfigError
 # Code graph adapters join the full startup import closure; their grammar and
 # parser initialization remains lazy until an adapter parses source.
 from .codegraph import config as _codegraph_config  # noqa: F401
@@ -1120,7 +1122,7 @@ def _specification_policy_details(
         if exact is not None:
             return exact.values["specification_mode"], "hosted_override", False
         default_mode = "optional" if policy is None else policy.default_mode
-        project_mode = binding.project_specification_mode
+        project_mode = (binding.project_policy or {}).get("specification_mode")
         allow_project_mode = policy is None or policy.allow_project_mode
         if (
             project_mode is not None
@@ -4964,25 +4966,33 @@ def _wiki_bind(
     write: list[str] | None = None,
     primary: str | None = None,
     specification_mode: Literal["disabled", "optional", "strict"] | None = None,
+    project_policy: dict | None = None,
 ) -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
         global _LOCAL_POSTGRES_BINDING
-        if specification_mode is not None and (
-            type(specification_mode) is not str
-            or specification_mode not in _SPECIFICATION_MODE_RANK
+        if specification_mode is not None and project_policy is not None and (
+            "specification_mode" in project_policy
         ):
             return {
-                "error": "specification mode is invalid",
-                "hint": "use disabled, optional, or strict",
+                "error": "specification mode is set twice",
+                "hint": "pass specification_mode or project_policy, not both",
+            }
+        declared = dict(project_policy or {})
+        if specification_mode is not None:
+            declared["specification_mode"] = specification_mode
+        try:
+            declared = _policy.parse_project_policy(declared) if declared else {}
+        except _PolicyConfigError as exc:
+            return {
+                "error": str(exc),
+                "hint": f"project policy accepts {', '.join(_policy.PROJECT_TIER_FIELDS)}",
             }
         session = _SESSION_BINDING.get()
-        if specification_mode is not None and not isinstance(
-            session, _HostedBindingState
-        ):
+        if declared and not isinstance(session, _HostedBindingState):
             return {
-                "error": "specification mode requires a hosted session",
-                "hint": "omit specification_mode for local PostgreSQL stdio",
+                "error": "project policy requires a hosted session",
+                "hint": "omit project_policy for local PostgreSQL stdio",
             }
         valid_read = (
             list(bind.read)
@@ -5046,10 +5056,8 @@ def _wiki_bind(
             read=tuple(dict.fromkeys(valid_read)),
             write=tuple(dict.fromkeys(valid_write)),
             primary=valid_primary,
-            project_specification_mode=(
-                bind.project_specification_mode
-                if specification_mode is None
-                else specification_mode
+            project_policy=(
+                bind.project_policy if not declared else declared
             ),
         )
         # Ask about the requested selection, not the current one: a domain
@@ -5104,6 +5112,7 @@ def wiki_bind(
     write: list[str] | None = None,
     primary: str | None = None,
     specification_mode: Literal["disabled", "optional", "strict"] | None = None,
+    project_policy: dict | None = None,
 ) -> dict:
     session = _SESSION_BINDING.get()
     if isinstance(session, _HostedBindingState):
@@ -5113,12 +5122,14 @@ def wiki_bind(
                 write=write,
                 primary=primary,
                 specification_mode=specification_mode,
+                project_policy=project_policy,
             )
     return _wiki_bind(
         read=read,
         write=write,
         primary=primary,
         specification_mode=specification_mode,
+        project_policy=project_policy,
     )
 
 

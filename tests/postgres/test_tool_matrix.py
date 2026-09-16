@@ -584,7 +584,9 @@ def test_hosted_bind_persists_project_specification_mode(postgres_server):
         server._SESSION_BINDING.reset(token)
 
     assert "error" not in result
-    assert state.selected_state().get().project_specification_mode == "strict"
+    assert state.selected_state().get().project_policy == {
+        "specification_mode": "strict",
+    }
 
 
 def test_local_postgres_bind_rejects_project_specification_mode(postgres_server):
@@ -597,7 +599,7 @@ def test_local_postgres_bind_rejects_project_specification_mode(postgres_server)
         server._SESSION_BINDING.reset(token)
         server._LOCAL_POSTGRES_BINDING = previous_local
 
-    assert result["error"] == "specification mode requires a hosted session"
+    assert result["error"] == "project policy requires a hosted session"
 
 
 def test_hosted_bind_rejects_invalid_project_mode_without_mutating_session(
@@ -618,7 +620,9 @@ def test_hosted_bind_rejects_invalid_project_mode_without_mutating_session(
         server._SESSION_BINDING.reset(token)
 
     assert result["error"] == "specification mode is invalid"
-    assert state.selected_state().get().project_specification_mode == "strict"
+    assert state.selected_state().get().project_policy == {
+        "specification_mode": "strict",
+    }
 
 
 def test_hosted_project_mode_is_isolated_between_sessions(postgres_server):
@@ -632,8 +636,10 @@ def test_hosted_project_mode_is_isolated_between_sessions(postgres_server):
     finally:
         server._SESSION_BINDING.reset(token)
 
-    assert first.selected_state().get().project_specification_mode == "strict"
-    assert second.selected_state().get().project_specification_mode is None
+    assert first.selected_state().get().project_policy == {
+        "specification_mode": "strict",
+    }
+    assert second.selected_state().get().project_policy is None
 
 
 @pytest.mark.parametrize(

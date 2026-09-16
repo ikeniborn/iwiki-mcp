@@ -281,6 +281,7 @@ def _postgres_binding(
         embed_dimensions=models.embed_dimensions,
         rerank_model=models.rerank_model,
         specification_mode=specification_mode,
+        project_policy={"specification_mode": specification_mode},
     )
 
 

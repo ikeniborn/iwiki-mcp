@@ -55,7 +55,10 @@ def _hosted_binding(tmp_path, project_mode=None):
         embed_model="fixture",
         embed_dimensions=3,
         rerank_model="",
-        project_specification_mode=project_mode,
+        project_policy=(
+            None if project_mode is None
+            else {"specification_mode": project_mode}
+        ),
     )
 
 
