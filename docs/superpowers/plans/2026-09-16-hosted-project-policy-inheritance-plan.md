@@ -1,3 +1,39 @@
+---
+chain:
+  intent: docs/superpowers/intents/2026-09-16-hosted-project-policy-inheritance-intent.md
+  spec: docs/superpowers/specs/2026-09-16-hosted-project-policy-inheritance-design.md
+review:
+  plan_hash: 15850807c2381089
+  last_run: 2026-09-16
+  phases:
+    - name: structure
+      status: passed
+    - name: coverage
+      status: passed
+    - name: dependencies
+      status: passed
+    - name: verifiability
+      status: passed
+    - name: consistency
+      status: passed
+  findings:
+    - id: F-001
+      phase: dependencies
+      severity: WARNING
+      section: "Task 1: The policy module"
+      section_hash: 514eab31618ea090
+      fragment: "_override_value"
+      text: >-
+        Task 1 read `override.values`, a mapping the override record only gains
+        in Task 2. The implementer of Task 1 sees only their own task, so the
+        step depended on an artifact that did not exist yet.
+      fix: >-
+        Task 1 returns None and says why; Task 2 supplies the body together with
+        the record it reads.
+      verdict: fixed
+      verdict_at: 2026-09-16
+---
+
 # Hosted Project Policy Inheritance Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -247,23 +283,12 @@ def parse_project_policy(value: Any) -> dict[str, Any]:
 
 
 def _override_value(specifications, iwiki_id: str, domain: str | None, name: str):
-    """Return an exact-pair value first, then the tenant-wide one."""
-    if specifications is None:
-        return None
-    exact = None
-    tenant = None
-    for override in specifications.overrides:
-        if override.iwiki_id != iwiki_id:
-            continue
-        if override.domain is None:
-            tenant = override
-        elif domain is not None and override.domain == domain:
-            exact = override
-    for candidate in (exact, tenant):
-        if candidate is not None:
-            value = candidate.values.get(name)
-            if value is not None:
-                return value
+    """Return an operator override for one field, once records can carry one.
+
+    Task 2 replaces this body: the override record only gains its `values`
+    mapping there, so reading it here would depend on a type that does not
+    exist yet.
+    """
     return None
 
 
@@ -321,8 +346,6 @@ def resolve_policy(
 Run: `uv run pytest tests/test_policy_resolution.py -v`
 Expected: PASS, six tests
 
-Note: `_override_value` reads `override.values`, a mapping added to the override record in Task 2. Until then the attribute does not exist; the tests above never construct an override, so they pass. Task 2 adds the override tests.
-
 - [ ] **Step 5: Lint and commit**
 
 ```bash
@@ -337,6 +360,7 @@ git commit -m "feat(policy): resolve hosted policy per field for one tenant and 
 
 **Files:**
 - Modify: `src/iwiki_mcp/postgres/config.py:106-189`
+- Modify: `src/iwiki_mcp/postgres/policy.py` (`_override_value` gains the body Task 1 deferred)
 - Modify: `tests/postgres/test_config.py:97-170`
 - Test: `tests/test_policy_resolution.py`
 
@@ -590,6 +614,31 @@ def _policy_override(raw: Any) -> "PolicyOverride":
 
 The import is function-local because `policy` imports `config` at module scope.
 
+Now give `_override_value` in `src/iwiki_mcp/postgres/policy.py` the body Task 1 deferred,
+since the record it reads exists from this task onward:
+
+```python
+def _override_value(specifications, iwiki_id: str, domain: str | None, name: str):
+    """Return an exact-pair value first, then the tenant-wide one."""
+    if specifications is None:
+        return None
+    exact = None
+    tenant = None
+    for override in specifications.overrides:
+        if override.iwiki_id != iwiki_id:
+            continue
+        if override.domain is None:
+            tenant = override
+        elif domain is not None and override.domain == domain:
+            exact = override
+    for candidate in (exact, tenant):
+        if candidate is not None:
+            value = candidate.values.get(name)
+            if value is not None:
+                return value
+    return None
+```
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_policy_resolution.py tests/postgres/test_config.py -v`
@@ -605,8 +654,8 @@ Expected: PASS, including the pre-existing default, `allow_project_mode`, exact-
 - [ ] **Step 6: Lint and commit**
 
 ```bash
-uv run flake8 src/iwiki_mcp/postgres/config.py tests/postgres/test_config.py tests/test_policy_resolution.py
-git add src/iwiki_mcp/postgres/config.py tests/postgres/test_config.py tests/test_policy_resolution.py
+uv run flake8 src/iwiki_mcp/postgres/config.py src/iwiki_mcp/postgres/policy.py tests/postgres/test_config.py tests/test_policy_resolution.py
+git add src/iwiki_mcp/postgres/config.py src/iwiki_mcp/postgres/policy.py tests/postgres/test_config.py tests/test_policy_resolution.py
 git commit -m "feat(config): carry any policy key on an override record with an optional domain"
 ```
 
