@@ -395,6 +395,18 @@ Git-only инструменты возвращают
 `can_manage_grants`, затем возвращает `created`, `already_existed`, `domain` и полный
 effective scope сессии. Точный retry идемпотентен.
 
+Bootstrap нового домена проекта выполняется в таком порядке: сначала bind только тех
+доменов, которые уже существуют, затем `wiki_create_domain(name)` — он расширяет текущую
+сессию новым доменом и делает его primary, — и только потом rebind полного scope проекта.
+Bind scope, который называет ещё не созданный домен, отклоняется gate с
+`reason: "domain_not_granted"`: gate сверяет запрошенный scope с текущими grants токена, а
+несуществующий домен не даёт никаких grants. Этот reason отличает домен, который
+вызывающий ещё может создать, от отозванного grant. Токен без `can_create_domain`
+отклоняется с `reason: "domain_creation_not_allowed"`, а create-capable токен, назвавший
+домен, которым уже владеет другой токен, получает in-band
+`{"error":"access_denied","reason":"domain_not_owned"}`: `can_create_domain` создаёт новый
+домен и никогда не присваивает существующий.
+
 `wiki_list_domain_grants(domain)` показывает owner токена и content/management flags.
 `wiki_set_domain_grant(domain, token_id, can_read, can_write)` и
 `wiki_revoke_domain_grant(domain, token_id)` меняют только content grant другого

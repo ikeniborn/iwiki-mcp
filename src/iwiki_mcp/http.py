@@ -335,7 +335,7 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         return
     if name == "wiki_create_domain":
         if not context.can_create_domain:
-            raise AccessError(403)
+            raise AccessError(403, "domain_creation_not_allowed")
         return
     if name in _DOMAIN_GRANT_TOOLS:
         if "domain" not in arguments:
@@ -401,11 +401,25 @@ def _authorize_tool(context: AuthContext, request: Any) -> None:
         else:
             read_domains = requested
     elif name == "wiki_bind":
+        # A bind names the scope the caller wants, so the only refusal here
+        # is a domain outside its own grants -- including one the caller's
+        # project file lists but the wiki has not provisioned yet. Attribute
+        # it, or the caller cannot tell a domain it may still create from a
+        # revoked grant.
         read_domains = _string_domains(arguments.get("read"))
         write_domains = _string_domains(arguments.get("write"))
         primary = arguments.get("primary")
         if isinstance(primary, str):
             write_domains = (*write_domains, primary)
+        try:
+            authorize_domains(
+                context,
+                read_domains=read_domains,
+                write_domains=write_domains,
+            )
+        except AccessError as exc:
+            raise AccessError(403, "domain_not_granted") from exc
+        return
     authorize_domains(
         context,
         read_domains=read_domains,

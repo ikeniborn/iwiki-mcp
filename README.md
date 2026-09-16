@@ -395,6 +395,18 @@ The three grant tools return `unsupported_transport` with actual `storage` and
 `can_manage_grants` rows, returning `created`, `already_existed`, `domain`, and the
 complete effective session scope. Exact retries are idempotent.
 
+Bootstrap a project domain in this order: bind only the domains that already exist, call
+`wiki_create_domain(name)` — which expands the current session with the new domain and
+makes it the primary — then rebind the full project scope. Binding a scope that names a
+domain the wiki has not provisioned yet is refused by the gate with
+`reason: "domain_not_granted"`, because the authorization gate checks the requested scope
+against the token's current grants and a domain that does not exist grants nothing. That
+reason distinguishes a domain the caller may still create from a revoked grant. A token
+without `can_create_domain` is refused with `reason: "domain_creation_not_allowed"`, and a
+create-capable token naming a domain another token already owns gets the in-band
+`{"error":"access_denied","reason":"domain_not_owned"}`: `can_create_domain` provisions a
+new domain and never claims an existing one.
+
 `wiki_list_domain_grants(domain)` exposes token owner and content/management flags for
 audit. `wiki_set_domain_grant(domain, token_id, can_read, can_write)` and
 `wiki_revoke_domain_grant(domain, token_id)` may change only another active token's

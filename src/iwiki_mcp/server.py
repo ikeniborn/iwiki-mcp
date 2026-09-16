@@ -540,11 +540,17 @@ def _safe(fn):
                 "error": "PostgreSQL operation failed",
                 "hint": "retry or inspect sanitized server diagnostics",
             }
-        except _postgres_auth.AccessError:
-            return {
+        except _postgres_auth.AccessError as e:
+            refused = {
                 "error": "access_denied",
                 "hint": "the authenticated context does not allow this operation",
             }
+            # `reason` names the caller's own binding relation that refused
+            # the call and never names a domain, a wiki, or another token,
+            # so it stays safe to return to the refused caller.
+            if e.reason is not None:
+                refused["reason"] = e.reason
+            return refused
         except cross_domain.CrossDomainError as e:
             hint = {
                 "write_scope_blocked": "add every visible referrer domain to write",
