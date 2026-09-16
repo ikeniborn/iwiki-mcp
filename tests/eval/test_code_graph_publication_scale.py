@@ -9,10 +9,11 @@ from eval.code_graph.runner import measure_publication
 from tests.codegraph.publication_contract_support import (
     generate_python_project,
 )
+from tests.user_docs import user_docs
 
 
-README = Path("README.md")
-README_RU = Path("docs/README.ru.md")
+README = user_docs()
+README_RU = user_docs(".ru")
 
 
 class _SqliteTarget:
@@ -106,12 +107,12 @@ def test_publication_report_rejects_an_unknown_target_mode(tmp_path):
 def test_operator_documentation_covers_the_deployment_contract(
     document, expected
 ):
-    assert expected in document.read_text(encoding="utf-8")
+    assert expected in document
 
 
 @pytest.mark.parametrize("document", [README, README_RU])
 def test_operator_documentation_states_no_silent_fallback(document):
-    text = document.read_text(encoding="utf-8").lower()
+    text = document.lower()
 
     assert "fallback" in text
     assert "0 disables" in text or "0 отключает" in text

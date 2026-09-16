@@ -6,32 +6,7 @@ from pathlib import Path
 import iwiki_mcp
 from packaging.requirements import Requirement
 from iwiki_mcp.codegraph.config import CodeGraphConfig
-
-# README.md is the landing page; the reference documentation lives in one module per
-# topic under docs/, each with a Russian `<stem>.ru.md` sibling.
-DOC_MODULES = (
-    "storage-modes",
-    "postgres-setup",
-    "wiki-model",
-    "code-graph",
-    "code-graph-publishing",
-    "specifications",
-    "tools-reference",
-    "env-reference",
-    "okf-compatibility",
-    "benchmarks",
-)
-
-
-def _user_docs(suffix: str = "") -> str:
-    """Concatenate the landing page and every documentation module of one language."""
-    landing = Path("docs/README.ru.md") if suffix else Path("README.md")
-    parts = [landing.read_text(encoding="utf-8")]
-    parts += [
-        Path(f"docs/{stem}{suffix}.md").read_text(encoding="utf-8")
-        for stem in DOC_MODULES
-    ]
-    return "\n".join(parts)
+from tests.user_docs import user_docs as _user_docs
 
 
 def test_package_version_matches_distribution_metadata():
