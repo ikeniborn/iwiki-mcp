@@ -2,7 +2,7 @@
 chain:
   intent: docs/superpowers/intents/2026-09-16-hosted-project-policy-inheritance-intent.md
 review:
-  spec_hash: 1bd28b22a34a9f80
+  spec_hash: efeb36e8e06b6b81
   last_run: 2026-09-16
   phases:
     - name: structure
@@ -41,6 +41,25 @@ review:
         State both answers in section 5 and split the row in section 8.
       verdict: fixed
       verdict_at: 2026-09-16
+    - id: F-003
+      phase: coverage
+      severity: CRITICAL
+      section: 6. Application points
+      section_hash: eb3c12dc492d22af
+      fragment: "an import into a `disabled` domain currently builds a specification projection anyway"
+      text: >-
+        The section justified the admin change with a defect that does not exist.
+        A trace of PostgresStore.import_pages against a live database, performed
+        during Task 6 and independently confirmed by its reviewer, shows an import
+        writes domains, pages, derived chunks and links, and git_imports, and never
+        reaches _replace_specification_projection. Projections are built only by
+        single-page writes and index_domain.
+      fix: >-
+        State the traced behaviour and the real defect — an administrative store
+        ignored per-domain policy for every operation that consults it — and record
+        the import-versus-index divergence as an out-of-scope follow-up.
+      verdict: fixed
+      verdict_at: 2026-09-17
 ---
 
 # Design: hosted project policy inheritance
@@ -259,10 +278,20 @@ with the domain already in scope, except:
 - the retry wrapper at `store.py:1435`, which receives the domain as a parameter.
 
 **`admin.py`** resolves policy per domain. `_store(iwiki_id)` passes a resolver built from
-`resolve_policy(..., project_policy=None)`, so `import_git` — which imports many domains in
-one atomic transaction — honours each domain's own mode instead of the constructor default
-`optional`. This closes a divergence that predates this work: an import into a `disabled`
-domain currently builds a specification projection anyway.
+`resolve_policy(..., project_policy=None)`, so every operation on an administrative store
+honours each domain's own mode instead of the constructor default `optional`.
+
+An earlier draft of this section justified the change by claiming that a Git import into a
+`disabled` domain builds a specification projection anyway. That claim is false and was
+corrected during implementation, after a trace of `PostgresStore.import_pages` against a live
+database: an import writes `iwiki.domains`, `iwiki.pages`, the derived chunks and links, and
+`iwiki.git_imports`, and never reaches `_replace_specification_projection`. Projections are
+built only by single-page writes and `index_domain`.
+
+The real defect is simpler and wider: an administrative store ignored per-domain policy for
+**every** operation that consults it, `index_domain` included. That is what this change fixes,
+and it is why the test proves the wiring through `index_domain` rather than through
+`import_git`.
 
 ## 7. Reporting
 
@@ -327,6 +356,11 @@ existing block untouched, and it is stated in the operator documentation rather 
 - Project `[code_graph]` extraction keys. They describe a checkout the hosted server cannot
   read.
 - A second server TOML table name. `[specifications]` is extended in place.
+- Building specification projections during a Git import. The trace above established that
+  bulk import and `index_domain` diverge: one writes pages without projections, the other
+  builds them. Whether an import should project, or whether index-only is the intended
+  design, is a separate question with its own atomicity and cost implications. Record it as a
+  follow-up rather than deciding it inside a policy change.
 
 ## 11. Documentation
 
