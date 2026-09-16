@@ -3,7 +3,7 @@ chain:
   intent: docs/superpowers/intents/2026-09-16-hosted-project-policy-inheritance-intent.md
   spec: docs/superpowers/specs/2026-09-16-hosted-project-policy-inheritance-design.md
 review:
-  plan_hash: 15850807c2381089
+  plan_hash: 46248e04dd57b9ef
   last_run: 2026-09-16
   phases:
     - name: structure
@@ -30,6 +30,37 @@ review:
       fix: >-
         Task 1 returns None and says why; Task 2 supplies the body together with
         the record it reads.
+      verdict: fixed
+      verdict_at: 2026-09-16
+    - id: F-002
+      phase: verifiability
+      severity: WARNING
+      section: "Task 2: Policy override records in the server TOML"
+      section_hash: 076417ae1c8b4762
+      fragment: "load_server_config(path, _runtime_env())"
+      text: >-
+        The planned tests used load_server_config and ConfigError as module-level
+        names and wrote the config file by hand, but tests/postgres/test_config.py
+        imports both inside each test and owns a _write_config helper. The tests
+        would have failed at collection rather than on behavior.
+      fix: Adopt the module's function-local imports and its _write_config helper.
+      verdict: fixed
+      verdict_at: 2026-09-16
+    - id: F-003
+      phase: verifiability
+      severity: CRITICAL
+      section: "Task 3: Carry the project policy through the binding and the bind tool"
+      section_hash: 91a0c660188fecc2
+      fragment: "test_local_postgres_binding_refuses_a_project_policy(bound)"
+      text: >-
+        The test asserted the local-PostgreSQL refusal while using the `bound`
+        fixture, which installs a Git binding. `_wiki_bind` never enters its
+        _is_postgres branch there, so the assertion could not pass and the step's
+        expected result was wrong.
+      fix: >-
+        Assert project_config_manual_edit_required against the Git binding the
+        fixture provides, and move the local-PostgreSQL row of the error table to
+        tests/postgres/test_tool_matrix.py.
       verdict: fixed
       verdict_at: 2026-09-16
 ---
@@ -429,19 +460,24 @@ def test_domainless_resolution_uses_the_tenant_override():
     assert resolved.value("require_session_binding") is True
 ```
 
+`tests/postgres/test_config.py` imports `load_server_config` and `ConfigError` **inside**
+each test function, and writes the file through its own `_write_config(tmp_path, text)`
+helper (line 39). Follow that style exactly — the module has no top-level import of either
+name.
+
 ```python
 # append to tests/postgres/test_config.py
 def test_hosted_override_accepts_an_omitted_domain(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
     text = (
         "[specifications]\n"
         "[[specifications.overrides]]\n"
         'iwiki_id = "team-wiki"\n'
         'specification_mode = "disabled"\n'
     ) + _server_toml()
-    path = tmp_path / "server.toml"
-    path.write_text(text, encoding="utf-8")
 
-    config = load_server_config(path, _runtime_env())
+    config = load_server_config(_write_config(tmp_path, text), _runtime_env())
 
     override = config.specifications.overrides[0]
     assert override.domain is None
@@ -449,6 +485,8 @@ def test_hosted_override_accepts_an_omitted_domain(tmp_path):
 
 
 def test_hosted_override_keeps_the_mode_alias(tmp_path):
+    from iwiki_mcp.postgres.config import load_server_config
+
     text = (
         "[specifications]\n"
         "[[specifications.overrides]]\n"
@@ -456,10 +494,8 @@ def test_hosted_override_keeps_the_mode_alias(tmp_path):
         'domain = "payments"\n'
         'mode = "strict"\n'
     ) + _server_toml()
-    path = tmp_path / "server.toml"
-    path.write_text(text, encoding="utf-8")
 
-    config = load_server_config(path, _runtime_env())
+    config = load_server_config(_write_config(tmp_path, text), _runtime_env())
 
     assert config.specifications.overrides[0].values == {
         "specification_mode": "strict"
@@ -467,6 +503,8 @@ def test_hosted_override_keeps_the_mode_alias(tmp_path):
 
 
 def test_hosted_override_rejects_the_alias_beside_the_canonical_key(tmp_path):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
     text = (
         "[specifications]\n"
         "[[specifications.overrides]]\n"
@@ -475,14 +513,14 @@ def test_hosted_override_rejects_the_alias_beside_the_canonical_key(tmp_path):
         'mode = "strict"\n'
         'specification_mode = "strict"\n'
     ) + _server_toml()
-    path = tmp_path / "server.toml"
-    path.write_text(text, encoding="utf-8")
 
     with pytest.raises(ConfigError):
-        load_server_config(path, _runtime_env())
+        load_server_config(_write_config(tmp_path, text), _runtime_env())
 
 
 def test_hosted_overrides_reject_two_tenant_records(tmp_path):
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
     text = (
         "[specifications]\n"
         "[[specifications.overrides]]\n"
@@ -492,11 +530,9 @@ def test_hosted_overrides_reject_two_tenant_records(tmp_path):
         'iwiki_id = "team-wiki"\n'
         'specification_mode = "disabled"\n'
     ) + _server_toml()
-    path = tmp_path / "server.toml"
-    path.write_text(text, encoding="utf-8")
 
     with pytest.raises(ConfigError):
-        load_server_config(path, _runtime_env())
+        load_server_config(_write_config(tmp_path, text), _runtime_env())
 ```
 
 Replace every existing `config.specifications.mode_for(...)` assertion in
@@ -730,17 +766,22 @@ def test_bind_stores_the_project_policy_on_the_session(hosted_session):
     }
 
 
-def test_local_postgres_binding_refuses_a_project_policy(bound):
+def test_git_binding_refuses_a_project_policy(bound):
     result = server.wiki_bind(
         read=["payments"], write=["payments"], primary="payments",
         project_policy={"specification_mode": "strict"},
     )
 
-    assert result["error"] == "project policy requires a hosted session"
+    assert result["code"] == "project_config_manual_edit_required"
 ```
 
-The last test uses the module's existing `bound` fixture (`tests/test_specification_tools.py:85`),
-which installs a non-hosted binding.
+The `bound` fixture (`tests/test_specification_tools.py:85`) installs a **Git** binding —
+`server.base.Binding`, not `PostgresBinding` — so `_wiki_bind` falls through its
+`_is_postgres` branch entirely and answers `project_config_manual_edit_required`. That is
+the Git row of the spec's error table. The local-PostgreSQL row (`project policy requires a
+hosted session`) is exercised by the `_is_postgres` branch and is covered where a local
+PostgreSQL binding already exists, in `tests/postgres/test_tool_matrix.py`; add it there if
+that file has no equivalent case.
 
 - [ ] **Step 2: Run test to verify it fails**
 
