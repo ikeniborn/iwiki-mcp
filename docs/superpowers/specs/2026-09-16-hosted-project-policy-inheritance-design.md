@@ -1,3 +1,33 @@
+---
+chain:
+  intent: docs/superpowers/intents/2026-09-16-hosted-project-policy-inheritance-intent.md
+review:
+  spec_hash: 99c0e5075b9969a4
+  last_run: 2026-09-16
+  phases:
+    - name: structure
+      status: passed
+    - name: coverage
+      status: passed
+    - name: clarity
+      status: passed
+    - name: consistency
+      status: passed
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: 9. Testing
+      section_hash: cfb59bbc03c438a6
+      fragment: "tenant wildcard"
+      text: >-
+        One entity carried two names: sections 3 and 4 call it a tenant override,
+        section 9 called it a tenant wildcard.
+      fix: Use "tenant override" in section 9.
+      verdict: fixed
+      verdict_at: 2026-09-16
+---
+
 # Design: hosted project policy inheritance
 
 **Date:** 2026-09-16
@@ -255,7 +285,7 @@ existing block untouched, and it is stated in the operator documentation rather 
 ## 9. Testing
 
 - Unit tests for `policy.py` with no database and no MCP runtime: per-field precedence, the
-  tenant wildcard, `domain=None`, suppression, `allow_project_mode = false`, and the
+  tenant override, `domain=None`, suppression, `allow_project_mode = false`, and the
   `0`-as-infinity rule for `max_snapshot_age_seconds`.
 - A guard test asserting that every member of `POLICY_FIELDS` carries `at_least_as_strict`
   and `parse`, and that every `project_tier` member has a suppression test. Adding a field
