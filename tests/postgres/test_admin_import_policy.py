@@ -30,8 +30,6 @@ import subprocess
 import psycopg
 import pytest
 
-from iwiki_mcp.postgres.config import HostedSpecificationsConfig, PolicyOverride
-
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -134,8 +132,36 @@ def test_admin_store_honours_a_disabled_domain_after_a_git_import(
     from iwiki_mcp import admin
 
     config, environ = admin_runtime
+    config.write_text(
+        config.read_text(encoding="utf-8") + _DISABLED_BILLING, encoding="utf-8"
+    )
+    _import_two_domains(config, environ, tmp_path / "source", monkeypatch)
+
+    service = admin._service(str(config), environ)
+    assert service.config.specifications.overrides[0].values == {
+        "specification_mode": "disabled"
+    }
+    store = service._store("wiki-a")
+    for domain in ("payments", "billing"):
+        store.index_domain(domain)
+
+    assert _projection_rows(service.dsn, "wiki-a", "billing") == 0
+    assert _projection_rows(service.dsn, "wiki-a", "payments") > 0
+
+
+_DISABLED_BILLING = (
+    "\n[[specifications.overrides]]\n"
+    'iwiki_id = "wiki-a"\n'
+    'domain = "billing"\n'
+    'specification_mode = "disabled"\n'
+)
+
+
+def _import_two_domains(config, environ, source, monkeypatch):
+    """Create the wiki and import one scenario page into payments and billing."""
+    from iwiki_mcp import admin
+
     prefix = ["--config", str(config)]
-    source = tmp_path / "source"
     for domain in ("payments", "billing"):
         (source / domain).mkdir(parents=True)
         (source / domain / "scenario.md").write_text(
@@ -152,9 +178,8 @@ def test_admin_store_honours_a_disabled_domain_after_a_git_import(
         "_embed",
         lambda _cfg, texts: [[1.0, 0.0, 0.0] for _text in texts],
     )
-
     assert _run(["base", "create", *prefix, "--iwiki", "wiki-a"], environ)[0] == 0
-    code, _output, error = _run(
+    code, output, error = _run(
         [
             "base", "import-git", *prefix, "--iwiki", "wiki-a",
             "--path", str(source), "--json",
@@ -162,22 +187,57 @@ def test_admin_store_honours_a_disabled_domain_after_a_git_import(
         environ,
     )
     assert code == 0, error
+    return json.loads(output)
+
+
+def test_git_import_projects_specifications_without_a_later_index(
+    admin_runtime, tmp_path, monkeypatch
+):
+    """The import leaves a usable wiki, not one whose scenarios are invisible.
+
+    Before this change the migrated wiki reported ``projection_state: absent``
+    until ``wiki_index`` ran per domain, so a ``strict`` domain enforced nothing
+    and the three specification tools returned empty. Nothing is indexed here.
+    """
+    from iwiki_mcp import admin
+
+    config, environ = admin_runtime
+    report = _import_two_domains(
+        config, environ, tmp_path / "source", monkeypatch
+    )
 
     service = admin._service(str(config), environ)
-    service.config = admin.ServerConfig(
-        storage=service.config.storage,
-        models=service.config.models,
-        server=service.config.server,
-        code_graph=service.config.code_graph,
-        specifications=HostedSpecificationsConfig(
-            overrides=(
-                PolicyOverride("wiki-a", "billing", {"specification_mode": "disabled"}),
-            )
-        ),
-    )
-    store = service._store("wiki-a")
-    for domain in ("payments", "billing"):
-        store.index_domain(domain)
+    assert _projection_rows(service.dsn, "wiki-a", "payments") > 0
+    assert _projection_rows(service.dsn, "wiki-a", "billing") > 0
+    assert report["specifications"]["projected"] == {
+        "billing": 1,
+        "payments": 1,
+    }
+    assert report["specifications"]["skipped_disabled"] == []
+    assert report["specifications"]["failed"] == []
 
+
+def test_git_import_skips_a_disabled_domain(
+    admin_runtime, tmp_path, monkeypatch
+):
+    """A domain the operator disabled is skipped by the import, not projected.
+
+    The override is written before the import rather than after, because the
+    policy has to be in force while the import runs -- that is the only moment
+    at which the import can honour it.
+    """
+    from iwiki_mcp import admin
+
+    config, environ = admin_runtime
+    config.write_text(
+        config.read_text(encoding="utf-8") + _DISABLED_BILLING, encoding="utf-8"
+    )
+    report = _import_two_domains(
+        config, environ, tmp_path / "source", monkeypatch
+    )
+
+    service = admin._service(str(config), environ)
     assert _projection_rows(service.dsn, "wiki-a", "billing") == 0
     assert _projection_rows(service.dsn, "wiki-a", "payments") > 0
+    assert report["specifications"]["skipped_disabled"] == ["billing"]
+    assert report["specifications"]["projected"] == {"payments": 1}

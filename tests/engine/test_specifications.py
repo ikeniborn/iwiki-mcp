@@ -69,7 +69,10 @@ def test_parses_event_sourced_aggregate_into_exact_immutable_model():
 def test_parses_request_response_and_event_roles_with_all_selector_kinds():
     block = '''id = "accept-payment"
 title = "Accept payment"
-given = [{ role = "fact", name = "Customer is active" }, { role = "state", name = "Balance is positive" }]
+given = [
+  { role = "fact", name = "Customer is active" },
+  { role = "state", name = "Balance is positive" },
+]
 when = { role = "request", name = "POST /payments" }
 then = [{ role = "response", name = "202 Accepted" }, { role = "event", name = "PaymentAccepted" }]
 code = [
@@ -197,7 +200,8 @@ def test_rejects_roles_outside_the_exact_phase_vocabulary(fragment, replacement)
 def test_exception_then_item_is_exclusive():
     block = AGGREGATE_BLOCK.replace(
         'then = [{ role = "event", name = "AccountOpened" }]',
-        'then = [{ role = "exception", name = "AccountRejected" }, { role = "event", name = "AuditRecorded" }]',
+        'then = [{ role = "exception", name = "AccountRejected" },'
+        ' { role = "event", name = "AuditRecorded" }]',
     )
 
     result = _parse(block)
@@ -216,7 +220,8 @@ def test_exception_then_item_is_exclusive():
         ),
         AGGREGATE_BLOCK.replace(
             '{ relation = "implements", phase = "when", symbol = "accounts.Account.confirm" }',
-            '{ relation = "implements", phase = "when", symbol = "accounts.Account.confirm", extra = "x" }',
+            '{ relation = "implements", phase = "when",'
+            ' symbol = "accounts.Account.confirm", extra = "x" }',
         ),
         AGGREGATE_BLOCK.replace(
             'title = "Confirm account opening"',
@@ -263,11 +268,14 @@ def test_enforces_scalar_bounds(fragment, replacement):
     [
         AGGREGATE_BLOCK.replace(
             'given = [{ role = "event", name = "AccountOpeningRequested" }]',
-            'given = [{ role = "event", name = "AccountOpeningRequested" }, { role = "event", name = "AccountOpeningRequested" }]',
+            'given = [{ role = "event", name = "AccountOpeningRequested" },'
+            ' { role = "event", name = "AccountOpeningRequested" }]',
         ),
         AGGREGATE_BLOCK.replace(
             '  { relation = "verifies", file = "tests/accounts/test_opening.py" },',
-            '  { relation = "implements", phase = "when", symbol = "accounts.Account.confirm" },\n  { relation = "verifies", file = "tests/accounts/test_opening.py" },',
+            '  { relation = "implements", phase = "when",'
+            ' symbol = "accounts.Account.confirm" },\n'
+            '  { relation = "verifies", file = "tests/accounts/test_opening.py" },',
         ),
     ],
 )

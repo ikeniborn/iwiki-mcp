@@ -9,6 +9,12 @@ from eval.unified_search.fixtures import (
 )
 
 
+ALL_POLICY_FACTS = (
+    '{"fact_ids":["wiki-policy","code-policy","association-policy"],'
+    '"graph_state":"ready"}'
+)
+
+
 def _response(*, content=None, tool_calls=None):
     return {
         "id": "chatcmpl-fixture", "object": "chat.completion", "created": 1,
@@ -78,7 +84,7 @@ def test_baseline_tool_loop_executes_complete_chat_shapes_and_scores_exactly():
         _response(tool_calls=[_tool_call("wiki_search", {"query": case.task_prompt})]),
         _response(tool_calls=[_tool_call("wiki_code_search", {"query": case.task_prompt})]),
         _response(tool_calls=[_tool_call("wiki_code_context", {"seeds": ["entity-policy"]})]),
-        _response(content='{"fact_ids":["wiki-policy","code-policy","association-policy"],"graph_state":"ready"}'),
+        _response(content=ALL_POLICY_FACTS),
     )
 
     result = run_agent_case(case, "baseline", "fixture-model", post, max_rounds=5)
@@ -110,7 +116,7 @@ def test_candidate_shares_environment_and_prompt_but_uses_one_unified_call():
     baseline_post = ScriptedPost(_response(content='{"fact_ids":[],"graph_state":"ready"}'))
     candidate_post = ScriptedPost(
         _response(tool_calls=[_tool_call("wiki_unified_search", {"query": case.task_prompt})]),
-        _response(content='{"fact_ids":["wiki-policy","code-policy","association-policy"],"graph_state":"ready"}'),
+        _response(content=ALL_POLICY_FACTS),
     )
 
     baseline = run_agent_case(case, "baseline", "fixture-model", baseline_post)
@@ -131,7 +137,10 @@ def test_candidate_shares_environment_and_prompt_but_uses_one_unified_call():
     baseline_payload.pop("tools")
     candidate_payload.pop("tools")
     assert baseline_payload == candidate_payload
-    assert {tool["function"]["name"] for tool in candidate_post.payloads[0][1]["tools"]} == {"wiki_unified_search"}
+    candidate_tools = candidate_post.payloads[0][1]["tools"]
+    assert {tool["function"]["name"] for tool in candidate_tools} == {
+        "wiki_unified_search"
+    }
 
 
 def test_agent_blocks_cycles_and_redacts_transport_and_secret_sentinel():
@@ -161,7 +170,10 @@ def test_agent_rejects_unknown_tools_malformed_arguments_and_invalid_final_json(
     )
     malformed = run_agent_case(
         case, "candidate", "fixture-model",
-        ScriptedPost(_response(tool_calls=[{"id": "x", "type": "function", "function": {"name": "wiki_unified_search", "arguments": "{"}}])),
+        ScriptedPost(_response(tool_calls=[{
+            "id": "x", "type": "function",
+            "function": {"name": "wiki_unified_search", "arguments": "{"},
+        }])),
     )
     final = run_agent_case(
         case, "candidate", "fixture-model",
@@ -180,11 +192,18 @@ def test_agent_rejects_schema_invalid_arguments_and_duplicate_facts():
     )
     wrong_type = run_agent_case(
         case, "baseline", "fixture-model",
-        ScriptedPost(_response(tool_calls=[_tool_call("wiki_code_context", {"seeds": "not-an-array"})])),
+        ScriptedPost(_response(tool_calls=[
+            _tool_call("wiki_code_context", {"seeds": "not-an-array"}),
+        ])),
     )
     extra = run_agent_case(
         case, "candidate", "fixture-model",
-        ScriptedPost(_response(tool_calls=[_tool_call("wiki_unified_search", {"query": case.task_prompt, "extra": 1})])),
+        ScriptedPost(_response(tool_calls=[
+            _tool_call(
+                "wiki_unified_search",
+                {"query": case.task_prompt, "extra": 1},
+            ),
+        ])),
     )
     duplicate = run_agent_case(
         case, "candidate", "fixture-model",
@@ -203,12 +222,21 @@ def test_agent_sanitizes_max_round_and_incomplete_chat_completion_shapes():
     case = next(case for case in FIXED_CASES if case.id == "wiki-only")
     exhausted = run_agent_case(
         case, "candidate", "fixture-model",
-        ScriptedPost(_response(tool_calls=[_tool_call("wiki_unified_search", {"query": case.task_prompt})])),
+        ScriptedPost(_response(tool_calls=[
+            _tool_call("wiki_unified_search", {"query": case.task_prompt}),
+        ])),
         max_rounds=1,
     )
     incomplete = run_agent_case(
         case, "candidate", "fixture-model",
-        ScriptedPost({"choices": [{"message": {"role": "assistant", "content": '{"fact_ids":["unaccepted-input-detail"],"graph_state":"ready"}', "tool_calls": None}}]}),
+        ScriptedPost({"choices": [{"message": {
+            "role": "assistant",
+            "content": (
+                '{"fact_ids":["unaccepted-input-detail"],'
+                '"graph_state":"ready"}'
+            ),
+            "tool_calls": None,
+        }}]}),
     )
     assert exhausted.status == "failed_max_rounds"
     assert incomplete.status == "failed_response"
@@ -230,9 +258,20 @@ def test_agent_bounds_tool_trace_before_executing_a_large_completion(monkeypatch
         callback_count += 1
         return {"results": []}
 
-    monkeypatch.setattr(agent, "_adapters", lambda case, arm: ([schema], {"private_tool": callback}))
-    calls = [_tool_call("private_tool", {"query": str(index)}, f"call-{index}") for index in range(4)]
-    result = run_agent_case(case, "candidate", "fixture-model", ScriptedPost(_response(tool_calls=calls)), max_rounds=1)
+    monkeypatch.setattr(
+        agent,
+        "_adapters",
+        lambda case, arm: ([schema], {"private_tool": callback}),
+    )
+    calls = [
+        _tool_call("private_tool", {"query": str(index)}, f"call-{index}")
+        for index in range(4)
+    ]
+    result = run_agent_case(
+        case, "candidate", "fixture-model",
+        ScriptedPost(_response(tool_calls=calls)),
+        max_rounds=1,
+    )
 
     assert result.status == "failed_tool_limit"
     assert callback_count == 0
@@ -247,7 +286,13 @@ def test_agent_sanitizes_non_json_callback_output(monkeypatch):
             "required": ["query"], "additionalProperties": False,
         }},
     }
-    monkeypatch.setattr(agent, "_adapters", lambda case, arm: ([schema], {"private_tool": lambda args: {"bad": object()}}))
+    monkeypatch.setattr(
+        agent,
+        "_adapters",
+        lambda case, arm: (
+            [schema], {"private_tool": lambda args: {"bad": object()}}
+        ),
+    )
 
     result = run_agent_case(
         case, "candidate", "fixture-model",
@@ -276,8 +321,15 @@ def test_agent_rejects_invalid_tool_envelopes_before_callback(monkeypatch, envel
         callback_count += 1
         return {}
 
-    monkeypatch.setattr(agent, "_adapters", lambda case, arm: ([schema], {"private_tool": callback}))
-    result = run_agent_case(case, "candidate", "fixture-model", ScriptedPost(_response(tool_calls=[envelope])))
+    monkeypatch.setattr(
+        agent,
+        "_adapters",
+        lambda case, arm: ([schema], {"private_tool": callback}),
+    )
+    result = run_agent_case(
+        case, "candidate", "fixture-model",
+        ScriptedPost(_response(tool_calls=[envelope])),
+    )
     assert result.status == "failed_tool_envelope"
     assert callback_count == 0
     assert result.tool_trace == ()
@@ -285,7 +337,10 @@ def test_agent_rejects_invalid_tool_envelopes_before_callback(monkeypatch, envel
 
 @pytest.mark.parametrize("case", FIXED_CASES, ids=lambda case: case.id)
 def test_every_catalog_case_runs_both_private_arms_without_mutation(case):
-    expected = json.dumps({"fact_ids": list(case.expected_fact_ids), "graph_state": case.expected_graph_state})
+    expected = json.dumps({
+        "fact_ids": list(case.expected_fact_ids),
+        "graph_state": case.expected_graph_state,
+    })
     original_wiki = case.wiki.as_dict()
     original_code = case.code.as_dict()
     original_context = case.context.as_dict()
@@ -307,7 +362,11 @@ def test_every_catalog_case_runs_both_private_arms_without_mutation(case):
     )
     assert baseline.success and candidate.success
     assert baseline.expected_fact_ids == candidate.expected_fact_ids == case.expected_fact_ids
-    assert baseline.expected_graph_state == candidate.expected_graph_state == case.expected_graph_state
+    assert (
+        baseline.expected_graph_state
+        == candidate.expected_graph_state
+        == case.expected_graph_state
+    )
     assert case.wiki.as_dict() == original_wiki
     assert case.code.as_dict() == original_code
     assert case.context.as_dict() == original_context
