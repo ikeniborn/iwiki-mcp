@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `iwiki-mcp` is a **stdio MCP server** (not a daemon — it lives for the spawning client session). It fronts a shared, git-synced wiki *base* split into *domains*. Coding agents author Markdown pages; the server validates structure, persists, embeds, indexes, and runs hybrid (vector + lexical) search across the domains a project is bound to.
 
-User-facing setup (install, MCP registration in Claude Code / Codex, env reference, base/domain/binding model) lives in `README.md`. Repository architecture is documented in `docs/architecture.md`; the self-documenting wiki is maintained through the bound iwiki MCP domain.
+`README.md` is the landing page: install, MCP registration in Claude Code / Codex, quick start, and a link table into `docs/`. The per-topic user documentation lives in `docs/` — `storage-modes.md`, `postgres-setup.md`, `wiki-model.md`, `code-graph.md`, `code-graph-publishing.md`, `specifications.md`, `tools-reference.md`, `env-reference.md`, `okf-compatibility.md`, `benchmarks.md` — each with a Russian `<page>.ru.md` sibling. Repository architecture is documented in `docs/architecture.md`; the self-documenting wiki is maintained through the bound iwiki MCP domain.
 
 ## Commands
 

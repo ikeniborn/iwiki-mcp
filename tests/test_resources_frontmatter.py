@@ -1,6 +1,8 @@
 from iwiki_mcp.resources import AUTHORING_RULES
 from pathlib import Path
 
+from tests.user_docs import user_docs
+
 
 def test_authoring_rules_mention_frontmatter_and_types():
     assert "frontmatter" in AUTHORING_RULES.lower()
@@ -23,9 +25,7 @@ def test_authoring_rules_keep_generated_artifacts_out_of_graph_links():
 
 
 def test_public_docs_describe_cross_domain_transaction_contract():
-    root = Path(__file__).parents[1]
-    for relative in ("README.md", "docs/README.ru.md"):
-        text = (root / relative).read_text(encoding="utf-8")
+    for text in (user_docs(), user_docs(".ru")):
         assert "write = [" in text
         assert "new_heading" in text
         assert ".iwiki/transactions/<id>" in text

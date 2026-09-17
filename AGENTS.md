@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Python MCP server packaged from `src/iwiki_mcp`. Core modules include `server.py` for the stdio MCP entry point, `base.py` for project/base binding, `indexer.py` and `retrieval.py` for wiki indexing and search, plus `resources.py` and `sync.py` for MCP resources and git sync. Tests live in `tests/`; engine-style unit tests are grouped in `tests/engine/`. User-facing setup docs are in `README.md`, localized docs in `docs/README.ru.md`, design notes in `docs/wiki/`, and reusable agent snippets in `templates/`.
+This is a Python MCP server packaged from `src/iwiki_mcp`. Core modules include `server.py` for the stdio MCP entry point, `base.py` for project/base binding, `indexer.py` and `retrieval.py` for wiki indexing and search, plus `resources.py` and `sync.py` for MCP resources and git sync. Tests live in `tests/`; engine-style unit tests are grouped in `tests/engine/`. User-facing setup docs are in `README.md` (landing page), per-topic documentation in `docs/<topic>.md` with Russian siblings `docs/<topic>.ru.md`, design notes in `docs/wiki/`, and reusable agent snippets in `templates/`.
 
 ## Build, Test, and Development Commands
 

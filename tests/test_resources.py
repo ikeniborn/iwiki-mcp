@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from iwiki_mcp.resources import AUTHORING_RULES
+from tests.user_docs import user_docs
 
 
 def test_authoring_rules_cover_section_format():
@@ -46,21 +47,13 @@ def _update_page_contract_sections():
             "## Existing page updates",
             "## OKF frontmatter",
         ),
-        "readme": _section(
-            (root / "README.md").read_text(encoding="utf-8"),
-            "## Tools",
-            "## Pareto benchmark",
-        ),
+        "readme": (root / "docs/tools-reference.md").read_text(encoding="utf-8"),
         "architecture": _section(
             (root / "docs/architecture.md").read_text(encoding="utf-8"),
             "### Transaction phase",
             "### Cross-domain rewrite coordinator",
         ),
-        "russian": _section(
-            (root / "docs/README.ru.md").read_text(encoding="utf-8"),
-            "## Инструменты",
-            "## Pareto-бенчмарк",
-        ),
+        "russian": (root / "docs/tools-reference.ru.md").read_text(encoding="utf-8"),
     }
 
 
@@ -152,9 +145,8 @@ def test_agent_snippets_explain_cross_domain_rewrite_boundary():
 
 
 def test_public_readmes_describe_description_as_a_separate_summary_vector():
-    root = Path(__file__).parents[1]
-    english = (root / "README.md").read_text(encoding="utf-8")
-    russian = (root / "docs/README.ru.md").read_text(encoding="utf-8")
+    english = user_docs()
+    russian = user_docs(".ru")
 
     assert "embedded as each section's context prefix" not in english
     assert "stored as a separate summary vector" in english
@@ -258,9 +250,9 @@ def test_authoring_rules_publish_complete_gwt_grammar_status_and_lint_contract()
 def test_gwt_documentation_covers_configuration_lifecycle_and_operations():
     root = Path(__file__).parents[1]
     documents = (
-        root / "README.md",
-        root / "docs/README.ru.md",
-        root / "docs/architecture.md",
+        user_docs(),
+        user_docs(".ru"),
+        (root / "docs/architecture.md").read_text(encoding="utf-8"),
     )
     required = (
         "[specifications]",
@@ -286,19 +278,21 @@ def test_gwt_documentation_covers_configuration_lifecycle_and_operations():
         "uv run pytest -q -m measurement tests/measurement/test_specification_paths.py -s",
     )
 
-    for path in documents:
-        text = path.read_text(encoding="utf-8")
-        assert all(term in text for term in required), path
+    for index, text in enumerate(documents):
+        assert all(term in text for term in required), index
         _assert_complete_gwt_contract_terms(text)
 
-    assert "ordinary wiki pages" in documents[0].read_text(encoding="utf-8").casefold()
-    assert "обычные wiki-страницы" in documents[1].read_text(encoding="utf-8").casefold()
-    assert "ordinary wiki pages" in documents[2].read_text(encoding="utf-8").casefold()
+    assert "ordinary wiki pages" in documents[0].casefold()
+    assert "обычные wiki-страницы" in documents[1].casefold()
+    assert "ordinary wiki pages" in documents[2].casefold()
 
 
 def test_english_docs_publish_complete_gwt_semantics():
     root = Path(__file__).parents[1]
-    documents = (root / "README.md", root / "docs/architecture.md")
+    documents = (
+        user_docs(),
+        (root / "docs/architecture.md").read_text(encoding="utf-8"),
+    )
     required = (
         "`id` is required",
         "1-128 UTF-8 bytes",
@@ -320,14 +314,13 @@ def test_english_docs_publish_complete_gwt_semantics():
         "projection and resolution findings remain advisory",
         "ordinary Wiki pages remain unaffected",
     )
-    for path in documents:
-        normalized = " ".join(path.read_text(encoding="utf-8").casefold().split())
-        assert all(term.casefold() in normalized for term in required), path
+    for index, document in enumerate(documents):
+        normalized = " ".join(document.casefold().split())
+        assert all(term.casefold() in normalized for term in required), index
 
 
 def test_russian_docs_publish_complete_gwt_semantics_in_russian():
-    root = Path(__file__).parents[1]
-    text = " ".join((root / "docs/README.ru.md").read_text(encoding="utf-8").split())
+    text = " ".join(user_docs(".ru").split())
     required = (
         "`id` обязателен",
         "1–128 байт UTF-8",
@@ -356,7 +349,7 @@ def test_english_surfaces_publish_exact_binding_and_selector_grammar():
     root = Path(__file__).parents[1]
     surfaces = (
         AUTHORING_RULES,
-        (root / "README.md").read_text(encoding="utf-8"),
+        user_docs(),
         (root / "docs/architecture.md").read_text(encoding="utf-8"),
     )
     required = (
@@ -380,8 +373,7 @@ def test_english_surfaces_publish_exact_binding_and_selector_grammar():
 
 
 def test_russian_docs_publish_exact_binding_and_selector_grammar():
-    root = Path(__file__).parents[1]
-    text = " ".join((root / "docs/README.ru.md").read_text(encoding="utf-8").split())
+    text = " ".join(user_docs(".ru").split())
     required = (
         "relation принимает строго `implements | verifies`",
         "`phase` необязателен и принимает строго `given | when | then`",
