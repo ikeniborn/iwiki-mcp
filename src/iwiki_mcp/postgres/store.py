@@ -532,14 +532,16 @@ class PostgresStore:
                         (self.iwiki_id, domain),
                     )
                     domain_ids[domain] = cursor.fetchone()[0]
+                imported_pages = []
                 for domain, slug, markdown, chunks, records, targets in prepared:
                     cursor.execute(
                         "INSERT INTO iwiki.pages "
                         "(iwiki_id, domain_id, slug, markdown) "
-                        "VALUES (%s, %s, %s, %s) RETURNING page_id",
+                        "VALUES (%s, %s, %s, %s) RETURNING page_id, revision",
                         (self.iwiki_id, domain_ids[domain], slug, markdown),
                     )
-                    page_id = cursor.fetchone()[0]
+                    page_id, revision = cursor.fetchone()
+                    imported_pages.append((domain, slug, markdown, revision))
                     self._replace_derived(
                         cursor, page_id, chunks, records, targets
                     )
@@ -553,6 +555,9 @@ class PostgresStore:
                     "AND d.slug = l.target_domain AND p.slug = l.target_slug",
                     (self.iwiki_id,),
                 )
+                counts["specifications"] = self._import_specifications(
+                    connection, cursor, import_domains, imported_pages
+                )
                 cursor.execute(
                     "INSERT INTO iwiki.git_imports "
                     "(iwiki_id, source_fingerprint, counts) VALUES (%s, %s, %s)",
@@ -564,6 +569,61 @@ class PostgresStore:
             "imported": True,
             "dry_run": False,
             "source_fingerprint": source_fingerprint,
+        }
+
+    def _import_specifications(
+        self, connection, cursor, import_domains, imported_pages
+    ) -> dict:
+        """Project the migrated specification pages, one domain at a time.
+
+        A bootstrap import is not a mutation of a page that already exists, so
+        `strict` has nothing to reject here: enforcing it would fail a whole
+        migration over the content that migration is carrying. Every enabled
+        domain therefore projects under `optional` semantics -- valid, complete,
+        unique scenarios enter and the rest stay findings -- and a `disabled`
+        domain projects nothing. A domain whose projection cannot be assembled
+        is reported rather than raised, so one malformed page costs its own
+        domain's projection and not the import.
+        """
+        from ..specifications import PageSnapshot, assemble_projection
+
+        projected: dict[str, int] = {}
+        skipped: list[str] = []
+        failed: list[str] = []
+        for domain in import_domains:
+            if self._mode_for(domain) == "disabled":
+                skipped.append(domain)
+                continue
+            snapshots = tuple(
+                PageSnapshot(slug, markdown, revision)
+                for page_domain, slug, markdown, revision in imported_pages
+                if page_domain == domain
+            )
+            specification_pages = tuple(
+                page for page in snapshots
+                if self._specification_page(page.markdown)
+            )
+            if not specification_pages:
+                continue
+            try:
+                projection = assemble_projection(
+                    domain,
+                    snapshots,
+                    markdown_revision=semantic_markdown_revision(
+                        (page.slug, page.markdown, page.revision)
+                        for page in specification_pages
+                    ),
+                )
+                with connection.transaction():
+                    self._replace_specification_projection(cursor, projection)
+            except Exception:
+                failed.append(domain)
+                continue
+            projected[domain] = projection.scenario_count
+        return {
+            "projected": projected,
+            "skipped_disabled": skipped,
+            "failed": failed,
         }
 
     def export_snapshot(self) -> dict:
