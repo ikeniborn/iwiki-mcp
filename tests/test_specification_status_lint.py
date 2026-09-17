@@ -55,7 +55,10 @@ def _hosted_binding(tmp_path, project_mode=None):
         embed_model="fixture",
         embed_dimensions=3,
         rerank_model="",
-        project_specification_mode=project_mode,
+        project_policy=(
+            None if project_mode is None
+            else {"specification_mode": project_mode}
+        ),
     )
 
 
@@ -431,7 +434,9 @@ def test_hosted_policy_uses_exact_override_then_default_without_mutation(
     )
     policy = HostedSpecificationsConfig(
         default_mode="optional",
-        overrides=(SpecificationOverride("wiki-a", "docs", "strict"),),
+        overrides=(
+            SpecificationOverride("wiki-a", "docs", {"specification_mode": "strict"}),
+        ),
     )
     binding = server.base.PostgresBinding(
         host="db.invalid",
@@ -463,6 +468,23 @@ def test_hosted_policy_uses_exact_override_then_default_without_mutation(
         server._SESSION_BINDING.reset(token)
 
 
+def test_domain_scoped_policy_honors_a_tenant_wide_override(tmp_path, monkeypatch):
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig, PolicyOverride
+
+    binding = _hosted_binding(tmp_path)
+    policy = HostedSpecificationsConfig(
+        overrides=(PolicyOverride("wiki-a", None, {"specification_mode": "strict"}),)
+    )
+    monkeypatch.setattr(server, "_HOSTED_SPECIFICATIONS", policy, raising=False)
+    token = server._SESSION_BINDING.set(binding)
+    try:
+        assert server._specification_policy(binding, "docs") == (
+            "strict", "hosted_override"
+        )
+    finally:
+        server._SESSION_BINDING.reset(token)
+
+
 def test_hosted_project_mode_tightens_default_per_domain(tmp_path, monkeypatch):
     from iwiki_mcp.postgres.config import (
         HostedSpecificationsConfig,
@@ -472,7 +494,9 @@ def test_hosted_project_mode_tightens_default_per_domain(tmp_path, monkeypatch):
     binding = _hosted_binding(tmp_path, project_mode="strict")
     policy = HostedSpecificationsConfig(
         default_mode="optional",
-        overrides=(SpecificationOverride("wiki-a", "docs", "disabled"),),
+        overrides=(
+            SpecificationOverride("wiki-a", "docs", {"specification_mode": "disabled"}),
+        ),
     )
     monkeypatch.setattr(server, "_HOSTED_SPECIFICATIONS", policy, raising=False)
     token = server._SESSION_BINDING.set(binding)
@@ -539,3 +563,90 @@ def test_hosted_project_mode_precedes_built_in_default(tmp_path, monkeypatch):
         )
     finally:
         server._SESSION_BINDING.reset(token)
+
+
+def test_code_binding_gate_reads_the_tenant_override(hosted_session, monkeypatch):
+    from iwiki_mcp.postgres.config import HostedSpecificationsConfig, PolicyOverride
+
+    hosted_session("token_default")
+    monkeypatch.setattr(
+        server,
+        "_HOSTED_SPECIFICATIONS",
+        HostedSpecificationsConfig(
+            overrides=(PolicyOverride("wiki-a", None, {"require_session_binding": True}),)
+        ),
+    )
+
+    assert server._code_binding_blocked() is True
+
+
+def test_binding_no_longer_precomputes_a_specification_mode():
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.auth import AuthContext
+    from iwiki_mcp.postgres.config import (
+        HostedServerConfig,
+        HostedSpecificationsConfig,
+        ModelConfig,
+        PostgresConfig,
+        ServerConfig,
+    )
+
+    config = ServerConfig(
+        storage=PostgresConfig(
+            host="127.0.0.1", port=5432, database="iwiki_test",
+            user="iwiki", sslmode="prefer", password="secret",
+        ),
+        models=ModelConfig("fixture-model", 3, ""),
+        server=HostedServerConfig("127.0.0.1", 8765, (), 1, 2, 30_000, 5_000),
+        specifications=HostedSpecificationsConfig(default_mode="strict"),
+    )
+    context = AuthContext("wiki-a", "token-a", ("docs",), ("docs",), "docs")
+
+    binding = http._binding(config, context, "/not-used")
+
+    assert binding.specification_mode == "optional"
+
+
+def _fake_domain_store(monkeypatch):
+    monkeypatch.setattr(
+        server, "_postgres_store_for_binding",
+        lambda _binding: type(
+            "FakeStore", (), {"list_domains": lambda self: ["payments", "accounts"]}
+        )(),
+    )
+
+
+def test_status_reports_every_policy_field_with_its_source(hosted_session, monkeypatch):
+    hosted_session("session")
+    _fake_domain_store(monkeypatch)
+
+    server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"specification_mode": "strict"},
+    )
+
+    status = server.wiki_status()
+
+    record = status["policy"]["domains"][0]
+    assert record["domain"] == "payments"
+    assert record["specification_mode"] == {"value": "strict", "source": "project"}
+    assert record["require_session_binding"]["source"] in {
+        "hosted_default", "built_in_default",
+    }
+    assert record["suppressed"] == []
+    assert status["specifications"]["domains"][0]["mode"] == "strict"
+
+
+def test_status_names_a_suppressed_field(hosted_session, monkeypatch):
+    hosted_session("session")
+    _fake_domain_store(monkeypatch)
+
+    server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"specification_mode": "disabled"},
+    )
+
+    record = server.wiki_status()["policy"]["domains"][0]
+
+    assert record["specification_mode"]["source"] != "project"
+    assert record["suppressed"] == ["specification_mode"]

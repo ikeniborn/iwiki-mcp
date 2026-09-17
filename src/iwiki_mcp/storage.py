@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 
 def expected_revision_required() -> dict:
@@ -83,7 +83,7 @@ class PostgresBinding:
     rerank_model: str
     password: str = field(repr=False)
     specification_mode: Literal["disabled", "optional", "strict"] = "optional"
-    project_specification_mode: Literal["disabled", "optional", "strict"] | None = None
+    project_policy: Mapping[str, Any] | None = None
 
     @property
     def storage(self) -> str:

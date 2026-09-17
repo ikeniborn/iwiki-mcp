@@ -274,15 +274,29 @@ allow_project_mode = true
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
+specification_mode = "disabled"          # every domain of this tenant
+require_session_binding = true           # operator-only; domain must stay omitted
+
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
 domain = "payments"
-mode = "strict"
+mode = "strict"                          # deprecated alias for specification_mode
 ```
 
-Hosted precedence is the exact `(iwiki_id, domain)` override, session-scoped project
-mode from `wiki_bind.specification_mode`, hosted default, then built-in `optional`.
-The project tier applies only when `allow_project_mode` is true and the project mode is
-at least as strict as the hosted default; resolution runs independently for every bound
-domain. Disabled mode bypasses the
+`postgres/policy.py` is the framework-free resolver behind every hosted policy
+consumer. Hosted precedence is resolved per field, first match wins: an exact
+`(iwiki_id, domain)` override, a tenant-wide override with `domain` omitted, the
+session-scoped project value carried by `wiki_bind(project_policy=…)`, the hosted
+default, then the built-in value. A key absent from an override record falls through to
+the next tier independently of that record's other keys — inheritance is per field, not
+per record. The project tier applies only when `allow_project_mode` is true and its value
+is at least as strict as the hosted default (`disabled < optional < strict`; `false <
+true`; `min()` for `max_snapshot_age_seconds` with `0` treated as infinity); a rejected
+project value leaves the hosted value in force and is named in
+`wiki_status`'s `policy.domains[].suppressed`. Resolution runs independently for every
+bound domain. `require_session_binding` is excluded from the project tier by
+construction: the gate that reads it judges a session that never bound, so a
+bind-carried value cannot exist when it decides. Disabled mode bypasses the
 projection. Optional mode commits Markdown and reports advisory projection findings.
 Strict mode prepares a valid coherent projection before committing a target
 specification mutation; ordinary Wiki mutations bypass specification persistence.
@@ -413,7 +427,9 @@ flowchart TB
 
 **Top-layer modules:** `server` (tool surface + storage dispatch), `http` (hosted
 authentication, sessions, pool, and uvicorn lifecycle), `admin` (PostgreSQL operator
-CLI), `postgres.*` (configuration, migration, authorization, and tenant store), `base` (binding + path
+CLI), `postgres.*` (configuration, migration, authorization, and tenant store —
+including `postgres.policy`, the framework-free per-field hosted policy resolver every
+policy consumer shares), `base` (binding + path
 resolve), `graph` (freshness, rebuild, and scoped graph provider), `indexer`
 (ingest + index), `retrieval` (multi-signal query), `okf`
 (frontmatter assembly), `sync` (git ops), `ignore` (`.iwikiignore` gate), `lock`

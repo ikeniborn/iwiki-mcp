@@ -236,6 +236,47 @@ def test_invalid_specification_mode_is_rejected_before_sql():
         )
 
 
+def test_store_resolves_the_mode_per_domain(store_factory):
+    store = store_factory(
+        specification_mode=lambda domain: "disabled" if domain == "billing" else "strict"
+    )
+
+    assert store._mode_for("docs") == "strict"
+    assert store._mode_for("billing") == "disabled"
+
+
+def test_store_still_accepts_a_plain_string(store_factory):
+    store = store_factory(specification_mode="strict")
+
+    assert store._mode_for("docs") == "strict"
+
+
+@pytest.mark.postgres_integration
+def test_search_specifications_filters_out_a_domain_disabled_by_its_own_policy(
+    store_factory,
+):
+    store = store_factory(
+        specification_mode=lambda domain: "disabled" if domain == "other" else "optional"
+    )
+    store.create_domain("other")
+    markdown = _specification_markdown()
+    docs_page = store.write_page("docs", "specification/stable", markdown)
+    other_page = store.write_page("other", "specification/stable", markdown)
+    store.replace_specification_projection(assemble_projection(
+        "docs",
+        [PageSnapshot("specification/stable", markdown, docs_page["revision"])],
+    ))
+    store.replace_specification_projection(assemble_projection(
+        "other",
+        [PageSnapshot("specification/stable", markdown, other_page["revision"])],
+    ))
+
+    results = store.search_specifications(("docs", "other"), "stable", 20)
+
+    assert [item.scenario_id for item in results] == ["stable-id"]
+    assert {item.domain for item in results} == {"docs"}
+
+
 @pytest.mark.parametrize("mode", ["disabled", "optional", "strict"])
 def test_postgres_binding_passes_effective_specification_mode_to_store(
     monkeypatch, mode,
@@ -678,7 +719,7 @@ def test_changed_domain_snapshot_reprepares_before_retry():
             raise _SpecificationSnapshotChanged
         return projection
 
-    assert store._run_specification_transaction(prepare, mutate) == 2
+    assert store._run_specification_transaction("docs", prepare, mutate) == 2
     assert prepared == [1, 2]
     assert mutations == [1, 2]
 

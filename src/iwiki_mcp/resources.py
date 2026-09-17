@@ -181,7 +181,12 @@ ordinary Wiki pages remain unaffected in every mode.
 `wiki_status` reports `domain`, `mode`, `source`, `projection_state`, `scenarios`, and
 `bindings`. Source is exactly
 `project | hosted_default | hosted_override | built_in_default`; projection state is
-exactly `disabled | absent | ready | stale | failed`.
+exactly `disabled | absent | ready | stale | failed`. A hosted session's `wiki_status`
+also carries a sibling `policy` block resolving `specification_mode`,
+`max_snapshot_age_seconds`, and `require_session_binding` per field through the same
+hosted-override → tenant-override → project → hosted-default → built-in chain, naming
+any rejected project value in `suppressed`; `specification_mode` therefore appears in
+both blocks, unchanged in the first and resolved again in the second.
 
 `wiki_lint` reports the full specification taxonomy: `missing_scenario`,
 `invalid_scenario`, `duplicate_scenario_id`, `incomplete_bindings`, `projection_stale`,

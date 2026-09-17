@@ -31,21 +31,41 @@ allow_project_mode = true
 
 [[specifications.overrides]]
 iwiki_id = "team-wiki"
+specification_mode = "disabled"          # каждый домен этого tenant
+require_session_binding = true           # только оператор; domain указывать нельзя
+
+[[specifications.overrides]]
+iwiki_id = "team-wiki"
 domain = "payments"
-mode = "strict"
+mode = "strict"                          # устаревший алиас для specification_mode
 ```
 
-Локальная политика действует для всех видимых доменов. Hosted-клиент передаёт значение
-проекта через опциональный `wiki_bind.specification_mode`. Hosted precedence: точный
-override `(iwiki_id, domain)`, проектный режим, hosted default, затем встроенный
-`optional`. Проектный tier применяется только когда он не слабее hosted default и
-`allow_project_mode` равен `true`; иначе `wiki_status` возвращает
-`project_mode_suppressed: true`. Значение ограничено сессией и разрешается отдельно для
-каждого bound domain. `disabled` хранит specification
+Hosted precedence разрешается по каждому полю отдельно: точный override
+`(iwiki_id, domain)`, tenant-wide override с опущенным `domain`, значение проекта,
+переданное через `wiki_bind(project_policy=…)`, hosted default, затем встроенное
+значение. Ключ, отсутствующий в записи, проваливается на следующий tier и не тянет за
+собой остальные значения этой записи. Проектный tier применяется только когда его
+значение не слабее hosted default и `allow_project_mode` равен `true`; иначе
+`wiki_status` называет поле в `policy.domains[].suppressed`. `require_session_binding`
+доступен только оператору: гейт, который его читает, судит сессию, которая не выполняла
+bind, поэтому значение, принесённое через bind, не может существовать в момент решения.
+
+Локальная политика действует для всех видимых доменов; hosted-политика разрешается
+отдельно для каждого bound domain и ограничена сессией. `disabled` хранит specification
 как обычный Markdown и отключает semantic-инструменты. `optional` хранит Markdown,
 выдаёт advisory-находки и проецирует только валидные, полные, уникальные сценарии.
 `strict` отклоняет невалидное изменение целевой specification до изменения страницы
 или projection.
+
+Три поля hosted-политики: `specification_mode`, `max_snapshot_age_seconds` и
+`require_session_binding`. Первые два принимают значение проекта через
+`wiki_bind(project_policy=…)`; `specification_mode` дополнительно принимает устаревший
+алиас `wiki_bind.specification_mode`, и передача обоих сразу — ошибка валидации.
+`require_session_binding` не принимает значение проекта никогда — по конструкции, а не
+по исключению. Блок `specifications` в `wiki_status` по-прежнему сообщает только
+`specification_mode` и не изменился; соседний блок `policy` сообщает разрешённое значение
+и источник каждого поля, поэтому `specification_mode` появляется в обоих — это
+осознанная цена того, что существующие читатели не сломаны.
 
 Каждый сценарий — один fenced TOML-блок внутри своей H2-секции:
 

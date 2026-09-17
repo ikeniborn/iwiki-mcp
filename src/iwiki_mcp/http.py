@@ -246,14 +246,6 @@ def _binding(
     config: ServerConfig, context: AuthContext, project_dir: str
 ) -> base.PostgresBinding:
     storage = config.storage
-    specifications = getattr(config, "specifications", None)
-    specification_mode = "optional"
-    if specifications is not None:
-        specification_mode = (
-            specifications.mode_for(context.iwiki_id, context.primary)
-            if context.primary is not None
-            else specifications.default_mode
-        )
     return base.PostgresBinding(
         host=storage.host,
         port=storage.port,
@@ -269,7 +261,6 @@ def _binding(
         embed_model=config.models.embed_model,
         embed_dimensions=config.models.embed_dimensions,
         rerank_model=config.models.rerank_model,
-        specification_mode=specification_mode,
     )
 
 

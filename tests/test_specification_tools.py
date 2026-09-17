@@ -289,41 +289,6 @@ def test_tool_storage_failures_never_expose_raw_private_details(
     assert "private.example" not in repr(result)
 
 
-@pytest.fixture
-def hosted_session():
-    """Install one hosted binding state so answers carry provenance."""
-    tokens = []
-
-    def install(source):
-        binding = server.base.PostgresBinding(
-            host="127.0.0.1",
-            port=5432,
-            database="iwiki_test",
-            user="iwiki",
-            sslmode="prefer",
-            iwiki_id="wiki-a",
-            read=("payments", "accounts"),
-            write=("payments",),
-            primary="payments",
-            project_dir="/not-used",
-            embed_model="fixture-model",
-            embed_dimensions=3,
-            rerank_model="",
-            password="secret",
-        )
-        selected = server._HostedSelectedState(binding, source=source)
-        state = server._HostedBindingState(selected, selected.get())
-        state.bind_session("session-a")
-        tokens.append(server._SESSION_BINDING.set(state))
-        return state
-
-    try:
-        yield install
-    finally:
-        for token in reversed(tokens):
-            server._SESSION_BINDING.reset(token)
-
-
 @pytest.mark.parametrize("source", ["session", "token_default"])
 def test_specification_answers_name_the_binding_tier(
     bound, hosted_session, source
@@ -412,3 +377,70 @@ def test_disabled_specification_search_still_names_a_defaulted_scope(
 
     assert answer["results"] == []
     assert "binding_defaulted" in answer["warnings"]
+
+
+def test_bind_rejects_an_unknown_project_policy_member(hosted_session):
+    hosted_session("session")
+
+    result = server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"max_batch_rows": 10},
+    )
+
+    assert "project policy" in result["error"]
+
+
+def test_bind_rejects_a_non_mapping_project_policy(hosted_session):
+    hosted_session("session")
+
+    result = server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy=["specification_mode", "strict"],
+    )
+
+    assert "project policy" in result["error"]
+    assert server._resolved_binding().project_policy is None
+
+
+def test_bind_rejects_the_alias_beside_the_object(hosted_session):
+    hosted_session("session")
+
+    result = server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        specification_mode="strict",
+        project_policy={"specification_mode": "strict"},
+    )
+
+    assert result["error"] == "specification mode is set twice"
+
+
+def test_bind_stores_the_project_policy_on_the_session(hosted_session, monkeypatch):
+    hosted_session("session")
+    monkeypatch.setattr(
+        server, "_postgres_store_for_binding",
+        lambda _binding: type(
+            "FakeStore", (), {"list_domains": lambda self: ["payments", "accounts"]}
+        )(),
+    )
+
+    result = server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"specification_mode": "strict",
+                        "max_snapshot_age_seconds": 3600},
+    )
+    assert "error" not in result
+
+    binding = server._resolved_binding()
+    assert binding.project_policy == {
+        "specification_mode": "strict",
+        "max_snapshot_age_seconds": 3600,
+    }
+
+
+def test_git_binding_refuses_a_project_policy(bound):
+    result = server.wiki_bind(
+        read=["payments"], write=["payments"], primary="payments",
+        project_policy={"specification_mode": "strict"},
+    )
+
+    assert result["code"] == "project_config_manual_edit_required"

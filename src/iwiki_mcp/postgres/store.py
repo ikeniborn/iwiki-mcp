@@ -340,7 +340,7 @@ class PostgresStore:
         auth_context: AuthContext | None = None,
         connection_factory: Callable[[], ContextManager[Any]] | None = None,
         require_database_principal: bool = False,
-        specification_mode: str = "optional",
+        specification_mode: str | Callable[[str], str] = "optional",
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = _validate_identifier(iwiki_id, "iwiki id")
@@ -353,8 +353,6 @@ class PostgresStore:
             lambda: psycopg.connect(self._dsn)
         )
         self._require_database_principal = require_database_principal
-        if specification_mode not in {"disabled", "optional", "strict"}:
-            raise ValueError("invalid specification mode")
         self.specification_mode = specification_mode
         if require_database_principal:
             context = auth_context
@@ -365,6 +363,23 @@ class PostgresStore:
                 write_domains=context.write_domains,
             ) is not None:
                 raise ValueError("invalid_config")
+
+    @property
+    def specification_mode(self) -> str | Callable[[str], str]:
+        return self._specification_mode_input
+
+    @specification_mode.setter
+    def specification_mode(self, value: str | Callable[[str], str]) -> None:
+        if callable(value):
+            self._specification_mode_for = value
+        else:
+            if value not in {"disabled", "optional", "strict"}:
+                raise ValueError("invalid specification mode")
+            self._specification_mode_for = lambda _domain, _mode=value: _mode
+        self._specification_mode_input = value
+
+    def _mode_for(self, domain: str) -> str:
+        return self._specification_mode_for(domain)
 
     def with_embedder(self, embedder: Callable) -> "PostgresStore":
         return PostgresStore(
@@ -1335,7 +1350,7 @@ class PostgresStore:
         page_revision: int | None,
     ) -> DomainProjection | None:
         """Parse one candidate domain snapshot before its write transaction."""
-        if self.specification_mode == "disabled":
+        if self._mode_for(domain) == "disabled":
             return None
         candidate_is_specification = (
             markdown is not None and self._specification_page(markdown)
@@ -1370,7 +1385,7 @@ class PostgresStore:
             ),
         )
         if (
-            self.specification_mode == "strict"
+            self._mode_for(domain) == "strict"
             and self._projection_blocks_page(projection, slug)
         ):
             raise ValueError("invalid specification page")
@@ -1390,11 +1405,11 @@ class PostgresStore:
         except ValueError as exc:
             if str(exc) == "invalid specification page":
                 raise
-            if self.specification_mode == "optional":
+            if self._mode_for(domain) == "optional":
                 return _SPECIFICATION_PREPARATION_FAILED
             raise ValueError("specification projection update failed") from None
         except Exception:
-            if self.specification_mode == "optional":
+            if self._mode_for(domain) == "optional":
                 return _SPECIFICATION_PREPARATION_FAILED
             raise ValueError("specification projection update failed") from None
 
@@ -1408,7 +1423,7 @@ class PostgresStore:
             return None
         if projection is _SPECIFICATION_PREPARATION_FAILED:
             return "specification projection is stale"
-        if self.specification_mode == "optional":
+        if self._mode_for(projection.domain) == "optional":
             try:
                 with connection.transaction():
                     self._replace_specification_projection(cursor, projection)
@@ -1425,14 +1440,14 @@ class PostgresStore:
             raise ValueError("specification projection update failed") from None
         return None
 
-    def _run_specification_transaction(self, prepare, mutate):
+    def _run_specification_transaction(self, domain, prepare, mutate):
         for _attempt in range(3):
             projection = prepare()
             try:
                 return mutate(projection)
             except _SpecificationSnapshotChanged:
                 continue
-        if self.specification_mode == "optional":
+        if self._mode_for(domain) == "optional":
             return mutate(_SPECIFICATION_PREPARATION_FAILED)
         raise ValueError("specification projection update failed")
 
@@ -1440,7 +1455,7 @@ class PostgresStore:
         self, projection: DomainProjection
     ) -> dict[str, object]:
         self._require_write(projection.domain)
-        if self.specification_mode == "disabled":
+        if self._mode_for(projection.domain) == "disabled":
             return {"state": "disabled"}
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -1456,13 +1471,16 @@ class PostgresStore:
         )
         for domain in valid_domains:
             self._require_read(domain)
-        if self.specification_mode == "disabled":
+        searchable = tuple(
+            domain for domain in valid_domains if self._mode_for(domain) != "disabled"
+        )
+        if not searchable:
             return ()
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 projections = tuple(
                     self._specification_projection_from_cursor(cursor, domain)
-                    for domain in valid_domains
+                    for domain in searchable
                 )
         return search_projections(projections, query, limit)
 
@@ -1473,7 +1491,7 @@ class PostgresStore:
 
         domain = _validate_identifier(domain, "domain")
         self._require_read(domain)
-        if self.specification_mode == "disabled":
+        if self._mode_for(domain) == "disabled":
             return None
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -1538,7 +1556,7 @@ class PostgresStore:
 
     def record_specification_resolution(self, attempt: ResolutionAttempt) -> None:
         self._require_write(attempt.domain)
-        if self.specification_mode == "disabled":
+        if self._mode_for(attempt.domain) == "disabled":
             return
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -1550,7 +1568,7 @@ class PostgresStore:
     def specification_status(self, domain: str) -> ProjectionStatus:
         domain = _validate_identifier(domain, "domain")
         self._require_read(domain)
-        if self.specification_mode == "disabled":
+        if self._mode_for(domain) == "disabled":
             return ProjectionStatus(domain=domain, state="disabled")
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -1669,7 +1687,7 @@ class PostgresStore:
             return row, warning
 
         outcome = self._run_specification_transaction(
-            prepare_projection, mutate
+            domain, prepare_projection, mutate
         )
         if isinstance(outcome, dict):
             return outcome
@@ -1743,7 +1761,7 @@ class PostgresStore:
             return row, warning
 
         outcome = self._run_specification_transaction(
-            prepare_projection, mutate
+            domain, prepare_projection, mutate
         )
         if isinstance(outcome, dict):
             return outcome
@@ -1809,7 +1827,7 @@ class PostgresStore:
             return current, warning
 
         outcome = self._run_specification_transaction(
-            prepare_projection, mutate
+            domain, prepare_projection, mutate
         )
         if isinstance(outcome, dict):
             return outcome
@@ -2097,7 +2115,7 @@ class PostgresStore:
                     self._prepare_page(domain, slug, markdown)
                 )
                 prepared_pages.append((page_id, chunks, records, targets))
-            if self.specification_mode == "disabled":
+            if self._mode_for(domain) == "disabled":
                 return None
             try:
                 snapshots = tuple(
@@ -2125,8 +2143,8 @@ class PostgresStore:
                             self._replace_derived(
                                 cursor, page_id, chunks, records, targets
                             )
-                        if self.specification_mode != "disabled":
-                            if self.specification_mode == "optional":
+                        if self._mode_for(domain) != "disabled":
+                            if self._mode_for(domain) == "optional":
                                 warning = self._publish_specification_projection(
                                     connection, cursor, projection
                                 )
@@ -2154,14 +2172,14 @@ class PostgresStore:
                 "bytes": 0,
                 "over_cap": False,
             }
-            if self.specification_mode != "disabled":
+            if self._mode_for(domain) != "disabled":
                 state = (
                     "failed"
-                    if warning and self.specification_mode == "strict"
+                    if warning and self._mode_for(domain) == "strict"
                     else "stale" if warning else "ready"
                 )
                 result["specifications"] = {
-                    "mode": self.specification_mode,
+                    "mode": self._mode_for(domain),
                     "state": state,
                     "scenarios": (
                         0

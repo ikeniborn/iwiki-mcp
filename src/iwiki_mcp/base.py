@@ -53,6 +53,11 @@ _PROJECT_CONFIG_TEMPLATE = """\
 
 # [specifications]
 # mode = "optional"  # disabled | optional | strict
+# Hosted transports carry this value to the server through
+# wiki_bind(project_policy=...) automatically; unlike specification_mode,
+# [code_graph] max_snapshot_age_seconds is not forwarded automatically and
+# must be passed deliberately by the client in the same project_policy. The
+# server may only be tightened, never loosened, by a project.
 
 # --- Optional local code graph ---
 # The graph is always built from this local checkout. publish_mode and read_mode
@@ -281,6 +286,7 @@ def _postgres_binding(
         embed_dimensions=models.embed_dimensions,
         rerank_model=models.rerank_model,
         specification_mode=specification_mode,
+        project_policy={"specification_mode": specification_mode},
     )
 
 

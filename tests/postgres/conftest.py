@@ -229,12 +229,13 @@ def store_factory(clean_postgres):
         )
     )
 
-    def factory(iwiki_id="wiki-a", *, embedder=_embed):
+    def factory(iwiki_id="wiki-a", *, embedder=_embed, specification_mode="optional"):
         store = PostgresStore(
             clean_postgres,
             iwiki_id,
             cfg,
             embedder=embedder,
+            specification_mode=specification_mode,
         )
         store.create_wiki(iwiki_id)
         store.create_domain("docs")

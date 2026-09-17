@@ -40,6 +40,8 @@ from .postgres import migrations as _postgres_migrations  # noqa: F401
 from .postgres import auth as _postgres_auth  # noqa: F401
 from .postgres import store as _postgres_store  # noqa: F401
 from .postgres import codegraph as _postgres_codegraph  # noqa: F401
+from .postgres import policy as _policy
+from .postgres.config import ConfigError as _PolicyConfigError
 # Code graph adapters join the full startup import closure; their grammar and
 # parser initialization remains lazy until an adapter parses source.
 from .codegraph import config as _codegraph_config  # noqa: F401
@@ -859,6 +861,16 @@ def wiki_status() -> dict:
                 for domain in domains
             ]
         }
+        if _SESSION_BINDING.get() is not None:
+            result["policy"] = {
+                "domains": [
+                    {
+                        "domain": domain,
+                        **_resolve_binding_policy(bind, domain).as_status(),
+                    }
+                    for domain in bind.read
+                ]
+            }
         return result
     domains = base.list_domains(bind.base)
     result = {
@@ -913,14 +925,33 @@ _CODE_BINDING_NOT_SELECTED = {
 }
 
 
+def _resolve_binding_policy(binding, domain: str | None):
+    """Resolve the hosted policy for one bound domain, or for the tenant alone."""
+    from .postgres.policy import resolve_policy
+
+    return resolve_policy(
+        _HOSTED_SPECIFICATIONS,
+        _HOSTED_CODE_GRAPH,
+        binding.iwiki_id,
+        domain,
+        getattr(binding, "project_policy", None),
+    )
+
+
 def _code_binding_blocked() -> bool:
     """Refuse a domain-free code read that fell back to the token default.
 
     Off by default: only a hosted server that opted into
     `code_graph.require_session_binding` turns the visible fallback into a
-    refusal.
+    refusal. `require_session_binding` is operator-only (excluded from
+    `PROJECT_TIER_FIELDS`), so resolving it with `domain=None` cannot be
+    influenced by any project-supplied policy.
     """
-    if not _hosted_code_graph_settings().require_session_binding:
+    binding = _resolved_binding()
+    if not _is_postgres(binding):
+        return False
+    resolved = _resolve_binding_policy(binding, None)
+    if not resolved.value("require_session_binding"):
         return False
     return _hosted_binding_provenance().get("binding_source") == "token_default"
 
@@ -954,12 +985,12 @@ def _hosted_code_graph_settings():
 
 
 def _postgres_code_reader(binding: base.PostgresBinding):
-    settings = _hosted_code_graph_settings()
+    resolved = _resolve_binding_policy(binding, binding.primary)
     return _postgres_codegraph.PostgresCodeGraphReader(
         binding.connection_dsn(),
         binding.iwiki_id,
         binding.primary,
-        max_snapshot_age_seconds=settings.max_snapshot_age_seconds,
+        max_snapshot_age_seconds=resolved.value("max_snapshot_age_seconds"),
     )
 
 
@@ -1070,7 +1101,7 @@ class _PostgresSpecificationQueryStore:
         if any(item.domain != domain for item in attempts):
             raise ValueError("resolution attempt scope mismatch")
         self._store._require_write(domain)
-        if self._store.specification_mode == "disabled":
+        if self._store._mode_for(domain) == "disabled":
             return
         with self._store._connect() as connection:
             with connection.cursor() as cursor:
@@ -1091,50 +1122,16 @@ def _specification_store(binding):
     return _GitSpecificationQueryStore(binding)
 
 
-_SPECIFICATION_MODE_RANK = {
-    "disabled": 0,
-    "optional": 1,
-    "strict": 2,
-}
-
-
 def _specification_policy_details(
     binding, domain: str
 ) -> tuple[str, str, bool]:
     if _is_postgres(binding) and _SESSION_BINDING.get() is not None:
-        policy = _HOSTED_SPECIFICATIONS
-        exact = (
-            None
-            if policy is None
-            else next(
-                (
-                    item
-                    for item in policy.overrides
-                    if item.iwiki_id == binding.iwiki_id and item.domain == domain
-                ),
-                None,
-            )
+        resolved = _resolve_binding_policy(binding, domain)
+        return (
+            resolved.value("specification_mode"),
+            resolved.source("specification_mode"),
+            "specification_mode" in resolved.suppressed,
         )
-        if exact is not None:
-            return exact.mode, "hosted_override", False
-        default_mode = "optional" if policy is None else policy.default_mode
-        project_mode = binding.project_specification_mode
-        allow_project_mode = policy is None or policy.allow_project_mode
-        if (
-            project_mode is not None
-            and allow_project_mode
-            and _SPECIFICATION_MODE_RANK[project_mode]
-            >= _SPECIFICATION_MODE_RANK[default_mode]
-        ):
-            return project_mode, "project", False
-        suppressed = project_mode is not None and (
-            not allow_project_mode
-            or _SPECIFICATION_MODE_RANK[project_mode]
-            < _SPECIFICATION_MODE_RANK[default_mode]
-        )
-        return default_mode, (
-            "built_in_default" if policy is None else "hosted_default"
-        ), suppressed
     source = "built_in_default"
     config_path = Path(binding.project_dir) / ".iwiki.toml"
     try:
@@ -4962,25 +4959,38 @@ def _wiki_bind(
     write: list[str] | None = None,
     primary: str | None = None,
     specification_mode: Literal["disabled", "optional", "strict"] | None = None,
+    project_policy: dict | None = None,
 ) -> dict:
     bind = _resolved_binding()
     if _is_postgres(bind):
         global _LOCAL_POSTGRES_BINDING
-        if specification_mode is not None and (
-            type(specification_mode) is not str
-            or specification_mode not in _SPECIFICATION_MODE_RANK
+        if project_policy is not None and not isinstance(project_policy, dict):
+            return {
+                "error": "project policy must be a table",
+                "hint": f"project policy accepts {', '.join(_policy.PROJECT_TIER_FIELDS)}",
+            }
+        if specification_mode is not None and project_policy is not None and (
+            "specification_mode" in project_policy
         ):
             return {
-                "error": "specification mode is invalid",
-                "hint": "use disabled, optional, or strict",
+                "error": "specification mode is set twice",
+                "hint": "pass specification_mode or project_policy, not both",
+            }
+        declared = dict(project_policy or {})
+        if specification_mode is not None:
+            declared["specification_mode"] = specification_mode
+        try:
+            declared = _policy.parse_project_policy(declared) if declared else {}
+        except _PolicyConfigError as exc:
+            return {
+                "error": str(exc),
+                "hint": f"project policy accepts {', '.join(_policy.PROJECT_TIER_FIELDS)}",
             }
         session = _SESSION_BINDING.get()
-        if specification_mode is not None and not isinstance(
-            session, _HostedBindingState
-        ):
+        if declared and not isinstance(session, _HostedBindingState):
             return {
-                "error": "specification mode requires a hosted session",
-                "hint": "omit specification_mode for local PostgreSQL stdio",
+                "error": "project policy requires a hosted session",
+                "hint": "omit project_policy for local PostgreSQL stdio",
             }
         valid_read = (
             list(bind.read)
@@ -5044,10 +5054,8 @@ def _wiki_bind(
             read=tuple(dict.fromkeys(valid_read)),
             write=tuple(dict.fromkeys(valid_write)),
             primary=valid_primary,
-            project_specification_mode=(
-                bind.project_specification_mode
-                if specification_mode is None
-                else specification_mode
+            project_policy=(
+                bind.project_policy if not declared else declared
             ),
         )
         # Ask about the requested selection, not the current one: a domain
@@ -5102,6 +5110,7 @@ def wiki_bind(
     write: list[str] | None = None,
     primary: str | None = None,
     specification_mode: Literal["disabled", "optional", "strict"] | None = None,
+    project_policy: dict | None = None,
 ) -> dict:
     session = _SESSION_BINDING.get()
     if isinstance(session, _HostedBindingState):
@@ -5111,12 +5120,14 @@ def wiki_bind(
                 write=write,
                 primary=primary,
                 specification_mode=specification_mode,
+                project_policy=project_policy,
             )
     return _wiki_bind(
         read=read,
         write=write,
         primary=primary,
         specification_mode=specification_mode,
+        project_policy=project_policy,
     )
 
 
