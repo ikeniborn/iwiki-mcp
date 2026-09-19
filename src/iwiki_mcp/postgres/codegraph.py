@@ -787,59 +787,49 @@ class PostgresCodeGraphStore:
             },
             prefix=True,
         )
-        # One command per row kind, never one per row: a snapshot carries tens
-        # of thousands of rows, and a round trip each would make activation
-        # cost scale with the database's latency instead of its throughput.
-        cursor.executemany(
+        # One RLS-compatible INSERT per row kind, never one SQL execution per
+        # row: even pipelined single-row INSERTs can exhaust the remote
+        # publication deadline for a snapshot with tens of thousands of rows.
+        cursor.execute(
             "INSERT INTO iwiki.code_graph_files "
             "(iwiki_id, domain_id, snapshot_id, file_id, repository_id, "
-            "row_data) VALUES (%s, %s, %s, %s, %s, %s)",
-            [
-                (
-                    self.iwiki_id,
-                    domain_id,
-                    snapshot_id,
-                    row["file_id"],
-                    row["repository_id"],
-                    Jsonb(row),
-                )
-                for row in rows["files"]
-            ],
+            "row_data) SELECT %s, %s, %s, row_data->>'file_id', "
+            "row_data->>'repository_id', row_data "
+            "FROM jsonb_array_elements(%s) AS payload(row_data)",
+            (
+                self.iwiki_id,
+                domain_id,
+                snapshot_id,
+                Jsonb(rows["files"]),
+            ),
         )
-        cursor.executemany(
+        cursor.execute(
             "INSERT INTO iwiki.code_graph_symbols "
             "(iwiki_id, domain_id, snapshot_id, symbol_id, file_id, "
-            "row_data) VALUES (%s, %s, %s, %s, %s, %s)",
-            [
-                (
-                    self.iwiki_id,
-                    domain_id,
-                    snapshot_id,
-                    row["symbol_id"],
-                    row["file_id"],
-                    Jsonb(row),
-                )
-                for row in rows["symbols"]
-            ],
+            "row_data) SELECT %s, %s, %s, row_data->>'symbol_id', "
+            "row_data->>'file_id', row_data "
+            "FROM jsonb_array_elements(%s) AS payload(row_data)",
+            (
+                self.iwiki_id,
+                domain_id,
+                snapshot_id,
+                Jsonb(rows["symbols"]),
+            ),
         )
-        cursor.executemany(
+        cursor.execute(
             "INSERT INTO iwiki.code_graph_relations "
             "(iwiki_id, domain_id, snapshot_id, relation_id, "
             "source_file_id, source_symbol_id, target_symbol_id, row_data) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            [
-                (
-                    self.iwiki_id,
-                    domain_id,
-                    snapshot_id,
-                    row["relation_id"],
-                    row["source_file_id"],
-                    row.get("source_symbol_id"),
-                    row.get("target_symbol_id"),
-                    Jsonb(row),
-                )
-                for row in rows["relations"]
-            ],
+            "SELECT %s, %s, %s, row_data->>'relation_id', "
+            "row_data->>'source_file_id', row_data->>'source_symbol_id', "
+            "row_data->>'target_symbol_id', row_data "
+            "FROM jsonb_array_elements(%s) AS payload(row_data)",
+            (
+                self.iwiki_id,
+                domain_id,
+                snapshot_id,
+                Jsonb(rows["relations"]),
+            ),
         )
         _insert_wiki_links(cursor, self.iwiki_id, domain_id, snapshot_id, links)
         cursor.execute(
@@ -1949,21 +1939,13 @@ def _insert_wiki_links(cursor, iwiki_id: str, domain_id: int, snapshot_id, links
     """Insert one derived link set as a single command, like the graph rows."""
     if not links:
         return
-    cursor.executemany(
+    cursor.execute(
         "INSERT INTO iwiki.code_graph_wiki_links "
         "(iwiki_id, domain_id, snapshot_id, relation_id, page_id, "
-        "selector, provenance) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "selector, provenance) SELECT %s, %s, %s, "
+        "row_data->>'relation_id', (row_data->>'page_id')::bigint, "
+        "row_data->'selector', row_data->'provenance' "
+        "FROM jsonb_array_elements(%s) AS payload(row_data) "
         "ON CONFLICT DO NOTHING",
-        [
-            (
-                iwiki_id,
-                domain_id,
-                snapshot_id,
-                link["relation_id"],
-                link["page_id"],
-                Jsonb(link["selector"]),
-                Jsonb(link["provenance"]),
-            )
-            for link in links
-        ],
+        (iwiki_id, domain_id, snapshot_id, Jsonb(links)),
     )

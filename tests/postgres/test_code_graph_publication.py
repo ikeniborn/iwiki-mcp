@@ -184,7 +184,7 @@ def test_separate_domains_finalize_without_blocking_each_other(pg_graph):
 
 
 class _CountingCursor:
-    """Cursor proxy counting the SQL commands one publication issues."""
+    """Cursor proxy counting the PostgreSQL commands one publication issues."""
 
     def __init__(self, cursor, commands):
         self._cursor = cursor
@@ -208,8 +208,9 @@ class _CountingCursor:
         return self._cursor.execute(*args, **kwargs)
 
     def executemany(self, *args, **kwargs):
-        self._commands.append("executemany")
-        return self._cursor.executemany(*args, **kwargs)
+        parameters = list(args[1])
+        self._commands.extend("execute" for _item in parameters)
+        return self._cursor.executemany(args[0], parameters, **kwargs)
 
 
 class _CountingConnection:
@@ -244,7 +245,7 @@ def _relation_heavy_rows(rows, count):
 
 
 def test_activation_cost_is_bounded_by_row_kinds_not_row_count(pg_graph):
-    """Activation must not pay one database round trip per published row."""
+    """Activation must not execute one SQL command per published row or link."""
     import psycopg
 
     from iwiki_mcp.codegraph import publication
@@ -266,6 +267,9 @@ def test_activation_cost_is_bounded_by_row_kinds_not_row_count(pg_graph):
             psycopg.connect(pg_graph.dsn), commands
         ),
     )
+    pg_graph.write_markdown_page(
+        "architecture", _selector_page("pkg.module_0.run")
+    )
     session = store.begin(header)
     for batch in publication.iter_snapshot_batches(
         rows, max_rows=1000, max_bytes=1_000_000
@@ -277,6 +281,7 @@ def test_activation_cost_is_bounded_by_row_kinds_not_row_count(pg_graph):
 
     assert result["state"] == "ready"
     assert result["counts"]["relations"] == 300
+    assert result["wiki_links"] == 300
     assert len(commands) < 30
     assert pg_graph.active_rows()["relations"] == 300
 

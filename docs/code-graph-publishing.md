@@ -121,6 +121,11 @@ revision or the new one, never a partial upload. Repeating an accepted ordinal w
 same rows succeeds idempotently; repeating it with different rows returns
 `batch_conflict`.
 
+PostgreSQL activation inserts each graph row kind and the derived Wiki links with one
+set-based, RLS-compatible statement. Pipelined `executemany` is not sufficient here: it
+still executes one `INSERT` per row, so a 100,000-row snapshot can exhaust the remote
+call deadline under database load even when network round trips are hidden.
+
 Retry the whole publication after `busy`, `session_expired`, `snapshot_conflict`,
 `revision_mismatch`, or `markdown_unavailable`: begin a new session and resend. A
 `snapshot_conflict` means the active snapshot or the destination Markdown changed while
