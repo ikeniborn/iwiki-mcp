@@ -118,6 +118,11 @@ IWIKI_BOT_HEARTBEAT_MAX_AGE_SECONDS=<heartbeat-window-seconds>
 Copy `deploy/nginx.conf.example` unchanged except for its host-specific `listen`
 address. Keep loopback upstream `127.0.0.1:8765`, explicit `Authorization` forwarding,
 disabled request/response buffering, `client_max_body_size 16m`, and `access_log off`.
+Keep the proxy timeouts as they ship. Hosted MCP answers with JSON rather than an open
+stream, so `proxy_read_timeout` bounds a single request: a code-graph publication or index
+runs for minutes, and a short timeout turns one into a 504 the client can only report as a
+masked transport failure. `proxy_connect_timeout 3s` fails fast while the MCP process
+restarts instead of stalling the client.
 At this stage the token placeholder is intentionally unresolved. Initial validation
 requires exactly one literal `IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>` line,
 rejects a missing, duplicate, or malformed token line, and rejects every other angle-
