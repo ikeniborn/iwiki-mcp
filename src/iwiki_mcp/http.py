@@ -182,6 +182,26 @@ class _SessionBindings:
             del self._records[session_id]
             return True
 
+    def is_foreign(self, session_id: str | None, context: AuthContext) -> bool:
+        """True when the id exists and belongs to a different token.
+
+        `resolve` deliberately conflates "unknown" and "not yours" by
+        returning None for both, which is right for binding lookup: neither
+        case yields a binding. Refusing a request needs the distinction,
+        because an unknown id is a fresh session and a foreign one is a
+        collision the SDK used to reject for us.
+        """
+        if session_id is None:
+            return False
+        with self._lock:
+            record = self._records.get(session_id)
+            if record is None:
+                return False
+            return (
+                record.token_id != context.token_id
+                or record.iwiki_id != context.iwiki_id
+            )
+
 
 def _header_values(scope, name: bytes) -> list[str]:
     return [
@@ -280,6 +300,33 @@ async def _send_method_not_allowed(send) -> None:
         }
     )
     await send({"type": "http.response.body", "body": b""})
+
+
+async def _send_session_not_found(send) -> None:
+    """Answer a session id owned by another token exactly as the SDK did.
+
+    Stateless mode drops the SDK's ownership check, so this is now the only
+    thing that refuses a collision - and it has to refuse before the response
+    starts, or the failure surfaces as a 500 mid-stream.
+    """
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": "server-error",
+            "error": {"code": -32600, "message": "Session not found"},
+        }
+    ).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 404,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("latin-1")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 def _binding(
@@ -542,6 +589,9 @@ class AuthenticatedMCPMiddleware:
                 await _send_method_not_allowed(send)
                 return
             session_id = _one_header(scope, b"mcp-session-id")
+            if self.sessions.is_foreign(session_id, context):
+                await _send_session_not_found(send)
+                return
             issued_session_id = session_id or uuid4().hex
             initial = _binding(self.config, context, self.project_dir)
 
