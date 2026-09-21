@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field, replace
 from threading import Lock
@@ -70,6 +71,14 @@ _DOMAIN_GRANT_TOOLS = {
     "wiki_revoke_domain_grant",
 }
 _SESSION_IDLE_SECONDS = 86400.0
+# The SDK reaped idle sessions while the transport was stateful. Stateless mode
+# has no session table to reap, so this bound is the only thing keeping the
+# binding table finite. Eviction is by last activity, never by age: a session
+# open all day and used every minute must outlive one opened a minute ago and
+# abandoned.
+_SESSION_MAX_ENTRIES = 1000
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,19 @@ class _SessionBindings:
         ]
         for session_id in expired:
             self._records.pop(session_id, None)
+        if len(self._records) <= _SESSION_MAX_ENTRIES:
+            return
+        ordered = sorted(
+            self._records.items(), key=lambda item: item[1].last_seen
+        )
+        evicted = len(self._records) - _SESSION_MAX_ENTRIES
+        for session_id, _record in ordered[:evicted]:
+            self._records.pop(session_id, None)
+        logger.warning(
+            "session binding table at capacity; evicted %d least recently "
+            "used entries",
+            evicted,
+        )
 
     def resolve(
         self, session_id: str | None, context: AuthContext

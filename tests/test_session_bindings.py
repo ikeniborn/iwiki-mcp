@@ -37,3 +37,21 @@ def test_remove_of_an_unknown_session_is_not_an_error():
 
     assert bindings.remove("never-existed", _context()) is False
     assert bindings.remove(None, _context()) is False
+
+
+def test_the_table_evicts_the_least_recently_seen_entry_first(monkeypatch):
+    from iwiki_mcp import http
+
+    monkeypatch.setattr(http, "_SESSION_MAX_ENTRIES", 2)
+    bindings = http._SessionBindings()
+    owner = _context()
+
+    bindings.store("oldest", owner, "a")
+    bindings.store("middle", owner, "b")
+    # Touching "oldest" makes "middle" the least recently seen.
+    assert bindings.resolve("oldest", owner) == "a"
+    bindings.store("newest", owner, "c")
+
+    assert bindings.resolve("middle", owner) is None
+    assert bindings.resolve("oldest", owner) == "a"
+    assert bindings.resolve("newest", owner) == "c"
