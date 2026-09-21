@@ -170,6 +170,14 @@ Application Compose and runtime create no PostgreSQL service, database, or schem
 objects and run no migrations. Runtime calls `require_schema_version`, validates its
 least-privilege principal, and refuses startup on a mismatch.
 
+That refusal names which failure it hit. A database the runtime cannot reach reports
+`cannot read the schema version from PostgreSQL at <host>:<port>/<database>` with the
+exception class; a database it reached but whose schema is wrong reports the version it
+found against the version required. The two have nothing in common as remedies — the
+first is a network, credential, or container problem, the second is a migration — and a
+shared message once sent an operator looking for a migration while the database was
+listening on no TCP port at all. Neither message contains the DSN or the password.
+
 The runtime pins one exact schema version, currently 8. An image is therefore not
 deployable against a database the operator has not migrated to that version, and an older
 image is not deployable against a newer database. Version 8 releases the foreign key that
