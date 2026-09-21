@@ -396,8 +396,13 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             session_id="0" * 32,
         )
         assert wrong_token_session.status_code == 404
-        assert wrong_token_session.json() == unknown_session.json()
         assert "wiki-a" not in wrong_token_session.text
+        # An unknown id is not a refusal. Stateless mode makes a restart
+        # invisible: a client returning with an id this process never issued
+        # gets a fresh session scoped to its own token. Only a foreign id -
+        # one this process holds for a different token - is refused, and that
+        # is what the 404 above covers.
+        assert unknown_session.status_code == 200
 
         absent_origin = _initialize(client, token)
         assert absent_origin.status_code == 200
@@ -598,7 +603,15 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
 
     assert runtime.pool.min_size == 1
     assert runtime.pool.max_size == 2
-    assert runtime.app.app.routes[0].app.session_manager.session_idle_timeout == 86400
+    # The hosted transport is stateless: the SDK holds no session table, so it
+    # has nothing to reap and no idle timeout of its own. Expiry and the size
+    # ceiling live in _SessionBindings instead, which is what survives a
+    # restart being invisible to the client.
+    assert runtime.app.app.routes[0].app.session_manager.stateless is True
+    assert (
+        runtime.app.app.routes[0].app.session_manager.session_idle_timeout
+        is None
+    )
     with runtime.pool.connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute("SHOW statement_timeout")
