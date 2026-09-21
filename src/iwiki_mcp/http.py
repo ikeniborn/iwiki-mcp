@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field, replace
 from threading import Lock
 import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import anyio
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
@@ -70,6 +72,14 @@ _DOMAIN_GRANT_TOOLS = {
     "wiki_revoke_domain_grant",
 }
 _SESSION_IDLE_SECONDS = 86400.0
+# The SDK reaped idle sessions while the transport was stateful. Stateless mode
+# has no session table to reap, so this bound is the only thing keeping the
+# binding table finite. Eviction is by last activity, never by age: a session
+# open all day and used every minute must outlive one opened a minute ago and
+# abandoned.
+_SESSION_MAX_ENTRIES = 1000
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -95,6 +105,19 @@ class _SessionBindings:
         ]
         for session_id in expired:
             self._records.pop(session_id, None)
+        if len(self._records) <= _SESSION_MAX_ENTRIES:
+            return
+        ordered = sorted(
+            self._records.items(), key=lambda item: item[1].last_seen
+        )
+        evicted = len(self._records) - _SESSION_MAX_ENTRIES
+        for session_id, _record in ordered[:evicted]:
+            self._records.pop(session_id, None)
+        logger.warning(
+            "session binding table at capacity; evicted %d least recently "
+            "used entries",
+            evicted,
+        )
 
     def resolve(
         self, session_id: str | None, context: AuthContext
@@ -137,10 +160,47 @@ class _SessionBindings:
                 raise AccessError(403)
             self._records[session_id] = record
 
-    def remove(self, session_id: str | None) -> None:
-        if session_id is not None:
-            with self._lock:
-                self._records.pop(session_id, None)
+    def remove(self, session_id: str | None, context: AuthContext) -> bool:
+        """Drop one binding, but only for the token that owns it.
+
+        Stateless mode removes the SDK's own ownership check, so this is the
+        only thing standing between a leaked session id and someone else's
+        binding. The boolean lets the caller answer identically either way:
+        whether a session existed is not the caller's business to learn.
+        """
+        if session_id is None:
+            return False
+        with self._lock:
+            record = self._records.get(session_id)
+            if record is None:
+                return False
+            if (
+                record.token_id != context.token_id
+                or record.iwiki_id != context.iwiki_id
+            ):
+                return False
+            del self._records[session_id]
+            return True
+
+    def is_foreign(self, session_id: str | None, context: AuthContext) -> bool:
+        """True when the id exists and belongs to a different token.
+
+        `resolve` deliberately conflates "unknown" and "not yours" by
+        returning None for both, which is right for binding lookup: neither
+        case yields a binding. Refusing a request needs the distinction,
+        because an unknown id is a fresh session and a foreign one is a
+        collision the SDK used to reject for us.
+        """
+        if session_id is None:
+            return False
+        with self._lock:
+            record = self._records.get(session_id)
+            if record is None:
+                return False
+            return (
+                record.token_id != context.token_id
+                or record.iwiki_id != context.iwiki_id
+            )
 
 
 def _header_values(scope, name: bytes) -> list[str]:
@@ -240,6 +300,43 @@ async def _send_method_not_allowed(send) -> None:
         }
     )
     await send({"type": "http.response.body", "body": b""})
+
+
+async def _send_no_content(send) -> None:
+    """Acknowledge a termination without saying whether it found anything.
+
+    The same 204 answers an owned session, a stranger's id, and an id that
+    never existed: a caller learns nothing about sessions it does not own.
+    """
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
+async def _send_session_not_found(send) -> None:
+    """Answer a session id owned by another token exactly as the SDK did.
+
+    Stateless mode drops the SDK's ownership check, so this is now the only
+    thing that refuses a collision - and it has to refuse before the response
+    starts, or the failure surfaces as a 500 mid-stream.
+    """
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": "server-error",
+            "error": {"code": -32600, "message": "Session not found"},
+        }
+    ).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 404,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("latin-1")),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 def _binding(
@@ -501,7 +598,24 @@ class AuthenticatedMCPMiddleware:
             if scope.get("method") == "GET":
                 await _send_method_not_allowed(send)
                 return
+            if scope.get("method") == "DELETE":
+                session_id = _one_header(scope, b"mcp-session-id")
+                self.sessions.remove(session_id, context)
+                await _send_no_content(send)
+                return
             session_id = _one_header(scope, b"mcp-session-id")
+            # Checked here, at request start, against the table `remove`
+            # mutates synchronously; `store` below runs later, inside
+            # `capture_send`, once the inner app has produced a response. A
+            # second request that stores a foreign id for the same session
+            # between this check and that later `store` still surfaces as a
+            # mid-stream 500 rather than a clean refusal -- it takes
+            # colliding client-supplied session ids to reach, so it is
+            # documented here rather than guarded against.
+            if self.sessions.is_foreign(session_id, context):
+                await _send_session_not_found(send)
+                return
+            issued_session_id = session_id or uuid4().hex
             initial = _binding(self.config, context, self.project_dir)
 
             from . import server
@@ -569,27 +683,33 @@ class AuthenticatedMCPMiddleware:
 
                     async def capture_send(message):
                         if message["type"] == "http.response.start":
-                            response_session = next(
-                                (
-                                    value.decode("latin-1")
-                                    for key, value in message.get("headers", ())
-                                    if key.lower() == b"mcp-session-id"
-                                ),
-                                None,
-                            )
-                            if (
-                                scope.get("method") == "DELETE"
-                                and message["status"] < 400
-                            ):
-                                self.sessions.remove(session_id)
-                            elif message["status"] < 400:
-                                target_session = response_session or session_id
-                                if target_session is not None:
-                                    self.sessions.store(
-                                        target_session,
-                                        context,
-                                        state,
+                            if message["status"] < 400:
+                                response_session = next(
+                                    (
+                                        value.decode("latin-1")
+                                        for key, value in message.get("headers", ())
+                                        if key.lower() == b"mcp-session-id"
+                                    ),
+                                    None,
+                                )
+                                # The SDK issues no id in stateless mode, so the
+                                # middleware supplies one. It still issues one when
+                                # this app is built stateful - as the transport tests
+                                # do - and then its id wins: two headers would reach
+                                # the client as one malformed value.
+                                target_session = (
+                                    response_session or session_id or issued_session_id
+                                )
+                                if response_session is None and session_id is None:
+                                    headers = list(message.get("headers", ()))
+                                    headers.append(
+                                        (
+                                            b"mcp-session-id",
+                                            issued_session_id.encode("latin-1"),
+                                        )
                                     )
+                                    message = dict(message, headers=headers)
+                                self.sessions.store(target_session, context, state)
                         await send(message)
 
                     try:
@@ -680,13 +800,12 @@ def prepare_runtime(
             pool, cfg, config.code_graph, config.specifications
         )
         server.mcp.settings.json_response = True
-        server.mcp.settings.stateless_http = False
+        server.mcp.settings.stateless_http = True
         server.mcp.settings.transport_security = TransportSecuritySettings(
             allowed_hosts=_allowed_hosts(config),
             allowed_origins=list(config.server.allowed_origins),
         )
         mcp_app = server.mcp.streamable_http_app()
-        server.mcp.session_manager.session_idle_timeout = _SESSION_IDLE_SECONDS
         app = AuthenticatedMCPMiddleware(
             mcp_app,
             config=config,

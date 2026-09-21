@@ -72,6 +72,15 @@ def _request(client, token, payload, *, origin=None, session_id=None):
     return client.post("/mcp", headers=headers, json=payload)
 
 
+def _delete(client, token, *, session_id=None):
+    headers = {}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    if session_id is not None:
+        headers["Mcp-Session-Id"] = session_id
+    return client.delete("/mcp", headers=headers)
+
+
 def _initialize(client, token, *, origin=None, client_name="integration-test"):
     return _request(
         client,
@@ -396,8 +405,13 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             session_id="0" * 32,
         )
         assert wrong_token_session.status_code == 404
-        assert wrong_token_session.json() == unknown_session.json()
         assert "wiki-a" not in wrong_token_session.text
+        # An unknown id is not a refusal. Stateless mode makes a restart
+        # invisible: a client returning with an id this process never issued
+        # gets a fresh session scoped to its own token. Only a foreign id -
+        # one this process holds for a different token - is refused, and that
+        # is what the 404 above covers.
+        assert unknown_session.status_code == 200
 
         absent_origin = _initialize(client, token)
         assert absent_origin.status_code == 200
@@ -598,7 +612,15 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
 
     assert runtime.pool.min_size == 1
     assert runtime.pool.max_size == 2
-    assert runtime.app.app.routes[0].app.session_manager.session_idle_timeout == 86400
+    # The hosted transport is stateless: the SDK holds no session table, so it
+    # has nothing to reap and no idle timeout of its own. Expiry and the size
+    # ceiling live in _SessionBindings instead, which is what survives a
+    # restart being invisible to the client.
+    assert runtime.app.app.routes[0].app.session_manager.stateless is True
+    assert (
+        runtime.app.app.routes[0].app.session_manager.session_idle_timeout
+        is None
+    )
     with runtime.pool.connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute("SHOW statement_timeout")
@@ -1616,3 +1638,92 @@ def test_hosted_bind_reselects_any_granted_domain(hosted_runtime):
             reason="domain_not_granted",
             binding_source="session",
         )
+
+
+def test_a_session_id_is_issued_and_survives_a_new_middleware_instance(
+    hosted_runtime,
+):
+    """The restart case: a fresh middleware keeps serving the same id.
+
+    Stateless mode means the SDK itself tracks nothing -- the middleware's
+    own `_SessionBindings` table is the only place a session id is known,
+    so a fresh middleware instance (modeling a container restart) must
+    still resolve a binding for an id it never stored, falling back to the
+    token's own grants exactly like an unrecognized session does today.
+    """
+    from iwiki_mcp import http, server
+
+    runtime = hosted_runtime.runtime
+    token = hosted_runtime.token
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        first = _initialize(client, token)
+        assert first.status_code == 200
+        session_id = first.headers["mcp-session-id"]
+        assert session_id
+
+        second = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert second.status_code == 200
+
+    # A fresh SDK session manager plus a fresh middleware model the
+    # container being recreated: the SDK's own instance can only run once,
+    # and the middleware's session binding table starts empty either way.
+    server.mcp._session_manager = None
+    restarted_inner = server.mcp.streamable_http_app()
+    restarted_app = http.AuthenticatedMCPMiddleware(
+        restarted_inner,
+        config=runtime.app.config,
+        auth_store=runtime.app.auth_store,
+        project_dir=runtime.app.project_dir,
+    )
+    with TestClient(restarted_app, base_url="http://127.0.0.1:8765") as restarted:
+        after = _tool_call(
+            restarted, token, "wiki_status", {}, session_id=session_id
+        )
+        assert after.status_code == 200
+        body = _tool_result(after)
+        assert body["binding_source"] == "token_default"
+
+
+def test_delete_releases_the_callers_binding_and_not_a_strangers(
+    hosted_runtime,
+):
+    """`DELETE /mcp` must answer identically for a stranger's id and the
+    caller's own, while only actually releasing the binding it owns."""
+    runtime = hosted_runtime.runtime
+    token = hosted_runtime.token
+    stranger_token = hosted_runtime.disabled
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        first = _initialize(client, token)
+        assert first.status_code == 200
+        session_id = first.headers["mcp-session-id"]
+
+        bound = _tool_call(
+            client,
+            token,
+            "wiki_bind",
+            {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+            session_id=session_id,
+        )
+        assert bound.status_code == 200
+
+        stranger = _delete(client, stranger_token, session_id=session_id)
+        assert stranger.status_code == 204
+
+        still_mine = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert still_mine.status_code == 200
+        assert _tool_result(still_mine)["binding_source"] == "session"
+
+        mine = _delete(client, token, session_id=session_id)
+        assert mine.status_code == 204
+
+        after = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert after.status_code == 200
+        assert _tool_result(after)["binding_source"] == "token_default"
