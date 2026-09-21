@@ -94,8 +94,9 @@ but every MCP request still needs `Authorization: Bearer <token>`. Invalid crede
 grants, sessions, and unavailable storage return sanitized 401/403/404/503 responses.
 Hosted mode does not emit server-initiated notifications: after Bearer authentication,
 `GET /mcp` returns `405 Method Not Allowed` with `Allow: POST, DELETE` without entering
-the MCP session manager. Stateful `POST` requests and `DELETE` session termination remain
-available.
+the MCP session manager. `POST` requests are served statelessly - the middleware issues and recognizes
+`mcp-session-id` itself - and `DELETE` is answered by the middleware with `204`,
+releasing the session's binding.
 
 ## Supported application container
 

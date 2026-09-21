@@ -94,8 +94,8 @@ MCP endpoint — `/mcp`. Размещайте loopback-listener за reverse pro
 credentials, grants, session и storage возвращаются очищенными 401/403/404/503.
 Hosted-режим не отправляет server-initiated notifications: после Bearer-аутентификации
 `GET /mcp` возвращает `405 Method Not Allowed` с `Allow: POST, DELETE`, не входя в MCP
-session manager. Stateful-запросы `POST` и завершение сессии через `DELETE` остаются
-доступны.
+session manager. Запросы `POST` обслуживаются без состояния — `mcp-session-id` выдаёт и распознаёт
+сам middleware, — а `DELETE` middleware отвечает `204`, освобождая привязку сессии.
 
 ## Поддерживаемый application container
 
