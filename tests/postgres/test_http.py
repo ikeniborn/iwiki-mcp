@@ -1616,3 +1616,50 @@ def test_hosted_bind_reselects_any_granted_domain(hosted_runtime):
             reason="domain_not_granted",
             binding_source="session",
         )
+
+
+def test_a_session_id_is_issued_and_survives_a_new_middleware_instance(
+    hosted_runtime,
+):
+    """The restart case: a fresh middleware keeps serving the same id.
+
+    Stateless mode means the SDK itself tracks nothing -- the middleware's
+    own `_SessionBindings` table is the only place a session id is known,
+    so a fresh middleware instance (modeling a container restart) must
+    still resolve a binding for an id it never stored, falling back to the
+    token's own grants exactly like an unrecognized session does today.
+    """
+    from iwiki_mcp import http, server
+
+    runtime = hosted_runtime.runtime
+    token = hosted_runtime.token
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        first = _initialize(client, token)
+        assert first.status_code == 200
+        session_id = first.headers["mcp-session-id"]
+        assert session_id
+
+        second = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert second.status_code == 200
+
+    # A fresh SDK session manager plus a fresh middleware model the
+    # container being recreated: the SDK's own instance can only run once,
+    # and the middleware's session binding table starts empty either way.
+    server.mcp._session_manager = None
+    restarted_inner = server.mcp.streamable_http_app()
+    restarted_app = http.AuthenticatedMCPMiddleware(
+        restarted_inner,
+        config=runtime.app.config,
+        auth_store=runtime.app.auth_store,
+        project_dir=runtime.app.project_dir,
+    )
+    with TestClient(restarted_app, base_url="http://127.0.0.1:8765") as restarted:
+        after = _tool_call(
+            restarted, token, "wiki_status", {}, session_id=session_id
+        )
+        assert after.status_code == 200
+        body = _tool_result(after)
+        assert body["binding_source"] == "token_default"

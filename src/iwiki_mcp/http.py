@@ -9,6 +9,7 @@ from threading import Lock
 import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import anyio
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
@@ -541,6 +542,7 @@ class AuthenticatedMCPMiddleware:
                 await _send_method_not_allowed(send)
                 return
             session_id = _one_header(scope, b"mcp-session-id")
+            issued_session_id = session_id or uuid4().hex
             initial = _binding(self.config, context, self.project_dir)
 
             from . import server
@@ -608,27 +610,19 @@ class AuthenticatedMCPMiddleware:
 
                     async def capture_send(message):
                         if message["type"] == "http.response.start":
-                            response_session = next(
-                                (
-                                    value.decode("latin-1")
-                                    for key, value in message.get("headers", ())
-                                    if key.lower() == b"mcp-session-id"
-                                ),
-                                None,
-                            )
-                            if (
-                                scope.get("method") == "DELETE"
-                                and message["status"] < 400
-                            ):
-                                self.sessions.remove(session_id, context)
-                            elif message["status"] < 400:
-                                target_session = response_session or session_id
-                                if target_session is not None:
-                                    self.sessions.store(
-                                        target_session,
-                                        context,
-                                        state,
+                            if message["status"] < 400:
+                                headers = list(message.get("headers", ()))
+                                if session_id is None:
+                                    headers.append(
+                                        (
+                                            b"mcp-session-id",
+                                            issued_session_id.encode("latin-1"),
+                                        )
                                     )
+                                    message = dict(message, headers=headers)
+                                self.sessions.store(
+                                    issued_session_id, context, state
+                                )
                         await send(message)
 
                     try:
@@ -719,13 +713,12 @@ def prepare_runtime(
             pool, cfg, config.code_graph, config.specifications
         )
         server.mcp.settings.json_response = True
-        server.mcp.settings.stateless_http = False
+        server.mcp.settings.stateless_http = True
         server.mcp.settings.transport_security = TransportSecuritySettings(
             allowed_hosts=_allowed_hosts(config),
             allowed_origins=list(config.server.allowed_origins),
         )
         mcp_app = server.mcp.streamable_http_app()
-        server.mcp.session_manager.session_idle_timeout = _SESSION_IDLE_SECONDS
         app = AuthenticatedMCPMiddleware(
             mcp_app,
             config=config,
