@@ -78,7 +78,7 @@ class Config:
             raise ConfigError(f"IWIKI_SEARCH_MODE must be one of: {allowed}.")
         idle_timeout_var = "IWIKI_IDLE_TIMEOUT_SECONDS"
         try:
-            idle_timeout_seconds = int(getenv(idle_timeout_var, "86400"))
+            idle_timeout_seconds = int(getenv(idle_timeout_var, "0"))
         except ValueError as exc:
             raise ConfigError(
                 f"{idle_timeout_var} must be a non-negative integer."

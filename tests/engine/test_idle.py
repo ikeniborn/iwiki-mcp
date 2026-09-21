@@ -9,11 +9,11 @@ from iwiki_mcp.engine.config import Config, ConfigError
 from iwiki_mcp.engine.idle import IdleTracker
 
 
-def test_idle_timeout_defaults_to_one_day(monkeypatch):
+def test_idle_timeout_defaults_to_disabled(monkeypatch):
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("IWIKI_LLM_KEY", "key")
 
-    assert Config.load().idle_timeout_seconds == 86400
+    assert Config.load().idle_timeout_seconds == 0
 
 
 def test_idle_timeout_zero_disables_limit(monkeypatch):

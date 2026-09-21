@@ -26,7 +26,7 @@
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `IWIKI_IDLE_TIMEOUT_SECONDS` | `86400` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0` disables the limit. Active tool calls are allowed to finish, and so is a code-graph build started by `wiki_code_index` whose caller already took its job handle. A query-time auto-rebuild does not hold the process open. A client that needs the server later must reconnect or start a new MCP process. |
+| `IWIKI_IDLE_TIMEOUT_SECONDS` | `0` | End a stdio MCP process after this many seconds with no incoming MCP activity. `0`, the default, disables the limit: a stdio server already exits when its client closes stdin, so the timer only ever removes a server whose client is still alive. Set a positive value for a headless run that must stop by itself. Active tool calls are allowed to finish, and so is a code-graph build started by `wiki_code_index` whose caller already took its job handle. A query-time auto-rebuild does not hold the process open. A client that needs the server later must reconnect or start a new MCP process. |
 
 **Search tuning**
 
