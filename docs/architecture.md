@@ -65,8 +65,10 @@ intersected with fresh grants. A session lock bridges FastMCP dispatch, makes re
 immediate without persisting transient removal, and prevents newly granted target access
 from automatic expansion. `wiki_bind` can only persist narrowing. Project initialization
 owns local `.iwiki.toml` and `.iwikiignore`; hosted provisioning never writes them.
-Session identifiers used under a different token are indistinguishable from unknown
-sessions and expire after bounded inactivity.
+A session identifier used under a different token is refused with `404` before the
+request reaches FastMCP; an unknown, expired, or absent identifier is not refused. Entries
+expire after bounded inactivity, and the table is additionally bounded at
+`_SESSION_MAX_ENTRIES`, evicting the least recently used entry once full.
 
 An unknown, expired, or absent session id makes the middleware build the binding from the
 token's own grants. That fallback is marked `token_default` on the selected state, while
@@ -120,8 +122,17 @@ mandatory. Database, authentication, and authorization failures cross the HTTP b
 only as sanitized 503, 401, or 403 responses; invalid or mismatched sessions use 404.
 Because hosted mode has no server-initiated notifications, authenticated `GET /mcp`
 stops at the outer middleware with 405 and `Allow: POST, DELETE`; it never acquires the
-per-session request lock or enters FastMCP. Stateful POST dispatch and DELETE termination
-continue through the session manager.
+per-session request lock or enters FastMCP. POST dispatch continues through FastMCP,
+which runs stateless (`stateless_http = True`): the SDK issues no session id and keeps
+no session table, so `AuthenticatedMCPMiddleware` mints `mcp-session-id` itself for a
+request that arrives without one, returns it in the response header, and owns the
+binding stored under it. DELETE termination never reaches FastMCP — the middleware
+answers it directly with `204`, identically for an owned, foreign, or nonexistent id,
+releasing only the caller's own binding. A restart therefore does not end a client's
+session: an id issued before the restart resolves as unknown rather than foreign and
+starts a fresh, token-scoped binding. A previously selected scope does not survive that
+restart — the client falls back to its token's grants and the answer carries
+`binding_source: token_default` — but the session id itself keeps working.
 
 Git-only tools fail early with stable `unsupported_storage` data when PostgreSQL is
 active. PostgreSQL update/delete require `expected_revision`; a lost optimistic-lock
