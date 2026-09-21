@@ -6,6 +6,7 @@ from typing import Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict
 
 
 class MigrationError(RuntimeError):
@@ -1102,13 +1103,35 @@ def run_migrations(
     )
 
 
+def _safe_server_label(dsn: str) -> str:
+    """Name the server without leaking a credential.
+
+    Only host, port, and database reach the message: enough to tell one server
+    from another while reading a log, and never the password or the DSN itself.
+    """
+    try:
+        parts = conninfo_to_dict(dsn)
+    except psycopg.Error:
+        return "the configured PostgreSQL server"
+    host = parts.get("host") or "?"
+    port = parts.get("port") or "5432"
+    database = parts.get("dbname") or "?"
+    return f"{host}:{port}/{database}"
+
+
 def require_schema_version(
     dsn: str,
     expected_version: int = 8,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
-    """Require one exact installed schema version without mutating the database."""
+    """Require one exact installed schema version without mutating the database.
+
+    An unreachable server and a mismatched schema are different failures with
+    different remedies, so they raise different messages. Reporting both as a
+    version requirement once sent an operator hunting a migration while the
+    real cause was a database that answered on no TCP port at all.
+    """
     try:
         with psycopg.connect(
             dsn, connect_timeout=connect_timeout_s
@@ -1122,11 +1145,15 @@ def require_schema_version(
                 current = cursor.fetchone()[0]
     except psycopg.Error as exc:
         raise MigrationError(
-            f"PostgreSQL schema version {expected_version} is required"
+            f"cannot read the schema version from PostgreSQL at "
+            f"{_safe_server_label(dsn)}: {type(exc).__name__}. "
+            f"The server may be unreachable, refusing this connection, or "
+            f"missing the iwiki schema entirely."
         ) from exc
     if current != expected_version:
         raise MigrationError(
-            f"PostgreSQL schema version {expected_version} is required"
+            f"PostgreSQL schema version {expected_version} is required, "
+            f"but {_safe_server_label(dsn)} reports version {current}"
         )
 
 
