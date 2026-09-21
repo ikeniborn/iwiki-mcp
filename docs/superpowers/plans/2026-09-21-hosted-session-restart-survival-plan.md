@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 8ed865a15813400f
+  plan_hash: 21dae5d4a9f0e3b3
   last_run: 2026-09-21
   phases:
     structure: { status: passed }
@@ -55,7 +55,7 @@ workflow:
 - No plaintext token is stored in memory or written to a log.
 - The token's grants are the ceiling; nothing here may widen a scope.
 - The local stdio transport and its startup path are untouched.
-- The 17 existing tests in `tests/postgres/test_http.py` are not modified — they read the session id from the response header, which keeps arriving.
+- The existing tests in `tests/postgres/test_http.py` are not modified — 17 test functions, 31 collected cases after parametrization. They read the session id from the response header, which keeps arriving.
 - `GET /mcp` keeps answering `405`; the container healthcheck accepts `{401, 405}`.
 - Bump `version` in `pyproject.toml`, `__version__` in `src/iwiki_mcp/__init__.py`, and the pin in `tests/test_package.py` together: 0.7.290 → 0.7.291.
 
