@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 3d4a530f3ffb7ead
+  spec_hash: 7a6604f64a8fdb8d
   last_run: 2026-09-21
   phases:
     structure: { status: passed }
@@ -144,9 +144,19 @@ it is absent from the standard library before Python 3.14 while this project sup
 ### R3 — Ownership is unchanged and still decides
 
 `sessions.resolve(session_id, context)` keeps refusing a record whose `token_id` or
-`iwiki_id` differs. A request bearing another token's session id therefore finds no
-binding and falls through to the existing `token_default` path, exactly as today. No id is
-ever adopted across tokens.
+`iwiki_id` differs. No id is ever adopted across tokens.
+
+A foreign id is refused outright with `404`, before the request reaches the SDK — not
+allowed to fall through to `token_default`. Falling through would reach `store`, whose
+ownership check raises after `http.response.start` has already been sent, turning a
+refusal into a 500 mid-stream. Stateless mode removed the SDK's own ownership check, so
+this refusal is now the only thing rejecting a collision, and it has to happen early. The
+body matches what the SDK used to send, so clients see no change.
+
+An *unknown* id is a different case and is not refused: it starts a fresh session scoped
+to the caller's own token, reported as `token_default`. That distinction is what makes a
+restart invisible — a client returning with an id this process never issued must be served,
+not rejected.
 
 ### R4 — The middleware answers DELETE
 

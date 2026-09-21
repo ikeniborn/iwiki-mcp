@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 21dae5d4a9f0e3b3
+  plan_hash: 7d1adc01450b9bd0
   last_run: 2026-09-21
   phases:
     structure: { status: passed }
@@ -31,7 +31,7 @@ review:
       verdict_at: 2026-09-21
 chain:
   intent: a7e80ec0610318a5
-  spec: 3d4a530f3ffb7ead
+  spec: 7a6604f64a8fdb8d
 workflow:
   route: chain
   continuation: full
@@ -47,7 +47,7 @@ workflow:
 
 **Tech Stack:** Python 3.11, the `mcp` SDK 1.28.1 pinned `<2`, Starlette/ASGI, `anyio`, psycopg pool, pytest with `asyncio_mode=auto`.
 
-**Spec:** `docs/superpowers/specs/2026-09-21-hosted-session-restart-survival-design.md` (spec_hash `3d4a530f3ffb7ead`)
+**Spec:** `docs/superpowers/specs/2026-09-21-hosted-session-restart-survival-design.md` (spec_hash `7a6604f64a8fdb8d`)
 
 ## Global Constraints
 
