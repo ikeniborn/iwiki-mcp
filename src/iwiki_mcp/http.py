@@ -684,8 +684,24 @@ class AuthenticatedMCPMiddleware:
                     async def capture_send(message):
                         if message["type"] == "http.response.start":
                             if message["status"] < 400:
-                                headers = list(message.get("headers", ()))
-                                if session_id is None:
+                                response_session = next(
+                                    (
+                                        value.decode("latin-1")
+                                        for key, value in message.get("headers", ())
+                                        if key.lower() == b"mcp-session-id"
+                                    ),
+                                    None,
+                                )
+                                # The SDK issues no id in stateless mode, so the
+                                # middleware supplies one. It still issues one when
+                                # this app is built stateful - as the transport tests
+                                # do - and then its id wins: two headers would reach
+                                # the client as one malformed value.
+                                target_session = (
+                                    response_session or session_id or issued_session_id
+                                )
+                                if response_session is None and session_id is None:
+                                    headers = list(message.get("headers", ()))
                                     headers.append(
                                         (
                                             b"mcp-session-id",
@@ -693,9 +709,7 @@ class AuthenticatedMCPMiddleware:
                                         )
                                     )
                                     message = dict(message, headers=headers)
-                                self.sessions.store(
-                                    issued_session_id, context, state
-                                )
+                                self.sessions.store(target_session, context, state)
                         await send(message)
 
                     try:
