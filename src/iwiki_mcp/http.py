@@ -302,6 +302,16 @@ async def _send_method_not_allowed(send) -> None:
     await send({"type": "http.response.body", "body": b""})
 
 
+async def _send_no_content(send) -> None:
+    """Acknowledge a termination without saying whether it found anything.
+
+    The same 204 answers an owned session, a stranger's id, and an id that
+    never existed: a caller learns nothing about sessions it does not own.
+    """
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
 async def _send_session_not_found(send) -> None:
     """Answer a session id owned by another token exactly as the SDK did.
 
@@ -588,7 +598,20 @@ class AuthenticatedMCPMiddleware:
             if scope.get("method") == "GET":
                 await _send_method_not_allowed(send)
                 return
+            if scope.get("method") == "DELETE":
+                session_id = _one_header(scope, b"mcp-session-id")
+                self.sessions.remove(session_id, context)
+                await _send_no_content(send)
+                return
             session_id = _one_header(scope, b"mcp-session-id")
+            # Checked here, at request start, against the table `remove`
+            # mutates synchronously; `store` below runs later, inside
+            # `capture_send`, once the inner app has produced a response. A
+            # second request that stores a foreign id for the same session
+            # between this check and that later `store` still surfaces as a
+            # mid-stream 500 rather than a clean refusal -- it takes
+            # colliding client-supplied session ids to reach, so it is
+            # documented here rather than guarded against.
             if self.sessions.is_foreign(session_id, context):
                 await _send_session_not_found(send)
                 return

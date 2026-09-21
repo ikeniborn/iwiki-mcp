@@ -72,6 +72,15 @@ def _request(client, token, payload, *, origin=None, session_id=None):
     return client.post("/mcp", headers=headers, json=payload)
 
 
+def _delete(client, token, *, session_id=None):
+    headers = {}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    if session_id is not None:
+        headers["Mcp-Session-Id"] = session_id
+    return client.delete("/mcp", headers=headers)
+
+
 def _initialize(client, token, *, origin=None, client_name="integration-test"):
     return _request(
         client,
@@ -1676,3 +1685,45 @@ def test_a_session_id_is_issued_and_survives_a_new_middleware_instance(
         assert after.status_code == 200
         body = _tool_result(after)
         assert body["binding_source"] == "token_default"
+
+
+def test_delete_releases_the_callers_binding_and_not_a_strangers(
+    hosted_runtime,
+):
+    """`DELETE /mcp` must answer identically for a stranger's id and the
+    caller's own, while only actually releasing the binding it owns."""
+    runtime = hosted_runtime.runtime
+    token = hosted_runtime.token
+    stranger_token = hosted_runtime.disabled
+
+    with TestClient(runtime.app, base_url="http://127.0.0.1:8765") as client:
+        first = _initialize(client, token)
+        assert first.status_code == 200
+        session_id = first.headers["mcp-session-id"]
+
+        bound = _tool_call(
+            client,
+            token,
+            "wiki_bind",
+            {"read": ["docs"], "write": ["docs"], "primary": "docs"},
+            session_id=session_id,
+        )
+        assert bound.status_code == 200
+
+        stranger = _delete(client, stranger_token, session_id=session_id)
+        assert stranger.status_code == 204
+
+        still_mine = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert still_mine.status_code == 200
+        assert _tool_result(still_mine)["binding_source"] == "session"
+
+        mine = _delete(client, token, session_id=session_id)
+        assert mine.status_code == 204
+
+        after = _tool_call(
+            client, token, "wiki_status", {}, session_id=session_id
+        )
+        assert after.status_code == 200
+        assert _tool_result(after)["binding_source"] == "token_default"
