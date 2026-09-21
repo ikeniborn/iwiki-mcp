@@ -137,10 +137,27 @@ class _SessionBindings:
                 raise AccessError(403)
             self._records[session_id] = record
 
-    def remove(self, session_id: str | None) -> None:
-        if session_id is not None:
-            with self._lock:
-                self._records.pop(session_id, None)
+    def remove(self, session_id: str | None, context: AuthContext) -> bool:
+        """Drop one binding, but only for the token that owns it.
+
+        Stateless mode removes the SDK's own ownership check, so this is the
+        only thing standing between a leaked session id and someone else's
+        binding. The boolean lets the caller answer identically either way:
+        whether a session existed is not the caller's business to learn.
+        """
+        if session_id is None:
+            return False
+        with self._lock:
+            record = self._records.get(session_id)
+            if record is None:
+                return False
+            if (
+                record.token_id != context.token_id
+                or record.iwiki_id != context.iwiki_id
+            ):
+                return False
+            del self._records[session_id]
+            return True
 
 
 def _header_values(scope, name: bytes) -> list[str]:
@@ -581,7 +598,7 @@ class AuthenticatedMCPMiddleware:
                                 scope.get("method") == "DELETE"
                                 and message["status"] < 400
                             ):
-                                self.sessions.remove(session_id)
+                                self.sessions.remove(session_id, context)
                             elif message["status"] < 400:
                                 target_session = response_session or session_id
                                 if target_session is not None:
