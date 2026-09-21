@@ -25,7 +25,15 @@ http {
             proxy_set_header Host $host;
             proxy_buffering off;
             proxy_request_buffering off;
-            proxy_read_timeout 300s;
+            # Hosted MCP answers with JSON, so no stream is held open and this
+            # timeout only bounds one request. A code-graph publication or index
+            # runs for minutes, and 300s turned those into a 504 the client
+            # could only report as a masked transport failure.
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            # Fail fast while the MCP process is restarting instead of holding
+            # the client in a connect that cannot succeed.
+            proxy_connect_timeout 3s;
         }
     }
 }
