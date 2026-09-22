@@ -627,6 +627,15 @@ def _snapshot_states(graph):
     )
 
 
+def _relation_rows(graph) -> int:
+    return graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_relations "
+        "WHERE iwiki_id = %s AND domain_id = %s",
+        (graph.iwiki_id, graph._domain_id()),
+        admin=True,
+    )[0][0]
+
+
 def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
     """Nothing reads a superseded snapshot, so keeping every one is a leak."""
     pg_graph.finalize(pg_graph.complete_session())
@@ -730,21 +739,22 @@ def test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone(pg_graph)
         pg_graph.finalize(pg_graph.complete_session())
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
 
+    oldest = _snapshot_states(pg_graph)[0][0]
+    rows = _snapshot_rows(pg_graph, oldest)
+    assert rows["files"] > 0, "fixture must seed file rows to guard against"
+    budget = rows["wiki_links"] + rows["relations"] + rows["symbols"]
+    assert budget > 0, "fixture must seed non-file child rows to drain first"
+
     store = pg_graph.store
     with store._transaction() as cursor:
         domain_id = store._domain_id(cursor)
-        store._prune_superseded(cursor, domain_id, store._clock(), 1)
+        store._prune_superseded(cursor, domain_id, store._clock(), budget)
 
-    orphans = pg_graph._query(
-        "SELECT count(*) FROM iwiki.code_graph_symbols s "
-        "WHERE s.iwiki_id = %s AND NOT EXISTS ("
-        "SELECT 1 FROM iwiki.code_graph_snapshots p "
-        "WHERE p.iwiki_id = s.iwiki_id AND p.domain_id = s.domain_id "
-        "AND p.snapshot_id = s.snapshot_id)",
-        (pg_graph.iwiki_id,),
-        admin=True,
-    )[0][0]
-    assert orphans == 0, "a snapshot row was deleted while children remained"
+    after = _snapshot_rows(pg_graph, oldest)
+    assert after["files"] > 0, "files drained before every other child table"
+    assert oldest in {row[0] for row in _snapshot_states(pg_graph)}, (
+        "a snapshot row was deleted while its files remained"
+    )
 
 
 def test_cleanup_never_touches_the_active_snapshot(pg_graph):

@@ -638,7 +638,7 @@ class PostgresCodeGraphStore:
             self._discard_snapshot(cursor, domain_id, snapshot_id)
         return len(expired)
 
-    def _prune_superseded(self, cursor, domain_id, now, budget) -> int:
+    def _prune_superseded(self, cursor, domain_id: int, now, budget) -> int:
         """Drop ready snapshots no longer active and older than the retention.
 
         Nothing reads a superseded snapshot: every query joins
