@@ -8,6 +8,7 @@ import time
 from starlette.testclient import TestClient
 
 from iwiki_mcp import server
+from tests.postgres.conftest import _embed
 
 
 def _tool_call(client, token, name, arguments):
@@ -76,9 +77,23 @@ def test_a_saturated_tool_ceiling_does_not_stall_the_liveness_probe(
 
 
 def test_genuinely_overlapping_updates_yield_one_success_and_one_conflict(
-    hosted_runtime,
+    hosted_runtime, monkeypatch,
 ):
     """The old four-way test never overlapped: the event loop serialized it."""
+    # PostgresStore binds its embedder as an __init__ default (evaluated once
+    # at class-definition time), so monkeypatching indexer.embed_texts or the
+    # module-level name doesn't reach it -- confirmed by trying both. Stub the
+    # factory the postgres write path actually calls per request instead,
+    # mirroring tests/postgres/test_tool_matrix.py's own store.with_embedder
+    # use for the same reason.
+    original_store_for_binding = server._postgres_store_for_binding
+
+    def stubbed_store_for_binding(binding):
+        return original_store_for_binding(binding).with_embedder(_embed)
+
+    monkeypatch.setattr(
+        server, "_postgres_store_for_binding", stubbed_store_for_binding
+    )
     token = hosted_runtime.token
 
     with TestClient(
@@ -91,6 +106,7 @@ def test_genuinely_overlapping_updates_yield_one_success_and_one_conflict(
             "markdown": "# Overlap probe\n\n## Body\n\nSeed.\n",
         })
         assert seeded.status_code == 200, seeded.text
+        assert "error" not in seeded.text, seeded.text
 
         results: list[str] = []
         barrier = threading.Barrier(2)
