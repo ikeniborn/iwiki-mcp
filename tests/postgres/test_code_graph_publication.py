@@ -722,3 +722,48 @@ def test_pruning_never_exceeds_its_per_call_bound(pg_graph):
 
     assert len(before - after) == pg_graph.superseded_cleanup_limit
     assert after < before
+
+
+def _relation_rows(pg_graph) -> int:
+    return pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_relations "
+        "WHERE iwiki_id = %s AND domain_id = %s",
+        (pg_graph.iwiki_id, pg_graph._domain_id()),
+        admin=True,
+    )[0][0]
+
+
+def test_cleanup_stops_at_its_row_budget(pg_graph, monkeypatch):
+    """A snapshot is too coarse a unit: two of them were eight minutes."""
+    monkeypatch.setattr(
+        type(pg_graph.store), "_CLEANUP_ROW_BUDGET", 5, raising=False
+    )
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    before = _relation_rows(pg_graph)
+    pg_graph.store.begin(pg_graph.header)
+    after = _relation_rows(pg_graph)
+
+    assert after < before, "cleanup made no progress"
+    assert before - after <= 5 + pg_graph.store._CLEANUP_BATCH_ROWS
+
+
+def test_cleanup_never_touches_the_active_snapshot(pg_graph):
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+    active = pg_graph.reader_status()["snapshot_id"]
+
+    pg_graph.store.begin(pg_graph.header)
+
+    assert pg_graph.reader_status()["snapshot_id"] == active
+    assert pg_graph.reader_status()["state"] == "ready"
+
+
+def test_the_row_budget_exceeds_what_one_publication_adds():
+    """A budget below one snapshot turns a stall into a permanent backlog."""
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    assert PostgresCodeGraphStore._CLEANUP_ROW_BUDGET > 30000

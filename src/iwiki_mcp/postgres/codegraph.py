@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 import datetime
 import json
 import secrets
+import time
 from typing import Any, Iterator
 
 import psycopg
@@ -97,6 +98,14 @@ def _current_markdown_revision(cursor, iwiki_id, domain_id: int) -> str:
 
 class PostgresCodeGraphStore:
     """Publish tenant-scoped graph snapshots with fixed non-transferable owners."""
+
+    # Cleanup is bounded by rows and a deadline rather than by snapshots. A
+    # snapshot holds tens of thousands of rows, so even a bound of two was
+    # eight minutes of held work. Partial progress is safe because nothing
+    # reads a superseded snapshot: every query joins active_snapshot_id.
+    _CLEANUP_ROW_BUDGET = 100000
+    _CLEANUP_DEADLINE_SECONDS = 2.0
+    _CLEANUP_BATCH_ROWS = 10000
 
     def __init__(
         self,
@@ -619,14 +628,19 @@ class PostgresCodeGraphStore:
             (self.iwiki_id, domain_id, threshold, self._staging_cleanup_limit),
         )
         expired = cursor.fetchall()
+        deadline = time.monotonic() + self._CLEANUP_DEADLINE_SECONDS
+        cleaned = 0
         for session_id, snapshot_id in expired:
+            if time.monotonic() >= deadline:
+                break
             cursor.execute(
                 "DELETE FROM iwiki.code_graph_publication_sessions "
                 "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
                 (self.iwiki_id, domain_id, session_id),
             )
             self._discard_snapshot(cursor, domain_id, snapshot_id)
-        return len(expired)
+            cleaned += 1
+        return cleaned
 
     def _prune_superseded(self, cursor, domain_id: int, now) -> int:
         """Drop ready snapshots no longer active and older than the retention.
@@ -664,19 +678,15 @@ class PostgresCodeGraphStore:
             ),
         )
         superseded = [row[0] for row in cursor.fetchall()]
+        deadline = time.monotonic() + self._CLEANUP_DEADLINE_SECONDS
+        budget = self._CLEANUP_ROW_BUDGET
+        pruned = 0
         for snapshot_id in superseded:
-            for table in (
-                "code_graph_wiki_links",
-                "code_graph_relations",
-                "code_graph_symbols",
-                "code_graph_files",
-            ):
-                cursor.execute(
-                    f"DELETE FROM iwiki.{table} "
-                    "WHERE iwiki_id = %s AND domain_id = %s "
-                    "AND snapshot_id = %s",
-                    (self.iwiki_id, domain_id, snapshot_id),
-                )
+            if budget <= 0 or time.monotonic() >= deadline:
+                break
+            budget -= self._delete_snapshot_rows(
+                cursor, domain_id, snapshot_id, budget
+            )
             cursor.execute(
                 "DELETE FROM iwiki.code_graph_snapshots "
                 "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
@@ -684,16 +694,51 @@ class PostgresCodeGraphStore:
                 "AND snapshot_id NOT IN ("
                 "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
                 "WHERE iwiki_id = %s AND domain_id = %s "
-                "AND active_snapshot_id IS NOT NULL)",
+                "AND active_snapshot_id IS NOT NULL) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM iwiki.code_graph_relations r "
+                "WHERE r.iwiki_id = %s AND r.domain_id = %s "
+                "AND r.snapshot_id = %s)",
                 (
                     self.iwiki_id,
                     domain_id,
                     snapshot_id,
                     self.iwiki_id,
                     domain_id,
+                    self.iwiki_id,
+                    domain_id,
+                    snapshot_id,
                 ),
             )
-        return len(superseded)
+            pruned += 1
+        return pruned
+
+    def _delete_snapshot_rows(self, cursor, domain_id, snapshot_id, budget):
+        """Delete up to `budget` rows of one snapshot; return how many went."""
+        removed = 0
+        for table in (
+            "code_graph_wiki_links",
+            "code_graph_relations",
+            "code_graph_symbols",
+            "code_graph_files",
+        ):
+            while removed < budget:
+                cursor.execute(
+                    f"DELETE FROM iwiki.{table} WHERE ctid IN ("
+                    f"SELECT ctid FROM iwiki.{table} "
+                    "WHERE iwiki_id = %s AND domain_id = %s "
+                    "AND snapshot_id = %s LIMIT %s)",
+                    (
+                        self.iwiki_id,
+                        domain_id,
+                        snapshot_id,
+                        min(self._CLEANUP_BATCH_ROWS, budget - removed),
+                    ),
+                )
+                if not cursor.rowcount:
+                    break
+                removed += cursor.rowcount
+        return removed
 
     def _fail_snapshot(self, cursor, domain_id: int, snapshot_id: str):
         cursor.execute(
