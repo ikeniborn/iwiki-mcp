@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 9ba0a634c2214831
+  spec_hash: f304669554881634
   last_run: 2026-09-22
   phases:
     structure: { status: passed }
@@ -16,6 +16,26 @@ review:
       fragment: null
       text: "The Testing section listed eight cases with no binding to the requirements they verify, so the plan gate could not check coverage mechanically."
       fix: "Testing is now a table whose every row names the requirements it verifies; all seven of R1-R7 are referenced."
+      verdict: fixed
+      verdict_at: 2026-09-22
+    - id: F-002
+      phase: coverage
+      severity: CRITICAL
+      section: Testing
+      section_hash: bf67496efa4245a8
+      fragment: "The existing suites are expected to pass unchanged."
+      text: "False. tests/postgres/test_code_graph_publication.py::test_pruning_never_exceeds_its_per_call_bound asserts len(before - after) == superseded_cleanup_limit, which encodes the snapshot-based bound R5 replaces. Found while writing the plan and returned to this gate rather than worked around."
+      fix: "R5 now states the contract change explicitly and Testing names the one test that is rewritten, forbidding edits to any other existing test."
+      verdict: fixed
+      verdict_at: 2026-09-22
+    - id: F-003
+      phase: coverage
+      severity: CRITICAL
+      section: R5
+      section_hash: a4af02259b0ce725
+      fragment: "a maximum number of deleted rows and a wall-clock deadline, whichever is reached first"
+      text: "Arithmetically impossible as specified. A publication adds about 30000 rows; at the throughput observed in production a 2-second budget removes a few hundred. R5's deadline and R6's drain could not both hold while cleanup ran inside begin. Found by the Task 5 review, and it is the intent's own stop rule firing: halt if bounding cleanup can only be made to fit by letting the backlog grow."
+      fix: "R5, R6 and R7 rewritten. begin now schedules cleanup on a single-flight background worker and returns; the worker drains the backlog in committed batches with no wall-clock deadline, since nothing waits on it. R6 is now measured as behaviour rather than asserted as a constant comparison. The snapshot row is deleted only once all four child tables are empty, closing the unindexed-cascade path the Task 5 review found."
       verdict: fixed
       verdict_at: 2026-09-22
 chain:
@@ -192,17 +212,19 @@ A global write lock was considered and rejected. It would serialize writers to u
 domains and make a long publication block every other write, in exchange for a guarantee
 the database already provides.
 
-### R5 — Cleanup is bounded by rows and a deadline
+### R5 — Cleanup runs outside the publication, in a single-flight worker
 
-`_prune_superseded` and `_cleanup_staging` share one budget per call, whichever limit is
-reached first:
+`begin` performs no cleanup at all. After the publication's rows are committed it *schedules*
+cleanup on a background daemon thread and returns.
 
-- at most **100,000** deleted rows, counted across both cleanups and all four child tables;
-- a wall-clock deadline of **2 seconds**, checked between batches;
-- a batch size of **10,000** rows per statement, which stays far inside the 30-second
-  `statement_timeout` that already bounds each statement.
+One cleanup runs at a time per process, guarded by a single-flight flag: a second publication
+arriving while cleanup is in progress schedules nothing and returns immediately. Cleanup runs
+until the domain's superseded backlog is drained or a generous per-cycle ceiling is reached —
+**200000** rows — whichever comes first. There is no wall-clock deadline, because nothing is
+waiting on it.
 
-Deletion proceeds in batches keyed by the primary-key prefix:
+Deletion proceeds in batches of **10000** rows keyed by the primary-key prefix, which stays far
+inside the 30-second `statement_timeout` that already bounds each statement:
 
 ```sql
 DELETE FROM iwiki.code_graph_relations
@@ -213,40 +235,51 @@ WHERE ctid IN (
 )
 ```
 
-A snapshot's own row is deleted only once its children are gone. Partial progress is safe
-because a superseded snapshot is already invisible to every query, so interrupting cleanup
-mid-snapshot leaves nothing inconsistent — this is what makes a row-based bound possible
-where the current snapshot-based one is not.
+Each batch commits in its own transaction, so a crash or a shutdown loses at most one batch and
+the next cycle resumes. Partial progress is safe because a superseded snapshot is already
+invisible to every query — nothing reads it, so interrupting mid-snapshot leaves nothing
+inconsistent. That property is what makes an interruptible worker possible at all.
 
-The existing bound counts snapshots and is documented as needing to "stay small", but the
-smallest useful value is already two snapshots, which is the eight minutes being fixed. A
-snapshot is too coarse a unit to bound with.
+A snapshot's own row is deleted only once **all four** child tables are empty for it, not just
+`code_graph_relations`. Guarding on one table lets budget exhaustion during `symbols` or `files`
+delete the parent row while children remain, and the resulting `ON DELETE CASCADE` walks
+`code_graph_relations_source_symbol_fk`, which carries no index — the 49-minute path the
+existing docstring exists to prevent.
 
-### R6 — The row budget exceeds what one publication adds
+This replaces an earlier design in which cleanup ran inside `begin` under a 2-second deadline.
+That could not work: a publication adds about 30000 rows, and at the throughput observed in
+production a 2-second budget removes a few hundred. `begin` fast, backlog draining, and cleanup
+inside `begin` are three promises of which only two can hold at once.
 
-The per-call row budget must be strictly greater than the rows one publication adds — about
-30,000 for this repository's snapshot, against the 100,000 budget of R5. Otherwise each
-publication removes less than it creates and the backlog grows, turning a stall into a
-permanent leak.
+### R6 — The backlog drains rather than growing
 
-At that ratio the current backlog of roughly 1.24M relation rows drains over about
-15 publications rather than accumulating.
+Cleanup removes strictly more than publications add. Because a cycle runs until the domain's
+backlog is drained rather than for a fixed slice of time, the invariant holds by construction:
+one publication adds one snapshot, and one cycle removes every superseded snapshot it finds.
 
-This is an invariant with a test, not a tuning note.
+The 200000-row per-cycle ceiling exists so a single cycle cannot run unboundedly against a
+pathological backlog; it is above one publication's ~30000 rows by a wide margin, so even a
+ceiling-limited cycle drains faster than publications accumulate.
+
+This is an invariant with a test that measures behaviour — the backlog strictly decreases across
+successive publications — not a test that merely asserts one constant is larger than another. A
+constant comparison passes while the backlog sits still, which is precisely the failure this
+requirement exists to prevent.
 
 ### R7 — Cleanup does not gate the publication
 
-Cleanup runs in its own transaction, after the snapshot and session rows have been
-committed. `begin` still performs it within the same call — no background task is
-introduced — but the publication is no longer *gated* on it in the two senses that matter:
-a cleanup failure is logged and cannot roll back the committed publication, and the total
-time is bounded by R5's deadline rather than by the size of the backlog.
+`begin` commits the snapshot and session rows, schedules cleanup, and returns. It never waits for
+cleanup, never fails because of cleanup, and its cost does not vary with the size of the backlog.
 
-`begin` therefore costs its own inserts plus at most the 2-second cleanup deadline, which
-is what keeps it inside the 5-second acceptance bound.
+A cleanup failure is logged with the rows removed and the failure type, and nothing propagates to
+the caller: cleanup is maintenance, not a precondition for work someone else already succeeded at.
 
-Today both cleanups run inside `begin`'s transaction before its inserts, which is why a
-long cleanup both delays an unrelated publication and can roll it back.
+The worker is a daemon thread, so process shutdown never blocks on it; a cycle interrupted by
+shutdown loses at most its current batch, and the next publication schedules a fresh cycle that
+resumes where it stopped.
+
+Today both cleanups run inside `begin`'s transaction before its inserts, which is why a long
+cleanup both delays an unrelated publication and can roll it back.
 
 ## 6. Error handling
 
@@ -256,7 +289,9 @@ long cleanup both delays an unrelated publication and can roll it back.
 | Client disconnects mid-call | The thread runs to completion and the result is discarded; it no longer blocks the server |
 | Tool ceiling reached | The caller queues on the limiter; no error is returned |
 | Connection pool exhausted | Should not occur, because the ceiling is the pool size; if it does, it surfaces as the existing PostgreSQL error path |
-| Cleanup fails or hits its deadline | Logged with the row count; the publication proceeds |
+| Cleanup fails or is interrupted | Logged with the rows removed and the failure type; the publication is already committed and is unaffected |
+| A cleanup cycle is already running | The new publication schedules nothing and returns; single-flight |
+| Process shuts down mid-cycle | The daemon thread is abandoned; at most one batch is lost and the next cycle resumes |
 | Concurrent updates to one section | One `200`, the rest `conflict`, from the database's own compare-and-swap |
 
 ## 7. Testing
@@ -271,12 +306,16 @@ mechanically rather than by reading prose.
 | 3 | Two sessions updating the same section with genuinely overlapping transactions yield one `200` and one `conflict`. New coverage: the existing four-way test ran under event-loop serialization and never overlapped. | R4 |
 | 4 | Saturating `_TOOL_LIMITER` queues callers rather than raising a pool timeout. | R2 |
 | 5 | The registration wrapper preserves the signature, so `func_metadata` builds the same argument model as the unwrapped function. | R1 |
-| 6 | Cleanup honours its row budget and its deadline, and never touches the active or a staging snapshot. | R5 |
-| 7 | Repeated `begin` calls against a seeded backlog each stay within the time bound while the row count strictly decreases. | R5, R6, R7 |
-| 8 | The row budget is greater than one publication's rows — an invariant test that fails loudly rather than degrading silently. | R6 |
-| 9 | A cleanup failure is logged and leaves the publication committed. | R7 |
+| 6 | Cleanup deletes in batches, never touches the active or a staging snapshot, and deletes a snapshot row only once all four child tables are empty for it. | R5 |
+| 7 | `begin` returns without waiting for cleanup: its duration does not vary with the size of the seeded backlog. | R7 |
+| 8 | Across successive publications against a seeded backlog, the row count strictly decreases — the drain measured as behaviour, not asserted as a constant. | R6 |
+| 9 | A cleanup failure is logged and leaves the publication committed, and a second publication arriving mid-cycle schedules nothing. | R5, R7 |
 
-The existing suites are expected to pass unchanged.
+The existing suites are expected to pass unchanged, with exactly one named exception:
+`tests/postgres/test_code_graph_publication.py::test_pruning_never_exceeds_its_per_call_bound`
+asserts the snapshot-based bound that R5 replaces, so it is rewritten to assert the row
+budget and the deadline instead. No other existing test may be edited; if one fails, that
+is a defect in the change rather than a contract that moved.
 
 ## 8. Out of scope
 
@@ -286,3 +325,6 @@ The existing suites are expected to pass unchanged.
   operations outside this work.
 - The watchdog's thresholds. Once a long operation no longer makes the server unresponsive,
   the watchdog stops interacting with it.
+- Exposing cleanup as its own MCP tool. The worker is internal; adding a public tool would be a
+  new contract this intent never asked for. If operators later need to force a cycle, that is its
+  own change.
