@@ -2,7 +2,13 @@ services:
   iwiki:
     build: .
     network_mode: host
-    restart: unless-stopped
+    # systemd owns this container's lifecycle through iwiki-mcp.service, which
+    # runs `compose up` in the foreground with Restart=on-failure. A Docker
+    # restart policy would fight that unit by restarting a container systemd had
+    # just stopped. The database stack uses the same arrangement for the same
+    # reason. Recovery from an unhealthy-but-running container comes from
+    # iwiki-mcp-watchdog.timer, since Docker applies no policy to health status.
+    restart: "no"
     read_only: true
     user: "10001:10001"
     tmpfs:

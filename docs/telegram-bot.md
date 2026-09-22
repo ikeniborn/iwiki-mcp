@@ -202,8 +202,11 @@ Use the one-service `compose.yaml` path documented in the
 
 Supervisor runs exactly one bot process per Telegram token together with hosted MCP and
 nginx. The runtime image includes `ffmpeg` for local voice conversion. Compose uses
-`restart: unless-stopped`, a 60-second graceful stop, a read-only root filesystem, and
-tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every unexpected child exit,
+`restart: "no"`, a 60-second graceful stop, a read-only root filesystem, and
+tmpfs mounts for `/run` and `/tmp`. The restart policy is `"no"` because systemd owns the
+container's lifecycle through `iwiki-mcp.service`; see
+[Health, recovery, and privacy](deployment.md#health-recovery-and-privacy). Supervisor
+restarts every unexpected child exit,
 including exit status zero; an explicit `supervisorctl stop` remains stopped until an
 explicit start. Each child receives `TERM` and has 55 seconds to stop before Supervisor
 can force its process group, inside the Compose 60-second window. Health covers all
