@@ -1,6 +1,8 @@
 """PostgreSQL publication session lifecycle, ownership, and activation tests."""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 
@@ -627,6 +629,15 @@ def _snapshot_states(graph):
     )
 
 
+def _relation_rows(graph) -> int:
+    return graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_relations "
+        "WHERE iwiki_id = %s AND domain_id = %s",
+        (graph.iwiki_id, graph._domain_id()),
+        admin=True,
+    )[0][0]
+
+
 def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
     """Nothing reads a superseded snapshot, so keeping every one is a leak."""
     pg_graph.finalize(pg_graph.complete_session())
@@ -638,6 +649,14 @@ def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
     pg_graph.finalize(pg_graph.complete_session())
     third = pg_graph.reader_status()["snapshot_id"]
+
+    # begin() only schedules cleanup on a daemon thread now; call the worker
+    # body directly so the prune below is observed after it has actually run,
+    # not raced against the background thread.
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    store._run_cleanup_cycle(domain_id)
 
     remaining = {row[0] for row in _snapshot_states(pg_graph)}
     assert first not in remaining
@@ -699,6 +718,14 @@ def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
     pg_graph.store.begin(pg_graph.header)
 
+    # begin() only schedules cleanup on a daemon thread now; call the worker
+    # body directly so the prune below is observed after it has actually run,
+    # not raced against the background thread.
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    store._run_cleanup_cycle(domain_id)
+
     assert _snapshot_rows(pg_graph, first) == {
         "wiki_links": 0,
         "relations": 0,
@@ -707,18 +734,173 @@ def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
     }
 
 
-def test_pruning_never_exceeds_its_per_call_bound(pg_graph):
-    superseded = []
-    for _ in range(pg_graph.superseded_cleanup_limit + 2):
+def test_the_backlog_drains_across_successive_publications(pg_graph):
+    """R6 measured as behaviour: a constant comparison passes while it stalls."""
+    for _ in range(pg_graph.superseded_cleanup_limit + 3):
         pg_graph.finalize(pg_graph.complete_session())
-        superseded.append(pg_graph.reader_status()["snapshot_id"])
-    pg_graph.finalize(pg_graph.complete_session())
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
 
-    # `begin` also inserts a staging snapshot, so only the ready ones count.
-    before = {row[0] for row in _snapshot_states(pg_graph) if row[1] == "ready"}
-    pg_graph.store.begin(pg_graph.header)
-    after = {row[0] for row in _snapshot_states(pg_graph) if row[1] == "ready"}
+    store = pg_graph.store
+    before = _relation_rows(pg_graph)
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    store._run_cleanup_cycle(domain_id)
+    after = _relation_rows(pg_graph)
 
-    assert len(before - after) == pg_graph.superseded_cleanup_limit
-    assert after < before
+    assert after < before, "the backlog did not shrink"
+
+
+def test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone(pg_graph):
+    """Guarding on one table lets the unindexed cascade fire mid-snapshot."""
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    oldest = _snapshot_states(pg_graph)[0][0]
+    rows = _snapshot_rows(pg_graph, oldest)
+    assert rows["files"] > 0, "fixture must seed file rows to guard against"
+    budget = rows["wiki_links"] + rows["relations"] + rows["symbols"]
+    assert budget > 0, "fixture must seed non-file child rows to drain first"
+
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+        store._prune_superseded(cursor, domain_id, store._clock(), budget)
+
+    after = _snapshot_rows(pg_graph, oldest)
+    assert after["files"] > 0, "files drained before every other child table"
+    assert oldest in {row[0] for row in _snapshot_states(pg_graph)}, (
+        "a snapshot row was deleted while its files remained"
+    )
+
+
+def test_cleanup_never_touches_the_active_snapshot(pg_graph):
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+    active = pg_graph.reader_status()["snapshot_id"]
+
+    pg_graph.store.begin(pg_graph.header)
+
+    assert pg_graph.reader_status()["snapshot_id"] == active
+    assert pg_graph.reader_status()["state"] == "ready"
+
+
+def test_begin_does_not_wait_for_cleanup(pg_graph, monkeypatch):
+    """begin's cost must not vary with the size of the backlog."""
+    scheduled = []
+    monkeypatch.setattr(
+        type(pg_graph.store),
+        "_schedule_cleanup",
+        lambda self, domain_id: scheduled.append(domain_id),
+    )
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    before = _relation_rows(pg_graph)
+    pg_graph.store.begin(pg_graph.header)
+
+    assert scheduled, "begin did not schedule cleanup"
+    assert _relation_rows(pg_graph) >= before, "begin performed cleanup inline"
+
+
+def test_a_failing_cleanup_leaves_the_publication_committed(pg_graph, monkeypatch):
+    """Cleanup is maintenance, not a precondition for someone else's work."""
+
+    def explode(self, domain_id):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(type(pg_graph.store), "_schedule_cleanup", explode)
+
+    session = pg_graph.store.begin(pg_graph.header)
+
+    assert session.session_id
+    assert "staging" in {row[1] for row in _snapshot_states(pg_graph)}
+
+
+def test_a_second_publication_mid_cycle_schedules_nothing(pg_graph, monkeypatch):
+    """The real worker never holds the lock while a cycle runs; only the
+    active-set membership does, so the fixture marks the domain active
+    directly instead of acquiring the lock (which would misrepresent state
+    the real code never holds re-entrantly).
+    """
+    cycles = []
+    monkeypatch.setattr(
+        type(pg_graph.store),
+        "_run_cleanup_cycle",
+        lambda self, domain_id: cycles.append(domain_id),
+    )
+    store = pg_graph.store
+    key = (store.iwiki_id, 1)
+    type(store)._cleanup_active.add(key)
+    try:
+        store._schedule_cleanup(1)
+    finally:
+        type(store)._cleanup_active.discard(key)
+
+    assert cycles == []
+
+
+def test_a_second_store_against_the_same_domain_schedules_nothing(pg_graph, monkeypatch):
+    """The guard is class-scoped and keyed by domain, not by store instance.
+
+    server.py builds a fresh PostgresCodeGraphStore per publication request,
+    so two concurrent publications against the same domain are two different
+    store objects; an instance-scoped guard would let both spawn a cycle.
+    """
+    cycles = []
+    monkeypatch.setattr(
+        type(pg_graph.store),
+        "_run_cleanup_cycle",
+        lambda self, domain_id: cycles.append(domain_id),
+    )
+    other = pg_graph.for_domain(pg_graph.domain)
+    assert other.store is not pg_graph.store
+
+    with pg_graph.store._transaction() as cursor:
+        domain_id = pg_graph.store._domain_id(cursor)
+    key = (pg_graph.store.iwiki_id, domain_id)
+
+    try:
+        pg_graph.store._schedule_cleanup(domain_id)
+        other.store._schedule_cleanup(domain_id)
+
+        deadline = time.monotonic() + 5
+        while not cycles and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert cycles == [domain_id], "the second store's schedule was not a no-op"
+    finally:
+        type(pg_graph.store)._cleanup_active.discard(key)
+
+
+def test_schedule_cleanup_runs_the_real_worker_and_clears_the_active_key(pg_graph):
+    """No test above lets the real thread run; this one exercises it end to
+    end against a seeded backlog and confirms the active-set key is not
+    leaked once the cycle finishes.
+    """
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    key = (store.iwiki_id, domain_id)
+
+    before = _relation_rows(pg_graph)
+    store._schedule_cleanup(domain_id)
+
+    try:
+        deadline = time.monotonic() + 10
+        while key in type(store)._cleanup_active and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert key not in type(store)._cleanup_active, (
+            "cleanup did not finish (and clear its active-set key) within the timeout"
+        )
+        assert _relation_rows(pg_graph) < before, "the real cleanup cycle removed no rows"
+    finally:
+        with type(store)._cleanup_lock:
+            type(store)._cleanup_active.discard(key)
