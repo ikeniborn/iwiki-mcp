@@ -30,7 +30,8 @@ def test_rendered_compose_is_one_hardened_host_network_service(rendered_compose)
     service = rendered_compose["services"]["iwiki"]
 
     assert service["network_mode"] == "host"
-    assert service["restart"] == "unless-stopped"
+    # Deliberately "no": systemd owns the lifecycle through iwiki-mcp.service.
+    assert service["restart"] == "no"
     assert service["read_only"] is True
     assert service["user"] == "10001:10001"
     assert set(service["tmpfs"]) == {

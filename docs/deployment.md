@@ -1257,8 +1257,15 @@ trap - EXIT INT TERM HUP
 
 ## Health, recovery, and privacy
 
-Compose uses `restart: unless-stopped`, `stop_grace_period: 60s`, a read-only root
-filesystem, and tmpfs mounts for `/run` and `/tmp`. Supervisor restarts every unexpected
+Compose uses `restart: "no"`, `stop_grace_period: 60s`, a read-only root
+filesystem, and tmpfs mounts for `/run` and `/tmp`. The restart policy is `"no"` because
+systemd owns the container's lifecycle: `iwiki-mcp.service` runs `compose up` in the
+foreground with `Restart=on-failure`, and a Docker policy would fight it by restarting a
+container systemd had just stopped. Docker applies no restart policy to health status at
+all, so an unhealthy-but-running container is recovered by `iwiki-mcp-watchdog.timer`,
+which restarts the unit after three consecutive unhealthy probes and at most three times
+an hour. The units and that runbook live in the `minipc` repository under
+`docs/services/iwiki-mcp/`. Supervisor restarts every unexpected
 exit of hosted MCP, nginx, or the Telegram bot, including exit status zero; an explicit
 `supervisorctl stop` remains stopped. Each child receives `TERM` with a 55-second wait
 before process-group kill, leaving five seconds inside the Compose graceful window.
