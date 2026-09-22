@@ -6,7 +6,9 @@ from contextlib import contextmanager
 from dataclasses import asdict, replace
 import datetime
 import json
+import logging
 import secrets
+import threading
 from typing import Any, Iterator
 
 import psycopg
@@ -43,6 +45,8 @@ from ..codegraph.query import (
 from ..codegraph.reader import EMPTY_CONTEXT_RESULT, MISSING_READ_RESULT
 from .store import validate_direct_principal
 
+
+LOGGER = logging.getLogger(__name__)
 
 _LOCK_NAMESPACE = 0x4957494B
 _LOCK_NOT_AVAILABLE = "55P03"
@@ -139,6 +143,8 @@ class PostgresCodeGraphStore:
         self._clock = clock or (
             lambda: datetime.datetime.now(datetime.timezone.utc)
         )
+        self._cleanup_lock = threading.RLock()
+        self._cleanup_active = False
         if require_database_principal and validate_direct_principal(
             dsn,
             iwiki_id=iwiki_id,
@@ -258,9 +264,6 @@ class PostgresCodeGraphStore:
             domain_id = self._domain_id(cursor)
             self._domain_state(cursor, domain_id)
             self._cleanup_staging(cursor, domain_id, now)
-            self._prune_superseded(
-                cursor, domain_id, now, self._CLEANUP_CYCLE_ROWS
-            )
             generation = self._markdown_generation(cursor, domain_id)
             base_revision = self._active_revision(cursor, domain_id)
             cursor.execute(
@@ -299,6 +302,15 @@ class PostgresCodeGraphStore:
                     now,
                     now,
                 ),
+            )
+        # Scheduled, never awaited: the publication is already committed and
+        # must not be charged for draining someone else's backlog.
+        try:
+            self._schedule_cleanup(domain_id)
+        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            LOGGER.warning(
+                "code graph cleanup could not be scheduled: %s",
+                type(exc).__name__,
             )
         return PublicationSession(
             session_id=session_id,
@@ -708,6 +720,51 @@ class PostgresCodeGraphStore:
             )
             deleted_rows += cursor.rowcount
         return deleted_rows
+
+    def _schedule_cleanup(self, domain_id: int) -> None:
+        """Start one cleanup cycle unless one is already running.
+
+        Cleanup is deliberately not part of a publication: a publication adds
+        about 30000 rows, and draining a backlog takes far longer than any
+        budget a caller would tolerate waiting for. Single-flight keeps a burst
+        of publications from stacking cycles on the same tables.
+        """
+        with self._cleanup_lock:
+            if self._cleanup_active:
+                return
+            self._cleanup_active = True
+        thread = threading.Thread(
+            target=self._run_cleanup_cycle,
+            args=(domain_id,),
+            name="iwiki-code-graph-cleanup",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_cleanup_cycle(self, domain_id: int) -> None:
+        """Drain this domain's superseded backlog, one committed batch at a time."""
+        removed = 0
+        try:
+            while removed < self._CLEANUP_CYCLE_ROWS:
+                with self._transaction() as cursor:
+                    batch = self._prune_superseded(
+                        cursor,
+                        domain_id,
+                        self._clock(),
+                        self._CLEANUP_CYCLE_ROWS - removed,
+                    )
+                if not batch:
+                    break
+                removed += batch
+        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            LOGGER.warning(
+                "code graph cleanup cycle failed after %s rows: %s",
+                removed,
+                type(exc).__name__,
+            )
+        finally:
+            with self._cleanup_lock:
+                self._cleanup_active = False
 
     def _delete_snapshot_rows(self, cursor, domain_id, snapshot_id, budget):
         """Delete up to `budget` rows of one snapshot; return how many went."""

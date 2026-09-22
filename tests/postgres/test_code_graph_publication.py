@@ -767,3 +767,55 @@ def test_cleanup_never_touches_the_active_snapshot(pg_graph):
 
     assert pg_graph.reader_status()["snapshot_id"] == active
     assert pg_graph.reader_status()["state"] == "ready"
+
+
+def test_begin_does_not_wait_for_cleanup(pg_graph, monkeypatch):
+    """begin's cost must not vary with the size of the backlog."""
+    scheduled = []
+    monkeypatch.setattr(
+        type(pg_graph.store),
+        "_schedule_cleanup",
+        lambda self, domain_id: scheduled.append(domain_id),
+    )
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    before = _relation_rows(pg_graph)
+    pg_graph.store.begin(pg_graph.header)
+
+    assert scheduled, "begin did not schedule cleanup"
+    assert _relation_rows(pg_graph) >= before, "begin performed cleanup inline"
+
+
+def test_a_failing_cleanup_leaves_the_publication_committed(pg_graph, monkeypatch):
+    """Cleanup is maintenance, not a precondition for someone else's work."""
+
+    def explode(self, domain_id):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(type(pg_graph.store), "_schedule_cleanup", explode)
+
+    session = pg_graph.store.begin(pg_graph.header)
+
+    assert session.session_id
+    assert "staging" in {row[1] for row in _snapshot_states(pg_graph)}
+
+
+def test_a_second_publication_mid_cycle_schedules_nothing(pg_graph, monkeypatch):
+    cycles = []
+    monkeypatch.setattr(
+        type(pg_graph.store),
+        "_run_cleanup_cycle",
+        lambda self, domain_id: cycles.append(domain_id),
+    )
+    store = pg_graph.store
+    store._cleanup_lock.acquire()
+    try:
+        store._cleanup_active = True
+        store._schedule_cleanup(1)
+    finally:
+        store._cleanup_active = False
+        store._cleanup_lock.release()
+
+    assert cycles == []
