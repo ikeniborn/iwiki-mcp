@@ -1,3 +1,42 @@
+---
+review:
+  plan_hash: 2da52fdf39cb9e50
+  last_run: 2026-09-22
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    dependencies: { status: passed }
+    verifiability: { status: passed }
+    consistency: { status: passed }
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: CRITICAL
+      section: Requirement coverage
+      section_hash: 28fa49a1a3089614
+      fragment: null
+      text: "The plan named no spec requirement anywhere, so neither direction of coverage could be checked mechanically - the same defect this author had just raised against the spec's Testing section."
+      fix: "Added a Requirement coverage table mapping R1-R7 to tasks, and an Implements line on each of the seven task headings."
+      verdict: fixed
+      verdict_at: 2026-09-22
+    - id: F-002
+      phase: structure
+      severity: WARNING
+      section: Task 3
+      section_hash: null
+      fragment: "httpx.get(f\"{url}/mcp\", timeout=2.0)"
+      text: "Tasks 3 and 4 were written against a live HTTP server. The hosted_runtime fixture yields an in-process ASGI app driven by starlette TestClient, with no URL, so both tasks would have failed at the first line."
+      fix: "Both rewritten against TestClient(runtime.app, base_url=...), with the fixture's real attribute names and the writable domain 'docs'. Found during plan self-review."
+      verdict: fixed
+      verdict_at: 2026-09-22
+chain:
+  intent: 477b97089342a0b1
+  spec: 4ecafd8ad402e951
+workflow:
+  route: chain
+  continuation: full
+---
+
 # Hosted tool dispatch off the event loop — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -22,9 +61,26 @@
 - Bump the version in `pyproject.toml`, `src/iwiki_mcp/__init__.py` and `tests/test_package.py` once, in the final task. Current version is `0.7.292`; use `0.7.293`.
 - `tests/postgres` requires a disposable database. Run it with the container recipe in `CLAUDE.md`; the DSN database name must end in `_test`.
 
+## Requirement coverage
+
+Every spec requirement maps to at least one task, and every task implements at least one
+requirement. A task that drifts outside this map is drift, not scope.
+
+| Spec requirement | Tasks |
+|---|---|
+| R1 — Tools execute off the event loop | 1, 3 |
+| R2 — The tool ceiling comes from the storage | 1, 2, 3 |
+| R3 — Liveness never competes with tools | 2, 3 |
+| R4 — No write serialization is added | 4 |
+| R5 — Cleanup is bounded by rows and a deadline | 5, 7 |
+| R6 — The row budget exceeds what one publication adds | 5 |
+| R7 — Cleanup does not gate the publication | 6 |
+
 ---
 
 ### Task 1: Dispatch tools onto a worker thread
+
+**Implements:** R1, R2
 
 **Files:**
 - Modify: `src/iwiki_mcp/server.py` (add the limiter and wrapper near the registration block at line 5770; rewrite lines 5771–5810)
@@ -173,6 +229,8 @@ git commit -m "feat(server): run tool handlers on a worker thread"
 
 ### Task 2: Size the ceiling from the connection pool
 
+**Implements:** R2, R3
+
 **Files:**
 - Modify: `src/iwiki_mcp/server.py:374-382` (`_install_hosted_runtime`)
 - Test: `tests/test_tool_dispatch.py` (extend)
@@ -269,6 +327,8 @@ git commit -m "feat(server): size the tool ceiling below the connection pool"
 ---
 
 ### Task 3: Prove the liveness probe survives saturated tools
+
+**Implements:** R1, R2, R3
 
 **Files:**
 - Test: `tests/postgres/test_tool_concurrency.py` (create)
@@ -395,6 +455,8 @@ git commit -m "test(http): guard the liveness probe against saturated tools"
 
 ### Task 4: Prove overlapping writes still conflict
 
+**Implements:** R4
+
 **Files:**
 - Test: `tests/postgres/test_tool_concurrency.py` (extend)
 
@@ -468,6 +530,8 @@ git commit -m "test(postgres): assert conflict under genuinely overlapping write
 ---
 
 ### Task 5: Bound cleanup by rows and a deadline
+
+**Implements:** R5, R6
 
 **Files:**
 - Modify: `src/iwiki_mcp/postgres/codegraph.py` (`_cleanup_staging` at line 609, `_prune_superseded` at line 631, and `_discard_snapshot`)
@@ -659,6 +723,8 @@ git commit -m "fix(codegraph): bound cleanup by rows and a deadline"
 
 ### Task 6: Take cleanup out of the publication transaction
 
+**Implements:** R7
+
 **Files:**
 - Modify: `src/iwiki_mcp/postgres/codegraph.py:243-296` (`begin`)
 - Test: `tests/postgres/test_code_graph_publication.py` (extend)
@@ -741,6 +807,8 @@ git commit -m "fix(codegraph): commit the publication before cleaning up"
 ---
 
 ### Task 7: Retire the snapshot-count contract, document, and release
+
+**Implements:** R5
 
 **Files:**
 - Modify: `tests/postgres/test_code_graph_publication.py` (rewrite `test_pruning_never_exceeds_its_per_call_bound`, around line 710)
