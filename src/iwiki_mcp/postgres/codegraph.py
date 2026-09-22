@@ -110,6 +110,14 @@ class PostgresCodeGraphStore:
     _CLEANUP_BATCH_ROWS = 10000
     _CLEANUP_CYCLE_ROWS = 200000
 
+    # Class-scoped: `server.py` builds a fresh store per publication request,
+    # so an instance-scoped guard would let every concurrent publication spawn
+    # its own cycle against the same tables. Keying by (iwiki_id, domain_id)
+    # keeps different domains free to clean concurrently while still
+    # single-flighting one domain's backlog per process.
+    _cleanup_lock = threading.Lock()
+    _cleanup_active: set = set()
+
     def __init__(
         self,
         dsn: str,
@@ -143,8 +151,6 @@ class PostgresCodeGraphStore:
         self._clock = clock or (
             lambda: datetime.datetime.now(datetime.timezone.utc)
         )
-        self._cleanup_lock = threading.RLock()
-        self._cleanup_active = False
         if require_database_principal and validate_direct_principal(
             dsn,
             iwiki_id=iwiki_id,
@@ -722,27 +728,38 @@ class PostgresCodeGraphStore:
         return deleted_rows
 
     def _schedule_cleanup(self, domain_id: int) -> None:
-        """Start one cleanup cycle unless one is already running.
+        """Start one cleanup cycle unless this domain already has one running.
 
         Cleanup is deliberately not part of a publication: a publication adds
         about 30000 rows, and draining a backlog takes far longer than any
         budget a caller would tolerate waiting for. Single-flight keeps a burst
-        of publications from stacking cycles on the same tables.
+        of publications from stacking cycles on the same tables. The guard is
+        class-scoped and keyed by (iwiki_id, domain_id): a fresh store is
+        constructed per publication request, so an instance-scoped guard would
+        let every concurrent publication spawn its own cycle; different
+        domains still clean concurrently.
         """
-        with self._cleanup_lock:
-            if self._cleanup_active:
+        key = (self.iwiki_id, domain_id)
+        with PostgresCodeGraphStore._cleanup_lock:
+            if key in PostgresCodeGraphStore._cleanup_active:
                 return
-            self._cleanup_active = True
-        thread = threading.Thread(
-            target=self._run_cleanup_cycle,
-            args=(domain_id,),
-            name="iwiki-code-graph-cleanup",
-            daemon=True,
-        )
-        thread.start()
+            PostgresCodeGraphStore._cleanup_active.add(key)
+        try:
+            thread = threading.Thread(
+                target=self._run_cleanup_cycle,
+                args=(domain_id,),
+                name="iwiki-code-graph-cleanup",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            with PostgresCodeGraphStore._cleanup_lock:
+                PostgresCodeGraphStore._cleanup_active.discard(key)
+            raise
 
     def _run_cleanup_cycle(self, domain_id: int) -> None:
         """Drain this domain's superseded backlog, one committed batch at a time."""
+        key = (self.iwiki_id, domain_id)
         removed = 0
         try:
             while removed < self._CLEANUP_CYCLE_ROWS:
@@ -763,8 +780,8 @@ class PostgresCodeGraphStore:
                 type(exc).__name__,
             )
         finally:
-            with self._cleanup_lock:
-                self._cleanup_active = False
+            with PostgresCodeGraphStore._cleanup_lock:
+                PostgresCodeGraphStore._cleanup_active.discard(key)
 
     def _delete_snapshot_rows(self, cursor, domain_id, snapshot_id, budget):
         """Delete up to `budget` rows of one snapshot; return how many went."""

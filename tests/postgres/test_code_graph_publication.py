@@ -1,6 +1,8 @@
 """PostgreSQL publication session lifecycle, ownership, and activation tests."""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 
@@ -803,6 +805,11 @@ def test_a_failing_cleanup_leaves_the_publication_committed(pg_graph, monkeypatc
 
 
 def test_a_second_publication_mid_cycle_schedules_nothing(pg_graph, monkeypatch):
+    """The real worker never holds the lock while a cycle runs; only the
+    active-set membership does, so the fixture marks the domain active
+    directly instead of acquiring the lock (which would misrepresent state
+    the real code never holds re-entrantly).
+    """
     cycles = []
     monkeypatch.setattr(
         type(pg_graph.store),
@@ -810,12 +817,71 @@ def test_a_second_publication_mid_cycle_schedules_nothing(pg_graph, monkeypatch)
         lambda self, domain_id: cycles.append(domain_id),
     )
     store = pg_graph.store
-    store._cleanup_lock.acquire()
+    key = (store.iwiki_id, 1)
+    type(store)._cleanup_active.add(key)
     try:
-        store._cleanup_active = True
         store._schedule_cleanup(1)
     finally:
-        store._cleanup_active = False
-        store._cleanup_lock.release()
+        type(store)._cleanup_active.discard(key)
 
     assert cycles == []
+
+
+def test_a_second_store_against_the_same_domain_schedules_nothing(pg_graph, monkeypatch):
+    """The guard is class-scoped and keyed by domain, not by store instance.
+
+    server.py builds a fresh PostgresCodeGraphStore per publication request,
+    so two concurrent publications against the same domain are two different
+    store objects; an instance-scoped guard would let both spawn a cycle.
+    """
+    cycles = []
+    monkeypatch.setattr(
+        type(pg_graph.store),
+        "_run_cleanup_cycle",
+        lambda self, domain_id: cycles.append(domain_id),
+    )
+    other = pg_graph.for_domain(pg_graph.domain)
+    assert other.store is not pg_graph.store
+
+    with pg_graph.store._transaction() as cursor:
+        domain_id = pg_graph.store._domain_id(cursor)
+    key = (pg_graph.store.iwiki_id, domain_id)
+
+    try:
+        pg_graph.store._schedule_cleanup(domain_id)
+        other.store._schedule_cleanup(domain_id)
+
+        deadline = time.monotonic() + 5
+        while not cycles and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert cycles == [domain_id], "the second store's schedule was not a no-op"
+    finally:
+        type(pg_graph.store)._cleanup_active.discard(key)
+
+
+def test_schedule_cleanup_runs_the_real_worker_and_clears_the_active_key(pg_graph):
+    """No test above lets the real thread run; this one exercises it end to
+    end against a seeded backlog and confirms the active-set key is not
+    leaked once the cycle finishes.
+    """
+    for _ in range(3):
+        pg_graph.finalize(pg_graph.complete_session())
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    key = (store.iwiki_id, domain_id)
+
+    before = _relation_rows(pg_graph)
+    store._schedule_cleanup(domain_id)
+
+    deadline = time.monotonic() + 10
+    while key in type(store)._cleanup_active and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert key not in type(store)._cleanup_active, (
+        "cleanup did not finish (and clear its active-set key) within the timeout"
+    )
+    assert _relation_rows(pg_graph) < before, "the real cleanup cycle removed no rows"
