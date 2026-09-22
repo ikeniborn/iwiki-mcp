@@ -1,3 +1,30 @@
+---
+review:
+  spec_hash: 9ba0a634c2214831
+  last_run: 2026-09-22
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: Testing
+      section_hash: 5b78dae010a68153
+      fragment: null
+      text: "The Testing section listed eight cases with no binding to the requirements they verify, so the plan gate could not check coverage mechanically."
+      fix: "Testing is now a table whose every row names the requirements it verifies; all seven of R1-R7 are referenced."
+      verdict: fixed
+      verdict_at: 2026-09-22
+chain:
+  intent: 477b97089342a0b1
+workflow:
+  route: chain
+  continuation: full
+---
+
 # Design: hosted-tool-dispatch-blocks-event-loop
 
 **Date:** 2026-09-22
@@ -234,26 +261,20 @@ long cleanup both delays an unrelated publication and can roll it back.
 
 ## 7. Testing
 
-New cases:
+Every case names the requirement it verifies, so the plan stage can check coverage
+mechanically rather than by reading prose.
 
-1. A handler that blocks for several seconds does not prevent the healthcheck's probe from
-   answering within 2 seconds. The probe is unauthenticated, so it is answered `401` by the
-   auth path and only `405` once authenticated — which is precisely why it depends on a
-   free connection as well as a free thread.
-2. The issue 100 reproduction: 60 concurrent `wiki_search` calls, with the health probe
-   answering throughout.
-3. Two sessions updating the same section with genuinely overlapping transactions yield
-   one `200` and one `conflict`. This is new coverage: the existing four-way test ran
-   under event-loop serialization and never overlapped.
-4. Saturating `_TOOL_LIMITER` queues callers rather than raising a pool timeout.
-5. The registration wrapper preserves the signature, so `func_metadata` builds the same
-   argument model as the unwrapped function.
-6. Cleanup honours its row budget and its deadline, and never touches the active or a
-   staging snapshot.
-7. Repeated `begin` calls against a seeded backlog each stay within the time bound while
-   the row count strictly decreases.
-8. The row budget is greater than one publication's rows — an invariant test that fails
-   loudly rather than degrading silently.
+| # | Case | Verifies |
+|---|---|---|
+| 1 | A handler that blocks for several seconds does not prevent the healthcheck's probe from answering within 2 seconds. The probe is unauthenticated, so it is answered `401` by the auth path and only `405` once authenticated — which is precisely why it depends on a free connection as well as a free thread. | R1, R3 |
+| 2 | The issue 100 reproduction: 60 concurrent `wiki_search` calls, with the health probe answering throughout. | R1, R2, R3 |
+| 3 | Two sessions updating the same section with genuinely overlapping transactions yield one `200` and one `conflict`. New coverage: the existing four-way test ran under event-loop serialization and never overlapped. | R4 |
+| 4 | Saturating `_TOOL_LIMITER` queues callers rather than raising a pool timeout. | R2 |
+| 5 | The registration wrapper preserves the signature, so `func_metadata` builds the same argument model as the unwrapped function. | R1 |
+| 6 | Cleanup honours its row budget and its deadline, and never touches the active or a staging snapshot. | R5 |
+| 7 | Repeated `begin` calls against a seeded backlog each stay within the time bound while the row count strictly decreases. | R5, R6, R7 |
+| 8 | The row budget is greater than one publication's rows — an invariant test that fails loudly rather than degrading silently. | R6 |
+| 9 | A cleanup failure is logged and leaves the publication committed. | R7 |
 
 The existing suites are expected to pass unchanged.
 
