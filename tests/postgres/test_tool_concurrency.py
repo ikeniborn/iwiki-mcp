@@ -73,3 +73,44 @@ def test_a_saturated_tool_ceiling_does_not_stall_the_liveness_probe(
     assert probe_elapsed < 2.0, (
         f"the probe took {probe_elapsed:.2f}s while tools were saturated"
     )
+
+
+def test_genuinely_overlapping_updates_yield_one_success_and_one_conflict(
+    hosted_runtime,
+):
+    """The old four-way test never overlapped: the event loop serialized it."""
+    token = hosted_runtime.token
+
+    with TestClient(
+        hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765"
+    ) as client:
+        seeded = _tool_call(client, token, "wiki_write_page", {
+            "domain": "docs",
+            "slug": "reference/overlap-probe",
+            "type": "reference",
+            "markdown": "# Overlap probe\n\n## Body\n\nSeed.\n",
+        })
+        assert seeded.status_code == 200, seeded.text
+
+        results: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def update(marker: str):
+            barrier.wait(timeout=30)
+            response = _tool_call(client, token, "wiki_update_page", {
+                "domain": "docs",
+                "slug": "reference/overlap-probe",
+                "heading": "Body",
+                "new_body": f"Body\n\nWritten by {marker}.\n",
+                "expected_revision": 1,
+            })
+            results.append(response.text)
+
+        threads = [threading.Thread(target=update, args=(m,)) for m in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+    assert len(results) == 2, results
+    assert sum("conflict" in text for text in results) == 1, results
