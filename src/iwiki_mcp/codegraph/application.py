@@ -525,6 +525,28 @@ def create_postgres_publisher(
 
 _SWEEP_LOCK = threading.Lock()
 _SWEEP_ACTIVE: set[str] = set()
+# Any authenticated request may kick a sweep, so the floor keeps an idle wiki
+# from re-sweeping continuously: without it the next request after a sweep
+# finishes would start another one.
+_SWEEP_MIN_INTERVAL_SECONDS = 900.0
+_SWEEP_LAST: dict[str, float] = {}
+
+
+def cleanup_sweep_due(iwiki_id: str) -> bool:
+    """Cheap enough to ask on every request: a lock and a float compare.
+
+    Deliberately not a timer. A background schedule would have no request, no
+    binding and no token, so it would have to act with the service role's whole
+    reach -- substituting connection privileges for a mandate, which is exactly
+    what the per-domain store design rejects. A request already carries the
+    mandate the sweep needs.
+    """
+    now = time.monotonic()
+    with _SWEEP_LOCK:
+        if iwiki_id in _SWEEP_ACTIVE:
+            return False
+        last = _SWEEP_LAST.get(iwiki_id)
+        return last is None or now - last >= _SWEEP_MIN_INTERVAL_SECONDS
 
 
 def _sweep_wiki_cleanup(
@@ -601,6 +623,7 @@ def schedule_wiki_cleanup(
         finally:
             with _SWEEP_LOCK:
                 _SWEEP_ACTIVE.discard(key)
+                _SWEEP_LAST[key] = time.monotonic()
 
     try:
         threading.Thread(
