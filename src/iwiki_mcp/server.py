@@ -2012,9 +2012,36 @@ def wiki_code_context(
 @_code_safe
 def wiki_code_publish_begin(header: dict) -> dict:
     """Open one owned publication session for the authenticated primary."""
-    return _with_binding_provenance(
-        _code_publication_service(_resolved_binding()).begin_from_mapping(header)
+    binding = _resolved_binding()
+    result = _with_binding_provenance(
+        _code_publication_service(binding).begin_from_mapping(header)
     )
+    _schedule_wiki_code_graph_cleanup(binding)
+    return result
+
+
+def _schedule_wiki_code_graph_cleanup(binding) -> None:
+    """Sweep every writable domain's own cleanup, never blocking the caller.
+
+    Cleanup used to be reachable only from a publication of the same domain,
+    so a domain that stopped publishing kept its superseded rows forever. The
+    sweep iterates `binding.write` and builds one store per domain, because a
+    store may only touch the domain it was constructed and validated for.
+    """
+    if not _is_postgres(binding):
+        return
+    context = _request_auth_context()
+    if context is None or not context.token_id:
+        return
+    try:
+        _codegraph_application.schedule_wiki_cleanup(
+            binding,
+            context.token_id,
+            _hosted_code_graph_settings(),
+            lock_timeout_ms=_CODE_PUBLICATION_LOCK_TIMEOUT_MS,
+        )
+    except Exception:  # noqa: BLE001 - maintenance must not fail a publication
+        LOGGER.warning("code graph cleanup sweep could not be scheduled")
 
 
 @_safe

@@ -312,7 +312,7 @@ class PostgresCodeGraphStore:
         # Scheduled, never awaited: the publication is already committed and
         # must not be charged for draining someone else's backlog.
         try:
-            self._schedule_cleanup(domain_id)
+            self._schedule_cleanup()
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
             LOGGER.warning(
                 "code graph cleanup could not be scheduled: %s",
@@ -728,7 +728,7 @@ class PostgresCodeGraphStore:
             deleted_rows += cursor.rowcount
         return deleted_rows
 
-    def _schedule_cleanup(self, domain_id: int) -> None:
+    def _schedule_cleanup(self) -> None:
         """Start one cleanup cycle unless this domain already has one running.
 
         Cleanup is deliberately not part of a publication: a publication adds
@@ -740,15 +740,17 @@ class PostgresCodeGraphStore:
         let every concurrent publication spawn its own cycle; different
         domains still clean concurrently.
         """
-        key = (self.iwiki_id, domain_id)
+        key = (self.iwiki_id, self.domain)
         with PostgresCodeGraphStore._cleanup_lock:
             if key in PostgresCodeGraphStore._cleanup_active:
+                LOGGER.debug(
+                    "code graph cleanup already running for this domain"
+                )
                 return
             PostgresCodeGraphStore._cleanup_active.add(key)
         try:
             thread = threading.Thread(
                 target=self._run_cleanup_cycle,
-                args=(domain_id,),
                 name="iwiki-code-graph-cleanup",
                 daemon=True,
             )
@@ -758,11 +760,20 @@ class PostgresCodeGraphStore:
                 PostgresCodeGraphStore._cleanup_active.discard(key)
             raise
 
-    def _run_cleanup_cycle(self, domain_id: int) -> None:
-        """Drain this domain's superseded backlog, one committed batch at a time."""
-        key = (self.iwiki_id, domain_id)
+    def _run_cleanup_cycle(self) -> None:
+        """Drain this domain's superseded backlog, one committed batch at a time.
+
+        The store resolves its own `domain_id` rather than taking one: it was
+        constructed and validated for exactly one domain, so accepting an id
+        from a caller would let it act outside what it checked. The outcome is
+        logged even when it is zero, because a cycle that ran and found nothing
+        used to be indistinguishable from one that never started.
+        """
+        key = (self.iwiki_id, self.domain)
         removed = 0
         try:
+            with self._transaction() as cursor:
+                domain_id = self._domain_id(cursor)
             while removed < self._CLEANUP_CYCLE_ROWS:
                 with self._transaction() as cursor:
                     batch = self._prune_superseded(
@@ -774,6 +785,9 @@ class PostgresCodeGraphStore:
                 if not batch:
                     break
                 removed += batch
+            LOGGER.info(
+                "code graph cleanup removed %s rows from one domain", removed
+            )
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
             LOGGER.warning(
                 "code graph cleanup cycle failed after %s rows: %s",

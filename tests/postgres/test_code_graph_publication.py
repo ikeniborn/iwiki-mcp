@@ -654,9 +654,7 @@ def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
     # body directly so the prune below is observed after it has actually run,
     # not raced against the background thread.
     store = pg_graph.store
-    with store._transaction() as cursor:
-        domain_id = store._domain_id(cursor)
-    store._run_cleanup_cycle(domain_id)
+    store._run_cleanup_cycle()
 
     remaining = {row[0] for row in _snapshot_states(pg_graph)}
     assert first not in remaining
@@ -722,9 +720,7 @@ def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
     # body directly so the prune below is observed after it has actually run,
     # not raced against the background thread.
     store = pg_graph.store
-    with store._transaction() as cursor:
-        domain_id = store._domain_id(cursor)
-    store._run_cleanup_cycle(domain_id)
+    store._run_cleanup_cycle()
 
     assert _snapshot_rows(pg_graph, first) == {
         "wiki_links": 0,
@@ -742,9 +738,7 @@ def test_the_backlog_drains_across_successive_publications(pg_graph):
 
     store = pg_graph.store
     before = _relation_rows(pg_graph)
-    with store._transaction() as cursor:
-        domain_id = store._domain_id(cursor)
-    store._run_cleanup_cycle(domain_id)
+    store._run_cleanup_cycle()
     after = _relation_rows(pg_graph)
 
     assert after < before, "the backlog did not shrink"
@@ -792,7 +786,7 @@ def test_begin_does_not_wait_for_cleanup(pg_graph, monkeypatch):
     monkeypatch.setattr(
         type(pg_graph.store),
         "_schedule_cleanup",
-        lambda self, domain_id: scheduled.append(domain_id),
+        lambda self: scheduled.append(self.domain),
     )
     for _ in range(3):
         pg_graph.finalize(pg_graph.complete_session())
@@ -808,7 +802,7 @@ def test_begin_does_not_wait_for_cleanup(pg_graph, monkeypatch):
 def test_a_failing_cleanup_leaves_the_publication_committed(pg_graph, monkeypatch):
     """Cleanup is maintenance, not a precondition for someone else's work."""
 
-    def explode(self, domain_id):
+    def explode(self):
         raise RuntimeError("cleanup exploded")
 
     monkeypatch.setattr(type(pg_graph.store), "_schedule_cleanup", explode)
@@ -829,13 +823,13 @@ def test_a_second_publication_mid_cycle_schedules_nothing(pg_graph, monkeypatch)
     monkeypatch.setattr(
         type(pg_graph.store),
         "_run_cleanup_cycle",
-        lambda self, domain_id: cycles.append(domain_id),
+        lambda self: cycles.append(self.domain),
     )
     store = pg_graph.store
-    key = (store.iwiki_id, 1)
+    key = (store.iwiki_id, store.domain)
     type(store)._cleanup_active.add(key)
     try:
-        store._schedule_cleanup(1)
+        store._schedule_cleanup()
     finally:
         type(store)._cleanup_active.discard(key)
 
@@ -853,24 +847,24 @@ def test_a_second_store_against_the_same_domain_schedules_nothing(pg_graph, monk
     monkeypatch.setattr(
         type(pg_graph.store),
         "_run_cleanup_cycle",
-        lambda self, domain_id: cycles.append(domain_id),
+        lambda self: cycles.append(self.domain),
     )
     other = pg_graph.for_domain(pg_graph.domain)
     assert other.store is not pg_graph.store
 
-    with pg_graph.store._transaction() as cursor:
-        domain_id = pg_graph.store._domain_id(cursor)
-    key = (pg_graph.store.iwiki_id, domain_id)
+    key = (pg_graph.store.iwiki_id, pg_graph.store.domain)
 
     try:
-        pg_graph.store._schedule_cleanup(domain_id)
-        other.store._schedule_cleanup(domain_id)
+        pg_graph.store._schedule_cleanup()
+        other.store._schedule_cleanup()
 
         deadline = time.monotonic() + 5
         while not cycles and time.monotonic() < deadline:
             time.sleep(0.01)
 
-        assert cycles == [domain_id], "the second store's schedule was not a no-op"
+        assert cycles == [pg_graph.domain], (
+            "the second store's schedule was not a no-op"
+        )
     finally:
         type(pg_graph.store)._cleanup_active.discard(key)
 
@@ -885,12 +879,10 @@ def test_schedule_cleanup_runs_the_real_worker_and_clears_the_active_key(pg_grap
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
 
     store = pg_graph.store
-    with store._transaction() as cursor:
-        domain_id = store._domain_id(cursor)
-    key = (store.iwiki_id, domain_id)
+    key = (store.iwiki_id, store.domain)
 
     before = _relation_rows(pg_graph)
-    store._schedule_cleanup(domain_id)
+    store._schedule_cleanup()
 
     try:
         deadline = time.monotonic() + 10
@@ -904,3 +896,93 @@ def test_schedule_cleanup_runs_the_real_worker_and_clears_the_active_key(pg_grap
     finally:
         with type(store)._cleanup_lock:
             type(store)._cleanup_active.discard(key)
+
+
+class _SweepSettings:
+    """Minimal settings for the sweep: retention zero so seeded rows qualify."""
+
+    publication_session_ttl_seconds = 1800
+    staging_retention_seconds = 86400
+    staging_cleanup_limit = 100
+    superseded_retention_seconds = 0
+    superseded_cleanup_limit = 2
+
+
+def _sweep_binding(graph, domains):
+    from psycopg.conninfo import conninfo_to_dict
+
+    from iwiki_mcp.storage import PostgresBinding
+
+    values = conninfo_to_dict(str(graph.dsn))
+    return PostgresBinding(
+        host=values.get("host", "127.0.0.1"),
+        port=int(values.get("port", 5432)),
+        database=values["dbname"],
+        user=values["user"],
+        sslmode=values.get("sslmode", "prefer"),
+        password=values.get("password", ""),
+        iwiki_id=graph.iwiki_id,
+        read=tuple(domains),
+        write=tuple(domains),
+        primary=domains[0],
+        project_dir="/hosted-without-checkout",
+        embed_model="fixture-model",
+        embed_dimensions=3,
+        rerank_model="",
+    )
+
+
+def test_the_sweep_drains_a_domain_that_did_not_publish(pg_graph):
+    """The regression: cleanup used to be reachable only from that domain's
+    own publication, so a domain that stopped publishing kept its rows.
+    """
+    from iwiki_mcp.codegraph import application
+
+    other = pg_graph.for_domain("private")
+    for _ in range(3):
+        other.finalize(other.complete_session())
+
+    before = _relation_rows(other)
+    assert before > 0, "fixture must seed rows in the non-publishing domain"
+
+    binding = _sweep_binding(pg_graph, ("docs", "private"))
+    application._sweep_wiki_cleanup(
+        binding, "owner-sweep", _SweepSettings(), 5000
+    )
+
+    assert _relation_rows(other) < before, (
+        "the sweep left a non-publishing domain's backlog in place"
+    )
+
+
+def test_the_sweep_builds_one_store_per_domain_and_mixes_none(
+    pg_graph, monkeypatch
+):
+    """Domains must never be mixed: each store cleans only what it validated."""
+    from iwiki_mcp.codegraph import application
+
+    built = []
+    swept = []
+
+    class _Recorder:
+        def __init__(self, domain):
+            self.domain = domain
+
+        def _run_cleanup_cycle(self):
+            swept.append(self.domain)
+
+    def fake_publisher(binding, owner_id, settings, *, lock_timeout_ms, domain):
+        built.append(domain)
+        return _Recorder(domain)
+
+    monkeypatch.setattr(
+        application, "create_postgres_publisher", fake_publisher
+    )
+
+    binding = _sweep_binding(pg_graph, ("docs", "private"))
+    application._sweep_wiki_cleanup(
+        binding, "owner-sweep", _SweepSettings(), 5000
+    )
+
+    assert built == ["docs", "private"]
+    assert swept == ["docs", "private"]
