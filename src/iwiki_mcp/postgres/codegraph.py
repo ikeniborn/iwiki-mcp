@@ -670,8 +670,9 @@ class PostgresCodeGraphStore:
         foreign keys cascade instead searches every child table once per
         deleted parent row, and those keys carry no index of their own: one
         such prune ran for 49 minutes on a live domain and took the server
-        with it. A snapshot holds tens of thousands of rows, so the per-call
-        bound counts snapshots, not rows, and must stay small.
+        with it. A snapshot holds tens of thousands of rows, so the bound counts rows
+        and the work is resumable: a cycle may stop mid-snapshot, and the next
+        one continues, because nothing reads a superseded snapshot.
         """
         threshold = now - datetime.timedelta(
             seconds=self._superseded_retention_seconds

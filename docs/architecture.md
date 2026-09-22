@@ -593,6 +593,16 @@ Every `wiki_*` handler is defined as a plain function, then registered separatel
 implementations directly. Each is wrapped by `@_safe`: it **never raises** —
 exceptions become `{"error", "hint"}` dicts.
 
+Registration also wraps every handler in `_threaded`, which runs the sync body on a
+worker thread under an `anyio.CapacityLimiter` (`server.py`'s `_TOOL_LIMITER`) instead
+of on the event loop. FastMCP calls a sync tool inline in its own coroutine, so without
+that hop a single blocking call inside any handler stops the server answering anything
+else, including the liveness probe. The limiter's ceiling is set from
+`pool.max_size - 2` once the PostgreSQL pool is configured, deliberately below the pool
+size: authentication draws connections from that same pool, so letting tool handlers
+take every connection would starve the probe through the database instead of through
+the loop.
+
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'background': '#1e1e2e', 'primaryColor': '#313244', 'primaryTextColor': '#cdd6f4', 'primaryBorderColor': '#89b4fa', 'lineColor': '#888888'}}}%%
 mindmap

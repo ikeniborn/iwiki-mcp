@@ -39,10 +39,21 @@ mode. PostgreSQL wiki storage always reads from its own database, so `read_mode`
 nothing left to choose there.
 
 `superseded_retention_seconds` bounds how long a snapshot that is no longer active is
-kept before publication prunes it, at most `staging_cleanup_limit` per call and never
-the active one. Nothing reads a superseded snapshot — every query joins
-`code_graph_domain_state.active_snapshot_id` — so the window exists only to leave an
-operator a manual revert target.
+kept before it becomes eligible for cleanup, never the active one. Nothing reads a
+superseded snapshot — every query joins `code_graph_domain_state.active_snapshot_id` —
+so the window exists only to leave an operator a manual revert target.
+
+Cleanup runs on a single-flight background worker rather than inside a publication:
+`begin` and `finalize` schedule a cycle and return immediately, so a publication is
+never delayed or failed by it. A cycle drains the backlog in committed batches — each
+batch deletes one superseded snapshot's rows, children first, in its own transaction —
+and stops once it hits its per-cycle row ceiling or the backlog is empty. If a cycle
+stops early, the next publication's schedule call resumes the drain where the previous
+one left off, because the state lives in the database, not in the worker. At most one
+cycle runs per domain at a time; concurrent publications against the same domain share
+it instead of stacking cycles on the same tables. Direct-PostgreSQL CLI publication is a
+known gap here: the process exits shortly after `finalize` returns, so a cleanup cycle
+it schedules can be killed before it drains.
 
 The published snapshot — not the reading server's own configuration — decides which
 languages a hosted read may return. `wiki_code_search` on PostgreSQL storage derives its
@@ -130,8 +141,9 @@ Retry the whole publication after `busy`, `session_expired`, `snapshot_conflict`
 `revision_mismatch`, or `markdown_unavailable`: begin a new session and resend. A
 `snapshot_conflict` means the active snapshot or the destination Markdown changed while
 the session was open, so the rebuilt graph must be published against the current state.
-Expired staging sessions are cleaned up in bounded batches when the next session begins;
-no background daemon runs.
+Expired staging sessions are cleaned up in bounded batches when the next session begins,
+inline and synchronously — distinct from the superseded-snapshot worker above, which is
+the only background daemon in this path.
 
 For PostgreSQL or remote MCP reads, `include_source=true` returns graph context without
 source plus `source_unavailable`; the server never fetches source from the publisher.

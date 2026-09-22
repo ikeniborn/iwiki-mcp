@@ -718,21 +718,20 @@ def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
     }
 
 
-def test_pruning_never_exceeds_its_per_call_bound(pg_graph):
-    superseded = []
-    for _ in range(pg_graph.superseded_cleanup_limit + 2):
+def test_the_backlog_drains_across_successive_publications(pg_graph):
+    """R6 measured as behaviour: a constant comparison passes while it stalls."""
+    for _ in range(pg_graph.superseded_cleanup_limit + 3):
         pg_graph.finalize(pg_graph.complete_session())
-        superseded.append(pg_graph.reader_status()["snapshot_id"])
-    pg_graph.finalize(pg_graph.complete_session())
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
 
-    # `begin` also inserts a staging snapshot, so only the ready ones count.
-    before = {row[0] for row in _snapshot_states(pg_graph) if row[1] == "ready"}
-    pg_graph.store.begin(pg_graph.header)
-    after = {row[0] for row in _snapshot_states(pg_graph) if row[1] == "ready"}
+    store = pg_graph.store
+    before = _relation_rows(pg_graph)
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    store._run_cleanup_cycle(domain_id)
+    after = _relation_rows(pg_graph)
 
-    assert len(before - after) == pg_graph.superseded_cleanup_limit
-    assert after < before
+    assert after < before, "the backlog did not shrink"
 
 
 def test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone(pg_graph):
