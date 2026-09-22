@@ -544,11 +544,38 @@ def _creation_binding() -> base.Binding:
     )
 
 
+def _maybe_sweep_code_graph_cleanup() -> None:
+    """Let any authenticated request kick a cleanup sweep, cheaply.
+
+    Publication alone was not enough: a wiki that stopped publishing kept its
+    superseded rows forever. A request is used as the trigger rather than a
+    timer because a request already carries a binding, and the sweep's mandate
+    is `binding.write`. A timer would have no binding and would have to act
+    with the service role's whole reach, which is the substitution of
+    privileges for authorization that the per-domain store design rejects.
+
+    The interval check comes first and costs a lock and a float compare, so an
+    ordinary call pays nothing. A wiki nobody touches is never swept, and that
+    is an acceptable resting state: its rows inconvenience no one.
+    """
+    context = _request_auth_context()
+    if context is None or not context.iwiki_id:
+        return
+    if not _codegraph_application.cleanup_sweep_due(context.iwiki_id):
+        return
+    try:
+        _schedule_wiki_code_graph_cleanup(_resolved_binding())
+    except Exception:  # noqa: BLE001 - maintenance must not affect the caller
+        LOGGER.debug("opportunistic code graph cleanup sweep was not started")
+
+
 def _safe(fn):
     @functools.wraps(fn)
     def wrap(*a, **k):
         try:
-            return fn(*a, **k)
+            result = fn(*a, **k)
+            _maybe_sweep_code_graph_cleanup()
+            return result
         except _codegraph_models.CodeGraphError as e:
             return _codegraph_runtime.sanitized_error(e)
         except base.BaseError as e:
