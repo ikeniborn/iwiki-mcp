@@ -35,7 +35,7 @@ def test_threaded_wrapper_preserves_the_signature_fastmcp_reads():
 
     wrapped = server._threaded(handler)
 
-    assert str(inspect.signature(wrapped)) == "(domain: str, limit: int = 5) -> dict"
+    assert inspect.signature(wrapped) == inspect.signature(handler)
     assert wrapped.__doc__ == "Original docstring."
     assert wrapped.__name__ == "handler"
 
