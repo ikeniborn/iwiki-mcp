@@ -724,30 +724,27 @@ def test_pruning_never_exceeds_its_per_call_bound(pg_graph):
     assert after < before
 
 
-def _relation_rows(pg_graph) -> int:
-    return pg_graph._query(
-        "SELECT count(*) FROM iwiki.code_graph_relations "
-        "WHERE iwiki_id = %s AND domain_id = %s",
-        (pg_graph.iwiki_id, pg_graph._domain_id()),
-        admin=True,
-    )[0][0]
-
-
-def test_cleanup_stops_at_its_row_budget(pg_graph, monkeypatch):
-    """A snapshot is too coarse a unit: two of them were eight minutes."""
-    monkeypatch.setattr(
-        type(pg_graph.store), "_CLEANUP_ROW_BUDGET", 5, raising=False
-    )
+def test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone(pg_graph):
+    """Guarding on one table lets the unindexed cascade fire mid-snapshot."""
     for _ in range(3):
         pg_graph.finalize(pg_graph.complete_session())
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
 
-    before = _relation_rows(pg_graph)
-    pg_graph.store.begin(pg_graph.header)
-    after = _relation_rows(pg_graph)
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+        store._prune_superseded(cursor, domain_id, store._clock(), 1)
 
-    assert after < before, "cleanup made no progress"
-    assert before - after <= 5 + pg_graph.store._CLEANUP_BATCH_ROWS
+    orphans = pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_symbols s "
+        "WHERE s.iwiki_id = %s AND NOT EXISTS ("
+        "SELECT 1 FROM iwiki.code_graph_snapshots p "
+        "WHERE p.iwiki_id = s.iwiki_id AND p.domain_id = s.domain_id "
+        "AND p.snapshot_id = s.snapshot_id)",
+        (pg_graph.iwiki_id,),
+        admin=True,
+    )[0][0]
+    assert orphans == 0, "a snapshot row was deleted while children remained"
 
 
 def test_cleanup_never_touches_the_active_snapshot(pg_graph):
@@ -760,10 +757,3 @@ def test_cleanup_never_touches_the_active_snapshot(pg_graph):
 
     assert pg_graph.reader_status()["snapshot_id"] == active
     assert pg_graph.reader_status()["state"] == "ready"
-
-
-def test_the_row_budget_exceeds_what_one_publication_adds():
-    """A budget below one snapshot turns a stall into a permanent backlog."""
-    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
-
-    assert PostgresCodeGraphStore._CLEANUP_ROW_BUDGET > 30000
