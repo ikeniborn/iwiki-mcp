@@ -59,3 +59,27 @@ def test_every_registered_tool_is_dispatched_through_a_thread():
     for tool in tools:
         registered = manager.get_tool(tool.name)
         assert registered.is_async, f"{tool.name} is registered as a sync tool"
+
+
+class _FakePool:
+    def __init__(self, max_size: int) -> None:
+        self.max_size = max_size
+
+
+def test_hosted_runtime_sizes_the_ceiling_below_the_connection_pool(monkeypatch):
+    """Authentication shares the pool, so tools must never be able to drain it."""
+    monkeypatch.setattr(server._TOOL_LIMITER, "total_tokens", 8, raising=False)
+
+    server._install_hosted_runtime(_FakePool(10), None)
+    try:
+        assert server._TOOL_LIMITER.total_tokens == 8
+    finally:
+        server._clear_hosted_runtime_for_test()
+
+
+def test_a_tiny_pool_still_leaves_one_tool_slot():
+    server._install_hosted_runtime(_FakePool(1), None)
+    try:
+        assert server._TOOL_LIMITER.total_tokens == 1
+    finally:
+        server._clear_hosted_runtime_for_test()

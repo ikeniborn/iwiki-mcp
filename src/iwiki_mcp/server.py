@@ -380,6 +380,10 @@ def _install_hosted_runtime(
     _HOSTED_CONFIG = cfg
     _HOSTED_CODE_GRAPH = code_graph
     _HOSTED_SPECIFICATIONS = specifications
+    # Authentication borrows from this same pool, so the tool ceiling has to
+    # leave connections behind for it. At parity the liveness probe would be
+    # starved through the database exactly as it was through the loop.
+    _TOOL_LIMITER.total_tokens = max(1, pool.max_size - _POOL_RESERVE)
 
 
 def _clear_hosted_runtime(pool) -> None:
@@ -390,6 +394,17 @@ def _clear_hosted_runtime(pool) -> None:
         _HOSTED_CONFIG = None
         _HOSTED_CODE_GRAPH = None
         _HOSTED_SPECIFICATIONS = None
+
+
+def _clear_hosted_runtime_for_test() -> None:
+    """Restore the import-time ceiling; used by tests that install a fake pool."""
+    global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
+    global _HOSTED_SPECIFICATIONS
+    _HOSTED_POOL = None
+    _HOSTED_CONFIG = None
+    _HOSTED_CODE_GRAPH = None
+    _HOSTED_SPECIFICATIONS = None
+    _TOOL_LIMITER.total_tokens = _DEFAULT_TOOL_CEILING
 
 
 def _resolved_binding() -> base.Binding | base.PostgresBinding:
