@@ -5769,45 +5769,70 @@ wiki_export_okf = _mutation_guard(wiki_export_okf)
 wiki_sync = _mutation_guard(wiki_sync)
 
 
+# Tools run on a worker thread rather than on the event loop. FastMCP calls a
+# sync tool inline in its coroutine, so one blocking call inside any handler
+# stops the whole server answering -- including the liveness probe.
+#
+# The ceiling sits below the database pool deliberately: authentication draws
+# from that same pool, so letting tools take every connection starves the
+# probe through the database instead of through the loop. Task-level detail
+# lives in docs/superpowers/specs/2026-09-22-hosted-tool-dispatch-blocks-event-loop-design.md
+_DEFAULT_TOOL_CEILING = 8
+_POOL_RESERVE = 2
+_TOOL_LIMITER = anyio.CapacityLimiter(_DEFAULT_TOOL_CEILING)
+
+
+def _threaded(fn):
+    """Register `fn` as an async tool that runs the sync body on a thread."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await anyio.to_thread.run_sync(
+            functools.partial(fn, *args, **kwargs), limiter=_TOOL_LIMITER
+        )
+
+    return wrapper
+
+
 # Thin MCP wrappers; implementation functions above stay unit-testable.
-mcp.tool()(wiki_status)
-mcp.tool()(wiki_code_status)
-mcp.tool()(wiki_code_index)
-mcp.tool()(wiki_code_search)
-mcp.tool()(wiki_code_context)
-mcp.tool()(wiki_code_publish_begin)
-mcp.tool()(wiki_code_publish_batch)
-mcp.tool()(wiki_code_publish_finalize)
-mcp.tool()(wiki_code_publish_abort)
-mcp.tool()(wiki_code_refresh_links)
-mcp.tool()(wiki_list_domains)
-mcp.tool()(wiki_list_pages)
-mcp.tool()(wiki_read_page)
-mcp.tool()(wiki_search)
-mcp.tool()(wiki_spec_search)
-mcp.tool()(wiki_spec_context)
-mcp.tool()(wiki_spec_resolve)
-mcp.tool()(wiki_related)
-mcp.tool()(wiki_write_page)
-mcp.tool()(wiki_update_page)
+mcp.tool()(_threaded(wiki_status))
+mcp.tool()(_threaded(wiki_code_status))
+mcp.tool()(_threaded(wiki_code_index))
+mcp.tool()(_threaded(wiki_code_search))
+mcp.tool()(_threaded(wiki_code_context))
+mcp.tool()(_threaded(wiki_code_publish_begin))
+mcp.tool()(_threaded(wiki_code_publish_batch))
+mcp.tool()(_threaded(wiki_code_publish_finalize))
+mcp.tool()(_threaded(wiki_code_publish_abort))
+mcp.tool()(_threaded(wiki_code_refresh_links))
+mcp.tool()(_threaded(wiki_list_domains))
+mcp.tool()(_threaded(wiki_list_pages))
+mcp.tool()(_threaded(wiki_read_page))
+mcp.tool()(_threaded(wiki_search))
+mcp.tool()(_threaded(wiki_spec_search))
+mcp.tool()(_threaded(wiki_spec_context))
+mcp.tool()(_threaded(wiki_spec_resolve))
+mcp.tool()(_threaded(wiki_related))
+mcp.tool()(_threaded(wiki_write_page))
+mcp.tool()(_threaded(wiki_update_page))
 
 
-mcp.tool()(wiki_insert_section)
-mcp.tool()(wiki_delete_section)
-mcp.tool()(wiki_move_section)
-mcp.tool()(wiki_delete_page)
-mcp.tool()(wiki_index)
-mcp.tool()(wiki_create_domain)
-mcp.tool()(wiki_list_domain_grants)
-mcp.tool()(wiki_set_domain_grant)
-mcp.tool()(wiki_revoke_domain_grant)
-mcp.tool()(wiki_bind)
-mcp.tool()(wiki_lint)
-mcp.tool()(wiki_remediation_plan)
-mcp.tool()(wiki_migrate_okf)
-mcp.tool()(wiki_apply_okf)
-mcp.tool()(wiki_export_okf)
-mcp.tool()(wiki_sync)
+mcp.tool()(_threaded(wiki_insert_section))
+mcp.tool()(_threaded(wiki_delete_section))
+mcp.tool()(_threaded(wiki_move_section))
+mcp.tool()(_threaded(wiki_delete_page))
+mcp.tool()(_threaded(wiki_index))
+mcp.tool()(_threaded(wiki_create_domain))
+mcp.tool()(_threaded(wiki_list_domain_grants))
+mcp.tool()(_threaded(wiki_set_domain_grant))
+mcp.tool()(_threaded(wiki_revoke_domain_grant))
+mcp.tool()(_threaded(wiki_bind))
+mcp.tool()(_threaded(wiki_lint))
+mcp.tool()(_threaded(wiki_remediation_plan))
+mcp.tool()(_threaded(wiki_migrate_okf))
+mcp.tool()(_threaded(wiki_apply_okf))
+mcp.tool()(_threaded(wiki_export_okf))
+mcp.tool()(_threaded(wiki_sync))
 
 
 @mcp.resource("iwiki://authoring-rules")
