@@ -1,3 +1,49 @@
+---
+review:
+  intent_hash: 477b97089342a0b1
+  last_run: 2026-09-22
+  phases:
+    structure: { status: passed }
+    completeness: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+    alignment: { status: passed }
+  findings:
+    - id: F-001
+      phase: structure
+      severity: WARNING
+      section: Desired Outcomes
+      section_hash: cf6eba8d31a26113
+      fragment: null
+      text: "A blank line split the Desired Outcomes list in two, leaving the fifth outcome as a separate list."
+      fix: "Removed the blank line so all five outcomes form one list."
+      verdict: fixed
+      verdict_at: 2026-09-22
+    - id: F-002
+      phase: clarity
+      severity: CRITICAL
+      section: Desired Outcomes
+      section_hash: cf6eba8d31a26113
+      fragment: "begin returns within a bounded time regardless of how many superseded snapshots are waiting"
+      text: "A bound with no number is not checkable - eight minutes is also a bounded time. The same defect this gate caught on the two previous intents, in the same author's wording."
+      fix: "Bounded it: begin returns in under 5 seconds against the current backlog of 47 superseded snapshots, stated against the eight minutes it takes today. Done when carries the same number."
+      verdict: fixed
+      verdict_at: 2026-09-22
+    - id: F-003
+      phase: consistency
+      severity: CRITICAL
+      section: null
+      section_hash: null
+      fragment: "**Status:** approved"
+      text: "Status-guard: the body was marked approved while F-002 was open."
+      fix: "Cleared by fixing F-002; no CRITICAL remains open."
+      verdict: fixed
+      verdict_at: 2026-09-22
+workflow:
+  route: chain
+  continuation: pending
+---
+
 # Intent: hosted-tool-dispatch-blocks-event-loop
 
 **Date:** 2026-09-22
@@ -52,10 +98,10 @@ code-graph internals.
 - Under real concurrency, token isolation and compare-and-swap write semantics are
   unchanged: another session's scope stays invisible, and concurrent updates to one
   section still yield one `200` and the rest `conflict`.
-
-- A code-graph publication is not gated on cleanup it did not ask for: `begin` returns
-  within a bounded time regardless of how many superseded snapshots are waiting, and the
-  backlog still drains to nothing over repeated publications rather than growing.
+- A code-graph publication is not gated on cleanup it did not ask for: `begin` returns in
+  under 5 seconds against the current backlog of 47 superseded snapshots, where it takes
+  about eight minutes today, and the backlog still drains to nothing over repeated
+  publications rather than growing.
 
 The fourth outcome is deliberate. The change must not trade a loud outage for quiet data
 corruption. The fifth carries its own trap: bounding the work per run is easy to write in
@@ -177,6 +223,6 @@ outcome and not an aside.
   reproduction of 60 concurrent `wiki_search` calls no longer times out the probe;
   concurrent updates to one section still yield one `200` and the rest `conflict`; both
   suites pass unchanged; no pool-exhaustion error occurs under that same load; and a
-  publication's `begin` returns within a bounded time against the current backlog of 47
+  publication's `begin` returns in under 5 seconds against the current backlog of 47
   superseded snapshots while that backlog measurably shrinks across successive
   publications.
