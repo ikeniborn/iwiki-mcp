@@ -650,6 +650,14 @@ def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
     pg_graph.finalize(pg_graph.complete_session())
     third = pg_graph.reader_status()["snapshot_id"]
 
+    # begin() only schedules cleanup on a daemon thread now; call the worker
+    # body directly so the prune below is observed after it has actually run,
+    # not raced against the background thread.
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    store._run_cleanup_cycle(domain_id)
+
     remaining = {row[0] for row in _snapshot_states(pg_graph)}
     assert first not in remaining
     assert third in remaining
@@ -709,6 +717,14 @@ def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
 
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
     pg_graph.store.begin(pg_graph.header)
+
+    # begin() only schedules cleanup on a daemon thread now; call the worker
+    # body directly so the prune below is observed after it has actually run,
+    # not raced against the background thread.
+    store = pg_graph.store
+    with store._transaction() as cursor:
+        domain_id = store._domain_id(cursor)
+    store._run_cleanup_cycle(domain_id)
 
     assert _snapshot_rows(pg_graph, first) == {
         "wiki_links": 0,
@@ -876,11 +892,15 @@ def test_schedule_cleanup_runs_the_real_worker_and_clears_the_active_key(pg_grap
     before = _relation_rows(pg_graph)
     store._schedule_cleanup(domain_id)
 
-    deadline = time.monotonic() + 10
-    while key in type(store)._cleanup_active and time.monotonic() < deadline:
-        time.sleep(0.05)
+    try:
+        deadline = time.monotonic() + 10
+        while key in type(store)._cleanup_active and time.monotonic() < deadline:
+            time.sleep(0.05)
 
-    assert key not in type(store)._cleanup_active, (
-        "cleanup did not finish (and clear its active-set key) within the timeout"
-    )
-    assert _relation_rows(pg_graph) < before, "the real cleanup cycle removed no rows"
+        assert key not in type(store)._cleanup_active, (
+            "cleanup did not finish (and clear its active-set key) within the timeout"
+        )
+        assert _relation_rows(pg_graph) < before, "the real cleanup cycle removed no rows"
+    finally:
+        with type(store)._cleanup_lock:
+            type(store)._cleanup_active.discard(key)

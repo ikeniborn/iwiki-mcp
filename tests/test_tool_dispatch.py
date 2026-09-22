@@ -68,7 +68,7 @@ class _FakePool:
 
 def test_hosted_runtime_sizes_the_ceiling_below_the_connection_pool(monkeypatch):
     """Authentication shares the pool, so tools must never be able to drain it."""
-    monkeypatch.setattr(server._TOOL_LIMITER, "total_tokens", 8, raising=False)
+    monkeypatch.setattr(server._TOOL_LIMITER, "total_tokens", 3, raising=False)
 
     server._install_hosted_runtime(_FakePool(10), None)
     try:

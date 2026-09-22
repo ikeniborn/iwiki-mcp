@@ -44,16 +44,16 @@ superseded snapshot — every query joins `code_graph_domain_state.active_snapsh
 so the window exists only to leave an operator a manual revert target.
 
 Cleanup runs on a single-flight background worker rather than inside a publication:
-`begin` and `finalize` schedule a cycle and return immediately, so a publication is
+`begin` schedules a cycle and returns immediately, so a publication is
 never delayed or failed by it. A cycle drains the backlog in committed batches — each
 batch deletes one superseded snapshot's rows, children first, in its own transaction —
 and stops once it hits its per-cycle row ceiling or the backlog is empty. If a cycle
-stops early, the next publication's schedule call resumes the drain where the previous
+stops early, the next `begin` call resumes the drain where the previous
 one left off, because the state lives in the database, not in the worker. At most one
 cycle runs per domain at a time; concurrent publications against the same domain share
 it instead of stacking cycles on the same tables. Direct-PostgreSQL CLI publication is a
 known gap here: the process exits shortly after `finalize` returns, so a cleanup cycle
-it schedules can be killed before it drains.
+`begin` scheduled can be killed before it drains.
 
 The published snapshot — not the reading server's own configuration — decides which
 languages a hosted read may return. `wiki_code_search` on PostgreSQL storage derives its
