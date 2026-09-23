@@ -1,6 +1,6 @@
 ---
 review:
-  spec_hash: 36f51e9dc0e9f449
+  spec_hash: fb769ff4442844b2
   last_run: 2026-09-23
   phases:
     structure: { status: passed }
@@ -38,15 +38,25 @@ review:
       fix: "Kept deliberately. The parameter's meaning shifts when the row budget takes over from the snapshot count, so recording that its default is untouched guards against drift the restructure invites."
       verdict: accepted
       verdict_at: 2026-09-23
+    - id: F-004
+      phase: coverage
+      severity: CRITICAL
+      section: "6. Parent-row guard"
+      section_hash: e0565fb217fa9124
+      fragment: "guards on `NOT EXISTS` over all four child tables"
+      text: "R15 required a guard over four child tables to prevent a state the foreign keys forbid. code_graph_symbols.file_id is NOT NULL and cascades from code_graph_files, relations depend on both, wiki_links on relations, and no constraint is NOT VALID, so an empty files implies every other child table is empty. The three extra clauses would cost an index probe each and buy nothing, and three of the four tests specified as their DoD are unconstructible."
+      fix: "R15 now keeps the single guard and requires a test that reads pg_constraint to pin the invariant, so a migration adding a child table outside the chain fails instead of silently widening the guard's obligation. Section 1 item 2 restated. Found at the plan gate while building the four-table test."
+      verdict: fixed
+      verdict_at: 2026-09-23
   chain:
     intent:
       path: docs/superpowers/intents/2026-09-23-cleanup-worker-connection-and-transaction-bounds-intent.md
-      intent_hash: 12614af27a64cbb1
+      intent_hash: 9411ca5227c39205
 ---
 # Cleanup worker connection and transaction bounds — design
 
 **Date:** 2026-09-23
-**Intent:** `docs/superpowers/intents/2026-09-23-cleanup-worker-connection-and-transaction-bounds-intent.md` (`intent_hash` `12614af27a64cbb1`)
+**Intent:** `docs/superpowers/intents/2026-09-23-cleanup-worker-connection-and-transaction-bounds-intent.md` (`intent_hash` `9411ca5227c39205`)
 **Topic:** `cleanup-worker-connection-and-transaction-bounds`
 
 ## 1. Problem
@@ -61,9 +71,15 @@ Three undeclared boundaries of the code-graph cleanup worker, items 3, 4 and 5 o
    constructed. Neither is counted by the `pool_max_size - 2` reserve that protects
    authentication. `_schedule_cleanup` and `schedule_wiki_cleanup` each spawn a
    `threading.Thread` with no global cap on how many exist.
-2. The snapshot-row delete guards on `NOT EXISTS` over `code_graph_files` alone. Drain
-   order puts files last, so it holds today, but a snapshot with zero file rows and
-   surviving symbol rows would pass it.
+2. The snapshot-row delete guards on `NOT EXISTS` over `code_graph_files` alone, and that
+   is exactly sufficient — issue 104 reads it as a hole and the first draft of this design
+   repeated the reading. `code_graph_symbols.file_id` is `NOT NULL` with a cascading
+   foreign key to `code_graph_files`, `code_graph_relations` depends on both,
+   `code_graph_wiki_links` depends on relations, and no constraint is `NOT VALID`. Files
+   is the root of the child chain, so an empty `code_graph_files` implies every other
+   child table is empty by integrity rather than by drain order, and the issue's scenario
+   cannot exist. What the guard lacks is not clauses but a test pinning the schema
+   invariant it silently depends on.
 3. `_run_cleanup_cycle` wraps one whole `_prune_superseded` call in a single transaction,
    and that call iterates up to `superseded_cleanup_limit` snapshots. The 10,000-row
    statements inside `_delete_snapshot_rows` are statements, not commits, so a kill rolls
@@ -228,17 +244,23 @@ this default is proposal-first and out of scope here.
 
 ## 6. Parent-row guard
 
-**R15.** The snapshot-row delete guards on `NOT EXISTS` over all four child tables —
-`code_graph_wiki_links`, `code_graph_relations`, `code_graph_symbols` and
-`code_graph_files` — in addition to the existing exclusion of the active snapshot.
-*DoD:* four tests, one per child table, each leaving rows only in that table and asserting
-the snapshot row survives. Each is shown to discriminate by reverting the guard and
-observing the test fail.
+**R15.** The guard keeps its single `NOT EXISTS` over `code_graph_files`, and gains a test
+that pins the schema invariant making that sufficient: every child table of a snapshot
+depends, directly or transitively, on `code_graph_files`. The test reads the live
+constraint catalogue rather than asserting a hand-written list, so a future migration that
+adds a child table outside the chain fails it instead of silently widening the guard's
+obligation.
+*DoD:* a test that queries `pg_constraint` for every foreign key whose referencing table is
+a `code_graph_*` child and asserts each one reaches `code_graph_files`, and that is shown
+to discriminate by adding a throwaway child table with no path to files and observing the
+failure.
 
-The guard is required by this change rather than merely improved by it. Today one
-transaction spans the whole prune, so a state with zero file rows and surviving symbol
-rows cannot persist. Per-batch commits make exactly that state durable, so the change that
-fixes item 5 is what makes item 4 reachable.
+The four-table guard this requirement originally specified is withdrawn. It was justified
+by a state — zero file rows with surviving symbol rows — that the foreign keys forbid, so
+the extra clauses would have cost three index probes per snapshot delete and bought
+nothing, and three of the four tests proving them could not have been constructed at all.
+Issue 104 item 4 is recorded as mistaken rather than implemented. The reachable risk was
+never the guard; it is the cascade cost that R17 and R18 measure.
 
 ## 7. Reactivation race
 
@@ -325,7 +347,7 @@ itself without one and a change to a PostgreSQL path is otherwise unverified.
 *DoD:* the suite is run against a disposable database and its result recorded, not relied
 on from the default skipping run.
 
-**R24.** The guard tests and the resumability test are each shown to discriminate:
+**R24.** The invariant test, the reactivation test and the resumability test are each shown to discriminate:
 reverting the change under test makes them fail.
 *DoD:* the demonstration is recorded for each.
 

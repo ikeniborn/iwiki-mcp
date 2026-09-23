@@ -1,14 +1,83 @@
+---
+review:
+  plan_hash: 74ae992cdc04740f
+  last_run: 2026-09-23
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    dependencies: { status: passed }
+    verifiability: { status: passed }
+    consistency: { status: passed }
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: WARNING
+      section: Self-Review
+      section_hash: null
+      fragment: "R14 - constraint only, no change, asserted by the unchanged default"
+      text: "R14 was covered by no plan step. The self-review noticed the absence and rationalised it instead of closing it, which is the failure mode the gate exists to catch."
+      fix: "Task 4 gained a step pinning superseded_cleanup_limit's default with a signature test, so the requirement has a step like every other."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-002
+      phase: coverage
+      severity: WARNING
+      section: "Task 1"
+      section_hash: null
+      fragment: "code graph cleanup finished one domain, %s rows removed"
+      text: "R19 requires rows removed and elapsed time per completed work item. The runtime logged only rows, so half the requirement was implemented nowhere in the plan."
+      fix: "The worker now times each job and logs the elapsed seconds on both the success and failure paths, with a test asserting both parts appear."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-003
+      phase: coverage
+      severity: INFO
+      section: "Task 7"
+      section_hash: null
+      fragment: "cleanup_sweep_due"
+      text: "R19 requires throttle skips to stay at debug, and the rewritten cleanup_sweep_due logged nothing at all."
+      fix: "The rewrite logs the skip at debug when the interval has not expired."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-004
+      phase: dependencies
+      severity: CRITICAL
+      section: "Task 3"
+      section_hash: null
+      fragment: "If tests/postgres/test_code_graph_publication.py has no _store helper"
+      text: "The plan invented _store and _seed_superseded_snapshot, including raw SQL backdating of ready_at, while the suite already provides the pg_graph fixture with advance_clock, _snapshot_states and _snapshot_rows. Worse, it broke three existing tests without saying so: two call the removed _run_cleanup_cycle and _prune_superseded, and one monkeypatches the deleted _schedule_cleanup."
+      fix: "Task 3 adds _store_with_factory and _aged_superseded once, built on the real fixture; Tasks 4-6 use them. Task 4 gained an explicit step migrating all three existing call sites."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-005
+      phase: coverage
+      severity: CRITICAL
+      section: "Task 5"
+      section_hash: null
+      fragment: "guards on NOT EXISTS over all four child tables"
+      text: "R15's four-table guard defends a state the foreign keys forbid: code_graph_files roots the child chain, so an empty files implies every other child table is empty. Three of the four tests specified as its DoD cannot be constructed, which is how the error surfaced."
+      fix: "Drift returned to the earliest gate. The intent's Objective and the spec's section 1 and R15 were corrected and both re-gated; issue 104 item 4 is recorded as mistaken. Task 5 now keeps the single guard and adds a catalogue-reading test that pins the invariant."
+      verdict: fixed
+      verdict_at: 2026-09-23
+  chain:
+    intent:
+      path: docs/superpowers/intents/2026-09-23-cleanup-worker-connection-and-transaction-bounds-intent.md
+      intent_hash: 9411ca5227c39205
+    spec:
+      path: docs/superpowers/specs/2026-09-23-cleanup-worker-connection-and-transaction-bounds-design.md
+      spec_hash: fb769ff4442844b2
+---
 # Cleanup worker connection and transaction bounds Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bound the code-graph cleanup worker's threads, connections and transactions, so a growing number of clients queues work instead of exhausting `max_connections`, and a kill loses one batch instead of a whole prune.
 
-**Architecture:** A maintenance runtime — a dedicated connection pool, a bounded deduplicated queue, and a fixed worker set — replaces the two ad-hoc guard sets and the two unbounded `threading.Thread` call sites. A cleanup cycle holds one connection for its duration and commits per batch, which makes a partially drained snapshot durable, which is why the snapshot-row delete gains a guard over all four child tables and a per-batch check that the snapshot has not been reactivated.
+**Architecture:** A maintenance runtime — a dedicated connection pool, a bounded deduplicated queue, and a fixed worker set — replaces the two ad-hoc guard sets and the two unbounded `threading.Thread` call sites. A cleanup cycle holds one connection for its duration and commits per batch, which makes a partially drained snapshot durable, which is why each batch re-checks that the snapshot has not been reactivated. The snapshot-row guard is left alone: the schema already makes one clause sufficient, and this plan pins that invariant with a test instead of widening the guard.
 
 **Tech Stack:** Python 3.12, `psycopg` 3, `psycopg_pool` 3.3, `queue.Queue`, `threading`, pytest (`asyncio_mode = "auto"`, `pythonpath = ["src"]`), flake8 at `max-line-length = 100`.
 
-**Spec:** `docs/superpowers/specs/2026-09-23-cleanup-worker-connection-and-transaction-bounds-design.md` (`spec_hash` `36f51e9dc0e9f449`)
+**Spec:** `docs/superpowers/specs/2026-09-23-cleanup-worker-connection-and-transaction-bounds-design.md` (`spec_hash` `fb769ff4442844b2`)
 
 ## Global Constraints
 
@@ -209,6 +278,25 @@ def test_start_is_idempotent():
         assert len(runtime._threads) == maintenance.MAINTENANCE_WORKERS
     finally:
         runtime.stop()
+
+
+def test_a_completed_job_reports_rows_and_elapsed_time(caplog):
+    """R19 asks for both; rows alone cannot show a worker running long."""
+    runtime = maintenance.MaintenanceRuntime(
+        runner=lambda job, factory: 4321, workers=1
+    )
+    runtime.start()
+    try:
+        with caplog.at_level("INFO", logger=maintenance.LOGGER.name):
+            runtime.submit(_job())
+            deadline = time.monotonic() + 5
+            while "rows removed" not in caplog.text and time.monotonic() < deadline:
+                time.sleep(0.01)
+    finally:
+        runtime.stop()
+
+    assert "4321 rows removed" in caplog.text
+    assert "s" in caplog.text.split("rows removed in ")[1][:6]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -237,6 +325,7 @@ from dataclasses import dataclass
 import logging
 import queue
 import threading
+import time
 from typing import Callable
 
 LOGGER = logging.getLogger(__name__)
@@ -385,17 +474,21 @@ class MaintenanceRuntime:
 
     def _run(self, job: CleanupJob) -> None:
         factory = self._pool.connection if self._pool is not None else None
+        started = time.monotonic()
         try:
             removed = self._runner(job, factory)
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
             LOGGER.warning(
-                "code graph cleanup failed for one domain: %s",
+                "code graph cleanup failed for one domain after %.1fs: %s",
+                time.monotonic() - started,
                 type(exc).__name__,
             )
         else:
             LOGGER.info(
-                "code graph cleanup finished one domain, %s rows removed",
+                "code graph cleanup finished one domain, "
+                "%s rows removed in %.1fs",
                 removed,
+                time.monotonic() - started,
             )
         finally:
             with self._lock:
@@ -634,20 +727,60 @@ Implements R11.
 
 **The detail that will bite you if you skip it.** `AuthStore` and `postgres/store.py` already declare `connection_factory: Callable[[], ContextManager[Any]]` and consume it as `with self._connect() as connection:`. The code-graph store is the odd one out: it declares `Callable[[], psycopg.Connection]` and calls `.close()` explicitly. This task aligns it with the established pattern, because a pooled `pool.connection` is a context manager and cannot be `.close()`d. `_CountingConnection` in the test suite proxies through `__getattr__`, and Python resolves `__enter__`/`__exit__` on the type rather than the instance, so the double needs both methods added explicitly or the whole publication test fails with `TypeError: 'ise not a context manager`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Add the two shared helpers the later tasks also use**
+
+The file has no store-construction helper — `test_activation_cost_is_bounded_by_row_kinds_not_row_count` builds one inline — and Tasks 4, 5 and 6 all need one with a custom factory. Add both helpers once, here, next to `_snapshot_rows`:
+
+```python
+def _store_with_factory(graph, factory):
+    """A store on the fixture's wiki and clock, with a factory of our own.
+
+    The clock matters: `advance_clock` is how the suite ages a snapshot past
+    the retention window, and a store with the real clock would never see a
+    candidate.
+    """
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    return PostgresCodeGraphStore(
+        graph.dsn,
+        graph.iwiki_id,
+        graph.domain,
+        graph.owner_id,
+        lock_timeout_ms=graph.lock_timeout_ms,
+        session_ttl_seconds=graph.session_ttl_seconds,
+        staging_retention_seconds=graph.staging_retention_seconds,
+        staging_cleanup_limit=graph.staging_cleanup_limit,
+        superseded_retention_seconds=graph.superseded_retention_seconds,
+        superseded_cleanup_limit=graph.superseded_cleanup_limit,
+        connection_factory=factory,
+        clock=graph._now,
+    )
+
+
+def _aged_superseded(graph, publications: int = 3) -> str:
+    """Publish repeatedly, age past the window, return the oldest snapshot."""
+    for _ in range(publications):
+        graph.finalize(graph.complete_session())
+    graph.advance_clock(graph.superseded_retention_seconds + 1)
+    return _snapshot_states(graph)[0][0]
+```
+
+- [ ] **Step 2: Write the failing test**
 
 Add to `tests/postgres/test_code_graph_publication.py`:
 
 ```python
 def test_one_connection_serves_many_transactions(pg_graph):
     """Committing per batch must not mean connecting per batch."""
+    import psycopg
+
     opened = []
 
     def factory():
         opened.append(1)
         return psycopg.connect(pg_graph.dsn)
 
-    store = _store(pg_graph, connection_factory=factory)
+    store = _store_with_factory(pg_graph, factory)
 
     with store._connection() as connection:
         with store._transaction_on(connection) as cursor:
@@ -660,9 +793,7 @@ def test_one_connection_serves_many_transactions(pg_graph):
     assert len(opened) == 1, "each transaction opened its own connection"
 ```
 
-If `tests/postgres/test_code_graph_publication.py` has no `_store` helper, construct the store inline with the same keyword arguments the file already uses at its other construction sites, passing `connection_factory=factory`.
-
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 3: Run the test to verify it fails**
 
 Run: `IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55432/iwiki_test" uv run pytest tests/postgres/test_code_graph_publication.py::test_one_connection_serves_many_transactions -q`
 Expected: FAIL — `AttributeError: 'PostgresCodeGraphStore' object has no attribute '_connection'`
@@ -674,7 +805,7 @@ docker run -d --name iwiki-pgtest -e POSTGRES_PASSWORD=pgtest -e POSTGRES_DB=iwi
 docker exec iwiki-pgtest psql -U postgres -d iwiki_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
-- [ ] **Step 3: Replace `_transaction` in `src/iwiki_mcp/postgres/codegraph.py`**
+- [ ] **Step 4: Replace `_transaction` in `src/iwiki_mcp/postgres/codegraph.py`**
 
 Replace lines 164-172 with:
 
@@ -721,7 +852,7 @@ to:
 
 and add `ContextManager` to the `typing` import at the top of the file.
 
-- [ ] **Step 4: Give the test double the context-manager protocol**
+- [ ] **Step 5: Give the test double the context-manager protocol**
 
 In `tests/postgres/test_code_graph_publication.py`, add these two methods to `_CountingConnection`, below `__repr__`:
 
@@ -734,17 +865,17 @@ In `tests/postgres/test_code_graph_publication.py`, add these two methods to `_C
         return self._connection.__exit__(*exc)
 ```
 
-- [ ] **Step 5: Run the affected tests**
+- [ ] **Step 6: Run the affected tests**
 
 Run: `IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55432/iwiki_test" uv run pytest tests/postgres/test_code_graph_publication.py -q`
 Expected: PASS, every test in the file including the new one
 
-- [ ] **Step 6: Run the fast suite to catch other callers**
+- [ ] **Step 7: Run the fast suite to catch other callers**
 
 Run: `uv run pytest -q`
 Expected: PASS with the suite's known result; no new failures
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/iwiki_mcp/postgres/codegraph.py tests/postgres/test_code_graph_publication.py
@@ -776,14 +907,21 @@ Implements R12 and R13.
 
 Add to `tests/postgres/test_code_graph_publication.py`:
 
-```python
-def test_a_kill_mid_drain_keeps_the_batches_already_committed(pg_graph):
-    """The published claim is 'at most one batch'; make it true."""
-    store = _store(pg_graph)
-    snapshot_id = _seed_superseded_snapshot(pg_graph, relations=25000)
+The fixture publishes a few hundred rows, far below `_CLEANUP_BATCH_ROWS = 10000`, so a test that wants several batches must shrink the batch rather than grow the fixture.
 
-    calls = {"n": 0}
+```python
+def test_a_kill_mid_drain_keeps_the_batches_already_committed(
+    pg_graph, monkeypatch
+):
+    """The published claim is 'at most one batch'; make it true."""
+    monkeypatch.setattr(type(pg_graph.store), "_CLEANUP_BATCH_ROWS", 2)
+    oldest = _aged_superseded(pg_graph)
+    before = _snapshot_rows(pg_graph, oldest)
+    assert sum(before.values()) > 6, "fixture must supply several batches"
+
+    store = pg_graph.store
     real_delete_batch = store._delete_batch
+    calls = {"n": 0}
 
     def exploding(cursor, table, domain_id, sid, limit):
         calls["n"] += 1
@@ -791,59 +929,34 @@ def test_a_kill_mid_drain_keeps_the_batches_already_committed(pg_graph):
             raise RuntimeError("killed mid-drain")
         return real_delete_batch(cursor, table, domain_id, sid, limit)
 
-    store._delete_batch = exploding
+    monkeypatch.setattr(store, "_delete_batch", exploding)
 
     with pytest.raises(RuntimeError):
         store.run_cleanup_cycle()
 
-    with psycopg.connect(pg_graph.dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM iwiki.code_graph_relations "
-                "WHERE snapshot_id = %s",
-                (snapshot_id,),
-            )
-            remaining = cursor.fetchone()[0]
-
-    assert remaining < 25000, "the committed batches were rolled back"
-    assert remaining >= 25000 - 2 * 10000, "more than one batch was lost"
+    after = _snapshot_rows(pg_graph, oldest)
+    removed = sum(before.values()) - sum(after.values())
+    assert removed > 0, "the committed batches were rolled back with the kill"
+    assert removed <= 4, "more than the two committed batches went missing"
 
 
 def test_a_cycle_opens_exactly_one_connection(pg_graph):
+    """One connection per cycle is what makes per-batch commits affordable."""
+    import psycopg
+
     opened = []
 
     def factory():
         opened.append(1)
         return psycopg.connect(pg_graph.dsn)
 
-    store = _store(pg_graph, connection_factory=factory)
-    _seed_superseded_snapshot(pg_graph, relations=25000)
+    _aged_superseded(pg_graph)
+    store = _store_with_factory(pg_graph, factory)
 
     store.run_cleanup_cycle()
 
     assert len(opened) == 1
 ```
-
-`_seed_superseded_snapshot(pg_graph, relations=N)` is a new helper in the same file: publish a snapshot, activate a second one over it, and backdate the first snapshot's `ready_at` past `superseded_retention_seconds` so the candidate query selects it. Follow the fixture pattern the file already uses to publish a snapshot, then:
-
-```python
-def _seed_superseded_snapshot(pg_graph, *, relations: int) -> str:
-    """Publish a snapshot, supersede it, and age it past the retention."""
-    snapshot_id = _publish_snapshot(pg_graph, relations=relations)
-    _publish_snapshot(pg_graph, relations=1)
-    with psycopg.connect(pg_graph.dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "UPDATE iwiki.code_graph_snapshots "
-                "SET ready_at = now() - interval '48 hours' "
-                "WHERE snapshot_id = %s",
-                (snapshot_id,),
-            )
-        connection.commit()
-    return snapshot_id
-```
-
-Reuse the file's existing publication helper for `_publish_snapshot`; if none exists under that name, extract one from the existing end-to-end cleanup test rather than writing a second publication path.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1008,11 +1121,27 @@ In `src/iwiki_mcp/postgres/codegraph.py`, delete `_prune_superseded` (lines 659-
         return cursor.rowcount
 ```
 
-`_delete_snapshot_row` keeps the one-table guard for this task only; Task 5 replaces it with the four-table guard and adds the reactivation check. Splitting them keeps each task's test honest about what it proves.
+`_delete_snapshot_row` keeps its single `NOT EXISTS` over `code_graph_files`, which the corrected spec establishes is exactly sufficient. Task 5 adds the reactivation check and the test that pins the invariant behind that sufficiency.
 
-- [ ] **Step 4: Point the remaining caller at the new name**
+- [ ] **Step 4: Point every existing caller at the new names**
+
+Three call sites outside this task's own code use the methods it just removed. Leaving any of them is a red suite, not a later problem.
 
 In `src/iwiki_mcp/codegraph/application.py`, inside `_sweep_wiki_cleanup`, change `store._run_cleanup_cycle()` to `store.run_cleanup_cycle()`. Task 7 deletes that function entirely; this keeps the tree green in between.
+
+In `tests/postgres/test_code_graph_publication.py`, `test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window` calls `store._run_cleanup_cycle()`. Rename it to `store.run_cleanup_cycle()` and update the comment above it, which still says `begin()` schedules a daemon thread — after Task 7 it schedules nothing.
+
+In the same file, `test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone` drives the removed `_prune_superseded` directly. Migrate it to the new decomposition, keeping its assertions exactly as they are:
+
+```python
+    store = pg_graph.store
+    with store._connection() as connection:
+        with store._transaction_on(connection) as cursor:
+            domain_id = store._domain_id(cursor)
+        store._drain_snapshot(connection, domain_id, oldest, budget)
+```
+
+Task 5 keeps this test as the guard's behavioural check and adds the schema invariant beside it.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -1024,7 +1153,31 @@ Expected: PASS
 Run: `uv run flake8 src tests && uv run pytest -q`
 Expected: flake8 silent; no new failures
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Assert the candidate page size is untouched (R14)**
+
+This restructure moves the governing bound from a snapshot count to a row budget, which
+invites someone to "tidy up" the now-quieter parameter. Pin it with a test in
+`tests/postgres/test_code_graph_publication.py`:
+
+```python
+def test_the_candidate_page_size_keeps_its_default():
+    """The row budget governs volume now; this parameter only pages the
+    candidate query, and changing its default is proposal-first."""
+    import inspect
+
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    parameter = inspect.signature(
+        PostgresCodeGraphStore.__init__
+    ).parameters["superseded_cleanup_limit"]
+
+    assert parameter.default == 2
+```
+
+Run: `uv run pytest tests/postgres/test_code_graph_publication.py -q -k candidate_page_size`
+Expected: PASS
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/iwiki_mcp/postgres/codegraph.py src/iwiki_mcp/codegraph/application.py tests/postgres/test_code_graph_publication.py
@@ -1033,82 +1186,36 @@ git commit -m "fix(codegraph): commit cleanup per batch on one connection per cy
 
 ---
 
-### Task 5: The four-table guard and the reactivation re-check
+### Task 5: The reactivation re-check and the guard's schema invariant
 
 Implements R15 and R16.
 
 **Files:**
-- Modify: `src/iwiki_mcp/postgres/codegraph.py` (`_drain_snapshot`, `_delete_snapshot_row`)
+- Modify: `src/iwiki_mcp/postgres/codegraph.py` (`_drain_snapshot`)
 - Test: `tests/postgres/test_code_graph_publication.py`
 
 **Interfaces:**
-- Consumes: `_drain_snapshot`, `_delete_snapshot_row`, `_CLEANUP_CHILD_TABLES` from Task 4.
+- Consumes: `_drain_snapshot`, `_delete_snapshot_row`, `_CLEANUP_CHILD_TABLES`, `_aged_superseded` from Tasks 3-4.
 - Produces: `_still_superseded(cursor, domain_id, snapshot_id) -> bool`
+
+**Read this before writing the guard you expect to write.** An earlier draft of this plan widened the snapshot-row guard to all four child tables, and the spec required it. Both were wrong and the spec has been corrected. `code_graph_symbols.file_id` is `NOT NULL` with a cascading foreign key to `code_graph_files`; `code_graph_relations` depends on files and symbols; `code_graph_wiki_links` depends on relations; and no constraint is `NOT VALID`. Files roots the chain, so an empty `code_graph_files` implies every other child table is empty by integrity, not by drain order. The state issue 104 describes cannot exist, three of the four tests that would have proved the extra clauses are unconstructible, and the clauses would cost an index probe each for nothing. The guard stays as Task 4 wrote it. What this task adds is the test that pins the invariant, so a future migration that adds a child table outside the chain fails loudly instead of silently widening what the guard owes.
 
 - [ ] **Step 1: Write the failing tests**
 
 Add to `tests/postgres/test_code_graph_publication.py`:
 
 ```python
-@pytest.mark.parametrize(
-    "table",
-    [
-        "code_graph_wiki_links",
-        "code_graph_relations",
-        "code_graph_symbols",
-        "code_graph_files",
-    ],
-)
-def test_the_snapshot_row_survives_while_any_child_table_has_rows(
-    pg_graph, table
+def test_a_reactivated_snapshot_stops_its_drain_within_one_batch(
+    pg_graph, monkeypatch
 ):
-    """Per-batch commits make a partial drain durable, so the guard must
-    cover every child table, not only the one that drains last."""
-    store = _store(pg_graph)
-    snapshot_id = _seed_superseded_snapshot(pg_graph, relations=10)
-
-    with psycopg.connect(pg_graph.dsn) as connection:
-        with connection.cursor() as cursor:
-            for other in (
-                "code_graph_wiki_links",
-                "code_graph_relations",
-                "code_graph_symbols",
-                "code_graph_files",
-            ):
-                if other == table:
-                    continue
-                cursor.execute(
-                    f"DELETE FROM iwiki.{other} WHERE snapshot_id = %s",
-                    (snapshot_id,),
-                )
-            cursor.execute(
-                "SELECT domain_id FROM iwiki.code_graph_snapshots "
-                "WHERE snapshot_id = %s",
-                (snapshot_id,),
-            )
-            domain_id = cursor.fetchone()[0]
-            cursor.execute(
-                f"SELECT count(*) FROM iwiki.{table} WHERE snapshot_id = %s",
-                (snapshot_id,),
-            )
-            assert cursor.fetchone()[0] > 0, "the fixture left nothing to guard"
-        connection.commit()
-
-    with store._connection() as connection:
-        with store._transaction_on(connection) as cursor:
-            removed = store._delete_snapshot_row(
-                cursor, domain_id, snapshot_id
-            )
-
-    assert removed == 0, f"the parent row was deleted while {table} had rows"
-
-
-def test_a_reactivated_snapshot_stops_its_drain_within_one_batch(pg_graph):
     """The retention window exists to be a revert target; the drain must not
     strip the snapshot an operator just restored."""
-    store = _store(pg_graph)
-    snapshot_id = _seed_superseded_snapshot(pg_graph, relations=25000)
+    monkeypatch.setattr(type(pg_graph.store), "_CLEANUP_BATCH_ROWS", 1)
+    oldest = _aged_superseded(pg_graph)
+    before = _snapshot_rows(pg_graph, oldest)
+    assert sum(before.values()) > 4, "fixture must supply several batches"
 
+    store = pg_graph.store
     original = store._delete_batch
     calls = {"n": 0}
 
@@ -1123,31 +1230,62 @@ def test_a_reactivated_snapshot_stops_its_drain_within_one_batch(pg_graph):
             )
         return original(cursor, table, domain_id, sid, limit)
 
-    store._delete_batch = reactivate_then_delete
+    monkeypatch.setattr(store, "_delete_batch", reactivate_then_delete)
     store.run_cleanup_cycle()
 
-    with psycopg.connect(pg_graph.dsn) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT count(*) FROM iwiki.code_graph_snapshots "
-                "WHERE snapshot_id = %s",
-                (snapshot_id,),
-            )
-            assert cursor.fetchone()[0] == 1, "the restored snapshot was removed"
-            cursor.execute(
-                "SELECT count(*) FROM iwiki.code_graph_relations "
-                "WHERE snapshot_id = %s",
-                (snapshot_id,),
-            )
-            remaining = cursor.fetchone()[0]
+    after = _snapshot_rows(pg_graph, oldest)
+    assert oldest in {row[0] for row in _snapshot_states(pg_graph)}, (
+        "the restored snapshot's row was removed"
+    )
+    assert sum(after.values()) > 0, "the drain continued past the reactivation"
 
-    assert remaining > 0, "the drain kept going after the reactivation"
+
+def test_every_code_graph_child_table_reaches_code_graph_files(pg_graph):
+    """The one-table guard is sufficient only while files roots the chain.
+
+    Read the live catalogue rather than a hand-written list: the point is to
+    fail when a migration adds a child table that does not depend on files,
+    which is exactly the case a hand-written list would not know about.
+    """
+    rows = pg_graph._query(
+        "SELECT c.relname, f.relname "
+        "FROM pg_constraint con "
+        "JOIN pg_class c ON c.oid = con.conrelid "
+        "JOIN pg_class f ON f.oid = con.confrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE con.contype = 'f' AND n.nspname = 'iwiki' "
+        "AND c.relname LIKE 'code\\_graph\\_%'",
+        (),
+        admin=True,
+    )
+    parents = {}
+    for child, parent in rows:
+        parents.setdefault(child, set()).add(parent)
+
+    children = {
+        "code_graph_wiki_links",
+        "code_graph_relations",
+        "code_graph_symbols",
+    }
+    assert children <= set(parents), "a child table has no foreign keys at all"
+
+    for table in children:
+        reached, frontier = set(), [table]
+        while frontier:
+            for parent in parents.get(frontier.pop(), ()):
+                if parent not in reached:
+                    reached.add(parent)
+                    frontier.append(parent)
+        assert "code_graph_files" in reached, (
+            f"{table} no longer depends on code_graph_files, so guarding the "
+            "snapshot-row delete on files alone is no longer sufficient"
+        )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55432/iwiki_test" uv run pytest tests/postgres/test_code_graph_publication.py -q -k "survives_while_any_child or reactivated"`
-Expected: FAIL — the parametrized guard test fails for `code_graph_wiki_links`, `code_graph_relations` and `code_graph_symbols`; the reactivation test fails because the drain continues.
+Run: `IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55432/iwiki_test" uv run pytest tests/postgres/test_code_graph_publication.py -q -k "reactivated or reaches_code_graph_files"`
+Expected: the reactivation test FAILS — the drain runs to completion and the snapshot row is gone. The invariant test PASSES immediately, because it asserts a property the schema already has; that is correct and expected. Its value is regression, and Step 6 is where it earns it.
 
 - [ ] **Step 3: Add the reactivation check**
 
@@ -1161,7 +1299,7 @@ Add this method to `PostgresCodeGraphStore`, directly above `_delete_batch`:
 
         The retention window buys exactly one thing: a manual revert target.
         Per-batch commits stretch a snapshot's drain over minutes, so the
-        check runs per batch rather than once per cycle — one indexed lookup
+        check runs per batch rather than once per cycle -- one indexed lookup
         per 10,000 rows narrows the race to a single batch.
         """
         cursor.execute(
@@ -1205,70 +1343,41 @@ Replace the body of `_drain_snapshot` from Task 4 with:
         return removed
 ```
 
-- [ ] **Step 5: Widen the guard to all four child tables**
+`_delete_snapshot_row` is unchanged from Task 4 — one `NOT EXISTS` over `code_graph_files`, plus the active-snapshot exclusion.
 
-Replace `_delete_snapshot_row` with:
-
-```python
-    def _delete_snapshot_row(
-        self, cursor, domain_id: int, snapshot_id: str
-    ) -> int:
-        """Remove the parent only once every child table is empty.
-
-        Guarding on `code_graph_files` alone held only because files drain
-        last, and only because one transaction spanned the whole prune. Once
-        each batch commits, a snapshot with no file rows and surviving symbol
-        rows becomes a durable state, and it would pass a one-table guard
-        straight into a cascade over
-        `code_graph_relations_source_symbol_fk` — a key covered only to its
-        snapshot prefix, so the cascade scans that snapshot's relations once
-        per deleted parent row.
-        """
-        guards = " ".join(
-            f"AND NOT EXISTS (SELECT 1 FROM iwiki.{table} c "
-            "WHERE c.iwiki_id = %s AND c.domain_id = %s "
-            "AND c.snapshot_id = %s) "
-            for table in self._CLEANUP_CHILD_TABLES
-        )
-        params = [
-            self.iwiki_id,
-            domain_id,
-            snapshot_id,
-            self.iwiki_id,
-            domain_id,
-        ]
-        for _ in self._CLEANUP_CHILD_TABLES:
-            params.extend([self.iwiki_id, domain_id, snapshot_id])
-        cursor.execute(
-            "DELETE FROM iwiki.code_graph_snapshots "
-            "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
-            "AND state = 'ready' "
-            "AND snapshot_id NOT IN ("
-            "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
-            "WHERE iwiki_id = %s AND domain_id = %s "
-            "AND active_snapshot_id IS NOT NULL) " + guards,
-            params,
-        )
-        return cursor.rowcount
-```
-
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55432/iwiki_test" uv run pytest tests/postgres/test_code_graph_publication.py -q`
 Expected: PASS
 
-- [ ] **Step 7: Prove the tests discriminate**
+- [ ] **Step 6: Prove both tests discriminate**
 
-Temporarily revert the guard to the single `code_graph_files` clause and re-run only the parametrized guard test. Expected: it fails for three of the four tables. Then restore the four-table guard. Do the same for `_still_superseded`: remove the call inside the batch loop and re-run the reactivation test, expect failure, then restore. Record both observations in the task's report — a guard test that cannot fail is not a guard test.
+For the reactivation test: remove the `_still_superseded` call inside the batch loop, re-run it, expect failure, then restore.
 
-- [ ] **Step 8: Lint and commit**
+For the invariant test, add a throwaway child table that hangs off snapshots without touching files, and confirm the test fails:
+
+```sql
+CREATE TABLE iwiki.code_graph_orphan_child (
+    iwiki_id text NOT NULL,
+    domain_id bigint NOT NULL,
+    snapshot_id text NOT NULL,
+    PRIMARY KEY (iwiki_id, domain_id, snapshot_id),
+    CONSTRAINT code_graph_orphan_child_snapshot_fk
+        FOREIGN KEY (iwiki_id, domain_id, snapshot_id)
+        REFERENCES iwiki.code_graph_snapshots (iwiki_id, domain_id, snapshot_id)
+        ON DELETE CASCADE
+);
+```
+
+The test as written iterates a fixed set of three child tables, so extend that set from the catalogue for this check, observe the failure, then drop the table. Record both demonstrations in the task's report — a test that cannot fail is not a test.
+
+- [ ] **Step 7: Lint and commit**
 
 ```bash
 uv run flake8 src tests
 git add src/iwiki_mcp/postgres/codegraph.py tests/postgres/test_code_graph_publication.py
-git commit -m "fix(codegraph): guard the snapshot delete on every child table and re-check activity per batch"
+git commit -m "fix(codegraph): re-check snapshot activity per batch and pin the guard's schema invariant"
 ```
-
 ---
 
 ### Task 6: `validate_direct_principal` accepts a connection factory
@@ -1486,7 +1595,10 @@ def cleanup_sweep_due(iwiki_id: str) -> bool:
     now = time.monotonic()
     with _SWEEP_LOCK:
         last = _SWEEP_LAST.get(iwiki_id)
-        return last is None or now - last >= _SWEEP_MIN_INTERVAL_SECONDS
+        due = last is None or now - last >= _SWEEP_MIN_INTERVAL_SECONDS
+    if not due:
+        LOGGER.debug("code graph cleanup skipped, inside the throttle interval")
+    return due
 ```
 
 Replace `schedule_wiki_cleanup` with:
@@ -1898,7 +2010,7 @@ The parent records every observation on the wiki task page and runs `/check-chai
 
 ## Self-Review
 
-**Spec coverage.** R1 → T1+T7. R2 → T1+T2. R3 → T7. R4 → T1+T7. R5 → T1. R6 → T7. R7 → T7. R8 → T2+T7. R9 → T6. R10 → T7+T8. R10a → T10. R11 → T3. R12 → T4. R13 → T4. R14 → constraint only, no change, asserted by the unchanged default. R15 → T5. R16 → T5. R17 → T9. R18 → T9. R19 → T1+T2. R20 → T1. R21 → T1. R22 → T8. R23 → T10. R24 → T5 step 7 and T10. No gaps.
+**Spec coverage.** R1 → T1+T7. R2 → T1+T2. R3 → T7. R4 → T1+T7. R5 → T1. R6 → T7. R7 → T7. R8 → T2+T7. R9 → T6. R10 → T7+T8. R10a → T10. R11 → T3. R12 → T4. R13 → T4. R14 → T4 step 7. R15 → T5 (invariant test; the guard itself is unchanged and correct). R16 → T5. R17 → T9. R18 → T9. R19 → T1 (rows, elapsed, drop counter), T2 (pool statistics), T7 (throttle skip at debug). R20 → T1. R21 → T1. R22 → T8. R23 → T10. R24 → T5 step 6 and T10. No gaps.
 
 **Placeholder scan.** No "TBD", no "add appropriate error handling", no "similar to Task N". Every code step carries the code. Two steps name a helper the implementer must locate in the existing test file rather than invent — `_store` and `_publish_snapshot` — and both say explicitly what to do if it is absent.
 

@@ -1,6 +1,6 @@
 ---
 review:
-  intent_hash: 12614af27a64cbb1
+  intent_hash: 9411ca5227c39205
   last_run: 2026-09-23
   phases:
     structure: { status: passed }
@@ -49,6 +49,16 @@ review:
       fix: "Recorded as in scope: slice S3 already covers both language siblings of docs/code-graph-publishing.md, and the wiki page carries the same claim and must be corrected with them."
       verdict: accepted
       verdict_at: 2026-09-23
+    - id: F-005
+      phase: consistency
+      severity: CRITICAL
+      section: Objective
+      section_hash: e5ec8dab395996ad
+      fragment: "a snapshot with zero file rows and surviving symbol rows would pass the guard"
+      text: "The stated hole cannot exist. code_graph_symbols.file_id is NOT NULL with a cascading foreign key to code_graph_files, relations depend on both, wiki_links depends on relations, and no constraint is NOT VALID - so files is the root of the child chain and an empty files implies every other child table is empty by integrity rather than by drain order. The claim came from issue 104 and this intent repeated it without reading the schema."
+      fix: "Objective now states the schema fact and calls the one-table guard exactly sufficient. The spec's R15 four-table guard is withdrawn and replaced by a test pinning the invariant. Found at the plan gate, where building the four-table test proved three of its four cases unconstructible."
+      verdict: fixed
+      verdict_at: 2026-09-23
 ---
 # Intent: cleanup-worker-connection-and-transaction-bounds
 
@@ -68,9 +78,16 @@ were confirmed by reading `src/iwiki_mcp/postgres/codegraph.py` rather than infe
   authentication therefore accounts for pooled tool work only, and `_schedule_cleanup`
   spawns one thread per `(iwiki_id, domain)` with no global cap.
 - `_prune_superseded`'s parent delete guards on `NOT EXISTS` over `code_graph_files`
-  alone. Drain order makes files last, so it holds today; a snapshot with zero file rows
-  and surviving symbol rows would pass the guard and cascade onto
-  `code_graph_relations_source_symbol_fk`.
+  alone. Issue 104 reads that as a hole and this intent first repeated the reading; both
+  are wrong, and the correction was established at the plan gate by reading the schema
+  rather than the drain. `code_graph_symbols.file_id` is `NOT NULL` with a foreign key to
+  `code_graph_files` that cascades, `code_graph_relations` depends on both, and
+  `code_graph_wiki_links` depends on relations, so `code_graph_files` is the root of the
+  child chain and no constraint is `NOT VALID`. An empty `code_graph_files` therefore
+  implies every other child table is empty as a matter of integrity, not of drain order,
+  and the issue's scenario — zero file rows with surviving symbol rows — cannot exist.
+  The one-table guard is exactly sufficient; what it lacks is a test pinning the schema
+  invariant it silently depends on.
 - That foreign key is covered only to its snapshot prefix, which is the more precise
   statement than issue 104's "unindexed". The migrations create no index on any
   `code_graph_*` table; `code_graph_relations` has exactly one, its primary key
@@ -87,10 +104,11 @@ were confirmed by reading `src/iwiki_mcp/postgres/codegraph.py` rather than infe
   statements inside `_delete_snapshot_rows` are statements, not commits, so a kill rolls
   back every snapshot the call touched.
 
-Indexing those foreign keys is therefore in scope rather than deferred: the four-way guard
-closes the hole the drain can actually reach, but leaves the cascade expensive everywhere
-else it can occur. It is in scope as a measured decision, not as a foregone one — an index
-is maintained on every publication for as long as it exists.
+Indexing those foreign keys is therefore in scope rather than deferred. It is the only one
+of the three items whose cost survives the correction above: the guard turns out to need
+nothing, but the cascade stays expensive wherever it fires, and it fires on every child
+delete the drain performs. It is in scope as a measured decision, not as a foregone one —
+an index is maintained on every publication for as long as it exists.
 
 Why now: the worker only just became reachable from any authenticated request, so it runs
 far more often than when these boundaries were written. The third item also contradicts
