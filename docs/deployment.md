@@ -187,10 +187,24 @@ deleted again. Stepping back is `rollback_v8_compatibility`, which restores vers
 with it that behaviour; it exists to reach the version an older runtime pins, not to
 repair anything. Version 9 adds three plain indexes on `code_graph_relations`'s own
 foreign-key columns (`source_symbol_id`, `source_file_id`, `target_symbol_id`); the
-measurement behind them is
-`docs/superpowers/reports/cleanup-index-measurement.md`. It ships no compatibility
-rollback — reversing it is an ordinary `DROP INDEX`, since the migration adds no table,
-column, or delete rule for an older runtime to disagree with.
+measurement behind them, including the write-blocking window below, is
+`docs/superpowers/reports/cleanup-index-measurement.md`. Stepping back is
+`rollback_v9_compatibility`, which restores version 8 by dropping the three indexes; it
+ships no separate raw-SQL compatibility artifact, since nothing beyond the rollback chain
+itself needs one.
+
+`run_migrations` applies every pending migration inside one transaction, and `CREATE
+INDEX CONCURRENTLY` cannot run inside a transaction block, so version 9 uses a plain
+`CREATE INDEX` for each of the three. That statement takes a `SHARE` lock on
+`code_graph_relations`, blocking every INSERT, UPDATE, and DELETE against it — every
+publication batch and every cleanup drain — for as long as the whole migration
+transaction stays open, not just until the index itself finishes building. Two mitigating
+facts: a plain `CREATE INDEX` on an already-populated table is a single heap-scan-and-sort
+with no second pass and no wait for concurrent transactions, so the measured 1.0-1.4s at
+~630,000 rows is a conservative upper bound for the shipped statement at the roughly one
+million rows a production table carries, not a lower one; and the production
+`lock_timeout_ms = 5000` means the migration aborts cleanly if it cannot acquire the lock
+promptly, rather than queuing indefinitely behind an in-flight publication.
 
 Create a separate admin configuration by copying `server.toml`, then replace only
 `storage.user` with the administration-only schema-owner/migrator role. Give a dedicated

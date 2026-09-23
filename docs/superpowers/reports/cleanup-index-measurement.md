@@ -82,13 +82,38 @@ CREATE INDEX CONCURRENTLY code_graph_relations_target_symbol_idx
     ON iwiki.code_graph_relations (iwiki_id, domain_id, snapshot_id, target_symbol_id);
 ```
 
-| State | Shipped drain, 1 snapshot (s) | `CREATE INDEX CONCURRENTLY` (s) | Index `pg_relation_size` | Insert 1 publication (s) |
+**The `CREATE INDEX CONCURRENTLY` column below measures a statement that does not ship.**
+It was used here only so building the index wouldn't itself block the benchmark harness's
+own connections. `run_migrations` applies every pending migration inside one
+`with connection.transaction()`, and `CONCURRENTLY` cannot run inside a transaction block,
+so the shipped migration (schema version 9) uses a plain `CREATE INDEX` for each of the
+three. Plain `CREATE INDEX` takes a `SHARE` lock on `code_graph_relations`, blocking every
+INSERT, UPDATE, and DELETE against it — every publication batch and every cleanup drain —
+for as long as the whole migration transaction stays open, not just until the index
+finishes building. Two mitigating facts: a plain `CREATE INDEX` on an already-populated
+table is a single heap-scan-and-sort with no second pass and no wait for concurrent
+transactions, so the measured 1.0-1.4s below at ~630,000 rows is a conservative **upper**
+bound for the shipped statement at the roughly one million rows a production table
+carries, not a lower one; and the production `lock_timeout_ms = 5000` means the migration
+aborts cleanly if it cannot acquire the lock promptly, rather than queuing indefinitely
+behind an in-flight publication.
+
+| State | Shipped drain, 1 snapshot (s) | `CREATE INDEX CONCURRENTLY` (s), measurement-only, does not ship | Index `pg_relation_size` | Insert 1 publication (s) |
 |---|---|---|---|---|
-| no index | 3.068 (first); repeats [4.575, 4.469, 14.385, 5.230], mean 7.165 | - | - | 2.499 |
+| no index | see below — 6 observations, mean 6.17s, range 3.068-14.385s | - | - | 2.499 |
 | + `source_symbol_idx` | 1.500 | 1.017 | 32,194,560 B (30.7 MiB) | 2.511 |
 | + `source_file_idx` (2 total) | 1.389 | 1.418 | 34,758,656 B (33.1 MiB) | 2.609 |
 | + `target_symbol_idx` (all 3) | 1.184 | 1.380 | 60,203,008 B (57.4 MiB) | 2.723 |
 | control: indexes dropped again, cache still warm | 5.278 | - | - | 2.493 |
+
+All six no-index shipped-drain observations, pooled honestly rather than reported as a
+partial subset: `3.068` (the first trial), `4.575, 4.469, 14.385, 5.230` (four repeats),
+`5.278` (the cache-warmth control above). Sum 37.005s / 6 = **mean 6.17s**, min 3.068s,
+max 14.385s. An earlier draft of this report computed the mean from the four repeats only
+(excluding 3.068), reporting 7.165 — about 16% high. Corrected everywhere in this report;
+the decision is unchanged because the separation argument rests on the minimum
+(no-index best case, 3.068s) and maximum (14.385s) against the indexed mean (1.097s), not
+on the mean of the no-index set.
 
 The control trial (drop all 3 indexes, measure again with a warm buffer cache) came back
 *slower* than the very first cold-cache baseline, ruling out "cache warmth" as the
@@ -98,7 +123,7 @@ explanation for the speedup seen after adding indexes — the indexes are doing 
 
 | Index alone | Trials (s) | Mean (s) |
 |---|---|---|
-| none | [4.575, 4.469, 14.385, 5.230] | 7.165 |
+| none | all 6 no-index observations: [3.068, 4.575, 4.469, 14.385, 5.230, 5.278] | 6.17 |
 | `source_symbol_idx` | [1.881, 1.627, 1.561] | 1.690 |
 | `target_symbol_idx` | [1.962, 2.240, 2.077] | 2.093 |
 | `source_file_idx` | [1.668, 1.773, 10.985] | 4.808 (2 of 3 trials ~1.7s; the 10.985s outlier matches the no-index trials' own outlier pattern — background autovacuum/checkpoint I/O, not the FK check) |
@@ -119,8 +144,9 @@ unchanged (+0)**. Without the candidate indexes, that same FK-check load falls o
 primary key's `(iwiki_id, domain_id, snapshot_id, …)` prefix — a range scan bounded to
 one snapshot, but one that still has to walk however many dead tuples that snapshot's
 just-deleted relations left behind, once per deleted symbol or file row (14,000 + 7,001
-times per drain). That is exactly the variance measured above (4.5-14.4s, no fixed
-ceiling) versus the tight, predictable ~1.1s with dedicated indexes.
+times per drain). That is exactly the variance measured above (3.1-14.4s across all six
+no-index observations, mean 6.17s, no fixed ceiling) versus the tight, predictable ~1.1s
+with dedicated indexes.
 
 ## Quantity 2: reverse order — cannot complete, by design
 
@@ -191,17 +217,19 @@ polling granularity, not vacuum work.
 Rule: add an index only when its measured delete benefit on the shipped drain path
 exceeds its measured write and space cost.
 
-- **`code_graph_relations_source_symbol_idx` — ADD.** Delete benefit ~5.5s/drain
-  (7.165s -> 1.690s alone, confirmed by +14,007 `idx_scan`). Write cost ~0.012s per
-  ~21k-row publication (2.499s -> 2.511s as the first index added). Space 30.7 MiB.
-  Benefit far exceeds cost.
+- **`code_graph_relations_source_symbol_idx` — ADD.** Delete benefit ~4.5s/drain
+  (6.17s no-index mean -> 1.690s alone, confirmed by +14,007 `idx_scan`). Write cost
+  ~0.012s per ~21k-row publication (2.499s -> 2.511s as the first index added, n=1 — see
+  the write-cost precision note below). Space 30.7 MiB. Benefit far exceeds cost.
 - **`code_graph_relations_source_file_idx` — ADD.** Delete benefit converges to the same
   ~1.7s territory in 2 of 3 clean trials (the 4.808s mean is dragged by one outlier that
   matches the no-index trials' own background-noise pattern), confirmed by +7,001
   `idx_scan` (= exactly the files deleted per drain). Write cost ~0.1s per publication
-  (2.511s -> 2.609s as the second index added). Space 33.1 MiB. Benefit exceeds cost.
+  (2.511s -> 2.609s as the second index added, n=1 — see the write-cost precision note
+  below). Space 33.1 MiB. Benefit exceeds cost.
 - **`code_graph_relations_target_symbol_idx` — ADD, narrowest margin.** Alone it drops
-  the drain from 7.165s to 2.093s; its marginal contribution on top of the other two is
+  the drain from the 6.17s no-index mean to 2.093s; its marginal contribution on top of
+  the other two is
   smaller (1.431s -> 1.097s, ~0.33s), and it is the largest of the three (57.4 MiB,
   roughly double the others) because `target_symbol_id` is set on more relation rows than
   `source_symbol_id`. It is also the constraint actually named in every reverse-order
@@ -219,13 +247,37 @@ once per deleted symbol (14,000x) and file (7,001x) per drain, is exactly what t
 candidate indexes remove, and `idx_scan` deltas plus the unchanged primary-key scan count
 prove the mechanism rather than merely correlating with it.
 
+### Recorded, not acted on (Minor)
+
+- **Write-cost precision.** The per-index write-cost deltas above (2.499s -> 2.511s
+  adding `source_symbol_idx`; 2.511s -> 2.609s adding `source_file_idx`) are each a
+  single publication (n=1), and both sit inside the ~2.32-2.69s spread the Setup section
+  already recorded across the 30 baseline publications with no index at all. At that
+  precision the write cost is not resolvable from zero — the numbers are consistent with
+  a real small overhead and also consistent with ordinary run-to-run variance. This cuts
+  in favour of ADD (a write cost too small to resolve is, at worst, negligible), so no
+  decision changes; stated here so the specific deltas aren't read as more precise than
+  they are.
+- **Partial index not evaluated.** A partial index on `target_symbol_idx`
+  (`WHERE target_symbol_id IS NOT NULL`) was never measured, even though that candidate
+  is both the narrowest-margin and the largest-footprint of the three. The plan named
+  exactly three candidates (the three plain composite indexes above); a partial-index
+  variant is outside that enumeration, not a deviation from it. Worth a follow-up
+  measurement if `target_symbol_idx`'s ~57.4 MiB (scaling with the domain) becomes a real
+  concern later.
+
 ## Migration
 
 Added as schema version 9 in `src/iwiki_mcp/postgres/migrations.py`
 (`CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION`), a plain (non-`CONCURRENTLY`) `CREATE INDEX`
 for each of the three columns — `CREATE INDEX CONCURRENTLY` cannot run inside a
-transaction block, and `run_migrations` applies every pending migration in one. Deploying
-version 9 against production is Task 10 (human checkpoint) and is out of scope here.
+transaction block, and `run_migrations` applies every pending migration in one. That
+plain `CREATE INDEX` holds a `SHARE` lock blocking every write to `code_graph_relations`
+for the duration of the whole migration transaction, not just the index build — see the
+write-blocking window paragraph above the results table, and `docs/deployment.md`, for
+the operational consequence and its two mitigations (a conservative upper-bound build
+time, and `lock_timeout_ms` aborting cleanly rather than queuing). Deploying version 9
+against production is Task 10 (human checkpoint) and is out of scope here.
 
 `rollback_v9_compatibility` was added alongside it (restores version 8 by dropping the
 three indexes), matching the existing per-version rollback convention (`rollback_v5`
@@ -260,3 +312,76 @@ task's to use).
 
 Both benchmark containers (`iwiki-pgbench`, `iwiki-pgtest-mine`) were removed after use.
 `iwiki-pgtest` (port 55432, not this task's) was never started, stopped, or written to.
+
+## Fix round 1
+
+Review verdict: measurement Approved — index column sets confirmed to match the composite
+FK definitions exactly, trial distributions confirmed non-overlapping at the individual-
+observation level, and the `idx_scan`-deltas-matching-cardinality-with-PK-flat evidence
+confirmed genuinely causal. The falsified expectation stands. Two Important findings, both
+about the deployment story, closed below; one Minor number correction; two further Minors
+recorded, not acted on.
+
+**Important 1 — `docs/deployment.md` denied a rollback that exists.** The paragraph said
+version 9 "ships no compatibility rollback," when `rollback_v9_compatibility` ships in the
+same commit and four test flows call it. Corrected to name it, following the paragraph's
+own convention of naming the function for every other version ("Stepping back is
+`rollback_v8_compatibility`..."). The qualifier this report already stated correctly — no
+separate `SCHEMA9_COMPATIBILITY_ROLLBACK_SQL` raw-SQL artifact — is preserved in the
+corrected text so the accurate distinction (no raw-SQL artifact, not no rollback) survives
+in both places.
+
+**Important 2 — the write-blocking window was stated nowhere.** Added to both
+`docs/deployment.md` and this report (the paragraph above the results table, and a pointer
+in the Migration section): plain `CREATE INDEX` takes a `SHARE` lock on
+`code_graph_relations` blocking every INSERT/UPDATE/DELETE — every publication batch and
+every cleanup drain — for the duration of the whole migration transaction, not just the
+index build; measured 1.0-1.4s at ~630k rows is a conservative *upper* bound for the
+shipped statement at ~1M rows (single heap-scan-and-sort, no second pass, no wait for
+concurrent transactions); `lock_timeout_ms = 5000` aborts the migration cleanly rather than
+queuing behind an in-flight publication. The results table's `CREATE INDEX CONCURRENTLY`
+column is now labeled "measurement-only, does not ship."
+
+**Minor, fixed — wrong mean in shipped source.** `mean 7.165` was the four repeats only
+`(4.575+4.469+14.385+5.230)/4`, excluding the first trial (`3.068`) and the cache-warmth
+control (`5.278`), both of which are equally valid no-index observations of the same
+operation. All six: `3.068, 4.575, 4.469, 14.385, 5.230, 5.278`, sum 37.005, **mean
+6.17s** — about 16% lower than the figure this report and the `migrations.py` migration
+comment previously stated. Corrected in both places (`migrations.py:713` comment range
+`4.5-14.4s` -> `3.1-14.4s (mean ~6.2s)`; every `7.165` in this report -> the pooled mean
+or, where a specific delta was being computed, the corrected delta). No decision changes:
+the separation argument was, and remains, the no-index minimum (3.068s, still nearly 3x
+the indexed mean) and maximum (14.385s, still ~13x) against the indexed mean (1.097s), not
+the no-index mean.
+
+**Minor, recorded, not acted on.** Both noted in a new "Recorded, not acted on (Minor)"
+subsection under Decision per candidate: the per-index write-cost deltas are n=1 and sit
+inside the 30-publication baseline's own `2.32-2.69s` spread, so they are not resolvable
+from zero at that precision (cuts in favour of ADD, no decision change); and a partial
+index (`WHERE target_symbol_id IS NOT NULL`) on the narrowest-margin, largest-footprint
+candidate was never evaluated — outside the plan's three enumerated candidates, so a
+scoped-out gap rather than a deviation, flagged as a follow-up.
+
+### Fix round 1 verification
+
+```bash
+uv run pytest -q -m "not slow"    # 3618 passed, 0 failed, 265 skipped
+uv run flake8 src tests           # clean
+```
+
+No production logic changed in this round — only comments and documentation — so a
+targeted (not full) `tests/postgres` re-run against a fresh throwaway container was used
+to confirm the `migrations.py` comment edit didn't disturb anything mechanical:
+
+```bash
+docker run -d --name iwiki-pgtest-mine2 -e POSTGRES_PASSWORD=pgtest -e POSTGRES_DB=iwiki_test \
+    -p 127.0.0.1:55437:5432 pgvector/pgvector:pg16
+docker exec iwiki-pgtest-mine2 psql -U postgres -d iwiki_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+IWIKI_TEST_POSTGRES_DSN="postgresql://postgres:pgtest@127.0.0.1:55437/iwiki_test" uv run pytest -q \
+    tests/postgres/test_migrations.py tests/postgres/test_code_graph_migrations.py \
+    tests/postgres/test_code_graph_rollback.py tests/postgres/test_specification_migrations.py \
+    tests/postgres/test_admin.py tests/postgres/test_http.py
+docker rm -f iwiki-pgtest-mine2
+```
+
+`102 passed`. Container removed after use.

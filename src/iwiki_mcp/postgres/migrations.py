@@ -710,8 +710,8 @@ WIKI_LINK_CASCADE_MIGRATION = Migration(
 # so these rows are already gone by then -- still pays a foreign-key check
 # per deleted parent row. Without these indexes that check falls back to the
 # primary key's snapshot-scoped range, which still holds the just-deleted
-# rows as dead tuples until vacuum: one full drain measured 4.5-14.4s across
-# repeated trials. With all three indexes present it measured a consistent
+# rows as dead tuples until vacuum: one full drain measured 3.1-14.4s across
+# repeated trials (mean ~6.2s). With all three indexes present it measured a consistent
 # 1.05-1.15s, and pg_stat_user_indexes confirmed each index absorbs exactly
 # the expected number of scans (one per deleted symbol or file row) that
 # previously fell on the primary key. The write cost is real but small
