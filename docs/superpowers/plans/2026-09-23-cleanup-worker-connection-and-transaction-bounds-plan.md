@@ -1,6 +1,6 @@
 ---
 review:
-  plan_hash: 74ae992cdc04740f
+  plan_hash: 8de9bc7058bd8cee
   last_run: 2026-09-23
   phases:
     structure: { status: passed }
@@ -57,6 +57,16 @@ review:
       fragment: "guards on NOT EXISTS over all four child tables"
       text: "R15's four-table guard defends a state the foreign keys forbid: code_graph_files roots the child chain, so an empty files implies every other child table is empty. Three of the four tests specified as its DoD cannot be constructed, which is how the error surfaced."
       fix: "Drift returned to the earliest gate. The intent's Objective and the spec's section 1 and R15 were corrected and both re-gated; issue 104 item 4 is recorded as mistaken. Task 5 now keeps the single guard and adds a catalogue-reading test that pins the invariant."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-006
+      phase: coverage
+      severity: WARNING
+      section: "Task 8"
+      section_hash: null
+      fragment: "replace the paragraph beginning \"Two things schedule that work.\""
+      text: "R22 requires the batch-commit claim corrected in every place that publishes it, but Task 8 rewrote only the second paragraph of each language sibling. The stale sentence - each batch deletes one superseded snapshot's rows, children first, in its own transaction - lives in the FIRST paragraph, which Task 8 did not touch. R22's own DoD could not have been met."
+      fix: "Task 8 steps 1 and 2 now rewrite both paragraphs in both languages, stating what a batch actually is: at most 10,000 rows from one child table of one snapshot. Found by the Task 4 reviewer as an out-of-scope observation."
       verdict: fixed
       verdict_at: 2026-09-23
   chain:
@@ -1826,9 +1836,23 @@ Implements R10's documentation half and R22.
 - Consumes: `MAINTENANCE_WORKERS` and the `pool_max_size` arithmetic from Task 7.
 - Produces: nothing code depends on.
 
-- [ ] **Step 1: Rewrite the English paragraph**
+- [ ] **Step 1: Rewrite the English paragraphs — both of them**
 
-In `docs/code-graph-publishing.md`, replace the paragraph beginning "Two things schedule that work." with:
+`docs/code-graph-publishing.md` carries the stale claim in its FIRST paragraph, not the second. Replace the paragraph beginning "Cleanup runs on a single-flight background worker" with:
+
+```markdown
+Cleanup runs on a single-flight background worker rather than inside a publication, so a
+publication is never delayed or failed by it. A cycle drains the backlog one committed
+batch at a time, where a batch is at most 10,000 rows from one child table of one
+snapshot, children before parents. A cycle holds one connection for its whole duration
+and stops once it hits its per-cycle row ceiling or the backlog is empty. If it stops
+early — or is killed — the rows already committed stay removed and the next cycle resumes
+from there, because the state lives in the database, not in the worker. Every batch
+re-checks that the snapshot is still superseded, so an operator reverting to it mid-drain
+loses at most one batch of its rows rather than the whole snapshot.
+```
+
+Then replace the paragraph beginning "Two things schedule that work." with:
 
 ```markdown
 Two things schedule that work, and neither of them runs it. `begin` queues a job for the
@@ -1847,9 +1871,24 @@ authentication share: the server's total PostgreSQL connections are `pool_max_si
 the two maintenance workers, twelve at the shipped defaults.
 ```
 
-- [ ] **Step 2: Rewrite the Russian sibling to match**
+- [ ] **Step 2: Rewrite the Russian sibling to match — both paragraphs**
 
-In `docs/code-graph-publishing.ru.md`, replace the paragraph beginning "Эту работу планируют две вещи." with:
+In `docs/code-graph-publishing.ru.md`, replace the paragraph beginning "Очистка выполняется single-flight фоновым воркером" with:
+
+```markdown
+Очистка выполняется single-flight фоновым воркером, а не внутри публикации, поэтому
+публикация никогда не задерживается и не падает из-за неё. Цикл вычерпывает накопившееся
+по одному закоммиченному батчу за раз, где батч — это не более 10 000 строк из одной
+дочерней таблицы одного снапшота, дети раньше родителя. Цикл держит одно соединение на всю
+свою длительность и останавливается по достижении потолка строк за цикл или когда очередь
+пуста. Если он остановился рано — или был убит — уже закоммиченные строки остаются
+удалёнными, а следующий цикл продолжает с этого места, поскольку состояние хранится в базе,
+а не в воркере. Каждый батч заново проверяет, что снапшот всё ещё вытеснен, поэтому
+оператор, возвращающий его посреди слива, теряет не больше одного батча его строк, а не
+весь снапшот.
+```
+
+Then replace the paragraph beginning "Эту работу планируют две вещи." with:
 
 ```markdown
 Эту работу планируют две вещи, и ни одна из них её не выполняет. `begin` ставит в очередь
