@@ -44,24 +44,29 @@ superseded snapshot — every query joins `code_graph_domain_state.active_snapsh
 so the window exists only to leave an operator a manual revert target.
 
 Cleanup runs on a single-flight background worker rather than inside a publication, so a
-publication is never delayed or failed by it. A cycle drains the backlog in committed
-batches — each batch deletes one superseded snapshot's rows, children first, in its own
-transaction — and stops once it hits its per-cycle row ceiling or the backlog is empty.
-If a cycle stops early, the next one resumes the drain where the previous one left off,
-because the state lives in the database, not in the worker. At most one cycle runs per
-domain at a time; concurrent publications against the same domain share it instead of
-stacking cycles on the same tables.
+publication is never delayed or failed by it. A cycle drains the backlog one committed
+batch at a time, where a batch is at most 10,000 rows from one child table of one
+snapshot, children before parents. A cycle holds one connection for its whole duration
+and stops once it hits its per-cycle row ceiling or the backlog is empty. If it stops
+early — or is killed — the rows already committed stay removed and the next cycle resumes
+from there, because the state lives in the database, not in the worker. Every batch
+re-checks that the snapshot is still superseded, so an operator reverting to it mid-drain
+loses at most one batch of its rows rather than the whole snapshot.
 
-Two things schedule that work. `begin` schedules a cycle for the domain it is publishing.
-Any other authenticated hosted request may instead schedule a *sweep*, which runs one
-cycle per domain in `binding.write`, one domain at a time, throttled to once per 900
-seconds per wiki; a call that finds the interval unexpired pays only a lock and a float
-compare. The sweep exists because publication alone left a domain that stopped publishing
-holding its superseded rows forever. Its reach is that caller's `binding.write` — the
-domains it may already write — and each domain is cleaned by its own store, built and
-validated for that domain alone. That mandate is also why the trigger is a request rather
-than a timer: a timer carries no binding and would have to act with the service role's
-whole reach. A wiki nobody touches is therefore never swept.
+Two things schedule that work, and neither of them runs it. `begin` queues a job for the
+domain it is publishing; any other authenticated hosted request may queue one job per
+domain in `binding.write`, throttled to once per 900 seconds per wiki. A fixed set of two
+maintenance workers drains that queue, so a growing number of clients produces queueing
+rather than threads and connections. The queue is bounded and an enqueue against a full
+one is dropped and counted — the work returns on a later request, because nothing waits
+on it.
+
+One batch is one delete of at most 10,000 rows from one child table of one snapshot, and
+each batch commits on its own. A kill therefore costs at most that one batch, and the
+next cycle resumes where it stopped. A worker holds one connection for a whole cycle and
+draws it from a maintenance pool of its own, never from the pool the tools and
+authentication share: the server's total PostgreSQL connections are `pool_max_size` plus
+the two maintenance workers, twelve at the shipped defaults.
 
 Direct-PostgreSQL CLI publication is a known gap here: the process exits shortly after
 `finalize` returns, so a cleanup cycle it scheduled can be killed before it drains.
