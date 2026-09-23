@@ -156,6 +156,7 @@ class PostgresCodeGraphStore:
             iwiki_id=iwiki_id,
             read_domains=(domain,),
             write_domains=(domain,),
+            connection_factory=self._connection_factory,
         ) is not None:
             raise ValueError("invalid_config")
 

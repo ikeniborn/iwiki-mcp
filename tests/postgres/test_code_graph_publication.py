@@ -1200,3 +1200,26 @@ def test_the_candidate_page_size_keeps_its_default():
     ).parameters["superseded_cleanup_limit"]
 
     assert parameter.default == 2
+
+
+def test_principal_validation_uses_the_supplied_factory(pg_graph):
+    """A worker holding two connections would put the ceiling out by one per
+    worker, which is the whole of the bound at two workers."""
+    import psycopg
+
+    from iwiki_mcp.postgres import store as store_module
+
+    opened = []
+
+    def factory():
+        opened.append(1)
+        return psycopg.connect(pg_graph.dsn)
+
+    result = store_module.validate_direct_principal(
+        pg_graph.dsn,
+        iwiki_id=pg_graph.iwiki_id,
+        connection_factory=factory,
+    )
+
+    assert result is None
+    assert len(opened) == 1, "validation ignored the factory and dialled out"
