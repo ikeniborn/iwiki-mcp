@@ -778,7 +778,7 @@ def prepare_runtime(
     cfg = admin._engine_config(config, env)
     probe(cfg)
     dsn = admin._dsn(config)
-    require_schema_version(dsn, expected_version=8)
+    require_schema_version(dsn, expected_version=9)
     require_hosted_runtime_principal(dsn)
     options = (
         f"-c statement_timeout={config.server.statement_timeout_ms} "

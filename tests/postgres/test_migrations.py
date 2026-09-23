@@ -156,7 +156,7 @@ def test_migration_history_includes_domain_authority_and_code_graph():
     from iwiki_mcp.postgres.migrations import MIGRATIONS
 
     assert tuple(migration.version for migration in MIGRATIONS) == (
-        1, 2, 3, 4, 5, 6, 7, 8,
+        1, 2, 3, 4, 5, 6, 7, 8, 9,
     )
     statements = "\n".join(MIGRATIONS[3].statements)
     assert "can_create_domain" in statements

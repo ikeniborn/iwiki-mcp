@@ -178,14 +178,19 @@ first is a network, credential, or container problem, the second is a migration 
 shared message once sent an operator looking for a migration while the database was
 listening on no TCP port at all. Neither message contains the DSN or the password.
 
-The runtime pins one exact schema version, currently 8. An image is therefore not
+The runtime pins one exact schema version, currently 9. An image is therefore not
 deployable against a database the operator has not migrated to that version, and an older
 image is not deployable against a newer database. Version 8 releases the foreign key that
 let derived code-graph links block deletion of the Markdown page they were derived from:
 before it, a page that carried a `code` selector at publication time could never be
 deleted again. Stepping back is `rollback_v8_compatibility`, which restores version 7 and
 with it that behaviour; it exists to reach the version an older runtime pins, not to
-repair anything.
+repair anything. Version 9 adds three plain indexes on `code_graph_relations`'s own
+foreign-key columns (`source_symbol_id`, `source_file_id`, `target_symbol_id`); the
+measurement behind them is
+`docs/superpowers/reports/cleanup-index-measurement.md`. It ships no compatibility
+rollback — reversing it is an ordinary `DROP INDEX`, since the migration adds no table,
+column, or delete rule for an older runtime to disagree with.
 
 Create a separate admin configuration by copying `server.toml`, then replace only
 `storage.user` with the administration-only schema-owner/migrator role. Give a dedicated
