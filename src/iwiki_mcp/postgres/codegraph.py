@@ -9,7 +9,7 @@ import json
 import logging
 import secrets
 import threading
-from typing import Any, Iterator
+from typing import Any, ContextManager, Iterator
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -131,7 +131,7 @@ class PostgresCodeGraphStore:
         staging_cleanup_limit: int,
         superseded_retention_seconds: int = 86400,
         superseded_cleanup_limit: int = 2,
-        connection_factory: Callable[[], psycopg.Connection] | None = None,
+        connection_factory: Callable[[], ContextManager[psycopg.Connection]] | None = None,
         require_database_principal: bool = False,
         clock: Callable[[], datetime.datetime] | None = None,
     ) -> None:
@@ -162,14 +162,31 @@ class PostgresCodeGraphStore:
     # -- infrastructure -------------------------------------------------
 
     @contextmanager
+    def _connection(self) -> Iterator[psycopg.Connection]:
+        """One connection, many transactions.
+
+        Cleanup commits per batch, so binding a connection to a single
+        transaction would mean one connect per 10,000 rows — roughly ninety
+        of them to drain a million. The factory yields a context manager, as
+        `AuthStore` and `postgres/store.py` already require, so a pooled
+        connection returns to its pool instead of being closed.
+        """
+        with self._connection_factory() as connection:
+            yield connection
+
+    @contextmanager
+    def _transaction_on(
+        self, connection: psycopg.Connection
+    ) -> Iterator[psycopg.Cursor]:
+        with connection.transaction():
+            with connection.cursor() as cursor:
+                yield cursor
+
+    @contextmanager
     def _transaction(self) -> Iterator[psycopg.Cursor]:
-        connection = self._connection_factory()
-        try:
-            with connection.transaction():
-                with connection.cursor() as cursor:
-                    yield cursor
-        finally:
-            connection.close()
+        with self._connection() as connection:
+            with self._transaction_on(connection) as cursor:
+                yield cursor
 
     def _domain_id(self, cursor) -> int:
         cursor.execute(

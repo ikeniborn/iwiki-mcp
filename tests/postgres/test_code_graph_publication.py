@@ -225,6 +225,13 @@ class _CountingConnection:
     def __repr__(self):
         return "<counting publication connection>"
 
+    def __enter__(self):
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._connection.__exit__(*exc)
+
     def __getattr__(self, name):
         return getattr(self._connection, name)
 
@@ -699,6 +706,62 @@ def _snapshot_rows(graph, snapshot_id):
             admin=True,
         )[0][0]
     return counts
+
+
+def _store_with_factory(graph, factory):
+    """A store on the fixture's wiki and clock, with a factory of our own.
+
+    The clock matters: `advance_clock` is how the suite ages a snapshot past
+    the retention window, and a store with the real clock would never see a
+    candidate.
+    """
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    return PostgresCodeGraphStore(
+        graph.dsn,
+        graph.iwiki_id,
+        graph.domain,
+        graph.owner_id,
+        lock_timeout_ms=graph.lock_timeout_ms,
+        session_ttl_seconds=graph.session_ttl_seconds,
+        staging_retention_seconds=graph.staging_retention_seconds,
+        staging_cleanup_limit=graph.staging_cleanup_limit,
+        superseded_retention_seconds=graph.superseded_retention_seconds,
+        superseded_cleanup_limit=graph.superseded_cleanup_limit,
+        connection_factory=factory,
+        clock=graph._now,
+    )
+
+
+def _aged_superseded(graph, publications: int = 3) -> str:
+    """Publish repeatedly, age past the window, return the oldest snapshot."""
+    for _ in range(publications):
+        graph.finalize(graph.complete_session())
+    graph.advance_clock(graph.superseded_retention_seconds + 1)
+    return _snapshot_states(graph)[0][0]
+
+
+def test_one_connection_serves_many_transactions(pg_graph):
+    """Committing per batch must not mean connecting per batch."""
+    import psycopg
+
+    opened = []
+
+    def factory():
+        opened.append(1)
+        return psycopg.connect(pg_graph.dsn)
+
+    store = _store_with_factory(pg_graph, factory)
+
+    with store._connection() as connection:
+        with store._transaction_on(connection) as cursor:
+            cursor.execute("SELECT 1")
+            assert cursor.fetchone()[0] == 1
+        with store._transaction_on(connection) as cursor:
+            cursor.execute("SELECT 2")
+            assert cursor.fetchone()[0] == 2
+
+    assert len(opened) == 1, "each transaction opened its own connection"
 
 
 def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
