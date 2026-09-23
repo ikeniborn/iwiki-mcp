@@ -79,11 +79,13 @@ sized against this larger total, not against the pool and workers alone.
 
 The direct-PostgreSQL CLI publisher has no hosted server, so no maintenance pool or worker
 set exists for its sweep to queue against; its own `begin` call falls back to one raw
-daemon thread per domain instead — the same local fallback a stdio session uses,
-deduplicated the same way. That process still exits shortly after `finalize` returns, and
-a daemon thread does not keep a process alive, so a cleanup cycle it scheduled can still be
-killed before it drains: whatever it already committed stays removed, and the rest waits
-for the next publication's sweep.
+daemon thread per domain instead. The CLI path is the sole user of this fallback, not
+stdio sessions. That process still exits shortly after `finalize` returns, and a daemon
+thread does not keep a process alive, so a cleanup cycle it scheduled can still be killed
+before it drains: whatever it already committed stays removed, and the rest waits for the
+next publication's sweep. On the CLI path the fallback spawns one daemon thread and one
+raw connection per writable domain, and those sit outside the hosted server's connection
+budget stated in the section above because they live in a different process.
 
 The published snapshot — not the reading server's own configuration — decides which
 languages a hosted read may return. `wiki_code_search` on PostgreSQL storage derives its

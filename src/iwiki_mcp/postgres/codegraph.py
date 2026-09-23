@@ -879,8 +879,11 @@ class PostgresCodeGraphStore:
 
         `code_graph_files` roots the child foreign-key chain this snapshot's
         rows sit in: `code_graph_symbols.file_id` is `NOT NULL` with a
-        cascading foreign key onto it, `code_graph_relations` depends on
-        symbols, and `code_graph_wiki_links` depends on relations. An empty
+        cascading foreign key onto `code_graph_files` (migrations.py:222-226),
+        and `code_graph_relations.source_file_id` is `NOT NULL` with a
+        cascading foreign key onto `code_graph_files` (migrations.py:245-249),
+        and `code_graph_wiki_links` has a cascading foreign key onto
+        `code_graph_relations` (migrations.py:294-298). An empty
         `code_graph_files` therefore implies every other child table is
         already empty by referential integrity, not by an assumption about
         the order `_CLEANUP_CHILD_TABLES` happened to drain in -- which is
