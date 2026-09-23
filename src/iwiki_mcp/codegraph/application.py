@@ -582,7 +582,7 @@ def _sweep_wiki_cleanup(
             )
             continue
         try:
-            store._run_cleanup_cycle()
+            store.run_cleanup_cycle()
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
             LOGGER.warning(
                 "code graph cleanup failed for one domain: %s",

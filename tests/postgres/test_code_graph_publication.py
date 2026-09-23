@@ -657,11 +657,11 @@ def test_a_superseded_snapshot_is_pruned_once_it_leaves_the_window(pg_graph):
     pg_graph.finalize(pg_graph.complete_session())
     third = pg_graph.reader_status()["snapshot_id"]
 
-    # begin() only schedules cleanup on a daemon thread now; call the worker
-    # body directly so the prune below is observed after it has actually run,
-    # not raced against the background thread.
+    # Call the cleanup entry point directly so the prune below is observed
+    # after it has actually run, not raced against `begin()`'s background
+    # scheduling.
     store = pg_graph.store
-    store._run_cleanup_cycle()
+    store.run_cleanup_cycle()
 
     remaining = {row[0] for row in _snapshot_states(pg_graph)}
     assert first not in remaining
@@ -741,6 +741,65 @@ def _aged_superseded(graph, publications: int = 3) -> str:
     return _snapshot_states(graph)[0][0]
 
 
+def test_a_kill_mid_drain_keeps_the_batches_already_committed(
+    pg_graph, monkeypatch
+):
+    """The published claim is 'at most one batch'; make it true.
+
+    The fixture's default snapshot is small (files=2, symbols=2,
+    relations=1, wiki_links=0), so the trigger counts real (non-empty)
+    batches rather than a fixed call number: it lets exactly two commit,
+    then kills the next call outright, regardless of which child table it
+    lands on.
+    """
+    monkeypatch.setattr(type(pg_graph.store), "_CLEANUP_BATCH_ROWS", 2)
+    oldest = _aged_superseded(pg_graph)
+    before = _snapshot_rows(pg_graph, oldest)
+    assert sum(before.values()) > 2, "fixture must supply several batches"
+
+    store = pg_graph.store
+    real_delete_batch = store._delete_batch
+    committed = {"n": 0}
+
+    def exploding(cursor, table, domain_id, sid, limit):
+        if committed["n"] >= 2:
+            raise RuntimeError("killed mid-drain")
+        removed = real_delete_batch(cursor, table, domain_id, sid, limit)
+        if removed:
+            committed["n"] += 1
+        return removed
+
+    monkeypatch.setattr(store, "_delete_batch", exploding)
+
+    with pytest.raises(RuntimeError):
+        store.run_cleanup_cycle()
+
+    after = _snapshot_rows(pg_graph, oldest)
+    removed = sum(before.values()) - sum(after.values())
+    assert removed > 0, "the committed batches were rolled back with the kill"
+    assert removed <= 2 * store._CLEANUP_BATCH_ROWS, (
+        "more than the two committed batches went missing"
+    )
+
+
+def test_a_cycle_opens_exactly_one_connection(pg_graph):
+    """One connection per cycle is what makes per-batch commits affordable."""
+    import psycopg
+
+    opened = []
+
+    def factory():
+        opened.append(1)
+        return psycopg.connect(pg_graph.dsn)
+
+    _aged_superseded(pg_graph)
+    store = _store_with_factory(pg_graph, factory)
+
+    store.run_cleanup_cycle()
+
+    assert len(opened) == 1
+
+
 def test_one_connection_serves_many_transactions(pg_graph):
     """Committing per batch must not mean connecting per batch."""
     import psycopg
@@ -779,11 +838,11 @@ def test_pruning_removes_the_child_rows_of_the_snapshot_it_drops(pg_graph):
     pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
     pg_graph.store.begin(pg_graph.header)
 
-    # begin() only schedules cleanup on a daemon thread now; call the worker
-    # body directly so the prune below is observed after it has actually run,
-    # not raced against the background thread.
+    # Call the cleanup entry point directly so the prune below is observed
+    # after it has actually run, not raced against `begin()`'s background
+    # scheduling.
     store = pg_graph.store
-    store._run_cleanup_cycle()
+    store.run_cleanup_cycle()
 
     assert _snapshot_rows(pg_graph, first) == {
         "wiki_links": 0,
@@ -801,7 +860,7 @@ def test_the_backlog_drains_across_successive_publications(pg_graph):
 
     store = pg_graph.store
     before = _relation_rows(pg_graph)
-    store._run_cleanup_cycle()
+    store.run_cleanup_cycle()
     after = _relation_rows(pg_graph)
 
     assert after < before, "the backlog did not shrink"
@@ -820,9 +879,10 @@ def test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone(pg_graph)
     assert budget > 0, "fixture must seed non-file child rows to drain first"
 
     store = pg_graph.store
-    with store._transaction() as cursor:
-        domain_id = store._domain_id(cursor)
-        store._prune_superseded(cursor, domain_id, store._clock(), budget)
+    with store._connection() as connection:
+        with store._transaction_on(connection) as cursor:
+            domain_id = store._domain_id(cursor)
+        store._drain_snapshot(connection, domain_id, oldest, budget)
 
     after = _snapshot_rows(pg_graph, oldest)
     assert after["files"] > 0, "files drained before every other child table"
@@ -1031,7 +1091,7 @@ def test_the_sweep_builds_one_store_per_domain_and_mixes_none(
         def __init__(self, domain):
             self.domain = domain
 
-        def _run_cleanup_cycle(self):
+        def run_cleanup_cycle(self):
             swept.append(self.domain)
 
     def fake_publisher(binding, owner_id, settings, *, lock_timeout_ms, domain):
@@ -1049,3 +1109,17 @@ def test_the_sweep_builds_one_store_per_domain_and_mixes_none(
 
     assert built == ["docs", "private"]
     assert swept == ["docs", "private"]
+
+
+def test_the_candidate_page_size_keeps_its_default():
+    """The row budget governs volume now; this parameter only pages the
+    candidate query, and changing its default is proposal-first."""
+    import inspect
+
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    parameter = inspect.signature(
+        PostgresCodeGraphStore.__init__
+    ).parameters["superseded_cleanup_limit"]
+
+    assert parameter.default == 2
