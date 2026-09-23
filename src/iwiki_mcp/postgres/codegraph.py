@@ -764,6 +764,10 @@ class PostgresCodeGraphStore:
         for table in self._CLEANUP_CHILD_TABLES:
             while removed < budget:
                 with self._transaction_on(connection) as cursor:
+                    if not self._still_superseded(
+                        cursor, domain_id, snapshot_id
+                    ):
+                        return removed
                     taken = self._delete_batch(
                         cursor,
                         table,
@@ -775,10 +779,30 @@ class PostgresCodeGraphStore:
                     break
                 removed += taken
         with self._transaction_on(connection) as cursor:
+            if not self._still_superseded(cursor, domain_id, snapshot_id):
+                return removed
             removed += self._delete_snapshot_row(
                 cursor, domain_id, snapshot_id
             )
         return removed
+
+    def _still_superseded(
+        self, cursor, domain_id: int, snapshot_id: str
+    ) -> bool:
+        """A revert during the drain must not strip the snapshot it restored.
+
+        The retention window buys exactly one thing: a manual revert target.
+        Per-batch commits stretch a snapshot's drain over minutes, so the
+        check runs per batch rather than once per cycle -- one indexed lookup
+        per 10,000 rows narrows the race to a single batch.
+        """
+        cursor.execute(
+            "SELECT 1 FROM iwiki.code_graph_domain_state "
+            "WHERE iwiki_id = %s AND domain_id = %s "
+            "AND active_snapshot_id = %s",
+            (self.iwiki_id, domain_id, snapshot_id),
+        )
+        return cursor.fetchone() is None
 
     def _delete_batch(
         self,

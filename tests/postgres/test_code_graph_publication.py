@@ -741,6 +741,83 @@ def _aged_superseded(graph, publications: int = 3) -> str:
     return _snapshot_states(graph)[0][0]
 
 
+def test_a_reactivated_snapshot_stops_its_drain_within_one_batch(
+    pg_graph, monkeypatch
+):
+    """The retention window exists to be a revert target; the drain must not
+    strip the snapshot an operator just restored."""
+    monkeypatch.setattr(type(pg_graph.store), "_CLEANUP_BATCH_ROWS", 1)
+    oldest = _aged_superseded(pg_graph)
+    before = _snapshot_rows(pg_graph, oldest)
+    assert sum(before.values()) > 4, "fixture must supply several batches"
+
+    store = pg_graph.store
+    original = store._delete_batch
+    calls = {"n": 0}
+
+    def reactivate_then_delete(cursor, table, domain_id, sid, limit):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            cursor.execute(
+                "UPDATE iwiki.code_graph_domain_state "
+                "SET active_snapshot_id = %s "
+                "WHERE iwiki_id = %s AND domain_id = %s",
+                (sid, store.iwiki_id, domain_id),
+            )
+        return original(cursor, table, domain_id, sid, limit)
+
+    monkeypatch.setattr(store, "_delete_batch", reactivate_then_delete)
+    store.run_cleanup_cycle()
+
+    after = _snapshot_rows(pg_graph, oldest)
+    assert oldest in {row[0] for row in _snapshot_states(pg_graph)}, (
+        "the restored snapshot's row was removed"
+    )
+    assert sum(after.values()) > 0, "the drain continued past the reactivation"
+
+
+def test_every_code_graph_child_table_reaches_code_graph_files(pg_graph):
+    """The one-table guard is sufficient only while files roots the chain.
+
+    Read the live catalogue rather than a hand-written list: the point is to
+    fail when a migration adds a child table that does not depend on files,
+    which is exactly the case a hand-written list would not know about.
+    """
+    rows = pg_graph._query(
+        "SELECT c.relname, f.relname "
+        "FROM pg_constraint con "
+        "JOIN pg_class c ON c.oid = con.conrelid "
+        "JOIN pg_class f ON f.oid = con.confrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE con.contype = 'f' AND n.nspname = 'iwiki' "
+        "AND c.relname LIKE 'code\\_graph\\_%%'",
+        (),
+        admin=True,
+    )
+    parents = {}
+    for child, parent in rows:
+        parents.setdefault(child, set()).add(parent)
+
+    children = {
+        "code_graph_wiki_links",
+        "code_graph_relations",
+        "code_graph_symbols",
+    }
+    assert children <= set(parents), "a child table has no foreign keys at all"
+
+    for table in children:
+        reached, frontier = set(), [table]
+        while frontier:
+            for parent in parents.get(frontier.pop(), ()):
+                if parent not in reached:
+                    reached.add(parent)
+                    frontier.append(parent)
+        assert "code_graph_files" in reached, (
+            f"{table} no longer depends on code_graph_files, so guarding the "
+            "snapshot-row delete on files alone is no longer sufficient"
+        )
+
+
 def test_a_kill_mid_drain_keeps_the_batches_already_committed(
     pg_graph, monkeypatch
 ):
