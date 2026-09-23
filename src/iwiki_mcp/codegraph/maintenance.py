@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Callable
 
+from psycopg_pool import ConnectionPool
+
 LOGGER = logging.getLogger(__name__)
 
 # One worker holds at most one connection at a time, so the worker count and
@@ -27,6 +29,36 @@ MAINTENANCE_WORKERS = 2
 # Maintenance work is droppable: it returns on a later request. The bound is
 # what keeps a growing client count from growing memory instead of queueing.
 MAINTENANCE_QUEUE_SIZE = 256
+
+
+def open_maintenance_pool(
+    dsn: str, *, options: str, workers: int = MAINTENANCE_WORKERS
+) -> ConnectionPool:
+    """Open the pool cleanup draws from, and nothing else does.
+
+    `min_size=0` keeps an idle server holding no maintenance backend at all,
+    and `open(wait=False)` keeps startup from blocking on one. `max_size` is
+    the worker count: a worker holds at most one connection, so the pool is a
+    hard ceiling that holds even if one ever takes a second.
+
+    The options string is the hosted server's own, so a cleanup statement
+    inherits `statement_timeout`. That is deliberate. Cleanup previously
+    connected with no options and therefore no statement timeout, which is
+    how one delete once ran for 49 minutes; a 10,000-row batch that cannot
+    finish inside the timeout is a batch that is too large, and failing it
+    loudly beats a statement nothing bounds.
+    """
+    pool = ConnectionPool(
+        dsn,
+        min_size=0,
+        max_size=workers,
+        kwargs={"options": options},
+        name="iwiki-maintenance",
+        open=False,
+    )
+    pool.open(wait=False)
+    return pool
+
 
 _SHUTDOWN = object()
 
@@ -149,6 +181,21 @@ class MaintenanceRuntime:
             return False
         return True
 
+    def log_pool_stats(self) -> None:
+        """Report connection use so exhaustion needs no database query."""
+        if self._pool is None:
+            return
+        stats = self._pool.get_stats()
+        LOGGER.info(
+            "code graph maintenance pool: size=%s available=%s "
+            "waiting=%s wait_ms=%s dropped=%s",
+            stats.get("pool_size", 0),
+            stats.get("pool_available", 0),
+            stats.get("requests_waiting", 0),
+            int(stats.get("requests_wait_ms", 0)),
+            self.dropped,
+        )
+
     # -- worker ---------------------------------------------------------
 
     def _work(self) -> None:
@@ -162,6 +209,7 @@ class MaintenanceRuntime:
                 self._queue.task_done()
 
     def _run(self, job: CleanupJob) -> None:
+        self.log_pool_stats()
         started = time.monotonic()
         try:
             factory = self._pool.connection if self._pool is not None else None

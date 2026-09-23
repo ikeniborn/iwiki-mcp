@@ -111,6 +111,9 @@ def test_a_failing_pool_connection_does_not_kill_its_worker(caplog):
         def connection(self):
             raise RuntimeError("pool connection failed")
 
+        def get_stats(self):
+            return {}
+
     def runner(job, factory):
         return 0
 
@@ -188,3 +191,88 @@ def test_a_completed_job_reports_rows_and_elapsed_time(caplog):
 
     assert "4321 rows removed" in caplog.text
     assert "s" in caplog.text.split("rows removed in ")[1][:6]
+
+
+class _FakePool:
+    def __init__(self, stats):
+        self._stats = stats
+        self.max_size = 2
+
+    def connection(self):  # pragma: no cover - identity is all that matters
+        raise AssertionError("not called in this test")
+
+    def get_stats(self):
+        return self._stats
+
+
+def test_the_runner_receives_the_pools_connection_factory():
+    pool = _FakePool({})
+    seen = []
+    runtime = maintenance.MaintenanceRuntime(
+        runner=lambda job, factory: seen.append(factory) or 0,
+        workers=1,
+        pool=pool,
+    )
+    runtime.start()
+    try:
+        runtime.submit(_job())
+        deadline = time.monotonic() + 5
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        runtime.stop()
+
+    assert seen == [pool.connection]
+
+
+def test_the_runner_receives_no_factory_without_a_pool():
+    seen = []
+    runtime = maintenance.MaintenanceRuntime(
+        runner=lambda job, factory: seen.append(factory) or 0, workers=1
+    )
+    runtime.start()
+    try:
+        runtime.submit(_job())
+        deadline = time.monotonic() + 5
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        runtime.stop()
+
+    assert seen == [None]
+
+
+def test_pool_statistics_reach_the_log(caplog):
+    """Exhaustion must be diagnosable from the log alone."""
+    pool = _FakePool(
+        {
+            "pool_size": 2,
+            "pool_available": 0,
+            "requests_waiting": 3,
+            "requests_wait_ms": 1250,
+        }
+    )
+    runtime = maintenance.MaintenanceRuntime(
+        runner=lambda job, factory: 0, pool=pool
+    )
+
+    with caplog.at_level("INFO", logger=maintenance.LOGGER.name):
+        runtime.log_pool_stats()
+
+    message = caplog.text
+    assert "available=0" in message
+    assert "waiting=3" in message
+    assert "wait_ms=1250" in message
+
+
+def test_the_pool_is_sized_to_the_worker_count():
+    pool = maintenance.open_maintenance_pool(
+        "postgresql://localhost/iwiki_not_opened",
+        options="-c statement_timeout=30000",
+        workers=3,
+    )
+    try:
+        assert pool.max_size == 3
+        assert pool.min_size == 0
+    finally:
+        pool.close()
