@@ -797,7 +797,12 @@ def prepare_runtime(
         from . import server
 
         server._install_hosted_runtime(
-            pool, cfg, config.code_graph, config.specifications
+            pool,
+            cfg,
+            config.code_graph,
+            config.specifications,
+            maintenance_dsn=dsn,
+            maintenance_options=options,
         )
         server.mcp.settings.json_response = True
         server.mcp.settings.stateless_http = True

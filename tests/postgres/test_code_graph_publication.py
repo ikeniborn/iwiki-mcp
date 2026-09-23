@@ -1,8 +1,6 @@
 """PostgreSQL publication session lifecycle, ownership, and activation tests."""
 from __future__ import annotations
 
-import time
-
 import pytest
 
 
@@ -980,124 +978,6 @@ def test_cleanup_never_touches_the_active_snapshot(pg_graph):
     assert pg_graph.reader_status()["state"] == "ready"
 
 
-def test_begin_does_not_wait_for_cleanup(pg_graph, monkeypatch):
-    """begin's cost must not vary with the size of the backlog."""
-    scheduled = []
-    monkeypatch.setattr(
-        type(pg_graph.store),
-        "_schedule_cleanup",
-        lambda self: scheduled.append(self.domain),
-    )
-    for _ in range(3):
-        pg_graph.finalize(pg_graph.complete_session())
-    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
-
-    before = _relation_rows(pg_graph)
-    pg_graph.store.begin(pg_graph.header)
-
-    assert scheduled, "begin did not schedule cleanup"
-    assert _relation_rows(pg_graph) >= before, "begin performed cleanup inline"
-
-
-def test_a_failing_cleanup_leaves_the_publication_committed(pg_graph, monkeypatch):
-    """Cleanup is maintenance, not a precondition for someone else's work."""
-
-    def explode(self):
-        raise RuntimeError("cleanup exploded")
-
-    monkeypatch.setattr(type(pg_graph.store), "_schedule_cleanup", explode)
-
-    session = pg_graph.store.begin(pg_graph.header)
-
-    assert session.session_id
-    assert "staging" in {row[1] for row in _snapshot_states(pg_graph)}
-
-
-def test_a_second_publication_mid_cycle_schedules_nothing(pg_graph, monkeypatch):
-    """The real worker never holds the lock while a cycle runs; only the
-    active-set membership does, so the fixture marks the domain active
-    directly instead of acquiring the lock (which would misrepresent state
-    the real code never holds re-entrantly).
-    """
-    cycles = []
-    monkeypatch.setattr(
-        type(pg_graph.store),
-        "_run_cleanup_cycle",
-        lambda self: cycles.append(self.domain),
-    )
-    store = pg_graph.store
-    key = (store.iwiki_id, store.domain)
-    type(store)._cleanup_active.add(key)
-    try:
-        store._schedule_cleanup()
-    finally:
-        type(store)._cleanup_active.discard(key)
-
-    assert cycles == []
-
-
-def test_a_second_store_against_the_same_domain_schedules_nothing(pg_graph, monkeypatch):
-    """The guard is class-scoped and keyed by domain, not by store instance.
-
-    server.py builds a fresh PostgresCodeGraphStore per publication request,
-    so two concurrent publications against the same domain are two different
-    store objects; an instance-scoped guard would let both spawn a cycle.
-    """
-    cycles = []
-    monkeypatch.setattr(
-        type(pg_graph.store),
-        "_run_cleanup_cycle",
-        lambda self: cycles.append(self.domain),
-    )
-    other = pg_graph.for_domain(pg_graph.domain)
-    assert other.store is not pg_graph.store
-
-    key = (pg_graph.store.iwiki_id, pg_graph.store.domain)
-
-    try:
-        pg_graph.store._schedule_cleanup()
-        other.store._schedule_cleanup()
-
-        deadline = time.monotonic() + 5
-        while not cycles and time.monotonic() < deadline:
-            time.sleep(0.01)
-
-        assert cycles == [pg_graph.domain], (
-            "the second store's schedule was not a no-op"
-        )
-    finally:
-        type(pg_graph.store)._cleanup_active.discard(key)
-
-
-def test_schedule_cleanup_runs_the_real_worker_and_clears_the_active_key(pg_graph):
-    """No test above lets the real thread run; this one exercises it end to
-    end against a seeded backlog and confirms the active-set key is not
-    leaked once the cycle finishes.
-    """
-    for _ in range(3):
-        pg_graph.finalize(pg_graph.complete_session())
-    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
-
-    store = pg_graph.store
-    key = (store.iwiki_id, store.domain)
-
-    before = _relation_rows(pg_graph)
-    store._schedule_cleanup()
-
-    try:
-        deadline = time.monotonic() + 10
-        while key in type(store)._cleanup_active and time.monotonic() < deadline:
-            time.sleep(0.05)
-
-        assert key not in type(store)._cleanup_active, (
-            "cleanup did not finish (and clear its active-set key) within the timeout"
-        )
-        assert _relation_rows(pg_graph) < before, "the real cleanup cycle removed no rows"
-    finally:
-        with type(store)._cleanup_lock:
-            type(store)._cleanup_active.discard(key)
-
-
 class _SweepSettings:
     """Minimal settings for the sweep: retention zero so seeded rows qualify."""
 
@@ -1132,6 +1012,16 @@ def _sweep_binding(graph, domains):
     )
 
 
+class _SyncRuntime:
+    """Runs a queued job inline, standing in for the maintenance workers."""
+
+    def submit(self, job):
+        from iwiki_mcp.codegraph import application
+
+        application.run_cleanup_job(job, None)
+        return True
+
+
 def test_the_sweep_drains_a_domain_that_did_not_publish(pg_graph):
     """The regression: cleanup used to be reachable only from that domain's
     own publication, so a domain that stopped publishing kept its rows.
@@ -1146,10 +1036,11 @@ def test_the_sweep_drains_a_domain_that_did_not_publish(pg_graph):
     assert before > 0, "fixture must seed rows in the non-publishing domain"
 
     binding = _sweep_binding(pg_graph, ("docs", "private"))
-    application._sweep_wiki_cleanup(
-        binding, "owner-sweep", _SweepSettings(), 5000
+    queued = application.schedule_wiki_cleanup(
+        binding, "owner-sweep", _SweepSettings(), runtime=_SyncRuntime()
     )
 
+    assert queued == 2
     assert _relation_rows(other) < before, (
         "the sweep left a non-publishing domain's backlog in place"
     )
@@ -1158,7 +1049,8 @@ def test_the_sweep_drains_a_domain_that_did_not_publish(pg_graph):
 def test_the_sweep_builds_one_store_per_domain_and_mixes_none(
     pg_graph, monkeypatch
 ):
-    """Domains must never be mixed: each store cleans only what it validated."""
+    """Domains must never be mixed: each queued job's store cleans only the
+    one domain it was built and validated for."""
     from iwiki_mcp.codegraph import application
 
     built = []
@@ -1168,10 +1060,14 @@ def test_the_sweep_builds_one_store_per_domain_and_mixes_none(
         def __init__(self, domain):
             self.domain = domain
 
-        def run_cleanup_cycle(self):
+        def run_cleanup_cycle(self, connection=None):
             swept.append(self.domain)
+            return 0
 
-    def fake_publisher(binding, owner_id, settings, *, lock_timeout_ms, domain):
+    def fake_publisher(
+        binding, owner_id, settings, *, lock_timeout_ms, domain,
+        connection_factory=None,
+    ):
         built.append(domain)
         return _Recorder(domain)
 
@@ -1180,8 +1076,8 @@ def test_the_sweep_builds_one_store_per_domain_and_mixes_none(
     )
 
     binding = _sweep_binding(pg_graph, ("docs", "private"))
-    application._sweep_wiki_cleanup(
-        binding, "owner-sweep", _SweepSettings(), 5000
+    application.schedule_wiki_cleanup(
+        binding, "owner-sweep", _SweepSettings(), runtime=_SyncRuntime()
     )
 
     assert built == ["docs", "private"]
@@ -1223,3 +1119,62 @@ def test_principal_validation_uses_the_supplied_factory(pg_graph):
 
     assert result is None
     assert len(opened) == 1, "validation ignored the factory and dialled out"
+
+
+def test_run_cleanup_job_runs_on_the_maintenance_pool_connection(pg_graph):
+    """Close the gap nothing else exercises: `create_postgres_publisher`'s
+    `connection_factory` pass-through must reach both construction (where
+    `validate_direct_principal` runs under `require_database_principal=True`)
+    and the drain itself, so a queued job never opens a connection outside
+    the maintenance pool.
+
+    Revert the one-line `connection_factory=connection_factory` pass-through
+    in `create_postgres_publisher` and this fails: construction falls back
+    to the store's own `psycopg.connect(dsn)` default, the pool below is
+    touched once instead of twice, and the count assertion below catches it
+    even though the cleanup cycle still completes.
+    """
+    from psycopg_pool import ConnectionPool
+
+    from iwiki_mcp.codegraph import application, maintenance
+
+    other = pg_graph.for_domain("private")
+    for _ in range(3):
+        other.finalize(other.complete_session())
+    before = _relation_rows(other)
+    assert before > 0, "fixture must seed rows to drain"
+
+    pool = ConnectionPool(
+        str(pg_graph.dsn),
+        min_size=0,
+        max_size=1,
+        open=False,
+        name="test-maintenance-pool",
+    )
+    pool.open(wait=True)
+    used = []
+
+    def counting_factory():
+        used.append(1)
+        return pool.connection()
+
+    binding = _sweep_binding(pg_graph, ("docs", "private"))
+    job = maintenance.CleanupJob(
+        iwiki_id=pg_graph.iwiki_id,
+        domain="private",
+        binding=binding,
+        owner_id="owner-maintenance",
+        settings=_SweepSettings(),
+        lock_timeout_ms=500,
+    )
+    try:
+        removed = application.run_cleanup_job(job, counting_factory)
+    finally:
+        pool.close()
+
+    assert removed > 0, "the cleanup cycle removed no rows"
+    assert len(used) == 2, (
+        "expected one pooled connection for principal validation and one "
+        "for the drain; the pass-through is not reaching both"
+    )
+    assert _relation_rows(other) < before

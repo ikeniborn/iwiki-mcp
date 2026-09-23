@@ -22,6 +22,7 @@ from iwiki_mcp.storage import GitBinding, PostgresBinding
 from . import config as codegraph_config
 from . import indexer as codegraph_indexer
 from . import linking
+from . import maintenance
 from . import runtime as codegraph_runtime
 from .context import validate_context_request
 from .languages import bash, javascript, python, typescript
@@ -500,6 +501,7 @@ def create_postgres_publisher(
     *,
     lock_timeout_ms: int = 5000,
     domain: str | None = None,
+    connection_factory=None,
 ) -> PostgresCodeGraphStore:
     target = domain or binding.primary
     if target is None:
@@ -519,12 +521,12 @@ def create_postgres_publisher(
         superseded_cleanup_limit=getattr(
             settings, "superseded_cleanup_limit", 2
         ),
+        connection_factory=connection_factory,
         require_database_principal=True,
     )
 
 
 _SWEEP_LOCK = threading.Lock()
-_SWEEP_ACTIVE: set[str] = set()
 # Any authenticated request may kick a sweep, so the floor keeps an idle wiki
 # from re-sweeping continuously: without it the next request after a sweep
 # finishes would start another one.
@@ -536,65 +538,59 @@ def cleanup_sweep_due(iwiki_id: str) -> bool:
     """Cheap enough to ask on every request: a lock and a float compare.
 
     Deliberately not a timer. A background schedule would have no request, no
-    binding and no token, so it would have to act with the service role's whole
-    reach -- substituting connection privileges for a mandate, which is exactly
-    what the per-domain store design rejects. A request already carries the
-    mandate the sweep needs.
+    binding and no token, so it would have to act with the service role's
+    whole reach -- substituting connection privileges for a mandate, which is
+    exactly what the per-domain store design rejects. A request already
+    carries the mandate the sweep needs.
+
+    In-flight deduplication now lives in the maintenance queue, so this
+    function answers one question only: has this wiki been queued recently.
     """
     now = time.monotonic()
     with _SWEEP_LOCK:
-        if iwiki_id in _SWEEP_ACTIVE:
-            return False
         last = _SWEEP_LAST.get(iwiki_id)
-        return last is None or now - last >= _SWEEP_MIN_INTERVAL_SECONDS
+        due = last is None or now - last >= _SWEEP_MIN_INTERVAL_SECONDS
+    if not due:
+        LOGGER.debug("code graph cleanup skipped, inside the throttle interval")
+    return due
 
 
-def _sweep_wiki_cleanup(
-    binding: PostgresBinding, owner_id: str, settings, lock_timeout_ms: int
-) -> None:
-    """Run each writable domain's own cleanup cycle, one domain at a time.
+def run_cleanup_job(job, connection_factory) -> int:
+    """Run one domain's cleanup cycle under that domain's own store.
 
-    A store cleans only the domain it was built for and validated against, so
-    the iteration lives here rather than inside the store: widening a store's
-    reach would let it delete rows in a domain whose principal it never
-    checked. `binding.write` is the mandate — exactly the domains this caller
-    may already write — not everything the connection happens to see.
-
-    The sweep exists because cleanup was reachable only from a publication of
-    the same domain, so a domain that stopped publishing kept its rows forever.
-    On the live server that left six domains holding 33 superseded snapshots
-    and about 800,000 rows while the domain that had just published had nothing
-    to collect.
+    A store cleans only the domain it was built for and validated against,
+    so one job is one store: widening a store's reach would let it delete
+    rows in a domain whose principal it never checked. `binding.write` is the
+    mandate -- exactly the domains this caller may already write -- not
+    everything the connection happens to see.
     """
-    removed_domains = 0
-    for domain in binding.write:
-        try:
-            store = create_postgres_publisher(
-                binding,
-                owner_id,
-                settings,
-                lock_timeout_ms=lock_timeout_ms,
-                domain=domain,
-            )
-        except Exception as exc:  # noqa: BLE001 - one domain must not stop the rest
-            LOGGER.debug(
-                "code graph cleanup skipped domain: %s", type(exc).__name__
-            )
-            continue
-        try:
-            store.run_cleanup_cycle()
-        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
-            LOGGER.warning(
-                "code graph cleanup failed for one domain: %s",
-                type(exc).__name__,
-            )
-            continue
-        removed_domains += 1
-    LOGGER.info(
-        "code graph cleanup swept %s of %s writable domains",
-        removed_domains,
-        len(binding.write),
+    store = create_postgres_publisher(
+        job.binding,
+        job.owner_id,
+        job.settings,
+        lock_timeout_ms=job.lock_timeout_ms,
+        domain=job.domain,
+        connection_factory=connection_factory,
     )
+    if connection_factory is None:
+        return store.run_cleanup_cycle()
+    with connection_factory() as connection:
+        return store.run_cleanup_cycle(connection)
+
+
+def _run_local_cleanup(job) -> None:
+    """The stdio path: no pool exists, so one daemon thread per job.
+
+    Bounded by construction rather than by a queue -- one stdio process
+    serves one client -- and still deduplicated, because the caller checked
+    the same set the hosted path uses.
+    """
+    threading.Thread(
+        target=run_cleanup_job,
+        args=(job, None),
+        name="iwiki-code-graph-cleanup",
+        daemon=True,
+    ).start()
 
 
 def schedule_wiki_cleanup(
@@ -603,36 +599,38 @@ def schedule_wiki_cleanup(
     settings,
     *,
     lock_timeout_ms: int = 5000,
-) -> None:
-    """Start one background sweep for this wiki unless one is already running.
+    runtime=None,
+) -> int:
+    """Queue one cleanup job per writable domain. Never blocks the caller.
 
-    Never awaited and never fatal: the publication that triggered it is already
-    committed, and cleanup is maintenance rather than a precondition for work
-    someone else succeeded at.
+    The publication or read that triggered this is already committed, and
+    cleanup is maintenance rather than a precondition for work someone else
+    succeeded at.
     """
-    key = binding.iwiki_id
+    queued = 0
+    for domain in binding.write:
+        job = maintenance.CleanupJob(
+            iwiki_id=binding.iwiki_id,
+            domain=domain,
+            binding=binding,
+            owner_id=owner_id,
+            settings=settings,
+            lock_timeout_ms=lock_timeout_ms,
+        )
+        if runtime is not None:
+            if runtime.submit(job):
+                queued += 1
+            continue
+        _run_local_cleanup(job)
+        queued += 1
     with _SWEEP_LOCK:
-        if key in _SWEEP_ACTIVE:
-            LOGGER.debug("code graph cleanup sweep already running, skipping")
-            return
-        _SWEEP_ACTIVE.add(key)
-
-    def run() -> None:
-        try:
-            _sweep_wiki_cleanup(binding, owner_id, settings, lock_timeout_ms)
-        finally:
-            with _SWEEP_LOCK:
-                _SWEEP_ACTIVE.discard(key)
-                _SWEEP_LAST[key] = time.monotonic()
-
-    try:
-        threading.Thread(
-            target=run, name="iwiki-code-graph-sweep", daemon=True
-        ).start()
-    except Exception:
-        with _SWEEP_LOCK:
-            _SWEEP_ACTIVE.discard(key)
-        raise
+        _SWEEP_LAST[binding.iwiki_id] = time.monotonic()
+    LOGGER.info(
+        "code graph cleanup queued %s of %s writable domains",
+        queued,
+        len(binding.write),
+    )
+    return queued
 
 
 def publisher_for(

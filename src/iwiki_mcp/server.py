@@ -54,7 +54,7 @@ from .codegraph import models as _codegraph_models  # noqa: F401
 from .codegraph import publication as _codegraph_publication  # noqa: F401
 from .codegraph import runtime as _codegraph_runtime  # noqa: F401
 from .codegraph import schema as _codegraph_schema  # noqa: F401
-from .codegraph import maintenance as _codegraph_maintenance  # noqa: F401
+from .codegraph import maintenance as _codegraph_maintenance
 from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
@@ -370,13 +370,20 @@ _HOSTED_POOL = None
 _HOSTED_CONFIG: Config | None = None
 _HOSTED_CODE_GRAPH = None
 _HOSTED_SPECIFICATIONS = None
+_MAINTENANCE_RUNTIME = None
 
 
 def _install_hosted_runtime(
-    pool, cfg: Config, code_graph=None, specifications=None
+    pool,
+    cfg: Config,
+    code_graph=None,
+    specifications=None,
+    *,
+    maintenance_dsn: str | None = None,
+    maintenance_options: str | None = None,
 ) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
-    global _HOSTED_SPECIFICATIONS
+    global _HOSTED_SPECIFICATIONS, _MAINTENANCE_RUNTIME
     _HOSTED_POOL = pool
     _HOSTED_CONFIG = cfg
     _HOSTED_CODE_GRAPH = code_graph
@@ -385,11 +392,31 @@ def _install_hosted_runtime(
     # leave connections behind for it. At parity the liveness probe would be
     # starved through the database exactly as it was through the loop.
     _TOOL_LIMITER.total_tokens = max(1, pool.max_size - _POOL_RESERVE)
+    if maintenance_dsn and _MAINTENANCE_RUNTIME is None:
+        maintenance_pool = _codegraph_maintenance.open_maintenance_pool(
+            maintenance_dsn, options=maintenance_options or ""
+        )
+        _MAINTENANCE_RUNTIME = _codegraph_maintenance.MaintenanceRuntime(
+            _codegraph_application.run_cleanup_job, pool=maintenance_pool
+        )
+        _MAINTENANCE_RUNTIME.start()
+
+
+def _stop_maintenance_runtime() -> None:
+    global _MAINTENANCE_RUNTIME
+    runtime = _MAINTENANCE_RUNTIME
+    _MAINTENANCE_RUNTIME = None
+    if runtime is None:
+        return
+    runtime.stop()
+    if runtime._pool is not None:
+        runtime._pool.close()
 
 
 def _clear_hosted_runtime(pool) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
     global _HOSTED_SPECIFICATIONS
+    _stop_maintenance_runtime()
     if _HOSTED_POOL is pool:
         _HOSTED_POOL = None
         _HOSTED_CONFIG = None
@@ -401,6 +428,7 @@ def _clear_hosted_runtime_for_test() -> None:
     """Restore the import-time ceiling; used by tests that install a fake pool."""
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
     global _HOSTED_SPECIFICATIONS
+    _stop_maintenance_runtime()
     _HOSTED_POOL = None
     _HOSTED_CONFIG = None
     _HOSTED_CODE_GRAPH = None
@@ -2067,6 +2095,7 @@ def _schedule_wiki_code_graph_cleanup(binding) -> None:
             context.token_id,
             _hosted_code_graph_settings(),
             lock_timeout_ms=_CODE_PUBLICATION_LOCK_TIMEOUT_MS,
+            runtime=_MAINTENANCE_RUNTIME,
         )
     except Exception:  # noqa: BLE001 - maintenance must not fail a publication
         LOGGER.warning("code graph cleanup sweep could not be scheduled")

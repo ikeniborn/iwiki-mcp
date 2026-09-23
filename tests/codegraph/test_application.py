@@ -395,6 +395,7 @@ def test_postgres_target_uses_exact_store_settings(tmp_path, monkeypatch):
             "staging_cleanup_limit": 7,
             "superseded_retention_seconds": 53,
             "superseded_cleanup_limit": 3,
+            "connection_factory": None,
             "require_database_principal": True,
         },
     }

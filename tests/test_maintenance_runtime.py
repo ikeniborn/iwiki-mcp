@@ -265,6 +265,22 @@ def test_pool_statistics_reach_the_log(caplog):
     assert "wait_ms=1250" in message
 
 
+def test_the_removed_guards_are_gone_from_the_source():
+    """R4: one deduplication set, not three."""
+    from pathlib import Path
+
+    import iwiki_mcp
+
+    root = Path(iwiki_mcp.__file__).parent
+    application_src = (root / "codegraph" / "application.py").read_text()
+    store_src = (root / "postgres" / "codegraph.py").read_text()
+
+    assert "_SWEEP_ACTIVE" not in application_src
+    assert "_cleanup_active" not in store_src
+    assert "_schedule_cleanup" not in store_src
+    assert "threading.Thread" not in store_src
+
+
 def test_the_pool_is_sized_to_the_worker_count():
     pool = maintenance.open_maintenance_pool(
         "postgresql://localhost/iwiki_not_opened",
