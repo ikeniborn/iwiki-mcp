@@ -578,19 +578,49 @@ def run_cleanup_job(job, connection_factory) -> int:
         return store.run_cleanup_cycle(connection)
 
 
-def _run_local_cleanup(job) -> None:
+# Local-only dedup for the stdio fallback: no MaintenanceRuntime exists on
+# that path, so this is what keeps a burst of requests for the same domain
+# from spawning one thread each -- the `_cleanup_active` property the
+# deleted class-scoped guard used to hold, kept in the one place that still
+# spawns a thread per job. Guarded by `_SWEEP_LOCK` rather than a lock of
+# its own: one lock, not a second guard mechanism.
+_LOCAL_CLEANUP_ACTIVE: set[tuple[str, str]] = set()
+
+
+def _run_local_cleanup(job) -> bool:
     """The stdio path: no pool exists, so one daemon thread per job.
 
     Bounded by construction rather than by a queue -- one stdio process
-    serves one client -- and still deduplicated, because the caller checked
-    the same set the hosted path uses.
+    serves one client -- and deduplicated through `_LOCAL_CLEANUP_ACTIVE`,
+    the same `(iwiki_id, domain)` key set `MaintenanceRuntime._scheduled`
+    plays on the hosted path. Returns False, starting no thread, when this
+    job's key is already running; the caller counts only what it started.
     """
+    key = job.key
+    with _SWEEP_LOCK:
+        if key in _LOCAL_CLEANUP_ACTIVE:
+            LOGGER.debug(
+                "code graph cleanup already running for this domain"
+            )
+            return False
+        _LOCAL_CLEANUP_ACTIVE.add(key)
+
+    def run() -> None:
+        try:
+            run_cleanup_job(job, None)
+        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            LOGGER.warning(
+                "code graph cleanup failed for one domain: %s",
+                type(exc).__name__,
+            )
+        finally:
+            with _SWEEP_LOCK:
+                _LOCAL_CLEANUP_ACTIVE.discard(key)
+
     threading.Thread(
-        target=run_cleanup_job,
-        args=(job, None),
-        name="iwiki-code-graph-cleanup",
-        daemon=True,
+        target=run, name="iwiki-code-graph-cleanup", daemon=True
     ).start()
+    return True
 
 
 def schedule_wiki_cleanup(
@@ -621,8 +651,8 @@ def schedule_wiki_cleanup(
             if runtime.submit(job):
                 queued += 1
             continue
-        _run_local_cleanup(job)
-        queued += 1
+        if _run_local_cleanup(job):
+            queued += 1
     with _SWEEP_LOCK:
         _SWEEP_LAST[binding.iwiki_id] = time.monotonic()
     LOGGER.info(

@@ -476,6 +476,84 @@ def test_selector_update_republishes_wiki_context(
     assert page_slug in {page["page_id"] for page in context["wiki_pages"]}
 
 
+def test_a_failing_cleanup_schedule_leaves_the_publication_committed(
+    hosted_empty_code, monkeypatch, caplog
+):
+    """The intent's hard constraint: a failure in maintenance must never
+    fail the caller. `begin()` no longer schedules cleanup itself -- Task 7
+    moved that to `server._schedule_wiki_code_graph_cleanup`, called after
+    `wiki_code_publish_begin` has already committed its session -- so this
+    is where the property has to be reproven, not at the store.
+
+    A `runtime.submit` that raises is a realistic failure shape (a bug in an
+    injected runtime), exercised through the real `schedule_wiki_cleanup`
+    rather than a mock of it.
+    """
+    from iwiki_mcp import server
+    from iwiki_mcp.codegraph.publication import header_payload
+
+    graph = hosted_empty_code.graph
+
+    class _ExplodingRuntime:
+        def submit(self, job):
+            raise RuntimeError("maintenance runtime exploded")
+
+    monkeypatch.setattr(server, "_MAINTENANCE_RUNTIME", _ExplodingRuntime())
+
+    with caplog.at_level("WARNING"):
+        session = server.wiki_code_publish_begin(header_payload(graph.header))
+
+    assert set(session) >= {"session_id", "max_batch_rows", "max_batch_bytes"}
+    assert "cleanup sweep could not be scheduled" in caplog.text
+
+    rows = graph._query(
+        "SELECT state FROM iwiki.code_graph_publication_sessions "
+        "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
+        (graph.iwiki_id, graph._domain_id(), session["session_id"]),
+        admin=True,
+    )
+    assert rows and rows[0][0] == "staging", (
+        "the publication was not committed despite the cleanup failure"
+    )
+
+
+def test_a_saturated_maintenance_queue_does_not_delay_the_publication(
+    hosted_empty_code, monkeypatch
+):
+    """A full maintenance queue must reject instantly, not make the caller
+    wait for room. `MaintenanceRuntime.submit` is non-blocking by design and
+    is unit-tested for that in isolation; this proves the property survives
+    composition through the publish-begin call site.
+    """
+    import time
+
+    from iwiki_mcp import server
+    from iwiki_mcp.codegraph.publication import header_payload
+
+    graph = hosted_empty_code.graph
+
+    class _SaturatedRuntime:
+        def submit(self, job):
+            return False
+
+    monkeypatch.setattr(server, "_MAINTENANCE_RUNTIME", _SaturatedRuntime())
+
+    started = time.monotonic()
+    session = server.wiki_code_publish_begin(header_payload(graph.header))
+    elapsed = time.monotonic() - started
+
+    assert set(session) >= {"session_id", "max_batch_rows", "max_batch_bytes"}
+    assert elapsed < 2.0, "a saturated queue made the publication wait"
+
+    rows = graph._query(
+        "SELECT state FROM iwiki.code_graph_publication_sessions "
+        "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
+        (graph.iwiki_id, graph._domain_id(), session["session_id"]),
+        admin=True,
+    )
+    assert rows and rows[0][0] == "staging"
+
+
 def _active_wiki_links(graph):
     """Read the links of the snapshot that is active right now.
 
