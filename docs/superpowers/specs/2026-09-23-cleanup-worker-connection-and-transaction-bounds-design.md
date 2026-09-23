@@ -1,3 +1,48 @@
+---
+review:
+  spec_hash: 36f51e9dc0e9f449
+  last_run: 2026-09-23
+  phases:
+    structure: { status: passed }
+    coverage: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+  findings:
+    - id: F-001
+      phase: coverage
+      severity: CRITICAL
+      section: "3. Architecture: the maintenance runtime"
+      section_hash: 75ea0088a57627c9
+      fragment: "both `threading.Thread` call sites are removed with them"
+      text: "R4 required that no threading.Thread call site remain, while R7 required the local fallback to run a daemon thread. The two requirements excluded each other verbatim."
+      fix: "R4 now requires the two current call sites to be replaced by the worker set, and names R7's local fallback as the only thread creation left outside it."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-002
+      phase: clarity
+      severity: WARNING
+      section: "3. Architecture: the maintenance runtime"
+      section_hash: 75ea0088a57627c9
+      fragment: null
+      text: "The document used 'work item' and 'cleanup cycle' for the same unit without ever saying so, leaving the connection count in R12 ambiguous against the queue in R4."
+      fix: "R4 states that one work item is one cleanup cycle and that the two terms name the same unit throughout."
+      verdict: fixed
+      verdict_at: 2026-09-23
+    - id: F-003
+      phase: coverage
+      severity: INFO
+      section: "5. Transaction boundary"
+      section_hash: cbfad3202042cf0e
+      fragment: "superseded_cleanup_limit keeps its current meaning as the candidate-selection page size and its default of 2"
+      text: "R14 asserts that nothing changes, so its DoD is a negative check rather than a deliverable."
+      fix: "Kept deliberately. The parameter's meaning shifts when the row budget takes over from the snapshot count, so recording that its default is untouched guards against drift the restructure invites."
+      verdict: accepted
+      verdict_at: 2026-09-23
+  chain:
+    intent:
+      path: docs/superpowers/intents/2026-09-23-cleanup-worker-connection-and-transaction-bounds-intent.md
+      intent_hash: 12614af27a64cbb1
+---
 # Cleanup worker connection and transaction bounds — design
 
 **Date:** 2026-09-23
@@ -96,10 +141,12 @@ an enqueue raising internally does not propagate to the caller.
 **R4.** The queue deduplicates by `(iwiki_id, domain)`. A key already queued or in flight
 is not enqueued again. This single set replaces both existing guards — `_SWEEP_ACTIVE`
 keyed by `iwiki_id` in `codegraph/application.py` and the class-scoped `_cleanup_active`
-keyed by `(iwiki_id, domain)` in `postgres/codegraph.py` — and both `threading.Thread`
-call sites are removed with them.
-*DoD:* enqueueing the same key twice yields one work item; neither removed guard nor
-either thread call site remains in the source.
+keyed by `(iwiki_id, domain)` in `postgres/codegraph.py` — and both current
+`threading.Thread` call sites are replaced by the worker set. One work item is one cleanup
+cycle: the two terms name the same unit throughout this document.
+*DoD:* enqueueing the same key twice yields one work item; neither removed guard remains
+in the source; and the only thread creation left outside the worker set is R7's local
+fallback.
 
 **R5.** The queue is bounded. An enqueue against a full queue is dropped, counted, and
 logged at warning. The work returns on a later request; nothing waits on it.
