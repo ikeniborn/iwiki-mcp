@@ -103,6 +103,34 @@ def test_a_failing_job_does_not_kill_its_worker():
     assert calls == ["boom", "after"]
 
 
+def test_a_failing_pool_connection_does_not_kill_its_worker(caplog):
+    """Pool misbehavior must not strand workers; factory must be inside try."""
+
+    class BadPool:
+        @property
+        def connection(self):
+            raise RuntimeError("pool connection failed")
+
+    def runner(job, factory):
+        return 0
+
+    runtime = maintenance.MaintenanceRuntime(runner=runner, workers=1, pool=BadPool())
+    runtime.start()
+    try:
+        with caplog.at_level("WARNING", logger=maintenance.LOGGER.name):
+            runtime.submit(_job(domain="first"))
+            runtime.submit(_job(domain="second"))
+            deadline = time.monotonic() + 5
+            while len(caplog.records) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+    finally:
+        runtime.stop()
+
+    assert len(caplog.records) >= 2, "both jobs should be attempted despite pool error"
+    assert "RuntimeError" in caplog.text, "pool connection error should be logged"
+    assert runtime._scheduled == set(), "keys should be released after failed attempts"
+
+
 def test_stop_joins_every_worker_even_with_a_full_queue():
     """The sentinel must always fit, or a bounded queue strands the workers."""
     release = threading.Event()

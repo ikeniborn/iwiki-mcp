@@ -162,9 +162,9 @@ class MaintenanceRuntime:
                 self._queue.task_done()
 
     def _run(self, job: CleanupJob) -> None:
-        factory = self._pool.connection if self._pool is not None else None
         started = time.monotonic()
         try:
+            factory = self._pool.connection if self._pool is not None else None
             removed = self._runner(job, factory)
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
             LOGGER.warning(
