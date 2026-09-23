@@ -1,3 +1,55 @@
+---
+review:
+  intent_hash: 12614af27a64cbb1
+  last_run: 2026-09-23
+  phases:
+    structure: { status: passed }
+    completeness: { status: passed }
+    clarity: { status: passed }
+    consistency: { status: passed }
+    alignment: { status: passed }
+  findings:
+    - id: F-001
+      phase: clarity
+      severity: WARNING
+      section: Desired Outcomes
+      section_hash: b35fb1424a165825
+      fragment: "never drives the server's PostgreSQL connections past the stated ceiling"
+      text: "The ceiling is never stated in this document, and Done when refers back to it, so the first outcome cannot be evaluated from the intent alone."
+      fix: "Accepted deliberately. The number is a Guarded decision produced by measurement and recorded in the task ledger; Done when cannot be evaluated until it is stated there. The user declined to fix a number before design."
+      verdict: accepted
+      verdict_at: 2026-09-23
+    - id: F-002
+      phase: clarity
+      severity: WARNING
+      section: Health Metrics
+      section_hash: 94b3cfb281cb4f10
+      fragment: "each stays within a stated, accepted margin"
+      text: "The margin for publication write cost, table size and autovacuum load carries no number, so the metric is not checkable as written."
+      fix: "Accepted on the same basis as F-001: the margin is set by the before-and-after measurement the index decision requires, and recorded with it."
+      verdict: accepted
+      verdict_at: 2026-09-23
+    - id: F-003
+      phase: consistency
+      severity: INFO
+      section: Autonomy Zones
+      section_hash: d0ba79f40a3ca463
+      fragment: "Creating an index against the production database is a deployment step and falls under no autonomy"
+      text: "A no-autonomy statement sits inside the Proposal-first bullet rather than the No autonomy one."
+      fix: "Left as written. It disambiguates the index specifically - designing it is guarded, applying it is not - and moving it would separate the clarification from what it clarifies."
+      verdict: accepted
+      verdict_at: 2026-09-23
+    - id: F-004
+      phase: alignment
+      severity: WARNING
+      section: Objective
+      section_hash: f07a51ff473d4f17
+      fragment: "The 10,000-row statements inside `_delete_snapshot_rows` are statements, not commits"
+      text: "This contradicts the wiki page concept/code-graph-storage, which states cleanup drains in committed batches of 10,000 rows. The intent is correct and the page is not, so the page is stale documentation that this work must correct."
+      fix: "Recorded as in scope: slice S3 already covers both language siblings of docs/code-graph-publishing.md, and the wiki page carries the same claim and must be corrected with them."
+      verdict: accepted
+      verdict_at: 2026-09-23
+---
 # Intent: cleanup-worker-connection-and-transaction-bounds
 
 **Date:** 2026-09-23
