@@ -53,23 +53,37 @@ from there, because the state lives in the database, not in the worker. Every ba
 re-checks that the snapshot is still superseded, so an operator reverting to it mid-drain
 loses at most one batch of its rows rather than the whole snapshot.
 
-Two things schedule that work, and neither of them runs it. `begin` queues a job for the
-domain it is publishing; any other authenticated hosted request may queue one job per
-domain in `binding.write`, throttled to once per 900 seconds per wiki. A fixed set of two
-maintenance workers drains that queue, so a growing number of clients produces queueing
-rather than threads and connections. The queue is bounded and an enqueue against a full
-one is dropped and counted — the work returns on a later request, because nothing waits
-on it.
+One sweep schedules that work, and none of its callers run it themselves.
+`wiki_code_publish_begin`, any other authenticated hosted request, and the direct-
+PostgreSQL CLI publisher's own `begin` (below) all call the same `schedule_wiki_cleanup`,
+which queues one job per domain in `binding.write`, throttled to once per 900 seconds per
+wiki — one trigger shape, not different behavior for `begin` versus everything else. On
+the hosted server a fixed set of two maintenance workers drains that queue, so a growing
+number of clients produces queueing rather than threads and connections. The queue is
+bounded and an enqueue against a full one is dropped and counted — the work returns on a
+later request, because nothing waits on it.
 
 One batch is one delete of at most 10,000 rows from one child table of one snapshot, and
 each batch commits on its own. A kill therefore costs at most that one batch, and the
 next cycle resumes where it stopped. A worker holds one connection for a whole cycle and
 draws it from a maintenance pool of its own, never from the pool the tools and
-authentication share: the server's total PostgreSQL connections are `pool_max_size` plus
-the two maintenance workers, twelve at the shipped defaults.
+authentication share. The server's total PostgreSQL connections are therefore the
+tools-and-auth pool (`pool_max_size`, a required setting with no shipped default — 10 in
+the sample `server.toml` in [deployment.md](deployment.md)) plus the two maintenance
+workers plus, at worst, the tool ceiling (`pool_max_size - 2`, 8 at the sample size) of
+short-lived connections that three hosted per-request paths still open outside both pools
+for principal validation — 20 at the sample size, not twelve. Those connects are transient
+and already bounded by the same tool ceiling as every other tool call, so they never reach
+into the reserved authentication connections; they do mean `max_connections` has to be
+sized against this larger total, not against the pool and workers alone.
 
-Direct-PostgreSQL CLI publication is a known gap here: the process exits shortly after
-`finalize` returns, so a cleanup cycle it scheduled can be killed before it drains.
+The direct-PostgreSQL CLI publisher has no hosted server, so no maintenance pool or worker
+set exists for its sweep to queue against; its own `begin` call falls back to one raw
+daemon thread per domain instead — the same local fallback a stdio session uses,
+deduplicated the same way. That process still exits shortly after `finalize` returns, and
+a daemon thread does not keep a process alive, so a cleanup cycle it scheduled can still be
+killed before it drains: whatever it already committed stays removed, and the rest waits
+for the next publication's sweep.
 
 The published snapshot — not the reading server's own configuration — decides which
 languages a hosted read may return. `wiki_code_search` on PostgreSQL storage derives its

@@ -423,6 +423,60 @@ def test_postgres_target_requires_primary_before_store_creation(
         )
 
 
+def test_postgres_target_carries_its_own_cleanup_fallback(tmp_path, monkeypatch):
+    """`publisher_for`'s direct-postgres branch is the only caller with no
+    server.py request to sweep on its behalf (Critical 1), so it must be
+    the one passing `schedule_local_cleanup=True` into the store.
+    """
+    captured = {}
+
+    class Store:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+
+    config = CodeGraphConfig(publish_mode="postgres")
+    binding = _postgres_binding(tmp_path)
+    monkeypatch.setattr(application, "PostgresCodeGraphStore", Store)
+    monkeypatch.setattr(
+        PostgresBinding,
+        "connection_dsn",
+        lambda _binding: "postgresql://fixture",
+    )
+
+    application.publisher_for(binding, config)
+
+    assert captured["kwargs"]["cleanup_binding"] is binding
+    assert captured["kwargs"]["cleanup_settings"] is config
+
+
+def test_create_postgres_publisher_omits_cleanup_fallback_by_default(
+    tmp_path, monkeypatch
+):
+    """The hosted per-request store (`server._postgres_code_store`) already
+    has its sweep triggered by `server._schedule_wiki_code_graph_cleanup`;
+    it must not also opt in here, or cleanup would double-schedule.
+    """
+    captured = {}
+
+    class Store:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+
+    config = CodeGraphConfig(publish_mode="postgres")
+    binding = _postgres_binding(tmp_path)
+    monkeypatch.setattr(application, "PostgresCodeGraphStore", Store)
+    monkeypatch.setattr(
+        PostgresBinding,
+        "connection_dsn",
+        lambda _binding: "postgresql://fixture",
+    )
+
+    application.create_postgres_publisher(binding, "owner-a", config)
+
+    assert "cleanup_binding" not in captured["kwargs"]
+    assert "cleanup_settings" not in captured["kwargs"]
+
+
 @pytest.mark.parametrize("binding_factory", [_git_binding, _postgres_binding])
 def test_mcp_target_uses_only_remote_transport(
     tmp_path, binding_factory, monkeypatch

@@ -77,6 +77,15 @@ statement_timeout_ms = 30000
 lock_timeout_ms = 5000
 ```
 
+`statement_timeout_ms` and `lock_timeout_ms` bound the code-graph maintenance pool exactly
+as they bound the tools-and-auth pool: `prepare_runtime` builds both pools' `options` from
+these same two values, so a cleanup DELETE now waits at most `lock_timeout_ms` for a lock
+and runs for at most `statement_timeout_ms` — where master's cleanup connected with neither
+timeout set. A cleanup batch contending with an in-flight publication therefore aborts its
+cycle at the shipped `lock_timeout_ms = 5000` (5s) rather than queuing indefinitely; see
+[code-graph-publishing.md](code-graph-publishing.md) for what a failed cycle does with the
+rows it already committed.
+
 A same-host PostgreSQL container must publish a host port such as
 `127.0.0.1:55432`; configure that host and port rather than a bridge-only service name.
 A remote database supplies its DNS name and custom port and should retain

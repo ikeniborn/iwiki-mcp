@@ -148,7 +148,20 @@ class MaintenanceRuntime:
             except queue.Full:  # pragma: no cover - the drain just made room
                 break
         for thread in threads:
-            thread.join(timeout=timeout)
+            try:
+                thread.join(timeout=timeout)
+            except RuntimeError:
+                # `start()` appends every thread before starting any, so a
+                # thread N+1 that never got to `.start()` because thread N's
+                # `.start()` raised is still in `threads` here. Joining an
+                # unstarted thread raises, and this must not propagate: the
+                # caller is `_clear_hosted_runtime`, and an exception here
+                # would replace the real startup error in `http.py`'s except
+                # clause and skip its `pool.close()`.
+                LOGGER.warning(
+                    "code graph maintenance worker never started; "
+                    "skipping join"
+                )
         with self._lock:
             self._threads = []
             self._scheduled.clear()
@@ -204,7 +217,19 @@ class MaintenanceRuntime:
             try:
                 if item is _SHUTDOWN:
                     return
-                self._run(item)
+                try:
+                    self._run(item)
+                except Exception:  # noqa: BLE001 - a dead worker strands
+                    # its domain in `_scheduled` forever, since `_run`'s own
+                    # finally never ran to release it -- so this backstop
+                    # (on top of `_run`'s own try/except) releases the key
+                    # too, not just the worker.
+                    with self._lock:
+                        self._scheduled.discard(item.key)
+                    LOGGER.exception(
+                        "code graph maintenance worker survived an "
+                        "unexpected exception outside its job runner"
+                    )
             finally:
                 self._queue.task_done()
 
@@ -215,9 +240,12 @@ class MaintenanceRuntime:
             factory = self._pool.connection if self._pool is not None else None
             removed = self._runner(job, factory)
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            rows = getattr(exc, "rows_removed", None)
             LOGGER.warning(
-                "code graph cleanup failed for one domain after %.1fs: %s",
+                "code graph cleanup failed for one domain after %.1fs, "
+                "%s rows removed before the failure: %s",
                 time.monotonic() - started,
+                "unknown" if rows is None else rows,
                 type(exc).__name__,
             )
         else:

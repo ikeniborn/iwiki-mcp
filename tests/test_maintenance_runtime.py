@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from iwiki_mcp.codegraph import maintenance
 
 
@@ -103,6 +105,34 @@ def test_a_failing_job_does_not_kill_its_worker():
     assert calls == ["boom", "after"]
 
 
+def test_a_failing_jobs_partial_rows_reach_the_failure_log(caplog):
+    """A cycle failing on its first batch and one failing after 199,000 rows
+    must not read alike -- the exception's `rows_removed`, when a runner
+    sets one, belongs in the warning, not just the exception class.
+    """
+    second = threading.Event()
+
+    def runner(job, factory):
+        if job.domain == "boom":
+            exc = RuntimeError("killed mid-drain")
+            exc.rows_removed = 4200
+            raise exc
+        second.set()
+        return 0
+
+    runtime = maintenance.MaintenanceRuntime(runner=runner, workers=1)
+    runtime.start()
+    try:
+        with caplog.at_level("WARNING", logger=maintenance.LOGGER.name):
+            runtime.submit(_job(domain="boom"))
+            runtime.submit(_job(domain="after"))
+            assert second.wait(timeout=5), "worker died on the failure"
+    finally:
+        runtime.stop()
+
+    assert "4200 rows removed before the failure" in caplog.text
+
+
 def test_a_failing_pool_connection_does_not_kill_its_worker(caplog):
     """Pool misbehavior must not strand workers; factory must be inside try."""
 
@@ -132,6 +162,77 @@ def test_a_failing_pool_connection_does_not_kill_its_worker(caplog):
     assert len(caplog.records) >= 2, "both jobs should be attempted despite pool error"
     assert "RuntimeError" in caplog.text, "pool connection error should be logged"
     assert runtime._scheduled == set(), "keys should be released after failed attempts"
+
+
+def test_something_escaping_run_itself_does_not_kill_the_worker(monkeypatch, caplog):
+    """`_run` catches its own runner's failures; this is about what happens
+    when something escapes `_run` itself -- nothing does today, but the
+    worker loop must survive it regardless, and release the stuck job's key
+    rather than stranding that domain in `_scheduled` for the process
+    lifetime.
+    """
+    calls = []
+    second = threading.Event()
+
+    def runner(job, factory):
+        calls.append(job.domain)
+        second.set()
+        return 0
+
+    runtime = maintenance.MaintenanceRuntime(runner=runner, workers=1)
+    real_run = runtime._run
+
+    def exploding_run(job):
+        if job.domain == "boom":
+            raise RuntimeError("escaped _run entirely")
+        return real_run(job)
+
+    monkeypatch.setattr(runtime, "_run", exploding_run)
+    runtime.start()
+    try:
+        with caplog.at_level("ERROR", logger=maintenance.LOGGER.name):
+            runtime.submit(_job(domain="boom"))
+            runtime.submit(_job(domain="after"))
+            assert second.wait(timeout=5), "worker died on the escaped exception"
+        # Checked before `stop()`, which unconditionally clears `_scheduled`
+        # on its own and would make this assertion vacuous afterward.
+        assert _job(domain="boom").key not in runtime._scheduled, (
+            "the domain whose exception escaped _run must not stay stranded"
+        )
+    finally:
+        runtime.stop()
+
+    assert calls == ["after"]
+    assert "unexpected exception" in caplog.text
+
+
+def test_stop_survives_a_thread_that_never_started(monkeypatch):
+    """`start()` appends every thread to `self._threads` before starting
+    any, so a `.start()` that raises partway leaves later threads in the
+    list unstarted. `stop()` joining one of those must not raise -- that
+    would propagate through `http.py`'s except clause, replacing the real
+    startup error and skipping `pool.close()`.
+    """
+    real_start = threading.Thread.start
+    calls = {"n": 0}
+
+    def flaky_start(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("could not start thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+
+    runtime = maintenance.MaintenanceRuntime(
+        runner=lambda job, factory: 0, workers=2
+    )
+    with pytest.raises(RuntimeError):
+        runtime.start()
+
+    runtime.stop()  # must not raise
+
+    assert runtime._threads == []
 
 
 def test_stop_joins_every_worker_even_with_a_full_queue():

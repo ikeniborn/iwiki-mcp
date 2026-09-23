@@ -83,3 +83,48 @@ def test_a_tiny_pool_still_leaves_one_tool_slot():
         assert server._TOOL_LIMITER.total_tokens == 1
     finally:
         server._clear_hosted_runtime_for_test()
+
+
+class _FakeMaintenanceRuntime:
+    def __init__(self) -> None:
+        self.stopped = False
+        self._pool = None
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_clear_hosted_runtime_with_a_foreign_pool_leaves_maintenance_running(
+    monkeypatch,
+):
+    """`_clear_hosted_runtime` must be symmetric with its own `_HOSTED_POOL
+    is pool` guard: a foreign (not-currently-installed) pool must not stop
+    the live maintenance runtime, or it would tear down a runtime that
+    belongs to the pool still installed and left untouched.
+    """
+    installed_pool = _FakePool(10)
+    foreign_pool = _FakePool(10)
+    fake_runtime = _FakeMaintenanceRuntime()
+    monkeypatch.setattr(server, "_HOSTED_POOL", installed_pool)
+    monkeypatch.setattr(server, "_MAINTENANCE_RUNTIME", fake_runtime)
+
+    server._clear_hosted_runtime(foreign_pool)
+
+    assert fake_runtime.stopped is False, "a foreign pool stopped the live runtime"
+    assert server._MAINTENANCE_RUNTIME is fake_runtime
+    assert server._HOSTED_POOL is installed_pool
+
+
+def test_clear_hosted_runtime_with_the_installed_pool_stops_maintenance(
+    monkeypatch,
+):
+    installed_pool = _FakePool(10)
+    fake_runtime = _FakeMaintenanceRuntime()
+    monkeypatch.setattr(server, "_HOSTED_POOL", installed_pool)
+    monkeypatch.setattr(server, "_MAINTENANCE_RUNTIME", fake_runtime)
+
+    server._clear_hosted_runtime(installed_pool)
+
+    assert fake_runtime.stopped is True
+    assert server._MAINTENANCE_RUNTIME is None
+    assert server._HOSTED_POOL is None

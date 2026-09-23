@@ -502,15 +502,22 @@ def create_postgres_publisher(
     lock_timeout_ms: int = 5000,
     domain: str | None = None,
     connection_factory=None,
+    schedule_local_cleanup: bool = False,
 ) -> PostgresCodeGraphStore:
+    """Build one store for exactly one domain.
+
+    `schedule_local_cleanup` is for `publisher_for`'s direct
+    (`publish_mode = "postgres"`) publisher only: that path runs with no
+    hosted server and therefore no request to sweep on its behalf, so its
+    store schedules its own R7 fallback from `begin`. Every other caller
+    (the hosted per-request store, and the store a maintenance worker
+    builds to run one cleanup job) already has its sweep triggered
+    elsewhere and must leave this off, or cleanup would double-schedule.
+    """
     target = domain or binding.primary
     if target is None:
         raise CodeGraphApplicationError("primary domain is required")
-    return PostgresCodeGraphStore(
-        binding.connection_dsn(),
-        binding.iwiki_id,
-        target,
-        owner_id,
+    kwargs = dict(
         lock_timeout_ms=lock_timeout_ms,
         session_ttl_seconds=settings.publication_session_ttl_seconds,
         staging_retention_seconds=settings.staging_retention_seconds,
@@ -523,6 +530,16 @@ def create_postgres_publisher(
         ),
         connection_factory=connection_factory,
         require_database_principal=True,
+    )
+    if schedule_local_cleanup:
+        kwargs["cleanup_binding"] = binding
+        kwargs["cleanup_settings"] = settings
+    return PostgresCodeGraphStore(
+        binding.connection_dsn(),
+        binding.iwiki_id,
+        target,
+        owner_id,
+        **kwargs,
     )
 
 
@@ -609,8 +626,11 @@ def _run_local_cleanup(job) -> bool:
         try:
             run_cleanup_job(job, None)
         except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            rows = getattr(exc, "rows_removed", None)
             LOGGER.warning(
-                "code graph cleanup failed for one domain: %s",
+                "code graph cleanup failed for one domain, "
+                "%s rows removed before the failure: %s",
+                "unknown" if rows is None else rows,
                 type(exc).__name__,
             )
         finally:
@@ -678,6 +698,7 @@ def publisher_for(
             binding,
             secrets.token_hex(16),
             config,
+            schedule_local_cleanup=True,
         )
     return McpSnapshotPublisher(
         RemoteMcpTransport(

@@ -182,3 +182,26 @@ def test_scheduling_without_a_runtime_deduplicates_through_the_local_set(
         binding, "token-1", object(), runtime=None
     )
     assert third == 1, "the key was not released once the job finished"
+
+
+def test_local_fallback_carries_partial_rows_into_the_failure_log(
+    monkeypatch, caplog
+):
+    """The local/stdio fallback must not lose a failing cycle's progress
+    either -- only the log message differs from the hosted worker's."""
+
+    def fake_run_cleanup_job(job, connection_factory):
+        exc = RuntimeError("killed mid-drain")
+        exc.rows_removed = 1234
+        raise exc
+
+    monkeypatch.setattr(application, "run_cleanup_job", fake_run_cleanup_job)
+
+    binding = _binding(iwiki_id="personal", write=["a"])
+    with caplog.at_level("WARNING", logger=application.LOGGER.name):
+        application.schedule_wiki_cleanup(binding, "token-1", object(), runtime=None)
+        deadline = time.monotonic() + 5
+        while "1234 rows removed" not in caplog.text and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert "1234 rows removed before the failure" in caplog.text

@@ -125,6 +125,8 @@ class PostgresCodeGraphStore:
         connection_factory: Callable[[], ContextManager[psycopg.Connection]] | None = None,
         require_database_principal: bool = False,
         clock: Callable[[], datetime.datetime] | None = None,
+        cleanup_binding: object | None = None,
+        cleanup_settings: object | None = None,
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = iwiki_id
@@ -136,6 +138,11 @@ class PostgresCodeGraphStore:
         self._superseded_retention_seconds = superseded_retention_seconds
         self._superseded_cleanup_limit = superseded_cleanup_limit
         self._staging_cleanup_limit = staging_cleanup_limit
+        # Only set for the direct (`publish_mode = "postgres"`) publisher,
+        # which runs with no hosted server and therefore no maintenance
+        # runtime to sweep on its behalf -- see `begin`'s R7 fallback.
+        self._cleanup_binding = cleanup_binding
+        self._cleanup_settings = cleanup_settings
         self._connection_factory = connection_factory or (
             lambda: psycopg.connect(dsn)
         )
@@ -318,12 +325,44 @@ class PostgresCodeGraphStore:
                     now,
                 ),
             )
+        self._schedule_local_cleanup()
         return PublicationSession(
             session_id=session_id,
             lease_expires_at=expires.isoformat(),
             base_snapshot_revision=base_revision,
             base_markdown_token=generation,
         )
+
+    def _schedule_local_cleanup(self) -> None:
+        """R7 fallback: sweep on `begin` when no hosted runtime ever will.
+
+        The hosted request path already sweeps from `server.py`, where the
+        binding and the installed `MaintenanceRuntime` are both in scope, so
+        this is a no-op there (`_cleanup_binding` stays `None`). It only
+        fires for the direct `publish_mode = "postgres"` publisher, which
+        never touches the MCP server -- without this, that deployment shape
+        schedules no cleanup at all and its superseded backlog never drains.
+        Scheduled, never awaited: the publication above is already
+        committed and must not be charged for draining someone else's
+        backlog, so a failure here is logged and swallowed, never raised.
+        """
+        if self._cleanup_binding is None:
+            return
+        try:
+            from ..codegraph import application as _codegraph_application
+
+            _codegraph_application.schedule_wiki_cleanup(
+                self._cleanup_binding,
+                self.owner_id,
+                self._cleanup_settings,
+                lock_timeout_ms=self._lock_timeout_ms,
+                runtime=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            LOGGER.warning(
+                "code graph cleanup could not be scheduled: %s",
+                type(exc).__name__,
+            )
 
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
@@ -656,6 +695,9 @@ class PostgresCodeGraphStore:
             self._discard_snapshot(cursor, domain_id, snapshot_id)
         return len(expired)
 
+    # Order matters: `code_graph_files` drains last because it roots the
+    # child foreign-key chain (see `_delete_snapshot_row`'s comment below),
+    # which is what lets that method guard on one table instead of four.
     _CLEANUP_CHILD_TABLES = (
         "code_graph_wiki_links",
         "code_graph_relations",
@@ -676,34 +718,47 @@ class PostgresCodeGraphStore:
             return self._drain(own)
 
     def _drain(self, connection) -> int:
-        removed = 0
-        with self._transaction_on(connection) as cursor:
-            domain_id = self._domain_id(cursor)
-        while removed < self._CLEANUP_CYCLE_ROWS:
+        # A single-item list, not a plain int: `_drain_snapshot` mutates it
+        # as each batch commits, so an exception raised mid-snapshot still
+        # leaves the caller an accurate count of what is actually gone from
+        # the database -- not just whatever full snapshots finished before
+        # the one that failed.
+        progress = [0]
+        try:
             with self._transaction_on(connection) as cursor:
-                candidates = self._superseded_candidates(
-                    cursor, domain_id, self._clock()
-                )
-            if not candidates:
-                break
-            progressed = False
-            for snapshot_id in candidates:
-                if removed >= self._CLEANUP_CYCLE_ROWS:
+                domain_id = self._domain_id(cursor)
+            while progress[0] < self._CLEANUP_CYCLE_ROWS:
+                with self._transaction_on(connection) as cursor:
+                    candidates = self._superseded_candidates(
+                        cursor, domain_id, self._clock()
+                    )
+                if not candidates:
                     break
-                taken = self._drain_snapshot(
-                    connection,
-                    domain_id,
-                    snapshot_id,
-                    self._CLEANUP_CYCLE_ROWS - removed,
-                )
-                removed += taken
-                progressed = progressed or taken > 0
-            if not progressed:
-                break
+                progressed = False
+                for snapshot_id in candidates:
+                    if progress[0] >= self._CLEANUP_CYCLE_ROWS:
+                        break
+                    before = progress[0]
+                    self._drain_snapshot(
+                        connection,
+                        domain_id,
+                        snapshot_id,
+                        self._CLEANUP_CYCLE_ROWS - progress[0],
+                        progress,
+                    )
+                    progressed = progressed or progress[0] > before
+                if not progressed:
+                    break
+        except Exception as exc:
+            # Carried so the caller's failure log can report progress, not
+            # just an exception class: a cycle that fails on its first batch
+            # and one that fails after 199,000 rows must not read alike.
+            exc.rows_removed = progress[0]
+            raise
         LOGGER.info(
-            "code graph cleanup removed %s rows from one domain", removed
+            "code graph cleanup removed %s rows from one domain", progress[0]
         )
-        return removed
+        return progress[0]
 
     def _superseded_candidates(self, cursor, domain_id: int, now) -> list:
         """Ready snapshots that are no longer active and past the retention.
@@ -733,7 +788,12 @@ class PostgresCodeGraphStore:
         return [row[0] for row in cursor.fetchall()]
 
     def _drain_snapshot(
-        self, connection, domain_id: int, snapshot_id: str, budget: int
+        self,
+        connection,
+        domain_id: int,
+        snapshot_id: str,
+        budget: int,
+        progress: list[int] | None = None,
     ) -> int:
         """Delete one snapshot's rows, children first, committing per batch.
 
@@ -742,6 +802,11 @@ class PostgresCodeGraphStore:
         table once per deleted parent row, and those keys carry no index of
         their own beyond that prefix: one such prune ran for 49 minutes on a
         live domain and took the server with it.
+
+        `progress`, when given, is updated in step with every commit rather
+        than only once this call returns, so a caller that catches an
+        exception raised partway through still sees the rows already gone
+        from the database, not zero.
         """
         removed = 0
         for table in self._CLEANUP_CHILD_TABLES:
@@ -761,12 +826,15 @@ class PostgresCodeGraphStore:
                 if not taken:
                     break
                 removed += taken
+                if progress is not None:
+                    progress[0] += taken
         with self._transaction_on(connection) as cursor:
             if not self._still_superseded(cursor, domain_id, snapshot_id):
                 return removed
-            removed += self._delete_snapshot_row(
-                cursor, domain_id, snapshot_id
-            )
+            taken = self._delete_snapshot_row(cursor, domain_id, snapshot_id)
+            removed += taken
+            if progress is not None:
+                progress[0] += taken
         return removed
 
     def _still_superseded(
@@ -807,6 +875,22 @@ class PostgresCodeGraphStore:
     def _delete_snapshot_row(
         self, cursor, domain_id: int, snapshot_id: str
     ) -> int:
+        """Delete the snapshot row once its files are gone -- and only then.
+
+        `code_graph_files` roots the child foreign-key chain this snapshot's
+        rows sit in: `code_graph_symbols.file_id` is `NOT NULL` with a
+        cascading foreign key onto it, `code_graph_relations` depends on
+        symbols, and `code_graph_wiki_links` depends on relations. An empty
+        `code_graph_files` therefore implies every other child table is
+        already empty by referential integrity, not by an assumption about
+        the order `_CLEANUP_CHILD_TABLES` happened to drain in -- which is
+        what lets this guard check one table instead of four. This exact
+        reasoning was read wrong three times on record (issue 104, the
+        intent's first draft, and the spec) and cost a plan-gate reversal;
+        `tests/postgres/test_code_graph_publication.py::
+        test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone`
+        pins it -- read that before touching this guard.
+        """
         cursor.execute(
             "DELETE FROM iwiki.code_graph_snapshots "
             "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "

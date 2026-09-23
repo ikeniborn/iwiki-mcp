@@ -817,6 +817,76 @@ def _aged_superseded(graph, publications: int = 3) -> str:
     return _snapshot_states(graph)[0][0]
 
 
+def test_begin_schedules_cleanup_for_the_direct_publisher(pg_graph):
+    """Critical 1 / R7 regression.
+
+    `application.publisher_for`'s direct (`publish_mode = "postgres"`)
+    branch never goes through `server.py`, so unless `begin()` triggers its
+    own fallback, that deployment shape schedules no cleanup at all and its
+    superseded backlog never drains. Builds a store configured exactly the
+    way that branch configures one -- with `cleanup_binding`/
+    `cleanup_settings` set -- and proves `begin()` actually drains a
+    superseded snapshot through the real `schedule_wiki_cleanup` -> local
+    daemon-thread fallback, not a mock of it. `superseded_retention_seconds`
+    is 0 on the cleanup settings so the real-clock cleanup job treats the
+    snapshot as due immediately, with no fixture clock trickery needed.
+    """
+    import time
+    from types import SimpleNamespace
+
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+
+    class _FakeBinding:
+        iwiki_id = pg_graph.iwiki_id
+        write = (pg_graph.domain,)
+
+        def connection_dsn(self):
+            return pg_graph.dsn
+
+    cleanup_settings = SimpleNamespace(
+        publication_session_ttl_seconds=pg_graph.session_ttl_seconds,
+        staging_retention_seconds=pg_graph.staging_retention_seconds,
+        staging_cleanup_limit=pg_graph.staging_cleanup_limit,
+        superseded_retention_seconds=0,
+        superseded_cleanup_limit=pg_graph.superseded_cleanup_limit,
+    )
+    store = PostgresCodeGraphStore(
+        pg_graph.dsn,
+        pg_graph.iwiki_id,
+        pg_graph.domain,
+        pg_graph.owner_id,
+        lock_timeout_ms=pg_graph.lock_timeout_ms,
+        session_ttl_seconds=pg_graph.session_ttl_seconds,
+        staging_retention_seconds=pg_graph.staging_retention_seconds,
+        staging_cleanup_limit=pg_graph.staging_cleanup_limit,
+        superseded_retention_seconds=pg_graph.superseded_retention_seconds,
+        superseded_cleanup_limit=pg_graph.superseded_cleanup_limit,
+        cleanup_binding=_FakeBinding(),
+        cleanup_settings=cleanup_settings,
+    )
+
+    pg_graph.finalize(pg_graph.complete_session())
+    superseded = pg_graph.reader_status()["snapshot_id"]
+    pg_graph.finalize(pg_graph.complete_session())
+    assert superseded not in {pg_graph.reader_status()["snapshot_id"]}
+
+    before = _snapshot_rows(pg_graph, superseded)
+    assert sum(before.values()) > 0, "fixture must supply a superseded snapshot"
+
+    store.begin(pg_graph.header)
+
+    deadline = time.monotonic() + 5.0
+    after = before
+    while time.monotonic() < deadline:
+        after = _snapshot_rows(pg_graph, superseded)
+        if sum(after.values()) == 0:
+            break
+        time.sleep(0.05)
+    assert sum(after.values()) == 0, (
+        "begin's own cleanup fallback did not drain the superseded snapshot"
+    )
+
+
 def test_a_reactivated_snapshot_stops_its_drain_within_one_batch(
     pg_graph, monkeypatch
 ):
@@ -924,7 +994,7 @@ def test_a_kill_mid_drain_keeps_the_batches_already_committed(
 
     monkeypatch.setattr(store, "_delete_batch", exploding)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc_info:
         store.run_cleanup_cycle()
 
     after = _snapshot_rows(pg_graph, oldest)
@@ -932,6 +1002,11 @@ def test_a_kill_mid_drain_keeps_the_batches_already_committed(
     assert removed > 0, "the committed batches were rolled back with the kill"
     assert removed <= 2 * store._CLEANUP_BATCH_ROWS, (
         "more than the two committed batches went missing"
+    )
+    assert exc_info.value.rows_removed == removed, (
+        "a failing drain must carry its partial progress with it -- a "
+        "cycle that fails on batch 1 and one that fails after 199,000 rows "
+        "must not read alike in the failure log"
     )
 
 

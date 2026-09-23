@@ -416,8 +416,12 @@ def _stop_maintenance_runtime() -> None:
 def _clear_hosted_runtime(pool) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
     global _HOSTED_SPECIFICATIONS
-    _stop_maintenance_runtime()
+    # Symmetric with the guard below: a foreign `pool` -- not the one
+    # currently installed -- must not stop maintenance either, or clearing
+    # it would kill a live maintenance runtime while leaving the actually
+    # hosted pool (and its own runtime) installed and untouched.
     if _HOSTED_POOL is pool:
+        _stop_maintenance_runtime()
         _HOSTED_POOL = None
         _HOSTED_CONFIG = None
         _HOSTED_CODE_GRAPH = None
