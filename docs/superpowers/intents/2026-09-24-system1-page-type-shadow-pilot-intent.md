@@ -1,6 +1,6 @@
 ---
 review:
-  intent_hash: c7ffa16041dee66c
+  intent_hash: 5e1daf8b54995e58
   last_run: 2026-09-24
   phases:
     structure: { status: passed }
@@ -12,13 +12,6 @@ review:
 workflow:
   route: chain
   continuation: execute
-result_check:
-  verdict: needs_work
-  source: intent
-  intent_hash: c7ffa16041dee66c
-  last_run: 2026-09-24
-  reviewed: true
-  docs_checked: true
 ---
 
 # Intent: system1-page-type-shadow-pilot
@@ -47,6 +40,8 @@ place to measure System 1 value before granting it any decision authority.
   only.
 - An unavailable, failed, or timed-out System One endpoint does not change whether the
   current write succeeds or fails.
+- A configured System One base URL ending in `/v1` sends the shadow request to exactly
+  `<base>/systemone`, without adding a second version segment.
 - The final evidence supports exactly one recommendation: `go`, `fine-tune`, or
   `reject`, with the measured quality, calibration, and latency results attached.
 
@@ -58,6 +53,8 @@ place to measure System 1 value before granting it any decision authority.
   results report no additional network wait in the write path.
 - With the endpoint unavailable, the current write's success or error outcome is
   unchanged in focused failure-path tests.
+- Focused request-construction tests observe exactly one `/v1` segment when the
+  configured System One base URL already ends in `/v1`.
 - Logs contain no API credentials, page body, or raw endpoint diagnostic payload.
 - Focused classification and write tests pass, followed by the full test suite on the
   final unchanged code-state fingerprint.
@@ -67,9 +64,9 @@ place to measure System 1 value before granting it any decision authority.
 
 ## Strategic Context
 
-- Interacts with: the Framework-hosted local GPU `/v1/systemone` endpoint, iwiki's
-  server-side write classifier, the evaluation harness, endpoint operators, and
-  authoring agents that submit pages.
+- Interacts with: the Framework-hosted local GPU API root ending in `/v1`, its
+  `/systemone` resource, iwiki's server-side write classifier, the evaluation harness,
+  endpoint operators, and authoring agents that submit pages.
 - Priority trade-off: trust first, then speed, then cost.
 
 ## Constraints
@@ -87,6 +84,8 @@ place to measure System 1 value before granting it any decision authority.
 
 - System One uses a separate endpoint and separate credentials from the current
   embedding and chat configuration.
+- `IWIKI_SYSTEM1_BASE_URL` is the API root and ends in `/v1`; the client appends only
+  `/systemone` and never inserts another version segment.
 - LAYA never changes frontmatter, tags, page path, write result, or write error during
   this pilot; explicit type and tags remain authoritative.
 - Failure and timeout are fail-open for the existing write flow.
@@ -116,14 +115,16 @@ place to measure System 1 value before granting it any decision authority.
 
 ## Stop Rules
 
-- Halt if: the available endpoint contract is not `/v1/systemone`, credentials or page
-  content cannot be isolated, or shadow execution changes any observable write behavior.
+- Halt if: the configured API root does not end in `/v1`, its System One resource is not
+  `<base>/systemone`, credentials or page content cannot be isolated, or shadow
+  execution changes any observable write behavior.
 - Halt if: focused or regression tests show a write-path regression that cannot be
   removed without granting LAYA production authority.
 - Escalate if: the six labels cannot be mapped unambiguously to endpoint output,
   probability calibration cannot be measured, or the required scope crosses into
   production mutation or retrieval decisions.
-- Done when: focused and full tests pass; a live or explicitly identified recorded-replay
-  benchmark over real iwiki pages reports accuracy, macro-F1, Brier score, ECE, and
-  p50/p95 latency; write behavior remains unchanged; and an evidence-backed `go`,
-  `fine-tune`, or `reject` recommendation is recorded.
+- Done when: focused and full tests pass; a base ending in `/v1` produces exactly one
+  `/v1/systemone` request path; a live or explicitly identified recorded-replay benchmark
+  over real iwiki pages reports accuracy, macro-F1, Brier score, ECE, and p50/p95 latency;
+  write behavior remains unchanged; and an evidence-backed `go`, `fine-tune`, or
+  `reject` recommendation is recorded.
