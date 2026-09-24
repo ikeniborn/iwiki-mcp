@@ -1086,12 +1086,19 @@ flowchart TD
     F --> G
     G --> H["title ← derive_title (H1 / slug)<br/>description ← explicit / Overview<br/>resource ← source<br/>status ← explicit / stub<br/>timestamp ← git last-commit / today"]
     H --> I["fm.render → frontmatter block"]
+    I -. "wiki_write_page when enabled" .-> S["System One shadow<br/>(decision discarded)"]
 
     classDef pri fill:#89b4fa,color:#1e1e2e,stroke:#74c7ec
     classDef def fill:#f9e2af,color:#1e1e2e,stroke:#df8e1d
     class C pri
     class F def
 ```
+
+The shadow uses a separate local-GPU endpoint and bearer credential. It submits at
+most 6,000 page-body characters to `/v1/systemone`, omits a model so the service can
+route multilingual input, validates all six class probabilities, and fails open after
+a two-second timeout. It emits no page payload or raw endpoint error and never feeds
+its decision back into write behavior.
 
 ### OKF adoption & layout tools
 

@@ -47,6 +47,9 @@ class Config:
     search_mode: str = "hybrid"
     rerank_model: str = ""
     idle_timeout_seconds: int = 86400
+    system1_shadow: bool = False
+    system1_base_url: str = ""
+    system1_api_key: str = ""
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -87,6 +90,19 @@ class Config:
             raise ConfigError(
                 f"{idle_timeout_var} must be a non-negative integer."
             )
+        system1_shadow = getenv("IWIKI_SYSTEM1_SHADOW", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        system1_base_url = getenv("IWIKI_SYSTEM1_BASE_URL", "").strip().rstrip("/")
+        system1_api_key = getenv("IWIKI_SYSTEM1_KEY", "").strip()
+        if system1_shadow and (not system1_base_url or not system1_api_key):
+            raise ConfigError(
+                "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
+                "IWIKI_SYSTEM1_SHADOW is enabled."
+            )
         return Config(
             base_url=base_url,
             api_key=api_key,
@@ -107,4 +123,7 @@ class Config:
             search_mode=search_mode,
             rerank_model=getenv("IWIKI_RERANK_MODEL", "").strip(),
             idle_timeout_seconds=idle_timeout_seconds,
+            system1_shadow=system1_shadow,
+            system1_base_url=system1_base_url,
+            system1_api_key=system1_api_key,
         )

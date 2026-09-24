@@ -4,6 +4,31 @@
 
 Бенчмарки только для оценки. Ни один из них не меняет production-поведение поиска, веса fusion или настройки rerank.
 
+## Бенчмарк типов страниц System One
+
+Пилот типов страниц сравнивает текущий чат-классификатор с System One shadow на
+проверенном оператором JSONL-корпусе. Храните корпус вне version control и обезличьте
+его перед использованием. Каждая строка содержит только нужные бенчмарку данные:
+
+```json
+{"id":"reviewed-001","label":"guide","body":"# Reviewed page\n\n## Steps\n..."}
+```
+
+Настройте `IWIKI_CHAT_MODEL`, включите `IWIKI_SYSTEM1_SHADOW` и передайте отдельные
+`IWIKI_SYSTEM1_BASE_URL` и `IWIKI_SYSTEM1_KEY` через окружение процесса. Затем запустите:
+
+```bash
+uv run python -m eval.system1_page_type --corpus /path/to/reviewed-pages.jsonl --output /tmp/system1-page-type-report.json
+```
+
+Runner сначала полностью измеряет baseline и фиксирует его p95 latency до любого
+запроса System One. Aggregate-only отчёт содержит accuracy, macro-F1, p50/p95, а также
+Brier score System One и ECE по 10 интервалам. Рекомендация `go` выдаётся, если качество
+не хуже и System One укладывается в зафиксированный p95; `fine-tune` — если latency
+проходит, но качество падает; `reject` — если p95 ухудшается. Любое unavailable или
+invalid решение останавливает прогон без оценки частичных evidence. Команда не хранит
+тела страниц и идентификаторы кейсов в отчёте.
+
 ## Code graph benchmark
 
 Запустите offline release evidence из корня репозитория:
