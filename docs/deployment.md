@@ -250,6 +250,46 @@ iwiki-mcp base list --config /opt/iwiki-mcp/admin-server.toml --json
 )
 ```
 
+That form assumes `iwiki-mcp` is installed on the host. A single-container deployment
+following this runbook has no reason to install it there, and on at least one host built
+from these instructions it is absent from `PATH` for every user including root — so the
+migration trigger has to run inside the image instead. The image is the better vehicle
+anyway: it pins the exact version whose schema you are migrating to, where a host
+install can drift from the image the service actually runs.
+
+Override the entrypoint, which is supervisord, and mount the admin configuration
+read-only. `--network host` is what lets the container reach the database at the address
+`admin-server.toml` names. The password still never enters argv, and the embedding
+identity is read from the runtime environment file rather than retyped, so it cannot
+drift from what the database already holds.
+
+```bash
+(
+set -euo pipefail
+read -r -s -p 'PostgreSQL schema-owner password: ' IWIKI_DB_PASSWORD
+printf '\n'
+export IWIKI_DB_PASSWORD
+set -a
+. /opt/iwiki-mcp/runtime.env
+set +a
+sudo -E docker run --rm --network host \
+  -e IWIKI_DB_PASSWORD -e IWIKI_EMBED_MODEL -e IWIKI_EMBED_DIMENSIONS -e IWIKI_RERANK_MODEL \
+  -v /opt/iwiki-mcp/admin-server.toml:/admin-server.toml:ro \
+  --entrypoint iwiki-mcp "$(sudo docker compose -p iwiki-mcp-app images -q iwiki)" \
+  base list --config /admin-server.toml --json
+)
+```
+
+Sourcing an environment file to obtain a password is the one thing to be careful with
+here. A value containing a space or a shell metacharacter is not safe to `.` into the
+shell: the assignment ends at the space and the rest of the line is executed as a
+command. Read such a value with `IWIKI_DB_PASSWORD="$(sed -n 's/^IWIKI_DB_PASSWORD=//p'
+FILE | head -1)"`, which preserves it verbatim, and export it afterwards. If two files
+are involved, source the runtime one first so the schema-owner value is not overwritten
+by the runtime role's — they are different roles by design, and the runtime role has no
+DDL privileges, so the mistake surfaces as an opaque `migration failed` rather than as a
+permission error naming the cause.
+
 With the same secret-safe boundary, create the base and domains only after the migration
 trigger succeeds. See [PostgreSQL provisioning and least
 privilege](postgres-setup.md) for background; do
