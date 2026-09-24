@@ -1,3 +1,5 @@
+import httpx
+
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
 from iwiki_mcp.engine import frontmatter as fm
@@ -60,6 +62,33 @@ def test_git_write_observes_system1_without_changing_explicit_metadata(
 
     assert "error" not in result
     assert calls == [body]
+    meta, _ = fm.split(
+        (tmp_path / "d" / "api" / "base.md").read_text(encoding="utf-8")
+    )
+    assert meta["type"] == "api"
+    assert meta["tags"] == ["binding"]
+
+
+def test_git_write_survives_unavailable_system1_endpoint(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
+    monkeypatch.setattr(
+        system1.httpx,
+        "post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            httpx.ConnectError("endpoint unavailable")
+        ),
+    )
+    body = "# Base binding\n\n## Overview\nHow binding works.\n\n## Detail\nwords here\n"
+
+    result = server.wiki_write_page(
+        "d", "base", body, source=None, type="api", tags=["Binding"]
+    )
+
+    assert "error" not in result
+    assert "warning" not in result
     meta, _ = fm.split(
         (tmp_path / "d" / "api" / "base.md").read_text(encoding="utf-8")
     )
