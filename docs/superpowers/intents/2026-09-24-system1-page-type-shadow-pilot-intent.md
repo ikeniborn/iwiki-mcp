@@ -12,6 +12,13 @@ review:
 workflow:
   route: chain
   continuation: execute
+result_check:
+  verdict: needs_work
+  source: intent
+  intent_hash: c7ffa16041dee66c
+  last_run: 2026-09-24
+  reviewed: true
+  docs_checked: true
 ---
 
 # Intent: system1-page-type-shadow-pilot
