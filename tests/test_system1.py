@@ -38,7 +38,7 @@ def test_shadow_sends_native_choice_request_and_returns_probabilities(monkeypatc
     cfg = _config(
         monkeypatch,
         system1_shadow=True,
-        system1_base_url="http://system1",
+        system1_base_url="http://system1/v1",
         system1_api_key="system1-key",
     )
     captured = {}
@@ -93,7 +93,7 @@ def test_shadow_transport_failure_is_safe_and_payload_free(monkeypatch):
     cfg = _config(
         monkeypatch,
         system1_shadow=True,
-        system1_base_url="http://system1",
+        system1_base_url="http://system1/v1",
         system1_api_key="system1-key",
     )
     body = "private page body"
@@ -116,7 +116,7 @@ def test_shadow_unexpected_provider_failure_cannot_escape(monkeypatch):
     cfg = _config(
         monkeypatch,
         system1_shadow=True,
-        system1_base_url="http://system1",
+        system1_base_url="http://system1/v1",
         system1_api_key="system1-key",
     )
     monkeypatch.setattr(
@@ -135,7 +135,7 @@ def test_shadow_rejects_incomplete_probability_vector(monkeypatch):
     cfg = _config(
         monkeypatch,
         system1_shadow=True,
-        system1_base_url="http://system1",
+        system1_base_url="http://system1/v1",
         system1_api_key="system1-key",
     )
 

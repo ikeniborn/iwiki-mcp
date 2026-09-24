@@ -15,7 +15,8 @@ redact it before use. Each line has exactly the data needed by the benchmark:
 ```
 
 Configure `IWIKI_CHAT_MODEL`, enable `IWIKI_SYSTEM1_SHADOW`, and provide the separate
-`IWIKI_SYSTEM1_BASE_URL` and `IWIKI_SYSTEM1_KEY` in the process environment. Then run:
+`IWIKI_SYSTEM1_BASE_URL` (the API root ending in `/v1`) and `IWIKI_SYSTEM1_KEY` in the
+process environment. Then run:
 
 ```bash
 uv run python -m eval.system1_page_type --corpus /path/to/reviewed-pages.jsonl --output /tmp/system1-page-type-report.json

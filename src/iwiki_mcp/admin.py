@@ -231,6 +231,8 @@ def _engine_config(
             "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
             "IWIKI_SYSTEM1_SHADOW is enabled."
         )
+    if system1_shadow and not system1_base_url.endswith("/v1"):
+        raise ConfigError("IWIKI_SYSTEM1_BASE_URL must end in /v1.")
     return Config(
         base_url=base_url,
         api_key=environ.get("IWIKI_LLM_KEY", "").strip(),

@@ -14,7 +14,7 @@ def test_cli_writes_aggregate_report(tmp_path, monkeypatch):
     monkeypatch.setenv("IWIKI_LLM_KEY", "llm-key")
     monkeypatch.setenv("IWIKI_CHAT_MODEL", "baseline")
     monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
-    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
     monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
     monkeypatch.setattr(
         cli,

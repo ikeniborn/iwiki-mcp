@@ -48,7 +48,7 @@ def classify_page_type(cfg: Config, body: str) -> PageTypeDecision | None:
     started = time.perf_counter()
     try:
         response = httpx.post(
-            f"{cfg.system1_base_url}/v1/systemone",
+            f"{cfg.system1_base_url}/systemone",
             json={
                 "state": {"document": body[:_MAX_DOCUMENT_CHARS]},
                 "questions": {

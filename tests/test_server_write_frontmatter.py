@@ -46,7 +46,7 @@ def test_git_write_observes_system1_without_changing_explicit_metadata(
 ):
     _patch(monkeypatch, tmp_path)
     monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
-    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
     monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
     calls = []
     monkeypatch.setattr(
@@ -72,7 +72,7 @@ def test_git_write_observes_system1_without_changing_explicit_metadata(
 def test_git_write_survives_unavailable_system1_endpoint(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
-    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
     monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
     monkeypatch.setattr(
         system1.httpx,
@@ -102,7 +102,7 @@ def test_postgres_page_preparation_observes_system1_without_changing_type(
     monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
     monkeypatch.setenv("IWIKI_LLM_KEY", "k")
     monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
-    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
     monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
     calls = []
     monkeypatch.setattr(
