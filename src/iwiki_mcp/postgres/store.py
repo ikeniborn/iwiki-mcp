@@ -90,10 +90,18 @@ def validate_direct_principal(
     iwiki_id: str | None = None,
     read_domains: tuple[str, ...] = (),
     write_domains: tuple[str, ...] = (),
+    connection_factory: Callable[[], ContextManager[Any]] | None = None,
 ) -> dict[str, str] | None:
-    """Reject owner/BYPASSRLS roles and, when supplied, unmapped scope."""
+    """Reject owner/BYPASSRLS roles and, when supplied, unmapped scope.
+
+    The factory exists so a maintenance worker validates through the same
+    pooled connection it will then work on. Dialling out separately would
+    put a worker at two connections and the server's stated ceiling out by
+    one per worker.
+    """
+    connect = connection_factory or (lambda: psycopg.connect(dsn))
     try:
-        with psycopg.connect(dsn) as connection:
+        with connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT session_user")
                 principal = cursor.fetchone()[0]

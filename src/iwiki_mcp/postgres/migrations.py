@@ -704,6 +704,44 @@ WIKI_LINK_CASCADE_MIGRATION = Migration(
 )
 
 
+# Measured (docs/superpowers/reports/cleanup-index-measurement.md): on a real
+# ~21k-relation-per-snapshot corpus, deleting one superseded snapshot's
+# symbol and file rows -- the shipped cleanup order deletes relations first,
+# so these rows are already gone by then -- still pays a foreign-key check
+# per deleted parent row. Without these indexes that check falls back to the
+# primary key's snapshot-scoped range, which still holds the just-deleted
+# rows as dead tuples until vacuum: one full drain measured 3.1-14.4s across
+# repeated trials (mean ~6.2s). With all three indexes present it measured a consistent
+# 1.05-1.15s, and pg_stat_user_indexes confirmed each index absorbs exactly
+# the expected number of scans (one per deleted symbol or file row) that
+# previously fell on the primary key. The write cost is real but small
+# (~2.5s -> ~2.6-2.7s per ~21k-row publication) against the delete-path
+# benefit, so all three are added rather than a subset.
+CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION_STATEMENTS = (
+    """
+    CREATE INDEX code_graph_relations_source_symbol_idx
+        ON iwiki.code_graph_relations
+        (iwiki_id, domain_id, snapshot_id, source_symbol_id)
+    """,
+    """
+    CREATE INDEX code_graph_relations_source_file_idx
+        ON iwiki.code_graph_relations
+        (iwiki_id, domain_id, snapshot_id, source_file_id)
+    """,
+    """
+    CREATE INDEX code_graph_relations_target_symbol_idx
+        ON iwiki.code_graph_relations
+        (iwiki_id, domain_id, snapshot_id, target_symbol_id)
+    """,
+)
+
+
+CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION = Migration(
+    version=9,
+    statements=CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION_STATEMENTS,
+)
+
+
 SCHEMA6_COMPATIBILITY_ROLLBACK_SQL = f"""
 SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
 DROP TABLE iwiki.specification_evidence;
@@ -967,6 +1005,7 @@ MIGRATIONS = (
     Migration(version=6, statements=SPECIFICATION_MIGRATION_STATEMENTS),
     SPECIFICATION_METADATA_MIGRATION,
     WIKI_LINK_CASCADE_MIGRATION,
+    CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION,
 )
 
 
@@ -1121,7 +1160,7 @@ def _safe_server_label(dsn: str) -> str:
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 8,
+    expected_version: int = 9,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -1438,4 +1477,69 @@ def rollback_v8_compatibility(
         "dry_run": False,
         "schema_version": 7,
         "removed_marker": 8,
+    }
+
+
+def rollback_v9_compatibility(
+    settings: MigrationSettings,
+    *,
+    confirm: bool,
+) -> dict[str, int | bool]:
+    """Restore schema v8 by dropping the three foreign-key indexes v9 adds.
+
+    Unlike earlier steps this touches no table, column, or delete rule -- the
+    indexes carry no behaviour an older runtime could disagree with, so
+    reversing them is exactly the DDL that added them, undone.
+    """
+    if confirm is not True:
+        raise ValueError("confirmation must be literal true")
+    try:
+        with psycopg.connect(
+            settings.dsn,
+            connect_timeout=settings.connect_timeout_s,
+        ) as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(settings.statement_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT set_config('lock_timeout', %s, true)",
+                        (str(settings.lock_timeout_ms),),
+                    )
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,)
+                    )
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(version), 0) "
+                        "FROM iwiki.schema_migrations"
+                    )
+                    current = cursor.fetchone()[0]
+                    if current != 9:
+                        raise MigrationError(
+                            "schema version 9 compatibility rollback is unavailable"
+                        )
+                    cursor.execute(
+                        "DROP INDEX iwiki.code_graph_relations_source_symbol_idx"
+                    )
+                    cursor.execute(
+                        "DROP INDEX iwiki.code_graph_relations_source_file_idx"
+                    )
+                    cursor.execute(
+                        "DROP INDEX iwiki.code_graph_relations_target_symbol_idx"
+                    )
+                    cursor.execute(
+                        "DELETE FROM iwiki.schema_migrations WHERE version = 9"
+                    )
+                    if cursor.rowcount != 1:
+                        raise MigrationError("migration marker removal failed")
+    except MigrationError:
+        raise
+    except psycopg.Error as exc:
+        raise MigrationError("compatibility rollback failed") from exc
+    return {
+        "dry_run": False,
+        "schema_version": 8,
+        "removed_marker": 9,
     }

@@ -103,7 +103,7 @@ def test_main_checks_postgres_schema_before_embedding_probe(monkeypatch):
 
     assert calls == [
         "load",
-        ("require-schema", binding.connection_dsn(), 8),
+        ("require-schema", binding.connection_dsn(), 9),
         ("probe", cfg),
         "run",
     ]
@@ -140,9 +140,9 @@ def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, caps
     )
 
     def reject(dsn, *, expected_version):
-        assert expected_version == 8
+        assert expected_version == 9
         raise server._postgres_migrations.MigrationError(
-            "PostgreSQL schema version 8 is required"
+            "PostgreSQL schema version 9 is required"
         )
 
     monkeypatch.setattr(
@@ -165,7 +165,7 @@ def test_main_stops_before_probe_when_postgres_schema_is_wrong(monkeypatch, caps
 
     captured = capsys.readouterr()
     assert exc.value.code == 1
-    assert "Reason: PostgreSQL schema version 8 is required" in captured.err
+    assert "Reason: PostgreSQL schema version 9 is required" in captured.err
     assert "fixture-secret" not in captured.err
 
 

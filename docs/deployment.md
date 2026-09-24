@@ -77,6 +77,15 @@ statement_timeout_ms = 30000
 lock_timeout_ms = 5000
 ```
 
+`statement_timeout_ms` and `lock_timeout_ms` bound the code-graph maintenance pool exactly
+as they bound the tools-and-auth pool: `prepare_runtime` builds both pools' `options` from
+these same two values, so a cleanup DELETE now waits at most `lock_timeout_ms` for a lock
+and runs for at most `statement_timeout_ms` — where master's cleanup connected with neither
+timeout set. A cleanup batch contending with an in-flight publication therefore aborts its
+cycle at the shipped `lock_timeout_ms = 5000` (5s) rather than queuing indefinitely; see
+[code-graph-publishing.md](code-graph-publishing.md) for what a failed cycle does with the
+rows it already committed.
+
 A same-host PostgreSQL container must publish a host port such as
 `127.0.0.1:55432`; configure that host and port rather than a bridge-only service name.
 A remote database supplies its DNS name and custom port and should retain
@@ -178,14 +187,33 @@ first is a network, credential, or container problem, the second is a migration 
 shared message once sent an operator looking for a migration while the database was
 listening on no TCP port at all. Neither message contains the DSN or the password.
 
-The runtime pins one exact schema version, currently 8. An image is therefore not
+The runtime pins one exact schema version, currently 9. An image is therefore not
 deployable against a database the operator has not migrated to that version, and an older
 image is not deployable against a newer database. Version 8 releases the foreign key that
 let derived code-graph links block deletion of the Markdown page they were derived from:
 before it, a page that carried a `code` selector at publication time could never be
 deleted again. Stepping back is `rollback_v8_compatibility`, which restores version 7 and
 with it that behaviour; it exists to reach the version an older runtime pins, not to
-repair anything.
+repair anything. Version 9 adds three plain indexes on `code_graph_relations`'s own
+foreign-key columns (`source_symbol_id`, `source_file_id`, `target_symbol_id`); the
+measurement behind them, including the write-blocking window below, is
+`docs/superpowers/reports/cleanup-index-measurement.md`. Stepping back is
+`rollback_v9_compatibility`, which restores version 8 by dropping the three indexes; it
+ships no separate raw-SQL compatibility artifact, since nothing beyond the rollback chain
+itself needs one.
+
+`run_migrations` applies every pending migration inside one transaction, and `CREATE
+INDEX CONCURRENTLY` cannot run inside a transaction block, so version 9 uses a plain
+`CREATE INDEX` for each of the three. That statement takes a `SHARE` lock on
+`code_graph_relations`, blocking every INSERT, UPDATE, and DELETE against it — every
+publication batch and every cleanup drain — for as long as the whole migration
+transaction stays open, not just until the index itself finishes building. Two mitigating
+facts: a plain `CREATE INDEX` on an already-populated table is a single heap-scan-and-sort
+with no second pass and no wait for concurrent transactions, so the measured 1.0-1.4s at
+~630,000 rows is a conservative upper bound for the shipped statement at the roughly one
+million rows a production table carries, not a lower one; and the production
+`lock_timeout_ms = 5000` means the migration aborts cleanly if it cannot acquire the lock
+promptly, rather than queuing indefinitely behind an in-flight publication.
 
 Create a separate admin configuration by copying `server.toml`, then replace only
 `storage.user` with the administration-only schema-owner/migrator role. Give a dedicated

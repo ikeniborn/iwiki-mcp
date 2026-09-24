@@ -8,8 +8,7 @@ import datetime
 import json
 import logging
 import secrets
-import threading
-from typing import Any, Iterator
+from typing import Any, ContextManager, Iterator
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -110,14 +109,6 @@ class PostgresCodeGraphStore:
     _CLEANUP_BATCH_ROWS = 10000
     _CLEANUP_CYCLE_ROWS = 200000
 
-    # Class-scoped: `server.py` builds a fresh store per publication request,
-    # so an instance-scoped guard would let every concurrent publication spawn
-    # its own cycle against the same tables. Keying by (iwiki_id, domain_id)
-    # keeps different domains free to clean concurrently while still
-    # single-flighting one domain's backlog per process.
-    _cleanup_lock = threading.Lock()
-    _cleanup_active: set = set()
-
     def __init__(
         self,
         dsn: str,
@@ -131,9 +122,11 @@ class PostgresCodeGraphStore:
         staging_cleanup_limit: int,
         superseded_retention_seconds: int = 86400,
         superseded_cleanup_limit: int = 2,
-        connection_factory: Callable[[], psycopg.Connection] | None = None,
+        connection_factory: Callable[[], ContextManager[psycopg.Connection]] | None = None,
         require_database_principal: bool = False,
         clock: Callable[[], datetime.datetime] | None = None,
+        cleanup_binding: object | None = None,
+        cleanup_settings: object | None = None,
     ) -> None:
         self._dsn = dsn
         self.iwiki_id = iwiki_id
@@ -145,6 +138,11 @@ class PostgresCodeGraphStore:
         self._superseded_retention_seconds = superseded_retention_seconds
         self._superseded_cleanup_limit = superseded_cleanup_limit
         self._staging_cleanup_limit = staging_cleanup_limit
+        # Only set for the direct (`publish_mode = "postgres"`) publisher,
+        # which runs with no hosted server and therefore no maintenance
+        # runtime to sweep on its behalf -- see `begin`'s R7 fallback.
+        self._cleanup_binding = cleanup_binding
+        self._cleanup_settings = cleanup_settings
         self._connection_factory = connection_factory or (
             lambda: psycopg.connect(dsn)
         )
@@ -156,20 +154,38 @@ class PostgresCodeGraphStore:
             iwiki_id=iwiki_id,
             read_domains=(domain,),
             write_domains=(domain,),
+            connection_factory=self._connection_factory,
         ) is not None:
             raise ValueError("invalid_config")
 
     # -- infrastructure -------------------------------------------------
 
     @contextmanager
+    def _connection(self) -> Iterator[psycopg.Connection]:
+        """One connection, many transactions.
+
+        Cleanup commits per batch, so binding a connection to a single
+        transaction would mean one connect per 10,000 rows — roughly ninety
+        of them to drain a million. The factory yields a context manager, as
+        `AuthStore` and `postgres/store.py` already require, so a pooled
+        connection returns to its pool instead of being closed.
+        """
+        with self._connection_factory() as connection:
+            yield connection
+
+    @contextmanager
+    def _transaction_on(
+        self, connection: psycopg.Connection
+    ) -> Iterator[psycopg.Cursor]:
+        with connection.transaction():
+            with connection.cursor() as cursor:
+                yield cursor
+
+    @contextmanager
     def _transaction(self) -> Iterator[psycopg.Cursor]:
-        connection = self._connection_factory()
-        try:
-            with connection.transaction():
-                with connection.cursor() as cursor:
-                    yield cursor
-        finally:
-            connection.close()
+        with self._connection() as connection:
+            with self._transaction_on(connection) as cursor:
+                yield cursor
 
     def _domain_id(self, cursor) -> int:
         cursor.execute(
@@ -309,21 +325,44 @@ class PostgresCodeGraphStore:
                     now,
                 ),
             )
-        # Scheduled, never awaited: the publication is already committed and
-        # must not be charged for draining someone else's backlog.
-        try:
-            self._schedule_cleanup()
-        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
-            LOGGER.warning(
-                "code graph cleanup could not be scheduled: %s",
-                type(exc).__name__,
-            )
+        self._schedule_local_cleanup()
         return PublicationSession(
             session_id=session_id,
             lease_expires_at=expires.isoformat(),
             base_snapshot_revision=base_revision,
             base_markdown_token=generation,
         )
+
+    def _schedule_local_cleanup(self) -> None:
+        """R7 fallback: sweep on `begin` when no hosted runtime ever will.
+
+        The hosted request path already sweeps from `server.py`, where the
+        binding and the installed `MaintenanceRuntime` are both in scope, so
+        this is a no-op there (`_cleanup_binding` stays `None`). It only
+        fires for the direct `publish_mode = "postgres"` publisher, which
+        never touches the MCP server -- without this, that deployment shape
+        schedules no cleanup at all and its superseded backlog never drains.
+        Scheduled, never awaited: the publication above is already
+        committed and must not be charged for draining someone else's
+        backlog, so a failure here is logged and swallowed, never raised.
+        """
+        if self._cleanup_binding is None:
+            return
+        try:
+            from ..codegraph import application as _codegraph_application
+
+            _codegraph_application.schedule_wiki_cleanup(
+                self._cleanup_binding,
+                self.owner_id,
+                self._cleanup_settings,
+                lock_timeout_ms=self._lock_timeout_ms,
+                runtime=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
+            LOGGER.warning(
+                "code graph cleanup could not be scheduled: %s",
+                type(exc).__name__,
+            )
 
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
@@ -656,23 +695,77 @@ class PostgresCodeGraphStore:
             self._discard_snapshot(cursor, domain_id, snapshot_id)
         return len(expired)
 
-    def _prune_superseded(self, cursor, domain_id: int, now, budget) -> int:
-        """Drop ready snapshots no longer active and older than the retention.
+    # Order matters: `code_graph_files` drains last because it roots the
+    # child foreign-key chain (see `_delete_snapshot_row`'s comment below),
+    # which is what lets that method guard on one table instead of four.
+    _CLEANUP_CHILD_TABLES = (
+        "code_graph_wiki_links",
+        "code_graph_relations",
+        "code_graph_symbols",
+        "code_graph_files",
+    )
 
-        Nothing reads a superseded snapshot: every query joins
-        `code_graph_domain_state.active_snapshot_id`. Retaining one past the
-        window buys only a manual revert, while retaining every one of them
-        forever is what let a deleted page stay pinned. The active snapshot is
-        excluded by the query, not by an ordering assumption.
+    def run_cleanup_cycle(self, connection=None) -> int:
+        """Drain this domain's superseded backlog and return rows removed.
 
-        The rows are removed explicitly, children first, each statement keyed
-        by `snapshot_id` so it rides the primary-key prefix. Letting the
-        foreign keys cascade instead searches every child table once per
-        deleted parent row, and those keys carry no index of their own: one
-        such prune ran for 49 minutes on a live domain and took the server
-        with it. A snapshot holds tens of thousands of rows, so the bound counts rows
-        and the work is resumable: a cycle may stop mid-snapshot, and the next
-        one continues, because nothing reads a superseded snapshot.
+        The caller may hand in a connection — a maintenance worker does, so
+        the whole cycle rides one pooled connection — or let the cycle open
+        its own for the local path.
+        """
+        if connection is not None:
+            return self._drain(connection)
+        with self._connection() as own:
+            return self._drain(own)
+
+    def _drain(self, connection) -> int:
+        # A single-item list, not a plain int: `_drain_snapshot` mutates it
+        # as each batch commits, so an exception raised mid-snapshot still
+        # leaves the caller an accurate count of what is actually gone from
+        # the database -- not just whatever full snapshots finished before
+        # the one that failed.
+        progress = [0]
+        try:
+            with self._transaction_on(connection) as cursor:
+                domain_id = self._domain_id(cursor)
+            while progress[0] < self._CLEANUP_CYCLE_ROWS:
+                with self._transaction_on(connection) as cursor:
+                    candidates = self._superseded_candidates(
+                        cursor, domain_id, self._clock()
+                    )
+                if not candidates:
+                    break
+                progressed = False
+                for snapshot_id in candidates:
+                    if progress[0] >= self._CLEANUP_CYCLE_ROWS:
+                        break
+                    before = progress[0]
+                    self._drain_snapshot(
+                        connection,
+                        domain_id,
+                        snapshot_id,
+                        self._CLEANUP_CYCLE_ROWS - progress[0],
+                        progress,
+                    )
+                    progressed = progressed or progress[0] > before
+                if not progressed:
+                    break
+        except Exception as exc:
+            # Carried so the caller's failure log can report progress, not
+            # just an exception class: a cycle that fails on its first batch
+            # and one that fails after 199,000 rows must not read alike.
+            exc.rows_removed = progress[0]
+            raise
+        LOGGER.info(
+            "code graph cleanup removed %s rows from one domain", progress[0]
+        )
+        return progress[0]
+
+    def _superseded_candidates(self, cursor, domain_id: int, now) -> list:
+        """Ready snapshots that are no longer active and past the retention.
+
+        The active snapshot is excluded by the query rather than by an
+        ordering assumption, and the state predicate leaves staging and
+        failed snapshots untouched.
         """
         threshold = now - datetime.timedelta(
             seconds=self._superseded_retention_seconds
@@ -692,138 +785,139 @@ class PostgresCodeGraphStore:
                 self._superseded_cleanup_limit,
             ),
         )
-        superseded = [row[0] for row in cursor.fetchall()]
-        deleted_rows = 0
-        for snapshot_id in superseded:
-            if budget <= 0:
-                break
-            removed = self._delete_snapshot_rows(
-                cursor, domain_id, snapshot_id, budget
-            )
-            budget -= removed
-            deleted_rows += removed
-            cursor.execute(
-                "DELETE FROM iwiki.code_graph_snapshots "
-                "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
-                "AND state = 'ready' "
-                "AND snapshot_id NOT IN ("
-                "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
-                "WHERE iwiki_id = %s AND domain_id = %s "
-                "AND active_snapshot_id IS NOT NULL) "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM iwiki.code_graph_files f "
-                "WHERE f.iwiki_id = %s AND f.domain_id = %s "
-                "AND f.snapshot_id = %s)",
-                (
-                    self.iwiki_id,
-                    domain_id,
-                    snapshot_id,
-                    self.iwiki_id,
-                    domain_id,
-                    self.iwiki_id,
-                    domain_id,
-                    snapshot_id,
-                ),
-            )
-            deleted_rows += cursor.rowcount
-        return deleted_rows
+        return [row[0] for row in cursor.fetchall()]
 
-    def _schedule_cleanup(self) -> None:
-        """Start one cleanup cycle unless this domain already has one running.
+    def _drain_snapshot(
+        self,
+        connection,
+        domain_id: int,
+        snapshot_id: str,
+        budget: int,
+        progress: list[int] | None = None,
+    ) -> int:
+        """Delete one snapshot's rows, children first, committing per batch.
 
-        Cleanup is deliberately not part of a publication: a publication adds
-        about 30000 rows, and draining a backlog takes far longer than any
-        budget a caller would tolerate waiting for. Single-flight keeps a burst
-        of publications from stacking cycles on the same tables. The guard is
-        class-scoped and keyed by (iwiki_id, domain_id): a fresh store is
-        constructed per publication request, so an instance-scoped guard would
-        let every concurrent publication spawn its own cycle; different
-        domains still clean concurrently.
+        Each statement is keyed by `snapshot_id` so it rides the primary-key
+        prefix. Letting the foreign keys cascade instead searches every child
+        table once per deleted parent row, and those keys carry no index of
+        their own beyond that prefix: one such prune ran for 49 minutes on a
+        live domain and took the server with it.
+
+        `progress`, when given, is updated in step with every commit rather
+        than only once this call returns, so a caller that catches an
+        exception raised partway through still sees the rows already gone
+        from the database, not zero.
         """
-        key = (self.iwiki_id, self.domain)
-        with PostgresCodeGraphStore._cleanup_lock:
-            if key in PostgresCodeGraphStore._cleanup_active:
-                LOGGER.debug(
-                    "code graph cleanup already running for this domain"
-                )
-                return
-            PostgresCodeGraphStore._cleanup_active.add(key)
-        try:
-            thread = threading.Thread(
-                target=self._run_cleanup_cycle,
-                name="iwiki-code-graph-cleanup",
-                daemon=True,
-            )
-            thread.start()
-        except Exception:
-            with PostgresCodeGraphStore._cleanup_lock:
-                PostgresCodeGraphStore._cleanup_active.discard(key)
-            raise
-
-    def _run_cleanup_cycle(self) -> None:
-        """Drain this domain's superseded backlog, one committed batch at a time.
-
-        The store resolves its own `domain_id` rather than taking one: it was
-        constructed and validated for exactly one domain, so accepting an id
-        from a caller would let it act outside what it checked. The outcome is
-        logged even when it is zero, because a cycle that ran and found nothing
-        used to be indistinguishable from one that never started.
-        """
-        key = (self.iwiki_id, self.domain)
         removed = 0
-        try:
-            with self._transaction() as cursor:
-                domain_id = self._domain_id(cursor)
-            while removed < self._CLEANUP_CYCLE_ROWS:
-                with self._transaction() as cursor:
-                    batch = self._prune_superseded(
-                        cursor,
-                        domain_id,
-                        self._clock(),
-                        self._CLEANUP_CYCLE_ROWS - removed,
-                    )
-                if not batch:
-                    break
-                removed += batch
-            LOGGER.info(
-                "code graph cleanup removed %s rows from one domain", removed
-            )
-        except Exception as exc:  # noqa: BLE001 - maintenance must not escape
-            LOGGER.warning(
-                "code graph cleanup cycle failed after %s rows: %s",
-                removed,
-                type(exc).__name__,
-            )
-        finally:
-            with PostgresCodeGraphStore._cleanup_lock:
-                PostgresCodeGraphStore._cleanup_active.discard(key)
-
-    def _delete_snapshot_rows(self, cursor, domain_id, snapshot_id, budget):
-        """Delete up to `budget` rows of one snapshot; return how many went."""
-        removed = 0
-        for table in (
-            "code_graph_wiki_links",
-            "code_graph_relations",
-            "code_graph_symbols",
-            "code_graph_files",
-        ):
+        for table in self._CLEANUP_CHILD_TABLES:
             while removed < budget:
-                cursor.execute(
-                    f"DELETE FROM iwiki.{table} WHERE ctid IN ("
-                    f"SELECT ctid FROM iwiki.{table} "
-                    "WHERE iwiki_id = %s AND domain_id = %s "
-                    "AND snapshot_id = %s LIMIT %s)",
-                    (
-                        self.iwiki_id,
+                with self._transaction_on(connection) as cursor:
+                    if not self._still_superseded(
+                        cursor, domain_id, snapshot_id
+                    ):
+                        return removed
+                    taken = self._delete_batch(
+                        cursor,
+                        table,
                         domain_id,
                         snapshot_id,
                         min(self._CLEANUP_BATCH_ROWS, budget - removed),
-                    ),
-                )
-                if not cursor.rowcount:
+                    )
+                if not taken:
                     break
-                removed += cursor.rowcount
+                removed += taken
+                if progress is not None:
+                    progress[0] += taken
+        with self._transaction_on(connection) as cursor:
+            if not self._still_superseded(cursor, domain_id, snapshot_id):
+                return removed
+            taken = self._delete_snapshot_row(cursor, domain_id, snapshot_id)
+            removed += taken
+            if progress is not None:
+                progress[0] += taken
         return removed
+
+    def _still_superseded(
+        self, cursor, domain_id: int, snapshot_id: str
+    ) -> bool:
+        """A revert during the drain must not strip the snapshot it restored.
+
+        The retention window buys exactly one thing: a manual revert target.
+        Per-batch commits stretch a snapshot's drain over minutes, so the
+        check runs per batch rather than once per cycle -- one indexed lookup
+        per 10,000 rows narrows the race to a single batch.
+        """
+        cursor.execute(
+            "SELECT 1 FROM iwiki.code_graph_domain_state "
+            "WHERE iwiki_id = %s AND domain_id = %s "
+            "AND active_snapshot_id = %s",
+            (self.iwiki_id, domain_id, snapshot_id),
+        )
+        return cursor.fetchone() is None
+
+    def _delete_batch(
+        self,
+        cursor,
+        table: str,
+        domain_id: int,
+        snapshot_id: str,
+        limit: int,
+    ) -> int:
+        cursor.execute(
+            f"DELETE FROM iwiki.{table} WHERE ctid IN ("
+            f"SELECT ctid FROM iwiki.{table} "
+            "WHERE iwiki_id = %s AND domain_id = %s "
+            "AND snapshot_id = %s LIMIT %s)",
+            (self.iwiki_id, domain_id, snapshot_id, limit),
+        )
+        return cursor.rowcount
+
+    def _delete_snapshot_row(
+        self, cursor, domain_id: int, snapshot_id: str
+    ) -> int:
+        """Delete the snapshot row once its files are gone -- and only then.
+
+        `code_graph_files` roots the child foreign-key chain this snapshot's
+        rows sit in: `code_graph_symbols.file_id` is `NOT NULL` with a
+        cascading foreign key onto `code_graph_files` (migrations.py:222-226),
+        and `code_graph_relations.source_file_id` is `NOT NULL` with a
+        cascading foreign key onto `code_graph_files` (migrations.py:245-249),
+        and `code_graph_wiki_links` has a cascading foreign key onto
+        `code_graph_relations` (migrations.py:294-298). An empty
+        `code_graph_files` therefore implies every other child table is
+        already empty by referential integrity, not by an assumption about
+        the order `_CLEANUP_CHILD_TABLES` happened to drain in -- which is
+        what lets this guard check one table instead of four. This exact
+        reasoning was read wrong three times on record (issue 104, the
+        intent's first draft, and the spec) and cost a plan-gate reversal;
+        `tests/postgres/test_code_graph_publication.py::
+        test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone`
+        pins it -- read that before touching this guard.
+        """
+        cursor.execute(
+            "DELETE FROM iwiki.code_graph_snapshots "
+            "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
+            "AND state = 'ready' "
+            "AND snapshot_id NOT IN ("
+            "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
+            "WHERE iwiki_id = %s AND domain_id = %s "
+            "AND active_snapshot_id IS NOT NULL) "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM iwiki.code_graph_files f "
+            "WHERE f.iwiki_id = %s AND f.domain_id = %s "
+            "AND f.snapshot_id = %s)",
+            (
+                self.iwiki_id,
+                domain_id,
+                snapshot_id,
+                self.iwiki_id,
+                domain_id,
+                self.iwiki_id,
+                domain_id,
+                snapshot_id,
+            ),
+        )
+        return cursor.rowcount
 
     def _fail_snapshot(self, cursor, domain_id: int, snapshot_id: str):
         cursor.execute(
