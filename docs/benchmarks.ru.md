@@ -35,6 +35,8 @@ invalid решение останавливает прогон без оценк
 [architecture.md](architecture.md#decision-system-one-page-type-classification): на 92
 отложенных wiki-страницах дообученный алиас `laya-iwiki` показал accuracy 0.587 / macro-F1
 0.488 против 0.359 / 0.252 у chat-классификатора при p95 менее 300 мс.
+Там же записан known-item бенчмарк буста поиска, по итогам которого
+`IWIKI_SYSTEM1_SEARCH_BOOST` оставлен равным `0`.
 
 ## Code graph benchmark
 

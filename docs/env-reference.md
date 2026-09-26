@@ -30,6 +30,9 @@
 | `IWIKI_SYSTEM1_BASE_URL` | empty | Separate API root for the local GPU System One service, including the trailing `/v1`. Required when the shadow is enabled; iwiki calls `<base>/systemone`. |
 | `IWIKI_SYSTEM1_KEY` | empty | Separate bearer credential for the System One service. Required when the shadow is enabled and never reused from `IWIKI_LLM_KEY`. |
 | `IWIKI_SYSTEM1_MODEL` | empty | Optional System One model alias sent as `model` in the shadow request, for example `laya-iwiki` (the Laya checkpoint fine-tuned on iwiki page types). Empty sends no `model` field, so the service routes as before. |
+| `IWIKI_SYSTEM1_GUIDANCE` | disabled | Adds an advisory write warning when a confident System One decision disagrees with an explicit page `type`. The type, path, and write result never change. Needs the System One URL and key. |
+| `IWIKI_SYSTEM1_SEARCH_BOOST` | `0` (off) | Weight in `[0, 1)` that moves `wiki_search` results whose page type matches the predicted query type up the existing ranking; membership and `k` never change. Keep `0`: the held-out benchmark showed no gain (see architecture decision). |
+| `IWIKI_SYSTEM1_MIN_CONFIDENCE` | `0.5` | Minimum System One probability for guidance or boost to act; `runbook` and `guide` decisions never act. |
 
 **Server lifecycle**
 
