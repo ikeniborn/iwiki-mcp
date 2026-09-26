@@ -3177,12 +3177,25 @@ def _prepare_postgres_page(
 
     warnings = []
     requested_type = type or authored_meta.get("type")
+    decision = system1.classify_page_type(cfg, body)
+    system1_type = (
+        system1.assigned_type(cfg, decision) if requested_type is None else None
+    )
+    type_source = "explicit"
     if requested_type is not None:
         page_type = _fm.normalize_type(requested_type)
         page_tags = _fm.normalize_tags(
             tags if tags is not None else authored_meta.get("tags", [])
         )
+    elif system1_type is not None:
+        type_source = "system1"
+        page_type = system1_type
+        page_tags = _fm.normalize_tags(
+            tags if tags is not None else authored_meta.get("tags", [])
+        )
+        warnings.append(system1.assignment_warning(decision, page_type))
     elif cfg.chat_model:
+        type_source = "chat"
         classified = classify.classify_page(cfg, body, [])
         page_type = classified["type"]
         page_tags = (
@@ -3191,6 +3204,7 @@ def _prepare_postgres_page(
         if classified["warning"]:
             warnings.append(classified["warning"])
     else:
+        type_source = "default"
         page_type = _fm.DEFAULT_TYPE
         page_tags = _fm.normalize_tags(tags or [])
         warnings.append(
@@ -3210,11 +3224,21 @@ def _prepare_postgres_page(
             "error": f"slug tail is reserved for the generated OKF file '{page_file}'",
             "hint": "choose another slug; index/log are generated, not authored",
         }
-    guidance = system1.type_guidance_warning(
-        cfg, system1.classify_page_type(cfg, body), requested_type
-    )
+    guidance = system1.type_guidance_warning(cfg, decision, requested_type)
     if guidance:
         warnings.append(guidance)
+    system1.record_decision(
+        cfg,
+        backend="postgres",
+        domain=domain,
+        identity=identity,
+        body=body,
+        requested_type=requested_type,
+        final_type=page_type,
+        type_source=type_source,
+        decision=decision,
+        warned=guidance is not None,
+    )
 
     meta = {
         "type": page_type,
@@ -3340,9 +3364,11 @@ def wiki_write_page(
             return {"error": str(exc),
                     "hint": "pass a source path inside the bound project"}
     cfg = Config.load()
+    decision = system1.classify_page_type(cfg, markdown)
+    system1_type = system1.assigned_type(cfg, decision) if type is None else None
     fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, _slug_parts(slug)[-1], markdown,
-        source=source, explicit_type=type, explicit_tags=tags,
+        source=source, explicit_type=type or system1_type, explicit_tags=tags,
         explicit_description=description, explicit_status=status,
         timestamp_path=f"{valid_domain}/{slug}.md",
         authored_code=authored_code)
@@ -3392,11 +3418,28 @@ def wiki_write_page(
         and "error" in prepared_specification
     ):
         return prepared_specification
-    fm_warning = _compose_warnings(
-        fm_warning,
-        system1.type_guidance_warning(
-            cfg, system1.classify_page_type(cfg, markdown), type
-        ),
+    if system1_type is not None:
+        type_source = "system1"
+        fm_warning = _compose_warnings(
+            fm_warning, system1.assignment_warning(decision, system1_type)
+        )
+    elif type is not None:
+        type_source = "explicit"
+    else:
+        type_source = "chat" if cfg.chat_model else "default"
+    guidance = system1.type_guidance_warning(cfg, decision, type)
+    fm_warning = _compose_warnings(fm_warning, guidance)
+    system1.record_decision(
+        cfg,
+        backend="git",
+        domain=valid_domain,
+        identity=identity,
+        body=markdown,
+        requested_type=type,
+        final_type=resolved_type,
+        type_source=type_source,
+        decision=decision,
+        warned=guidance is not None,
     )
     if prepared_specification is not None:
         def mutate_specification_page() -> None:

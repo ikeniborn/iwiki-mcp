@@ -29,6 +29,10 @@ Each domain is a subdirectory under the base. A page's identity is its domain-re
     log.jsonl
 ```
 
+### Choosing `concept` or `reference`
+
+The type records the question a page answers, not its formatting. `concept` answers "why / how does this work": an idea, model, mechanism, methodology, or rationale meant to be read top to bottom. `reference` answers "what exactly is X": facts looked up by name — keys, flags, schemas, field lists, limits, inventories, contracts, changelogs, ledgers — even when they are written as prose. A page that does both should be split; otherwise choose the question most readers arrive with. Table density does not decide it: on the hosted wiki the two classes differ by only 0.02 versus 0.07 table lines per line. A write may return `System One suggests type ...` as a second opinion; keep the authored type when this rule supports it.
+
 Use one base across projects. Bind each project to the domains it should read from and the domain it should write to.
 
 ## Graph cache and links

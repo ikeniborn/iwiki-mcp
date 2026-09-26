@@ -38,6 +38,18 @@ held-out wiki pages the fine-tuned `laya-iwiki` alias scored accuracy 0.587 / ma
 The same section records the known-item search-boost benchmark that kept
 `IWIKI_SYSTEM1_SEARCH_BOOST` at `0`.
 
+Production decisions accumulate in the private `IWIKI_SYSTEM1_DECISION_LOG`. Summarize
+warning rate, warning acceptance, and assigned types, and export human-reviewed labels
+(accepted or kept warnings, explicit types) for the next fine-tune:
+
+```bash
+uv run python -m eval.system1_decisions --log /path/to/decisions.jsonl --page-ids /path/to/page-ids.txt --training-out /path/to/reviewed-labels.jsonl
+```
+
+`page-ids.txt` lists current page ids (`domain/type/slug`), one per line. A warning
+counts as accepted when the page now lives under the suggested type. System One's own
+assignments are never exported as labels.
+
 ## Code graph benchmark
 
 Run the offline release evidence from the repository root:

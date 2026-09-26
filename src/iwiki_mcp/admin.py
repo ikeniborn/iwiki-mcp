@@ -20,7 +20,11 @@ from .codegraph.config import CodeGraphConfigError
 from .codegraph.mcp_adapter import CodeGraphAdapterError
 from .engine.config import Config
 from .engine.config import ConfigError as _EngineConfigError
-from .engine.config import require_system1_connection, system1_guidance_settings
+from .engine.config import (
+    require_system1_connection,
+    system1_guidance_settings,
+    system1_record_settings,
+)
 from .engine.embed import EmbedError, embed_texts
 from .postgres.auth import AuthStore, validate_domain_identifier
 from .postgres.config import ConfigError, ServerConfig, load_server_config
@@ -232,8 +236,9 @@ def _engine_config(
         guidance, search_boost, min_confidence = system1_guidance_settings(
             environ.get
         )
+        assign_type, decision_log = system1_record_settings(environ.get)
         require_system1_connection(
-            system1_shadow or guidance or search_boost > 0,
+            system1_shadow or guidance or assign_type or search_boost > 0,
             system1_base_url,
             system1_api_key,
         )
@@ -265,6 +270,8 @@ def _engine_config(
         system1_guidance=guidance,
         system1_search_boost=search_boost,
         system1_min_confidence=min_confidence,
+        system1_assign_type=assign_type,
+        system1_decision_log=decision_log,
     )
 
 

@@ -1098,13 +1098,13 @@ The shadow uses a separate local-GPU endpoint and bearer credential. It submits 
 most 6,000 page-body characters to `/v1/systemone`, sends `model` only when
 `IWIKI_SYSTEM1_MODEL` is set (otherwise the service routes automatically), validates all
 six class probabilities, and fails open after a two-second timeout. It emits no page
-payload or raw endpoint error; its decision reaches the write result only as the
-optional advisory warning described below.
+payload or raw endpoint error; its decision reaches the write result only through the
+optional guidance warning and untyped-page assignment described below.
 
 ## Decision: System One page-type classification
 
-Status: accepted (2026-09-26) — shadow plus advisory write guidance; search boost
-off. This records why a fine-tuned Laya checkpoint classifies page types and what it
+Status: accepted (2026-09-26) — advisory write guidance, type assignment for untyped
+pages, and a decision log; search boost off. This records why a fine-tuned Laya checkpoint classifies page types and what it
 does and does not change.
 
 **Context.** Page `type` is the governed OKF field that also decides the page's
@@ -1115,9 +1115,9 @@ the same six-way choice in a fraction of a second.
 
 **Decision.**
 
-- System One runs beside the write path. Explicit or chat-derived `type`, tags,
-  placement, and write results stay authoritative; the decision can only add the
-  advisory warning below.
+- System One runs beside the write path. An explicit `type`, tags, and write results
+  stay authoritative; the decision can add the advisory warning and type a page written
+  without `type`, as described below.
 - The request targets the dedicated alias `laya-iwiki` through `IWIKI_SYSTEM1_MODEL`,
   a Laya multilingual checkpoint fine-tuned on this wiki's own authored page types.
   The base aliases stay available; unset `IWIKI_SYSTEM1_MODEL` keeps automatic routing.
@@ -1126,6 +1126,15 @@ the same six-way choice in a fraction of a second.
   different from an explicit `type` adds one advisory write warning naming the
   suggested type and probability. The authored type, path, and write result never
   change; authors decide.
+- **Type assignment (enabled).** With `IWIKI_SYSTEM1_ASSIGN_TYPE`, a page written
+  without `type` takes a confident non-weak decision as its type, with a warning, before
+  the chat classifier or the `concept` default. The hosted server has no chat model, so
+  this replaces the blanket `concept` default there. Explicit types are never replaced.
+- **Decision log (enabled).** `IWIKI_SYSTEM1_DECISION_LOG` appends every write decision
+  (page id, requested and final type, type source, prediction, probabilities, body hash,
+  warned flag; never the body) to a private JSONL file. `eval.system1_decisions`
+  reports warning acceptance and exports human-reviewed labels for the next fine-tune;
+  System One's own assignments are excluded so the model never trains on itself.
 - **Search boost (built, off).** With `IWIKI_SYSTEM1_SEARCH_BOOST > 0`, `wiki_search`
   classifies the query and adds that weight to reciprocal-rank positions of pool items
   whose page type (first slug segment) matches a confident non-weak prediction, then
@@ -1326,9 +1335,9 @@ env vars.
 - **Constant duplication is intentional** — `OVERVIEW_HEADING`, `LEAD_MAX`, the
   `_H2` regex, and `RESERVED_*` are copied so config-free modules avoid importing
   `chunk`/`embed`. Change one, change all (the "keep in sync" comments mark them).
-- **System One never decides.** It may add an advisory write warning; it never changes
-  a page's type, path, or write result, and the search boost stays off (weight 0)
-  until a benchmark shows gain.
+- **System One never overrides an author.** It may add an advisory warning and may
+  type a page written without `type`; it never replaces an explicit type or changes a
+  write's success, and the search boost stays off (weight 0) until a benchmark shows gain.
 - **`VectorStore` is the storage seam** — a future SQLite/sqlite-vec backend only
   needs `load`/`save`/`query`.
 - **Domain-relative `file` paths** in the index keep the store machine-portable

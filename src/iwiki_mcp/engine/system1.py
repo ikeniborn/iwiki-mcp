@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
 import math
 import time
 
@@ -42,7 +46,7 @@ def _invalid(started: float, status: str) -> PageTypeDecision:
 
 def classify_page_type(cfg: Config, body: str) -> PageTypeDecision | None:
     """Return a validated decision for a page body; None when System One is off."""
-    if not (cfg.system1_shadow or cfg.system1_guidance):
+    if not (cfg.system1_shadow or cfg.system1_guidance or cfg.system1_assign_type):
         return None
     return _decide(cfg, body)
 
@@ -159,3 +163,64 @@ def boost_by_query_type(cfg: Config, query: str, ordered: list[dict]) -> list[di
     ]
     scored.sort(key=lambda entry: (-entry[0], entry[1]))
     return [item for _score, _index, item in scored]
+
+
+def assigned_type(cfg: Config, decision: PageTypeDecision | None) -> str | None:
+    """Type System One may assign to a page written without one."""
+    return _actionable(cfg, decision) if cfg.system1_assign_type else None
+
+
+def assignment_warning(decision: PageTypeDecision, page_type: str) -> str:
+    return (
+        f"type '{page_type}' assigned by System One "
+        f"(p={decision.probabilities[page_type]:.2f}); pass `type` to override"
+    )
+
+
+def record_decision(
+    cfg: Config,
+    *,
+    backend: str,
+    domain: str,
+    identity: str,
+    body: str,
+    requested_type: str | None,
+    final_type: str,
+    type_source: str,
+    decision: PageTypeDecision | None,
+    warned: bool,
+) -> None:
+    """Append one decision to the private JSONL log; never raises.
+
+    The record references the page by domain, identity, and body hash only; it
+    never contains the page body, so later training reads text from the wiki.
+    """
+    if not cfg.system1_decision_log or decision is None:
+        return
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "backend": backend,
+        "domain": domain,
+        "identity": identity,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "requested_type": fm.normalize_type(requested_type) if requested_type else None,
+        "final_type": final_type,
+        "type_source": type_source,
+        "status": decision.status,
+        "predicted": decision.page_type,
+        "probabilities": decision.probabilities,
+        "model": decision.model or cfg.system1_model or None,
+        "latency_ms": round(decision.latency_ms, 1),
+        "warned": warned,
+    }
+    line = json.dumps(record, sort_keys=True) + "\n"
+    try:
+        os.makedirs(os.path.dirname(cfg.system1_decision_log), mode=0o700, exist_ok=True)
+        fd = os.open(cfg.system1_decision_log,
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        return
