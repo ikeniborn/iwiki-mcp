@@ -40,6 +40,7 @@ Keep production runtime configuration outside the checkout:
 /opt/iwiki-mcp/server.toml       hosted MCP and external PostgreSQL endpoint
 /opt/iwiki-mcp/nginx.conf        LAN/Traefik listener and loopback upstream
 /opt/iwiki-mcp/runtime.env       owner-only runtime secrets and bot settings
+/var/lib/iwiki-mcp/system1/      private System One decision log (UID 10001)
 ```
 
 For a new target directory, create every file with final ownership and mode before
@@ -53,6 +54,7 @@ sudo install -d -o root -g root -m 0755 /opt/iwiki-mcp
 sudo install -o root -g root -m 0644 /dev/null /opt/iwiki-mcp/server.toml
 sudo install -o root -g root -m 0644 deploy/nginx.conf.example /opt/iwiki-mcp/nginx.conf
 sudo install -o root -g root -m 0600 /dev/null /opt/iwiki-mcp/runtime.env
+sudo install -d -o 10001 -g 10001 -m 0700 /var/lib/iwiki-mcp/system1
 )
 ```
 
@@ -172,6 +174,12 @@ Expected metadata is `root:root 0755` for `/opt/iwiki-mcp`, `root:root 0644` for
 `server.toml` and `nginx.conf`, and `root:root 0600` for `runtime.env`. Container UID
 `10001` reads the two non-secret configuration files through read-only bind mounts.
 Compose reads the owner-only environment file on the host; it is not mounted.
+`/var/lib/iwiki-mcp/system1` (override with `IWIKI_SYSTEM1_STATE_DIR`) is the only
+writable mount: set `IWIKI_SYSTEM1_DECISION_LOG=/var/lib/iwiki/system1/decisions.jsonl`
+to keep System One decisions for measurement and future training. It holds page ids,
+types, probabilities, and body hashes, never page bodies, and it is not part of the
+PostgreSQL dump, so include it in host backups. If the directory is missing or not
+owned by `10001`, logging fails open and writes continue.
 
 ## Out-of-band schema migration and principal provisioning
 

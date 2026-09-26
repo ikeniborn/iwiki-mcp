@@ -33,6 +33,8 @@
 | `IWIKI_SYSTEM1_GUIDANCE` | disabled | Adds an advisory write warning when a confident System One decision disagrees with an explicit page `type`. The type, path, and write result never change. Needs the System One URL and key. |
 | `IWIKI_SYSTEM1_SEARCH_BOOST` | `0` (off) | Weight in `[0, 1)` that moves `wiki_search` results whose page type matches the predicted query type up the existing ranking; membership and `k` never change. Keep `0`: the held-out benchmark showed no gain (see architecture decision). |
 | `IWIKI_SYSTEM1_MIN_CONFIDENCE` | `0.5` | Minimum System One probability for guidance or boost to act; `runbook` and `guide` decisions never act. |
+| `IWIKI_SYSTEM1_ASSIGN_TYPE` | disabled | When a page is written without `type`, use a confident, non-`runbook`/`guide` System One decision as its type (with a warning) before the chat classifier or the `concept` default. An explicit `type` is never replaced. |
+| `IWIKI_SYSTEM1_DECISION_LOG` | empty | Absolute path of an append-only JSONL log of every System One write decision (page id, types, probabilities, body hash; never the body), mode `0600`. Summarize and export reviewed labels with `python -m eval.system1_decisions`. Empty disables logging. |
 
 **Server lifecycle**
 

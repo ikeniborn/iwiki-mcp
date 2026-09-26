@@ -54,6 +54,8 @@ class Config:
     system1_guidance: bool = False
     system1_search_boost: float = 0.0
     system1_min_confidence: float = 0.5
+    system1_assign_type: bool = False
+    system1_decision_log: str = ""
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -106,8 +108,10 @@ class Config:
         system1_guidance, system1_search_boost, system1_min_confidence = (
             system1_guidance_settings(getenv)
         )
+        system1_assign_type, system1_decision_log = system1_record_settings(getenv)
         require_system1_connection(
-            system1_shadow or system1_guidance or system1_search_boost > 0,
+            system1_shadow or system1_guidance or system1_assign_type
+            or system1_search_boost > 0,
             system1_base_url,
             system1_api_key,
         )
@@ -138,6 +142,8 @@ class Config:
             system1_guidance=system1_guidance,
             system1_search_boost=system1_search_boost,
             system1_min_confidence=system1_min_confidence,
+            system1_assign_type=system1_assign_type,
+            system1_decision_log=system1_decision_log,
         )
 
 
@@ -160,6 +166,15 @@ def system1_guidance_settings(getenv) -> tuple[bool, float, float]:
             "IWIKI_SYSTEM1_MIN_CONFIDENCE in [0, 1]."
         )
     return guidance, boost, confidence
+
+
+def system1_record_settings(getenv) -> tuple[bool, str]:
+    """Read type assignment and the decision-log path."""
+    assign = getenv("IWIKI_SYSTEM1_ASSIGN_TYPE", "").strip().lower() in _TRUE
+    log_path = getenv("IWIKI_SYSTEM1_DECISION_LOG", "").strip()
+    if log_path and not os.path.isabs(log_path):
+        raise ConfigError("IWIKI_SYSTEM1_DECISION_LOG must be an absolute path.")
+    return assign, log_path
 
 
 def require_system1_connection(enabled: bool, base_url: str, api_key: str) -> None:

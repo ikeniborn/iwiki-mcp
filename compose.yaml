@@ -25,6 +25,9 @@ services:
     volumes:
       - ${IWIKI_SERVER_CONFIG_FILE:-/opt/iwiki-mcp/server.toml}:/etc/iwiki/server.toml:ro
       - ${IWIKI_NGINX_CONFIG_FILE:-/opt/iwiki-mcp/nginx.conf}:/etc/nginx/nginx.conf:ro
+      # The only writable mount: the private System One decision log
+      # (IWIKI_SYSTEM1_DECISION_LOG). The host directory must be owned by 10001.
+      - ${IWIKI_SYSTEM1_STATE_DIR:-/var/lib/iwiki-mcp/system1}:/var/lib/iwiki/system1
     healthcheck:
       test: ["CMD", "/app/.venv/bin/python", "/app/deploy/healthcheck.py"]
       interval: 30s

@@ -50,6 +50,7 @@ def test_rendered_compose_is_one_hardened_host_network_service(rendered_compose)
     assert config_mounts == {
         ("/etc/iwiki/server.toml", True),
         ("/etc/nginx/nginx.conf", True),
+        ("/var/lib/iwiki/system1", False),
     }
     environment = service.get("environment", {})
     assert STANDARD_PROXY_KEYS.isdisjoint(environment)

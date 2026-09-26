@@ -38,6 +38,18 @@ invalid решение останавливает прогон без оценк
 Там же записан known-item бенчмарк буста поиска, по итогам которого
 `IWIKI_SYSTEM1_SEARCH_BOOST` оставлен равным `0`.
 
+Решения в проде накапливаются в приватном `IWIKI_SYSTEM1_DECISION_LOG`. Сводка (доля
+предупреждений, доля принятых, назначенные типы) и выгрузка проверенных людьми меток
+(принятые или отклонённые предупреждения, явные типы) для следующего дообучения:
+
+```bash
+uv run python -m eval.system1_decisions --log /path/to/decisions.jsonl --page-ids /path/to/page-ids.txt --training-out /path/to/reviewed-labels.jsonl
+```
+
+`page-ids.txt` содержит текущие id страниц (`domain/type/slug`), по одному на строку.
+Предупреждение считается принятым, если страница теперь лежит под предложенным типом.
+Собственные назначения System One в метки никогда не выгружаются.
+
 ## Code graph benchmark
 
 Запустите offline release evidence из корня репозитория:

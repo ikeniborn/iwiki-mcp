@@ -86,6 +86,14 @@ AUTHORING_RULES: str = """\
 - `type` is an OPEN vocabulary. Prefer a common value -- `architecture`, `api`,
   `guide`, `reference`, `runbook`, `concept` (default) -- but any lower-case value
   is allowed (e.g. `person`, `team`); an off-list value is only advised, not rejected.
+- `concept` vs `reference` is decided by the question the page answers, not by how
+  many tables it has. `concept` answers "why / how does this work": an idea, model,
+  mechanism, methodology, or rationale read top to bottom. `reference` answers
+  "what exactly is X": facts looked up by name -- keys, flags, schemas, field lists,
+  limits, inventories, contracts, changelogs, ledgers -- even when written as prose.
+  If both, split the page; otherwise pick the question most readers arrive with.
+  A write may return "System One suggests type ..." as a second opinion; keep your
+  type when this rule supports it.
 - `status` is one of `stub` (default), `developing`, `stable`, `deprecated`.
 - `tags` are lowercase kebab-case, <=5 per page; reuse an existing domain tag first.
 - Put relationship links in two reserved sections, `## Outgoing links` (Markdown links
