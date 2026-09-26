@@ -16,7 +16,8 @@
 
 Настройте `IWIKI_CHAT_MODEL`, включите `IWIKI_SYSTEM1_SHADOW` и передайте отдельные
 `IWIKI_SYSTEM1_BASE_URL` (корень API, оканчивающийся на `/v1`) и
-`IWIKI_SYSTEM1_KEY` через окружение процесса. Затем запустите:
+`IWIKI_SYSTEM1_KEY` (и при необходимости `IWIKI_SYSTEM1_MODEL`, например `laya-iwiki`,
+чтобы оценить конкретный алиас) через окружение процесса. Затем запустите:
 
 ```bash
 uv run python -m eval.system1_page_type --corpus /path/to/reviewed-pages.jsonl --output /tmp/system1-page-type-report.json

@@ -46,19 +46,19 @@ def classify_page_type(cfg: Config, body: str) -> PageTypeDecision | None:
         return None
 
     started = time.perf_counter()
+    request = {"model": cfg.system1_model} if cfg.system1_model else {}
+    request["state"] = {"document": body[:_MAX_DOCUMENT_CHARS]}
+    request["questions"] = {
+        "page_type": {
+            "type": "choice",
+            "instructions": "Choose the dominant intent of this wiki page.",
+            "criteria": _CRITERIA,
+        }
+    }
     try:
         response = httpx.post(
             f"{cfg.system1_base_url}/systemone",
-            json={
-                "state": {"document": body[:_MAX_DOCUMENT_CHARS]},
-                "questions": {
-                    "page_type": {
-                        "type": "choice",
-                        "instructions": "Choose the dominant intent of this wiki page.",
-                        "criteria": _CRITERIA,
-                    }
-                },
-            },
+            json=request,
             headers={"Authorization": f"Bearer {cfg.system1_api_key}"},
             timeout=_TIMEOUT,
         )

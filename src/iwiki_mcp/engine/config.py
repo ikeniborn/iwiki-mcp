@@ -50,6 +50,7 @@ class Config:
     system1_shadow: bool = False
     system1_base_url: str = ""
     system1_api_key: str = ""
+    system1_model: str = ""
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -98,6 +99,7 @@ class Config:
         }
         system1_base_url = getenv("IWIKI_SYSTEM1_BASE_URL", "").strip().rstrip("/")
         system1_api_key = getenv("IWIKI_SYSTEM1_KEY", "").strip()
+        system1_model = getenv("IWIKI_SYSTEM1_MODEL", "").strip()
         if system1_shadow and (not system1_base_url or not system1_api_key):
             raise ConfigError(
                 "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
@@ -128,4 +130,5 @@ class Config:
             system1_shadow=system1_shadow,
             system1_base_url=system1_base_url,
             system1_api_key=system1_api_key,
+            system1_model=system1_model,
         )
