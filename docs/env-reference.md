@@ -22,6 +22,14 @@
 |---|---|---|
 | `IWIKI_CHAT_MODEL` | empty | Optional chat model name for server-side `type`/`tags` classification. Reuses `IWIKI_LLM_BASE_URL` and `IWIKI_LLM_KEY`. When unset, frontmatter defaults to `type="concept"` with no tags. |
 
+**System One shadow**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IWIKI_SYSTEM1_SHADOW` | disabled | Enables evaluation-only page-type observation during `wiki_write_page`. Accepted true values are `1`, `true`, `yes`, and `on`. The decision never changes frontmatter, paths, tags, write results, or errors. |
+| `IWIKI_SYSTEM1_BASE_URL` | empty | Separate API root for the local GPU System One service, including the trailing `/v1`. Required when the shadow is enabled; iwiki calls `<base>/systemone`. |
+| `IWIKI_SYSTEM1_KEY` | empty | Separate bearer credential for the System One service. Required when the shadow is enabled and never reused from `IWIKI_LLM_KEY`. |
+
 **Server lifecycle**
 
 | Variable | Default | Meaning |

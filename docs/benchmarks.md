@@ -4,6 +4,32 @@
 
 Evaluation-only benchmarks. None of them changes production search behavior, fusion weights, or rerank settings.
 
+## System One page-type benchmark
+
+The page-type pilot compares the current chat classifier with the System One shadow
+over an operator-reviewed JSONL corpus. Keep that corpus outside version control and
+redact it before use. Each line has exactly the data needed by the benchmark:
+
+```json
+{"id":"reviewed-001","label":"guide","body":"# Reviewed page\n\n## Steps\n..."}
+```
+
+Configure `IWIKI_CHAT_MODEL`, enable `IWIKI_SYSTEM1_SHADOW`, and provide the separate
+`IWIKI_SYSTEM1_BASE_URL` (the API root ending in `/v1`) and `IWIKI_SYSTEM1_KEY` in the
+process environment. Then run:
+
+```bash
+uv run python -m eval.system1_page_type --corpus /path/to/reviewed-pages.jsonl --output /tmp/system1-page-type-report.json
+```
+
+The runner measures the entire baseline first and freezes its p95 latency before any
+System One request. The aggregate-only report contains accuracy, macro-F1, p50/p95,
+plus System One Brier score and 10-bin ECE. It recommends `go` when quality is not
+worse and System One meets the frozen p95, `fine-tune` when latency passes but quality
+regresses, and `reject` when p95 regresses. Any unavailable or invalid decision stops
+the run without scoring partial evidence. The command does not store page bodies or
+case identifiers in the report.
+
 ## Code graph benchmark
 
 Run the offline release evidence from the repository root:

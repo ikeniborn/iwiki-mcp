@@ -59,7 +59,7 @@ from .codegraph import sqlite_adapter as _codegraph_sqlite_adapter  # noqa: F401
 from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .lock import base_lock, mutation_lock
-from .engine import classify, rerank
+from .engine import classify, rerank, system1
 from .engine import frontmatter as _fm
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
@@ -3207,6 +3207,7 @@ def _prepare_postgres_page(
             "error": f"slug tail is reserved for the generated OKF file '{page_file}'",
             "hint": "choose another slug; index/log are generated, not authored",
         }
+    system1.classify_page_type(cfg, body)
 
     meta = {
         "type": page_type,
@@ -3384,6 +3385,7 @@ def wiki_write_page(
         and "error" in prepared_specification
     ):
         return prepared_specification
+    system1.classify_page_type(cfg, markdown)
     if prepared_specification is not None:
         def mutate_specification_page() -> None:
             os.makedirs(os.path.dirname(path), exist_ok=True)

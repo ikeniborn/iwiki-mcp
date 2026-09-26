@@ -24,6 +24,8 @@ but still feed the link graph. Run `wiki_export_okf` once to migrate legacy page
 
 `type` and `tags` are resolved with this precedence: an **explicit** `type`/`tags` argument on the write tool wins; otherwise, when `IWIKI_CHAT_MODEL` is set, the server classifies the page body with that chat model; otherwise it defaults to `type="concept"` with no tags.
 
+When `IWIKI_SYSTEM1_SHADOW` is enabled, both Git and PostgreSQL create paths also send a bounded page body to the separate System One `/v1/systemone` endpoint after the authoritative type has been resolved. The request asks for one of `architecture`, `api`, `guide`, `reference`, `runbook`, or `concept` and validates the complete probability vector. The result is discarded: it cannot alter `type`, `tags`, placement, warnings, write success, or write errors. Disabled shadow makes no System One HTTP call; endpoint and response failures fail open without page content in diagnostics.
+
 Faceted search narrows `wiki_search` to a `type` and/or a set of `tags`; the query values are normalized the same way as stored frontmatter (case-insensitive `type`, kebab-case `tags`), so `type="API"` still matches a page whose frontmatter says `type: api`:
 
 ```text

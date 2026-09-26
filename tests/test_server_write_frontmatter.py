@@ -1,6 +1,10 @@
+import httpx
+
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
 from iwiki_mcp.engine import frontmatter as fm
+from iwiki_mcp.engine import system1
+from iwiki_mcp.engine.config import Config
 
 
 def _bind(tmp_path):
@@ -35,6 +39,98 @@ def test_write_with_explicit_type_and_tags(tmp_path, monkeypatch):
     assert meta["description"].startswith("How binding works")
     assert meta["tags"] == ["binding"]          # normalized
     assert rest.startswith("# Base binding")
+
+
+def test_git_write_observes_system1_without_changing_explicit_metadata(
+    tmp_path, monkeypatch
+):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
+    calls = []
+    monkeypatch.setattr(
+        system1,
+        "classify_page_type",
+        lambda cfg, body: calls.append(body),
+    )
+    body = "# Base binding\n\n## Overview\nHow binding works.\n\n## Detail\nwords here\n"
+
+    result = server.wiki_write_page(
+        "d", "base", body, source=None, type="api", tags=["Binding"]
+    )
+
+    assert "error" not in result
+    assert calls == [body]
+    meta, _ = fm.split(
+        (tmp_path / "d" / "api" / "base.md").read_text(encoding="utf-8")
+    )
+    assert meta["type"] == "api"
+    assert meta["tags"] == ["binding"]
+
+
+def test_git_write_survives_unavailable_system1_endpoint(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
+    monkeypatch.setattr(
+        system1.httpx,
+        "post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            httpx.ConnectError("endpoint unavailable")
+        ),
+    )
+    body = "# Base binding\n\n## Overview\nHow binding works.\n\n## Detail\nwords here\n"
+
+    result = server.wiki_write_page(
+        "d", "base", body, source=None, type="api", tags=["Binding"]
+    )
+
+    assert "error" not in result
+    assert "warning" not in result
+    meta, _ = fm.split(
+        (tmp_path / "d" / "api" / "base.md").read_text(encoding="utf-8")
+    )
+    assert meta["type"] == "api"
+    assert meta["tags"] == ["binding"]
+
+
+def test_postgres_page_preparation_observes_system1_without_changing_type(
+    monkeypatch,
+):
+    monkeypatch.setenv("IWIKI_LLM_BASE_URL", "http://x")
+    monkeypatch.setenv("IWIKI_LLM_KEY", "k")
+    monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
+    monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1")
+    monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
+    calls = []
+    monkeypatch.setattr(
+        system1,
+        "classify_page_type",
+        lambda cfg, body: calls.append(body),
+    )
+    markdown = "# Page\n\n## Overview\nHow it works.\n\n## Detail\nMore.\n"
+
+    prepared = server._prepare_postgres_page(
+        Config.load(),
+        "d",
+        "page",
+        markdown,
+        source=None,
+        type="reference",
+        tags=["Lookup"],
+        description=None,
+        status=None,
+    )
+
+    assert not isinstance(prepared, dict)
+    identity, rendered, _warning = prepared
+    meta, _ = fm.split(rendered)
+    assert calls == [markdown]
+    assert identity == "reference/page"
+    assert meta["type"] == "reference"
+    assert meta["tags"] == ["lookup"]
 
 
 def test_write_without_type_and_no_chat_model_defaults_concept(tmp_path, monkeypatch):

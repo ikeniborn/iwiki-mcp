@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-import time
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -1258,9 +1258,12 @@ def test_detached_build_publishes_after_the_caller_took_its_handle(
         application, "publisher_for", lambda *_args, **_kwargs: publisher
     )
     real_publish_metadata = CodeGraphStore.publish_metadata
+    publishing = threading.Event()
+    release = threading.Event()
 
     def slow_publish_metadata(self, *args, **kwargs):
-        time.sleep(0.4)
+        publishing.set()
+        assert release.wait(timeout=5)
         return real_publish_metadata(self, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -1276,8 +1279,10 @@ def test_detached_build_publishes_after_the_caller_took_its_handle(
 
     assert outcome.index["state"] == "rebuilding"
     assert outcome.publication == {}
+    assert publishing.is_set()
     job_id = outcome.index["job"]["id"]
 
+    release.set()
     _BUILD_WORKERS.join(timeout=30)
 
     assert [call[0] for call in publisher.calls].count("begin") == 1
@@ -1304,9 +1309,12 @@ def test_detached_publication_failure_ends_the_job_as_failed(
         application, "publisher_for", lambda *_args, **_kwargs: publisher
     )
     real_publish_metadata = CodeGraphStore.publish_metadata
+    publishing = threading.Event()
+    release = threading.Event()
 
     def slow_publish_metadata(self, *args, **kwargs):
-        time.sleep(0.4)
+        publishing.set()
+        assert release.wait(timeout=5)
         return real_publish_metadata(self, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -1319,7 +1327,10 @@ def test_detached_publication_failure_ends_the_job_as_failed(
     outcome = application.index_and_publish(
         harness.binding, force=True, wait_seconds=0
     )
+    assert outcome.index["state"] == "rebuilding"
+    assert publishing.is_set()
     job_id = outcome.index["job"]["id"]
+    release.set()
     _BUILD_WORKERS.join(timeout=30)
 
     assert [call[0] for call in publisher.calls].count("finalize") == 1

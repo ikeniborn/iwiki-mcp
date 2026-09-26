@@ -216,6 +216,23 @@ def _engine_config(
     server_config: ServerConfig, environ: Mapping[str, str]
 ) -> Config:
     base_url = environ.get("IWIKI_LLM_BASE_URL", "").strip().rstrip("/")
+    system1_shadow = environ.get("IWIKI_SYSTEM1_SHADOW", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    system1_base_url = (
+        environ.get("IWIKI_SYSTEM1_BASE_URL", "").strip().rstrip("/")
+    )
+    system1_api_key = environ.get("IWIKI_SYSTEM1_KEY", "").strip()
+    if system1_shadow and (not system1_base_url or not system1_api_key):
+        raise ConfigError(
+            "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
+            "IWIKI_SYSTEM1_SHADOW is enabled."
+        )
+    if system1_shadow and not system1_base_url.endswith("/v1"):
+        raise ConfigError("IWIKI_SYSTEM1_BASE_URL must end in /v1.")
     return Config(
         base_url=base_url,
         api_key=environ.get("IWIKI_LLM_KEY", "").strip(),
@@ -235,6 +252,9 @@ def _engine_config(
             environ.get("IWIKI_WRITE_SEED_THRESHOLD", "0.35")
         ),
         rerank_model=server_config.models.rerank_model,
+        system1_shadow=system1_shadow,
+        system1_base_url=system1_base_url,
+        system1_api_key=system1_api_key,
     )
 
 

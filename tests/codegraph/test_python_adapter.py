@@ -513,6 +513,23 @@ def test_parser_package_is_lazy_and_static_parse_never_executes_python(monkeypat
     module = importlib.reload(sys.modules["iwiki_mcp.codegraph.languages.python"])
     assert "tree_sitter_language_pack" not in sys.modules
 
+    from tree_sitter import Language, Parser
+    import tree_sitter_python
+
+    class DownloadError(Exception):
+        pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tree_sitter_language_pack",
+        types.SimpleNamespace(
+            DownloadError=DownloadError,
+            get_parser=lambda _language: Parser(
+                Language(tree_sitter_python.language())
+            ),
+        ),
+    )
+
     calls = []
     original_import = builtins.__import__
 
