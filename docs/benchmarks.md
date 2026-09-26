@@ -31,6 +31,11 @@ regresses, and `reject` when p95 regresses. Any unavailable or invalid decision 
 the run without scoring partial evidence. The command does not store page bodies or
 case identifiers in the report.
 
+Recorded results and the resulting shadow-only decision are in
+[architecture.md](architecture.md#decision-system-one-page-type-classification): on 92
+held-out wiki pages the fine-tuned `laya-iwiki` alias scored accuracy 0.587 / macro-F1
+0.488 against 0.359 / 0.252 for the chat classifier, with p95 under 300 ms.
+
 ## Code graph benchmark
 
 Run the offline release evidence from the repository root:
