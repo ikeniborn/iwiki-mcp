@@ -29,6 +29,7 @@
 | `IWIKI_SYSTEM1_SHADOW` | disabled | Enables evaluation-only page-type observation during `wiki_write_page`. Accepted true values are `1`, `true`, `yes`, and `on`. The decision never changes frontmatter, paths, tags, write results, or errors. |
 | `IWIKI_SYSTEM1_BASE_URL` | empty | Separate API root for the local GPU System One service, including the trailing `/v1`. Required when the shadow is enabled; iwiki calls `<base>/systemone`. |
 | `IWIKI_SYSTEM1_KEY` | empty | Separate bearer credential for the System One service. Required when the shadow is enabled and never reused from `IWIKI_LLM_KEY`. |
+| `IWIKI_SYSTEM1_MODEL` | empty | Optional System One model alias sent as `model` in the shadow request, for example `laya-iwiki` (the Laya checkpoint fine-tuned on iwiki page types). Empty sends no `model` field, so the service routes as before. |
 
 **Server lifecycle**
 

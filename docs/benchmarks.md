@@ -15,7 +15,8 @@ redact it before use. Each line has exactly the data needed by the benchmark:
 ```
 
 Configure `IWIKI_CHAT_MODEL`, enable `IWIKI_SYSTEM1_SHADOW`, and provide the separate
-`IWIKI_SYSTEM1_BASE_URL` (the API root ending in `/v1`) and `IWIKI_SYSTEM1_KEY` in the
+`IWIKI_SYSTEM1_BASE_URL` (the API root ending in `/v1`) and `IWIKI_SYSTEM1_KEY` (plus the
+optional `IWIKI_SYSTEM1_MODEL`, such as `laya-iwiki`, to score a specific alias) in the
 process environment. Then run:
 
 ```bash

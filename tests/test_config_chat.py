@@ -25,12 +25,14 @@ def test_system1_shadow_defaults_disabled(monkeypatch):
     monkeypatch.delenv("IWIKI_SYSTEM1_SHADOW", raising=False)
     monkeypatch.delenv("IWIKI_SYSTEM1_BASE_URL", raising=False)
     monkeypatch.delenv("IWIKI_SYSTEM1_KEY", raising=False)
+    monkeypatch.delenv("IWIKI_SYSTEM1_MODEL", raising=False)
 
     config = Config.load()
 
     assert config.system1_shadow is False
     assert config.system1_base_url == ""
     assert config.system1_api_key == ""
+    assert config.system1_model == ""
 
 
 def test_system1_shadow_loads_separate_endpoint_and_key(monkeypatch):
@@ -39,12 +41,14 @@ def test_system1_shadow_loads_separate_endpoint_and_key(monkeypatch):
     monkeypatch.setenv("IWIKI_SYSTEM1_SHADOW", "true")
     monkeypatch.setenv("IWIKI_SYSTEM1_BASE_URL", "http://system1/v1/")
     monkeypatch.setenv("IWIKI_SYSTEM1_KEY", "system1-key")
+    monkeypatch.setenv("IWIKI_SYSTEM1_MODEL", " laya-iwiki ")
 
     config = Config.load()
 
     assert config.system1_shadow is True
     assert config.system1_base_url == "http://system1/v1"
     assert config.system1_api_key == "system1-key"
+    assert config.system1_model == "laya-iwiki"
 
 
 @pytest.mark.parametrize("missing", ["IWIKI_SYSTEM1_BASE_URL", "IWIKI_SYSTEM1_KEY"])

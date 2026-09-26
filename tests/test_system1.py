@@ -83,9 +83,34 @@ def test_shadow_sends_native_choice_request_and_returns_probabilities(monkeypatc
     assert captured["json"]["state"] == {
         "document": "# Page\n\n## Steps\nDo this."
     }
+    assert "model" not in captured["json"]
     question = captured["json"]["questions"]["page_type"]
     assert question["type"] == "choice"
     assert tuple(question["criteria"]) == fm.CLASSIFIABLE_TYPES
+
+
+def test_shadow_sends_configured_model_alias(monkeypatch):
+    system1 = _system1_module()
+    cfg = _config(
+        monkeypatch,
+        system1_shadow=True,
+        system1_base_url="http://system1/v1",
+        system1_api_key="system1-key",
+        system1_model="laya-iwiki",
+    )
+    captured = {}
+
+    def post(url, **kwargs):
+        captured.update(kwargs)
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(system1.httpx, "post", post)
+
+    decision = system1.classify_page_type(cfg, "# Page")
+
+    assert decision.status == "unavailable"
+    assert captured["json"]["model"] == "laya-iwiki"
+    assert list(captured["json"]) == ["model", "state", "questions"]
 
 
 def test_shadow_transport_failure_is_safe_and_payload_free(monkeypatch):
