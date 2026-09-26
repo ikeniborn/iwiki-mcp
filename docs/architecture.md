@@ -1095,10 +1095,57 @@ flowchart TD
 ```
 
 The shadow uses a separate local-GPU endpoint and bearer credential. It submits at
-most 6,000 page-body characters to `/v1/systemone`, omits a model so the service can
-route multilingual input, validates all six class probabilities, and fails open after
-a two-second timeout. It emits no page payload or raw endpoint error and never feeds
-its decision back into write behavior.
+most 6,000 page-body characters to `/v1/systemone`, sends `model` only when
+`IWIKI_SYSTEM1_MODEL` is set (otherwise the service routes automatically), validates all
+six class probabilities, and fails open after a two-second timeout. It emits no page
+payload or raw endpoint error and never feeds its decision back into write behavior.
+
+## Decision: System One page-type classification
+
+Status: accepted, shadow-only (2026-09-26). This records why a fine-tuned Laya
+checkpoint classifies page types and what it does and does not change.
+
+**Context.** Page `type` is the governed OKF field that also decides the page's
+directory. When an author omits it, the chat classifier (`IWIKI_CHAT_MODEL`) fills it
+through a generative 27B model: tens of seconds per write and 36% agreement with
+authored labels. System One (Laya typed decisions on the Framework GPU API) answers
+the same six-way choice in a fraction of a second.
+
+**Decision.**
+
+- System One runs as a **shadow** of the write path. Its decision is measured and
+  discarded; explicit or chat-derived `type`, tags, placement, and write results stay
+  authoritative.
+- The request targets the dedicated alias `laya-iwiki` through `IWIKI_SYSTEM1_MODEL`,
+  a Laya multilingual checkpoint fine-tuned on this wiki's own authored page types.
+  The base aliases stay available; unset `IWIKI_SYSTEM1_MODEL` keeps automatic routing.
+- System One is **not part of retrieval**. `wiki_search`, its five signals, RRF, and
+  rerank never read the shadow decision, so search quality is unaffected by it.
+- Promoting the decision to authority over `type` is a separate, human-approved change;
+  it requires better per-class recall and calibration than measured below.
+
+**Results.** Held-out set: 92 real wiki pages that entered neither training nor
+calibration, labelled by their authored frontmatter `type`. Same pages, same prompt
+contract, scored by `eval/system1_page_type`.
+
+| Classifier | Accuracy | Macro-F1 | p95 latency | Brier / ECE |
+|---|---|---|---|---|
+| Chat classifier (`lemonade-qwen38-27b-udq4km-mmf16-no-reasoning`) | 0.359 | 0.252 | 9.0–24.0 s | — |
+| Laya base multilingual | 0.326 | 0.216 | 332 ms | 0.874 / 0.230 |
+| `laya-iwiki` (fine-tuned, calibrated) | **0.587** | **0.488** | 243–292 ms | 0.690 / 0.265 |
+
+The runner's recommendation for `laya-iwiki` is `go`. Per class, `laya-iwiki` improves
+`concept` (20/33 vs 8/33) and `reference` (18/29 vs 6/29), is on par for `architecture` (13/19 vs 14/19), and
+regresses `runbook` (2/8 vs 5/8); `guide` stays 0/2 for both. Calibrated ECE is worse
+than the base checkpoint, so its probabilities are advisory, not confidence. The
+earlier 24-page pilot with the base checkpoint measured 0.292 vs 0.375 accuracy and
+recommended `fine-tune`, which triggered this work.
+
+**Consequences.** The shadow costs at most one bounded request per page creation and
+never blocks a write; after a Framework restart the first request may exceed the
+two-second budget while Laya reloads and is then recorded as `unavailable`. Training
+data, labels, and the checkpoint live on the Framework host; the procedure is
+Framework's `tools/laya_finetune`.
 
 ### OKF adoption & layout tools
 
@@ -1246,6 +1293,8 @@ env vars.
 - **Constant duplication is intentional** — `OVERVIEW_HEADING`, `LEAD_MAX`, the
   `_H2` regex, and `RESERVED_*` are copied so config-free modules avoid importing
   `chunk`/`embed`. Change one, change all (the "keep in sync" comments mark them).
+- **System One never decides.** The page-type shadow is measured and discarded; it
+  feeds neither write behavior nor retrieval.
 - **`VectorStore` is the storage seam** — a future SQLite/sqlite-vec backend only
   needs `load`/`save`/`query`.
 - **Domain-relative `file` paths** in the index keep the store machine-portable
