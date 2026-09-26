@@ -16,6 +16,7 @@ from iwiki_mcp.base import Binding
 from iwiki_mcp.codegraph.config import CodeGraphConfig
 from iwiki_mcp.codegraph.context import CodeGraphContext, validate_context_request
 from iwiki_mcp.codegraph import models as models_module
+from iwiki_mcp.codegraph.languages import python as python_language
 from iwiki_mcp.codegraph.indexer import AdapterFactory
 from iwiki_mcp.codegraph.linking import WikiSelectorResolver
 from iwiki_mcp.codegraph.languages.python import PythonAdapter
@@ -518,6 +519,20 @@ def reset_code_graph_worker_registry():
     _reset_build_worker_registry()
     yield
     _reset_build_worker_registry()
+
+
+@pytest.fixture(autouse=True)
+def use_local_python_grammar():
+    """Keep code-graph tests independent of language-pack downloads."""
+    from tree_sitter import Language, Parser
+    import tree_sitter_python
+
+    previous = python_language._PARSER
+    python_language._PARSER = Parser(
+        Language(tree_sitter_python.language())
+    )
+    yield
+    python_language._PARSER = previous
 
 
 @pytest.fixture
