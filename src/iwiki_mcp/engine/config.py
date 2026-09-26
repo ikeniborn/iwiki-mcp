@@ -51,6 +51,9 @@ class Config:
     system1_base_url: str = ""
     system1_api_key: str = ""
     system1_model: str = ""
+    system1_guidance: bool = False
+    system1_search_boost: float = 0.0
+    system1_min_confidence: float = 0.5
 
     @staticmethod
     def load(load_ignore: bool = False) -> "Config":
@@ -100,13 +103,14 @@ class Config:
         system1_base_url = getenv("IWIKI_SYSTEM1_BASE_URL", "").strip().rstrip("/")
         system1_api_key = getenv("IWIKI_SYSTEM1_KEY", "").strip()
         system1_model = getenv("IWIKI_SYSTEM1_MODEL", "").strip()
-        if system1_shadow and (not system1_base_url or not system1_api_key):
-            raise ConfigError(
-                "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
-                "IWIKI_SYSTEM1_SHADOW is enabled."
-            )
-        if system1_shadow and not system1_base_url.endswith("/v1"):
-            raise ConfigError("IWIKI_SYSTEM1_BASE_URL must end in /v1.")
+        system1_guidance, system1_search_boost, system1_min_confidence = (
+            system1_guidance_settings(getenv)
+        )
+        require_system1_connection(
+            system1_shadow or system1_guidance or system1_search_boost > 0,
+            system1_base_url,
+            system1_api_key,
+        )
         return Config(
             base_url=base_url,
             api_key=api_key,
@@ -131,4 +135,41 @@ class Config:
             system1_base_url=system1_base_url,
             system1_api_key=system1_api_key,
             system1_model=system1_model,
+            system1_guidance=system1_guidance,
+            system1_search_boost=system1_search_boost,
+            system1_min_confidence=system1_min_confidence,
         )
+
+
+_TRUE = {"1", "true", "yes", "on"}
+
+
+def system1_guidance_settings(getenv) -> tuple[bool, float, float]:
+    """Read the System One guidance flags that let decisions influence results."""
+    guidance = getenv("IWIKI_SYSTEM1_GUIDANCE", "").strip().lower() in _TRUE
+    try:
+        boost = float(getenv("IWIKI_SYSTEM1_SEARCH_BOOST", "0") or 0)
+        confidence = float(getenv("IWIKI_SYSTEM1_MIN_CONFIDENCE", "0.5") or 0.5)
+    except ValueError as exc:
+        raise ConfigError(
+            "IWIKI_SYSTEM1_SEARCH_BOOST and IWIKI_SYSTEM1_MIN_CONFIDENCE must be numbers."
+        ) from exc
+    if not 0 <= boost < 1 or not 0 <= confidence <= 1:
+        raise ConfigError(
+            "IWIKI_SYSTEM1_SEARCH_BOOST must be in [0, 1) and "
+            "IWIKI_SYSTEM1_MIN_CONFIDENCE in [0, 1]."
+        )
+    return guidance, boost, confidence
+
+
+def require_system1_connection(enabled: bool, base_url: str, api_key: str) -> None:
+    """Any System One feature needs its own endpoint and credential."""
+    if not enabled:
+        return
+    if not base_url or not api_key:
+        raise ConfigError(
+            "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
+            "IWIKI_SYSTEM1_SHADOW is enabled."
+        )
+    if not base_url.endswith("/v1"):
+        raise ConfigError("IWIKI_SYSTEM1_BASE_URL must end in /v1.")

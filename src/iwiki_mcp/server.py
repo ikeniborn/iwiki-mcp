@@ -2392,8 +2392,8 @@ def wiki_search(
                 "hint": "retry or inspect sanitized server diagnostics",
             }
         return {"error": str(exc)}
-    results = candidates[:requested_top_k]
-    response = answer({"results": results})
+    ordered = candidates
+    metadata = None
     if cfg.rerank_model:
         if _is_postgres(bind):
             hydrated = _postgres_store_for_binding(bind).hydrate_candidates(candidates)
@@ -2416,9 +2416,12 @@ def wiki_search(
                 if (item["domain"], item["file"], item["heading"], item["chunk"])
                 not in scored_keys
             ]
-            results = (scored + unscored)[:requested_top_k]
-        response = answer({"results": results, "rerank": metadata})
-    return response
+            ordered = scored + unscored
+    ordered = system1.boost_by_query_type(cfg, query, ordered)
+    results = ordered[:requested_top_k]
+    if metadata is None:
+        return answer({"results": results})
+    return answer({"results": results, "rerank": metadata})
 
 
 @_safe
@@ -3207,7 +3210,11 @@ def _prepare_postgres_page(
             "error": f"slug tail is reserved for the generated OKF file '{page_file}'",
             "hint": "choose another slug; index/log are generated, not authored",
         }
-    system1.classify_page_type(cfg, body)
+    guidance = system1.type_guidance_warning(
+        cfg, system1.classify_page_type(cfg, body), requested_type
+    )
+    if guidance:
+        warnings.append(guidance)
 
     meta = {
         "type": page_type,
@@ -3385,7 +3392,12 @@ def wiki_write_page(
         and "error" in prepared_specification
     ):
         return prepared_specification
-    system1.classify_page_type(cfg, markdown)
+    fm_warning = _compose_warnings(
+        fm_warning,
+        system1.type_guidance_warning(
+            cfg, system1.classify_page_type(cfg, markdown), type
+        ),
+    )
     if prepared_specification is not None:
         def mutate_specification_page() -> None:
             os.makedirs(os.path.dirname(path), exist_ok=True)

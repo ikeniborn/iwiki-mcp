@@ -1,4 +1,4 @@
-"""Fail-open System One shadow decision for wiki page types."""
+"""Fail-open System One page-type decisions: shadow, write guidance, search boost."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -41,10 +41,13 @@ def _invalid(started: float, status: str) -> PageTypeDecision:
 
 
 def classify_page_type(cfg: Config, body: str) -> PageTypeDecision | None:
-    """Return a validated shadow decision, never affecting the write caller."""
-    if not cfg.system1_shadow:
+    """Return a validated decision for a page body; None when System One is off."""
+    if not (cfg.system1_shadow or cfg.system1_guidance):
         return None
+    return _decide(cfg, body)
 
+
+def _decide(cfg: Config, body: str) -> PageTypeDecision:
     started = time.perf_counter()
     request = {"model": cfg.system1_model} if cfg.system1_model else {}
     request["state"] = {"document": body[:_MAX_DOCUMENT_CHARS]}
@@ -94,3 +97,65 @@ def classify_page_type(cfg: Config, body: str) -> PageTypeDecision | None:
         return _invalid(started, "invalid")
     except Exception:
         return _invalid(started, "invalid")
+
+
+# Classes whose held-out recall was too low to act on (runbook 2/8, guide 0/2).
+_WEAK_TYPES = frozenset({"runbook", "guide"})
+_RRF_K = 60
+
+
+def _actionable(cfg: Config, decision: PageTypeDecision | None) -> str | None:
+    """The decided type when it is confident enough and not a weak class."""
+    if decision is None or decision.status != "ok" or decision.page_type is None:
+        return None
+    if decision.page_type in _WEAK_TYPES:
+        return None
+    if decision.probabilities[decision.page_type] < cfg.system1_min_confidence:
+        return None
+    return decision.page_type
+
+
+def type_guidance_warning(
+    cfg: Config, decision: PageTypeDecision | None, explicit_type: str | None
+) -> str | None:
+    """Advisory warning when a confident decision disagrees with an explicit type."""
+    if not cfg.system1_guidance or explicit_type is None:
+        return None
+    authored = fm.normalize_type(explicit_type)
+    suggested = _actionable(cfg, decision)
+    if authored not in fm.CLASSIFIABLE_TYPES or suggested in (None, authored):
+        return None
+    return (
+        f"System One suggests type '{suggested}' "
+        f"(p={decision.probabilities[suggested]:.2f}); explicit type '{authored}' kept"
+    )
+
+
+def _file_type(file: str) -> str | None:
+    head = file.split("/", 1)[0]
+    return head if "/" in file and head in fm.CLASSIFIABLE_TYPES else None
+
+
+def boost_by_query_type(cfg: Config, query: str, ordered: list[dict]) -> list[dict]:
+    """Reorder an existing ranking toward pages of the query's predicted type.
+
+    Membership is unchanged: each item keeps its reciprocal-rank position score
+    and gains ``system1_search_boost`` when its page type matches a confident,
+    non-weak prediction for the query.
+    """
+    if cfg.system1_search_boost <= 0 or len(ordered) < 2:
+        return ordered
+    predicted = _actionable(cfg, _decide(cfg, query))
+    if predicted is None:
+        return ordered
+    scored = [
+        (
+            1 / (_RRF_K + index + 1)
+            + (cfg.system1_search_boost if _file_type(item["file"]) == predicted else 0),
+            index,
+            item,
+        )
+        for index, item in enumerate(ordered)
+    ]
+    scored.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [item for _score, _index, item in scored]
