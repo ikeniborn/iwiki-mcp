@@ -19,6 +19,8 @@ from .codegraph import application as _codegraph_application
 from .codegraph.config import CodeGraphConfigError
 from .codegraph.mcp_adapter import CodeGraphAdapterError
 from .engine.config import Config
+from .engine.config import ConfigError as _EngineConfigError
+from .engine.config import require_system1_connection, system1_guidance_settings
 from .engine.embed import EmbedError, embed_texts
 from .postgres.auth import AuthStore, validate_domain_identifier
 from .postgres.config import ConfigError, ServerConfig, load_server_config
@@ -226,13 +228,17 @@ def _engine_config(
         environ.get("IWIKI_SYSTEM1_BASE_URL", "").strip().rstrip("/")
     )
     system1_api_key = environ.get("IWIKI_SYSTEM1_KEY", "").strip()
-    if system1_shadow and (not system1_base_url or not system1_api_key):
-        raise ConfigError(
-            "IWIKI_SYSTEM1_BASE_URL and IWIKI_SYSTEM1_KEY must be set when "
-            "IWIKI_SYSTEM1_SHADOW is enabled."
+    try:
+        guidance, search_boost, min_confidence = system1_guidance_settings(
+            environ.get
         )
-    if system1_shadow and not system1_base_url.endswith("/v1"):
-        raise ConfigError("IWIKI_SYSTEM1_BASE_URL must end in /v1.")
+        require_system1_connection(
+            system1_shadow or guidance or search_boost > 0,
+            system1_base_url,
+            system1_api_key,
+        )
+    except _EngineConfigError as exc:
+        raise ConfigError(str(exc)) from None
     return Config(
         base_url=base_url,
         api_key=environ.get("IWIKI_LLM_KEY", "").strip(),
@@ -255,6 +261,10 @@ def _engine_config(
         system1_shadow=system1_shadow,
         system1_base_url=system1_base_url,
         system1_api_key=system1_api_key,
+        system1_model=environ.get("IWIKI_SYSTEM1_MODEL", "").strip(),
+        system1_guidance=guidance,
+        system1_search_boost=search_boost,
+        system1_min_confidence=min_confidence,
     )
 
 

@@ -1098,12 +1098,14 @@ The shadow uses a separate local-GPU endpoint and bearer credential. It submits 
 most 6,000 page-body characters to `/v1/systemone`, sends `model` only when
 `IWIKI_SYSTEM1_MODEL` is set (otherwise the service routes automatically), validates all
 six class probabilities, and fails open after a two-second timeout. It emits no page
-payload or raw endpoint error and never feeds its decision back into write behavior.
+payload or raw endpoint error; its decision reaches the write result only as the
+optional advisory warning described below.
 
 ## Decision: System One page-type classification
 
-Status: accepted, shadow-only (2026-09-26). This records why a fine-tuned Laya
-checkpoint classifies page types and what it does and does not change.
+Status: accepted (2026-09-26) — shadow plus advisory write guidance; search boost
+off. This records why a fine-tuned Laya checkpoint classifies page types and what it
+does and does not change.
 
 **Context.** Page `type` is the governed OKF field that also decides the page's
 directory. When an author omits it, the chat classifier (`IWIKI_CHAT_MODEL`) fills it
@@ -1113,14 +1115,22 @@ the same six-way choice in a fraction of a second.
 
 **Decision.**
 
-- System One runs as a **shadow** of the write path. Its decision is measured and
-  discarded; explicit or chat-derived `type`, tags, placement, and write results stay
-  authoritative.
+- System One runs beside the write path. Explicit or chat-derived `type`, tags,
+  placement, and write results stay authoritative; the decision can only add the
+  advisory warning below.
 - The request targets the dedicated alias `laya-iwiki` through `IWIKI_SYSTEM1_MODEL`,
   a Laya multilingual checkpoint fine-tuned on this wiki's own authored page types.
   The base aliases stay available; unset `IWIKI_SYSTEM1_MODEL` keeps automatic routing.
-- System One is **not part of retrieval**. `wiki_search`, its five signals, RRF, and
-  rerank never read the shadow decision, so search quality is unaffected by it.
+- **Write guidance (enabled).** With `IWIKI_SYSTEM1_GUIDANCE`, a decision that is
+  confident (`IWIKI_SYSTEM1_MIN_CONFIDENCE`, default 0.5), not `runbook`/`guide`, and
+  different from an explicit `type` adds one advisory write warning naming the
+  suggested type and probability. The authored type, path, and write result never
+  change; authors decide.
+- **Search boost (built, off).** With `IWIKI_SYSTEM1_SEARCH_BOOST > 0`, `wiki_search`
+  classifies the query and adds that weight to reciprocal-rank positions of pool items
+  whose page type (first slug segment) matches a confident non-weak prediction, then
+  slices to `k`. Membership never changes. It stays at `0` because it failed its gate
+  (results below).
 - Promoting the decision to authority over `type` is a separate, human-approved change;
   it requires better per-class recall and calibration than measured below.
 
@@ -1140,6 +1150,29 @@ regresses `runbook` (2/8 vs 5/8); `guide` stays 0/2 for both. Calibrated ECE is 
 than the base checkpoint, so its probabilities are advisory, not confidence. The
 earlier 24-page pilot with the base checkpoint measured 0.292 vs 0.375 accuracy and
 recommended `fine-tune`, which triggered this work.
+
+**Search boost results.** Known-item benchmark on the hosted wiki: query = a page's
+`description`, target = that page, `wiki_search` in its own domain with rerank, top 8,
+page-level MRR and hit@1. Parameters were chosen on 153 non-test pages
+(weight 0.0005, confidence 0.5) and judged on the 92 held-out test pages.
+
+| Split | Variant | MRR | hit@1 | hit@8 |
+|---|---|---|---|---|
+| dev (153) | no boost | 0.756 | 0.588 | 0.987 |
+| dev (153) | boost 0.0005 / 0.5 | 0.761 | 0.601 | 0.987 |
+| test (92) | no boost | **0.774** | **0.620** | 0.967 |
+| test (92) | boost 0.0005 / 0.5 | 0.769 | 0.609 | 0.978 |
+
+Larger weights lowered every metric (test MRR 0.734 at 0.002 without a confidence
+gate, 0.662 at 0.008). The cause is input shift: the model was trained on page bodies,
+and on short queries its predicted type matches the target page's type only 101 of 245
+times. The gate required held-out MRR and hit@1 not to drop, so the boost is disabled.
+Revisit only with a query-trained decision.
+
+**Guidance precision.** On the page-type test split, `laya-iwiki` precision stays near
+0.61 at every confidence threshold from 0.3 to 0.7, and most disagreements are
+`concept` ↔ `reference`, where authored labels are themselves inconsistent. Warnings are
+therefore a second opinion, not a correction.
 
 **Consequences.** The shadow costs at most one bounded request per page creation and
 never blocks a write; after a Framework restart the first request may exceed the
@@ -1293,8 +1326,9 @@ env vars.
 - **Constant duplication is intentional** — `OVERVIEW_HEADING`, `LEAD_MAX`, the
   `_H2` regex, and `RESERVED_*` are copied so config-free modules avoid importing
   `chunk`/`embed`. Change one, change all (the "keep in sync" comments mark them).
-- **System One never decides.** The page-type shadow is measured and discarded; it
-  feeds neither write behavior nor retrieval.
+- **System One never decides.** It may add an advisory write warning; it never changes
+  a page's type, path, or write result, and the search boost stays off (weight 0)
+  until a benchmark shows gain.
 - **`VectorStore` is the storage seam** — a future SQLite/sqlite-vec backend only
   needs `load`/`save`/`query`.
 - **Domain-relative `file` paths** in the index keep the store machine-portable
