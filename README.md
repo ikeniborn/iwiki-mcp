@@ -186,7 +186,7 @@ sibling named `<page>.ru.md`.
 | [Benchmarks](docs/benchmarks.md) | Code graph, search pipeline, and Pareto evaluation runs. |
 | [Architecture](docs/architecture.md) | Internal module map and data flow. |
 | [Deployment runbook](docs/deployment.md) | Operator path: container deployment, migration, cutover, rollback. |
-| [Telegram bot](docs/telegram-bot.md) | The bundled Telegram bot service. |
+| [Telegram bot](docs/telegram-bot.md) | The bundled Telegram bot service; `IWIKI_BOT_ENABLED=false` mutes it. |
 
 ## Limitations (v1)
 

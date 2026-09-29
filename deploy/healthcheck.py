@@ -80,6 +80,11 @@ def check_heartbeat(path, maximum_age, clock):
         return False
 
 
+def bot_enabled(environ):
+    """Only an explicit ``IWIKI_BOT_ENABLED=false`` disables the bot checks."""
+    return environ.get("IWIKI_BOT_ENABLED", "true").strip().lower() != "false"
+
+
 def fail(code):
     print(code)
     return 1
@@ -97,7 +102,9 @@ def main(
     if environ is None:
         environ = os.environ
 
-    if not children_running(REQUIRED_CHILDREN, run, probe_timeout):
+    enabled = bot_enabled(environ)
+    required_children = REQUIRED_CHILDREN if enabled else REQUIRED_CHILDREN - {"telegram-bot"}
+    if not children_running(required_children, run, probe_timeout):
         return fail("child_not_running")
     if not local_http_ok(
         "127.0.0.1",
@@ -124,6 +131,8 @@ def main(
     ):
         return fail("nginx_unavailable")
 
+    if not enabled:
+        return 0
     try:
         maximum_age = float(
             environ.get("IWIKI_BOT_HEARTBEAT_MAX_AGE_SECONDS", "120")

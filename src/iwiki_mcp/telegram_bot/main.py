@@ -4,15 +4,17 @@ import argparse
 import asyncio
 from collections.abc import Awaitable, Callable
 import logging
+import os
 from pathlib import Path
 import random
 import sys
+import threading
 import time
 
 import anyio
 
 from .access import AccessPolicy
-from .config import BotConfig
+from .config import BotConfig, BotConfigError
 from .context import ContextBudget
 from .conversation import ConversationService
 from .inference import InferenceClient, InferenceError
@@ -265,15 +267,34 @@ async def run_bot(
             )
 
 
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def bot_enabled(environ=os.environ) -> bool:
+    """Read ``IWIKI_BOT_ENABLED``: exactly ``true`` (the default) or ``false``."""
+    value = environ.get("IWIKI_BOT_ENABLED", "true").strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise BotConfigError("invalid IWIKI_BOT_ENABLED")
+
+
+def _wait_forever() -> None:
+    # Supervisor expects a long-lived child; a clean exit would be restarted.
+    threading.Event().wait()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Telegram client for remote iwiki"
     )
     parser.parse_args()
+    if not bot_enabled():
+        logging.basicConfig(stream=sys.stdout, level=logging.INFO, format=LOG_FORMAT)
+        LOGGER.info("telegram bot disabled")
+        _wait_forever()
+        return
     config = BotConfig.load()
-    logging.basicConfig(
-        stream=sys.stdout,
-        level=config.log_level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    logging.basicConfig(stream=sys.stdout, level=config.log_level, format=LOG_FORMAT)
     anyio.run(run_bot, config)

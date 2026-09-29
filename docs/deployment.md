@@ -104,6 +104,7 @@ IWIKI_EMBED_MODEL=<exact-embedding-model-id>
 IWIKI_EMBED_DIMENSIONS=<exact-embedding-dimensions>
 IWIKI_RERANK_MODEL=<exact-rerank-model-id-or-empty>
 
+IWIKI_BOT_ENABLED=true
 IWIKI_BOT_TELEGRAM_TOKEN=<telegram-bot-token>
 IWIKI_BOT_IWIKI_URL=http://127.0.0.1:8765/mcp
 IWIKI_BOT_IWIKI_TOKEN=<least-privilege-iwiki-token>
@@ -1347,6 +1348,11 @@ exit of hosted MCP, nginx, or the Telegram bot, including exit status zero; an e
 before process-group kill, leaving five seconds inside the Compose graceful window.
 Health verifies all three children, loopback MCP, nginx ingress, and a Telegram
 heartbeat newer than the configured window; it makes no extra Telegram request.
+`IWIKI_BOT_ENABLED=false` mutes the bot: the `telegram-bot` child logs
+`telegram bot disabled`, loads no bot configuration, and idles under Supervisor,
+while health skips that child and the heartbeat and still requires hosted MCP and
+nginx. Any value other than `true` (the default) or `false` is rejected at bot
+startup.
 
 If a running MCP session fails, the bot closes that session, reconnects and initializes
 a replacement with bounded backoff, and resumes the same failed Telegram update without

@@ -188,7 +188,7 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 | [Бенчмарки](benchmarks.ru.md) | Прогоны оценки code graph, search pipeline и Pareto. |
 | [Архитектура](architecture.md) | Внутренняя карта модулей и поток данных (только EN). |
 | [Deployment runbook](deployment.md) | Операторский путь: развёртывание контейнера, миграция, cutover, откат (только EN). |
-| [Telegram-бот](telegram-bot.md) | Встроенный сервис Telegram-бота (только EN). |
+| [Telegram-бот](telegram-bot.md) | Встроенный сервис Telegram-бота (только EN); `IWIKI_BOT_ENABLED=false` отключает его. |
 
 ## Ограничения (v1)
 
