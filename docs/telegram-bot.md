@@ -211,7 +211,10 @@ including exit status zero; an explicit `supervisorctl stop` remains stopped unt
 explicit start. Each child receives `TERM` and has 55 seconds to stop before Supervisor
 can force its process group, inside the Compose 60-second window. Health covers all
 three children, loopback MCP, nginx ingress, and the Telegram polling heartbeat within
-the configured liveness window.
+the configured liveness window. Set `IWIKI_BOT_ENABLED=false` in `runtime.env` to
+mute the bot without removing it: the child idles, and health drops the bot and
+heartbeat checks; see
+[Health, recovery, and privacy](deployment.md#health-recovery-and-privacy).
 
 The application runtime creates no PostgreSQL database or schema objects and runs no
 migrations. It requires the exact compatible schema prepared out of band by the

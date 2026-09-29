@@ -492,3 +492,61 @@ def test_invalid_ingress_health_port_uses_stable_code(capsys, port):
     assert "sensitive-marker" not in captured.out + captured.err
     assert len(connections) == 1
     assert paths == []
+
+
+DISABLED_ENVIRONMENT = {**ENVIRONMENT, "IWIKI_BOT_ENABLED": "false"}
+STATUS_WITHOUT_BOT = "\n".join(
+    (
+        "iwiki-mcp RUNNING pid 10, uptime 0:00:10",
+        "nginx RUNNING pid 11, uptime 0:00:10",
+        "telegram-bot STOPPED Sep 29 12:00 PM",
+    )
+)
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", " false "])
+def test_bot_enabled_only_for_explicit_false(value):
+    assert healthcheck.bot_enabled({"IWIKI_BOT_ENABLED": value}) is False
+    assert healthcheck.bot_enabled({}) is True
+    assert healthcheck.bot_enabled({"IWIKI_BOT_ENABLED": "true"}) is True
+    assert healthcheck.bot_enabled({"IWIKI_BOT_ENABLED": ""}) is True
+
+
+def test_disabled_bot_skips_bot_child_and_heartbeat(capsys):
+    exit_code, captured, _, connections, paths = run_main(
+        capsys,
+        process_result=completed_status(STATUS_WITHOUT_BOT),
+        environment=DISABLED_ENVIRONMENT,
+    )
+
+    assert exit_code == 0
+    assert captured.out == ""
+    assert [(item.host, item.port) for item in connections] == [
+        ("127.0.0.1", 8765),
+        ("192.168.68.123", 8766),
+    ]
+    assert paths == []
+
+
+def test_disabled_bot_still_requires_mcp_and_nginx_children(capsys):
+    status = "telegram-bot RUNNING pid 12, uptime 0:00:10\nnginx RUNNING pid 11, uptime 0:00:10"
+    exit_code, captured, _, connections, paths = run_main(
+        capsys,
+        process_result=completed_status(status),
+        environment=DISABLED_ENVIRONMENT,
+    )
+
+    assert exit_code == 1
+    assert captured.out == "child_not_running\n"
+    assert connections == []
+    assert paths == []
+
+
+def test_enabled_bot_with_stopped_child_fails(capsys):
+    exit_code, captured, _, _, paths = run_main(
+        capsys, process_result=completed_status(STATUS_WITHOUT_BOT)
+    )
+
+    assert exit_code == 1
+    assert captured.out == "child_not_running\n"
+    assert paths == []
