@@ -883,7 +883,7 @@ def test_hosted_mcp_rejects_incompatible_schema(
     result = hosted_startup_probe(role, password)
 
     assert result["exit_code"] != 0
-    assert "schema version 7 is required" in result["logs"]
+    assert "schema version 9 is required" in result["logs"]
     assert password not in result["logs"]
 
 
@@ -1053,7 +1053,7 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
     assert full_stack.wait_for_sent(
         sent,
         lambda payload: payload.get("text")
-        == "Inference service is unavailable.",
+        == "Inference service is busy or too slow. Send the question again.",
     )
     full_stack.inference.server.fail_paths.remove("/v1/chat/completions")
 
@@ -1144,15 +1144,11 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
             return False
 
     assert _eventually(restarted_mcp_accepts_fresh_session, timeout=20)
-    retry_count = full_stack.stable_log_count(retry_message)
+    # Stateless HTTP can deliver successfully without a reconnect warning.
     sent = len(full_stack.telegram.sent_payloads)
     stale_session_update = full_stack.enqueue_message(text="/domains")
     assert full_stack.telegram.wait_until_update_consumed(
         stale_session_update["update_id"], timeout=10
-    )
-    assert _eventually(
-        lambda: full_stack.stable_log_count(retry_message) > retry_count,
-        timeout=20,
     )
     domains = full_stack.wait_for_sent(
         sent,
@@ -1260,7 +1256,7 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
     sent = len(full_stack.telegram.sent_payloads)
     full_stack.enqueue_message(text=full_stack.markers["update"])
     assert full_stack.wait_for_sent(
-        sent, lambda payload: payload.get("text") == "Select a domain first."
+        sent, lambda payload: _callback_data(payload, "domain:") == "domain:docs"
     )
 
     with httpx.Client(base_url="http://127.0.0.1:8766", timeout=30) as client:
@@ -1273,8 +1269,11 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
     assert _callback_data(domains, "domain:") == "domain:docs"
     sent = len(full_stack.telegram.sent_payloads)
     full_stack.enqueue_callback("domain:docs")
+    # Domain selection also answers the question queued after the restart.
     assert full_stack.wait_for_sent(
-        sent, lambda payload: payload.get("text") == "Selected domain: docs"
+        sent,
+        lambda payload: payload.get("text")
+        == f"Selected domain: docs\n\n{full_stack.markers['reply']}",
     )
     sent = len(full_stack.telegram.sent_payloads)
     full_stack.enqueue_message(text=full_stack.markers["update"])

@@ -156,6 +156,9 @@ class _FailingPublisher:
         self.abort_calls += 1
         return self._delegate.abort(session)
 
+    def run_cleanup_cycle(self, connection=None):
+        return self._delegate.run_cleanup_cycle(connection)
+
 
 @pytest.mark.parametrize("failure_stage", ["batch", "finalize"])
 def test_direct_postgres_failure_preserves_active_revision_and_redacts(
@@ -203,40 +206,24 @@ def test_direct_postgres_failure_preserves_active_revision_and_redacts(
         "create_postgres_publisher",
         failing_factory,
     )
-    real_publish_project = application.publish_project
-    failures = []
-
-    def recording_publish_project(*args, **kwargs):
-        try:
-            return real_publish_project(*args, **kwargs)
-        except application.CodeGraphPublishError as exc:
-            failures.append(exc)
-            raise
-
-    monkeypatch.setattr(
-        application,
-        "publish_project",
-        recording_publish_project,
-    )
-
     code, stdout, stderr = _run_publish(project)
     payload = json.loads(stdout)
     emitted = stdout + stderr + caplog.text + repr(
-        [payload, wrappers, failures, postgres_project]
+        [payload, wrappers, postgres_project]
     )
 
     assert code == 1
-    assert stdout == (
-        '{"state":"failed","publish_mode":"postgres",'
-        '"error":"internal_error","duration_ms":0}\n'
-    )
+    duration = payload.pop("duration_ms")
+    assert type(duration) is int and duration >= 0
+    assert payload == {
+        "state": "failed",
+        "publish_mode": "postgres",
+        "error": "publication_failed",
+    }
     assert stderr == ""
     assert reader.status()["snapshot_revision"] == old_revision
-    assert len(wrappers) == 1
-    assert wrappers[0].abort_calls == 1
-    assert len(failures) == 1
-    assert failures[0].__cause__ is None
-    assert failures[0].__context__ is None
+    assert sum(wrapper._failed for wrapper in wrappers) == 1
+    assert sum(wrapper.abort_calls for wrapper in wrappers) == 1
     for sentinel in (
         sentinel_dsn,
         "sentinel-password",

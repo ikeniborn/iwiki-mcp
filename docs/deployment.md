@@ -32,6 +32,21 @@ Inference, remote iwiki, and PostgreSQL remain direct. Compose defines no standa
 proxy environment variables, inference and remote-iwiki HTTPX clients use
 `trust_env=False`, and psycopg connects directly to PostgreSQL.
 
+## Memory use of pooled database connections
+
+Version `0.7.311` registers pgvector adapters once per physical PostgreSQL connection.
+Repeated registration creates fresh adapter classes retained by psycopg's process-wide
+cache. Registering on every store checkout therefore accumulated memory during normal
+requests, even after Python garbage collection. A replacement connection registers its
+own adapters, and failed registration remains retryable. No database migration or
+allocator setting is required.
+
+Deploy the corrected image with the normal service restart and verify health, search,
+and writes. Compare RSS over repeated requests and the following day. Restarting the
+previous image releases accumulated memory temporarily; it does not remove the cause.
+Do not impose a small hard memory limit on a running, oversized process: an OOM kill
+can interrupt requests. Size any later limit from observed corrected-runtime peaks.
+
 ## Operator files and templates
 
 Keep production runtime configuration outside the checkout:

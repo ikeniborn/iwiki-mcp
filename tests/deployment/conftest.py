@@ -217,7 +217,10 @@ class _InferenceHandler(BaseHTTPRequestHandler):
             }
         )
         if self.path == "/v1/models":
-            self._send(200, {"data": [{"id": self.server.chat_model}]})
+            self._send(200, {"data": [
+                {"id": self.server.chat_model},
+                {"id": "acceptance-transcription"},
+            ]})
         else:
             self._send(404, {"error": "not_found"})
 
@@ -249,7 +252,7 @@ class _InferenceHandler(BaseHTTPRequestHandler):
         elif self.path == "/v1/chat/completions":
             content = (
                 self.server.preview
-                if b"Produce Markdown" in body
+                if b"Produce Markdown" in body or b"You draft wiki Markdown" in body
                 else self.server.reply
             )
             self._send(
