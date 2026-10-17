@@ -416,7 +416,11 @@ class PostgresStore:
     @contextmanager
     def _connect(self):
         with self._connection_factory() as connection:
-            register_vector(connection)
+            # pgvector creates adapter classes retained by psycopg's global
+            # cache. Register once per physical connection, not per checkout.
+            if not getattr(connection, "_iwiki_vector_registered", False):
+                register_vector(connection)
+                connection._iwiki_vector_registered = True
             yield connection
 
     def create_wiki(self, slug: str) -> None:
