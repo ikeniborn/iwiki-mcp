@@ -32,6 +32,9 @@ jobs:
       IWIKI_TEST_POSTGRES_DSN: postgresql://postgres:pgtest@127.0.0.1:5432/iwiki_test
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Rollback tests archive the pinned pre-migration source commit.
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'

@@ -7,6 +7,9 @@ The `PostgreSQL tests` GitHub Actions workflow runs on pull requests, pushes to
 and a disposable PostgreSQL 16 service with pgvector. Dependencies come from
 `uv.lock` through `uv sync --frozen --extra dev`.
 
+Checkout includes the full Git history because rollback compatibility tests
+archive a pinned historical source commit. A shallow checkout cannot run them.
+
 The job creates the `vector` extension in `iwiki_test`, sets
 `IWIKI_TEST_POSTGRES_DSN`, and runs every test in `tests/postgres`. It does not
 use production credentials or connect to a production database. The service
