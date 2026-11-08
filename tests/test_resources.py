@@ -4,6 +4,19 @@ from iwiki_mcp.resources import AUTHORING_RULES
 from tests.user_docs import user_docs
 
 
+def test_agent_contract_preserves_configured_domain_case():
+    root = Path(__file__).parents[1]
+    contracts = [AUTHORING_RULES]
+    contracts.extend(
+        (root / relative).read_text(encoding="utf-8")
+        for relative in ("templates/AGENTS.md.snippet", "templates/CLAUDE.md.snippet")
+    )
+    for contract in contracts:
+        assert "Preserve the exact spelling and letter case" in contract
+        assert "Do not lowercase or casefold domain names." in contract
+        assert "`familyTraffic`" in contract
+
+
 def test_authoring_rules_cover_section_format():
     text = AUTHORING_RULES.lower()
     assert "description" in text          # description is the authored summary
