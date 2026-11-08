@@ -57,14 +57,15 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     release_replace = first.project_dir / ".writer-release-replace"
     verify_pending = first.project_dir / ".writer-verify-pending"
     release_verify = first.project_dir / ".writer-release-verify"
-    stop_reader = first.project_dir / ".reader-stop"
+    stop_reader = context.Event()
+    observed_old = context.Event()
+    observed_new = context.Event()
     result_reader, result_writer = context.Pipe(duplex=False)
     observation_reader, observation_writer = context.Pipe(duplex=False)
 
     def reader():
         observations = []
-        deadline = time.monotonic() + 15
-        while not stop_reader.exists() and time.monotonic() < deadline:
+        while not stop_reader.is_set():
             try:
                 with closing(sqlite3.connect(
                     f"file:{second.paths.database.as_posix()}?mode=ro",
@@ -84,7 +85,15 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
                         )
                     )
                     connection.execute("ROLLBACK")
-                observations.append((repository, names))
+                observation = (repository, names)
+                # Keep the pipe payload bounded while retaining every distinct read.
+                if observation not in observations:
+                    observations.append(observation)
+                if repository is not None:
+                    if repository[1] == old:
+                        observed_old.set()
+                    else:
+                        observed_new.set()
             except Exception as exc:
                 observations.append(("error", type(exc).__name__))
             # Publication refuses to replace the canonical database while a
@@ -144,9 +153,10 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
         while not entered.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert entered.exists()
-        started = time.monotonic()
+        assert observed_old.wait(timeout=10)
         competing = second.index(force=True)
-        elapsed = time.monotonic() - started
+        # The competitor must return while publication is still blocked.
+        assert not release_replace.exists()
         release_replace.write_text("release", encoding="utf-8")
         deadline = time.monotonic() + 20
         while not verify_pending.exists() and time.monotonic() < deadline:
@@ -154,11 +164,12 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
         assert verify_pending.exists()
         during = [second.status() for _attempt in range(3)]
         guarded = [second.query_guard() for _attempt in range(3)]
+        assert observed_new.wait(timeout=10)
     finally:
         release_replace.write_text("release", encoding="utf-8")
         release_verify.write_text("release", encoding="utf-8")
         writer_process.join(timeout=10)
-        stop_reader.write_text("stop", encoding="utf-8")
+        stop_reader.set()
         reader_process.join(timeout=10)
         for process in (writer_process, reader_process):
             if process.is_alive():
@@ -175,8 +186,6 @@ def test_competing_writer_is_busy_and_reader_sees_complete_revision(
     observation_reader.close()
     after = second.status()
     assert competing["code"] == "busy"
-    # Bounded by the two-second rebuild budget, never by the paused publication.
-    assert elapsed < 8
     assert {item["state"] for item in during} == {"rebuilding"}
     assert {item["revision"] for item in during} == {
         writer_result["status"]["revision"]

@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 import weakref
 
 import pytest
@@ -1307,23 +1308,43 @@ def test_bounded_rebuild_checks_one_shared_deadline_before_publication(
     seed_runtime, monkeypatch
 ):
     runtime = seed_runtime.with_state(
-        "dirty", auto_rebuild="bounded", max_rebuild_seconds=1
+        "dirty", auto_rebuild="bounded", max_rebuild_seconds=30
     )
-    real_parse = runtime.runtime._indexer._parse
+    indexer = runtime.runtime._indexer
+    real_parse = indexer._parse
+    jobs = []
+    now = time.monotonic()
+    clock = SimpleNamespace(monotonic=lambda: now, sleep=time.sleep)
+    # Replace only the indexer's clock; thread waits retain the real clock.
+    monkeypatch.setattr(codegraph_indexer, "time", clock)
 
-    def slow_parse(discovered, config):
-        time.sleep(1.05)
-        return real_parse(discovered, config)
+    def expired_parse(discovered, config):
+        nonlocal now
+        parsed = real_parse(discovered, config)
+        job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
+        assert job is not None
+        jobs.append(job)
+        # Cross the original request's deadline, without sleeping or cancelling.
+        now = job.build_deadline + 1
+        return parsed
 
-    monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
+    monkeypatch.setattr(indexer, "_parse", expired_parse)
 
     out = runtime.query_guard()
-    runtime.runtime.join_workers(timeout=3)
+    runtime.runtime.join_workers(timeout=10)
+    assert len(jobs) == 1
+    job = jobs[0]
     settled = runtime.status()
 
-    assert out["state"] == "rebuilding"
+    # The worker may unwind before or after query_guard reads its status.
+    assert out["state"] in {"dirty", "rebuilding"}
     assert out["fresh"] is False
     assert out["results"] == []
+    assert job is not None
+    assert not job.thread.is_alive()
+    assert job.result["code"] == "busy"
+    assert not job.control.cancelled.is_set()
+    assert not job.control.publication_attempted.is_set()
     assert settled["state"] == "dirty"
     assert runtime.build_attempts == 1
     assert not list(runtime.paths.database.parent.glob(
@@ -4747,63 +4768,66 @@ def test_two_query_guard_style_callers_join_without_cancelling_the_starter(
     """
     runtime = seed_runtime
 
-    store = runtime.runtime._indexer.store
-    real_publish = store.publish_metadata
+    build_paused = threading.Event()
+    release_build = threading.Event()
+    real_parse = runtime.runtime._indexer._parse
 
-    def slow_publish(*args, **kwargs):
-        time.sleep(1.5)
-        return real_publish(*args, **kwargs)
+    def paused_parse(*args, **kwargs):
+        build_paused.set()
+        assert release_build.wait(timeout=30)
+        return real_parse(*args, **kwargs)
 
-    monkeypatch.setattr(store, "publish_metadata", slow_publish)
-
+    monkeypatch.setattr(runtime.runtime._indexer, "_parse", paused_parse)
     starter_result: dict[str, object] = {}
 
     def call_starter():
         starter_result["answer"] = runtime.runtime._index_with_deadline(
             force=True,
             languages=None,
-            build_deadline=time.monotonic() + 10,
-            wait_deadline=time.monotonic() + 10,
+            build_deadline=time.monotonic() + 60,
+            wait_deadline=time.monotonic() + 60,
             restore_prior_on_abort=True,
             cancel_on_wait=True,
         )
 
     starter_thread = threading.Thread(target=call_starter)
     starter_thread.start()
-
-    job = None
-    poll_deadline = time.monotonic() + 5
-    while time.monotonic() < poll_deadline:
+    try:
+        assert build_paused.wait(timeout=10)
         job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
-        if job is not None and job.thread is not None and job.thread.is_alive():
-            break
-        time.sleep(0.01)
-    assert job is not None
-    assert isinstance(job, _BuildJob)  # the live job, not a snapshot
-    assert job.thread.is_alive()
-    assert job.explicit is False  # cancel_on_wait=True -> query-guard-shaped
+        assert isinstance(job, _BuildJob)
+        assert job.thread.is_alive()
+        assert job.explicit is False
 
-    # A second, short-budget query-guard-shaped caller joins the same job
-    # (matching force/languages/explicit) and gives up quickly.
-    joined = runtime.runtime._index_with_deadline(
-        force=True,
-        languages=None,
-        build_deadline=time.monotonic() + 0.5,
-        wait_deadline=time.monotonic() + 0.5,
-        restore_prior_on_abort=True,
-        cancel_on_wait=True,
-    )
+        # Observe the real registry result: busy alone also passes on refusal.
+        start_results = []
+        real_start = _BUILD_WORKERS.start
 
-    assert joined["code"] == "busy"
-    assert sum(
-        thread.name == "iwiki-code-graph-build"
-        for thread in threading.enumerate()
-    ) == 1
-    # The joiner's own expiry must not have cancelled the shared build.
-    assert job.control.cancelled.is_set() is False
+        def recording_start(*args, **kwargs):
+            result = real_start(*args, **kwargs)
+            start_results.append(result)
+            return result
 
-    starter_thread.join(timeout=15)
+        monkeypatch.setattr(_BUILD_WORKERS, "start", recording_start)
+        joined = runtime.runtime._index_with_deadline(
+            force=True,
+            languages=None,
+            build_deadline=time.monotonic() + 60,
+            wait_deadline=time.monotonic(),
+            restore_prior_on_abort=True,
+            cancel_on_wait=True,
+        )
 
+        assert start_results == [(job, False)]
+        assert joined["code"] == "busy"
+        assert job.control.cancelled.is_set() is False
+    finally:
+        release_build.set()
+        starter_thread.join(timeout=10)
+        runtime.runtime.join_workers(timeout=10)
+
+    assert not starter_thread.is_alive()
+    assert not job.thread.is_alive()
     assert job.control.cancelled.is_set() is False
     assert starter_result["answer"]["state"] == "ready"
     assert job.state == "ready"

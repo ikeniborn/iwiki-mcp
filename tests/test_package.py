@@ -25,7 +25,7 @@ def test_package_metadata_rejects_mcp_v2():
 
 
 def test_code_graph_benchmark_package_version():
-    assert iwiki_mcp.__version__ == "0.7.312"
+    assert iwiki_mcp.__version__ == "0.7.313"
 
 
 def test_user_docs_describe_python_code_graph_mvp_contract():
@@ -374,6 +374,8 @@ def test_publisher_operator_docs_define_safe_scheduled_publication_contract():
         if path.suffix in {".service", ".timer"}
         or path.parts[:2] == (".github", "workflows")
     )
-    # Baseline from f1e5eb0; keep known pre-existing deployment files explicit.
-    allowed_preexisting_artifacts = frozenset()
+    # Keep pre-existing CI explicit; scheduled publication ships no units.
+    allowed_preexisting_artifacts = frozenset({
+        Path(".github/workflows/postgres.yml"),
+    })
     assert tracked_artifacts == allowed_preexisting_artifacts
