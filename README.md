@@ -176,6 +176,7 @@ sibling named `<page>.ru.md`.
 |---|---|
 | [Storage and transport modes](docs/storage-modes.md) | Git stdio, PostgreSQL stdio, hosted Streamable HTTP, the supported container, session lifetime, and the PostgreSQL MCP tool contract. |
 | [PostgreSQL provisioning](docs/postgres-setup.md) | Least-privilege roles, admin CLI, backup/restore, migration v4/v5, and rollback. |
+| [PostgreSQL CI](docs/postgres-ci.md) | Disposable database tests, JUnit evidence, and rejection of skipped coverage. |
 | [Wiki base, domains, and binding](docs/wiki-model.md) | Base layout, the graph cache and links, `.iwiki.toml` binding, and Git sync of the base. |
 | [Python code graph](docs/code-graph.md) | The optional local code graph: configuration, build jobs, read tools, and per-language coverage. |
 | [Code graph publication](docs/code-graph-publishing.md) | Distributed publication modes, the publisher CLI, scheduling, and SQLite snapshot profiles. |
