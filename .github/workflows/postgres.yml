@@ -10,8 +10,33 @@ permissions:
   contents: read
 
 jobs:
-  postgres:
-    name: PostgreSQL integration
+  selection:
+    name: Select PostgreSQL coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run_postgres: ${{ steps.scope.outputs.run_postgres }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Test change selection
+        run: python -m unittest discover -s tests/ci -p test_postgres_selection.py
+      - name: Select database coverage
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/select_postgres_ci.py
+
+  database:
+    name: PostgreSQL suite
+    needs: selection
+    if: needs.selection.outputs.run_postgres == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -65,3 +90,24 @@ jobs:
           name: postgres-junit
           path: reports/postgres.xml
           if-no-files-found: error
+
+  postgres:
+    # Keep the existing required-check name; selection failures must not look skipped.
+    name: PostgreSQL integration
+    needs: [selection, database]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require selected coverage
+        env:
+          SELECTION_RESULT: ${{ needs.selection.result }}
+          REQUIRED: ${{ needs.selection.outputs.run_postgres }}
+          DATABASE_RESULT: ${{ needs.database.result }}
+        run: |
+          test "$SELECTION_RESULT" = success
+          case "$REQUIRED:$DATABASE_RESULT" in
+            true:success) echo "PostgreSQL coverage passed; JUnit gate rejected skips." ;;
+            false:skipped) echo "PostgreSQL not required for this change; no database started." ;;
+            *) echo "Required PostgreSQL coverage or selection failed." >&2; exit 1 ;;
+          esac
