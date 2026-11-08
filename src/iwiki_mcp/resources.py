@@ -26,6 +26,13 @@ AUTHORING_RULES: str = """\
 
 ## Search and maintenance tools
 
+- Preserve the exact spelling and letter case of domain names from `.iwiki.toml`
+  in every tool argument and wiki link.
+- Do not lowercase or casefold domain names.
+- For example, pass `familyTraffic` exactly; `familytraffic` is a different identifier.
+- Normalize only the scope representation, such as a legacy scalar `write` into a list.
+- Before diagnosing `domain_not_granted`, compare submitted names with `.iwiki.toml`
+  character for character.
 - Read search exposes exactly `hybrid`, `lexical`, and `semantic`. The omitted mode
   comes from `IWIKI_SEARCH_MODE` (default `hybrid`); an explicit `wiki_search.mode`
   wins. `vector` is an internal embedding term, not a public mode.
