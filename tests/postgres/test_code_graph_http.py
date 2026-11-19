@@ -138,6 +138,8 @@ def test_hosted_context_never_returns_source(hosted_ready_code):
 def test_hosted_reads_report_missing_before_publication(hosted_empty_code):
     from iwiki_mcp import server
 
+    polled = server.wiki_code_status(job_id="unknown", job_only=True)
+    assert polled["warnings"] == ["job_unknown"]
     assert server.wiki_code_status()["state"] == "missing"
     assert server.wiki_code_search("needle")["results"] == []
 
@@ -429,6 +431,7 @@ def test_fail_closed_option_refuses_a_defaulted_code_read(
     }
 
     assert server.wiki_code_status() == refusal
+    assert server.wiki_code_status(job_id="unknown", job_only=True) == refusal
     assert server.wiki_code_search("parse") == refusal
     assert server.wiki_code_context(["py:module:" + "a" * 64]) == refusal
     assert hosted_session.readers == []
@@ -464,3 +467,31 @@ def test_wiki_status_and_bind_report_the_session_binding(
     assert bound["binding_source"] == "session"
     assert bound["session_id"] == "session-a"
     assert server.wiki_status()["binding_source"] == "session"
+
+
+@pytest.mark.parametrize(("source", "warnings"), [
+    ("session", ["job_unknown"]),
+    ("token_default", ["job_unknown", "binding_defaulted"]),
+])
+def test_hosted_job_only_reports_provenance_without_a_reader(hosted_session, source, warnings):
+    from iwiki_mcp import server
+
+    hosted_session(source)
+    assert server.wiki_code_status(job_id="unknown", job_only=True) == {
+        "binding_source": source, "warnings": warnings,
+    }
+    assert hosted_session.readers == []
+
+
+@pytest.mark.postgres_integration
+def test_hosted_job_only_uses_the_selected_http_session(hosted_runtime):
+    from starlette.testclient import TestClient
+    from tests.postgres.test_code_graph_contract import _McpRoute, _open_session
+
+    with TestClient(hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session = _open_session(client, hosted_runtime.token)
+        route = _McpRoute(client, hosted_runtime.token, session)
+        assert route.call("wiki_bind", {"primary": "docs"})["binding_source"] == "session"
+        assert route.call("wiki_code_status", {"job_only": True, "job_id": "unknown"}) == {
+            "binding_source": "session", "warnings": ["job_unknown"],
+        }

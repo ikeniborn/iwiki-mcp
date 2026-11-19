@@ -1,12 +1,14 @@
 """FastMCP Unit B code-graph tool integration."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from importlib.metadata import version
 import json
 from pathlib import Path
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -417,6 +419,9 @@ def test_wiki_code_status_reports_a_failed_publication_as_a_failed_job(
     # warning rather than leaving the caller to cross-reference `job`.
     assert polled["state"] == "ready"
     assert "publication_failed" in polled["warnings"]
+    assert server.wiki_code_status(job_id=answer["job"]["id"], job_only=True) == {
+        "job": polled["job"], "warnings": ["publication_failed"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -921,7 +926,8 @@ async def test_fastmcp_registry_has_exact_code_tools():
     # A new parameter is not a new tool: the job handle is optional and the
     # schema has to say what it is, since the answer never repeats it.
     status_properties = tools["wiki_code_status"].inputSchema["properties"]
-    assert set(status_properties) == {"job_id"}
+    assert set(status_properties) == {"job_id", "job_only"}
+    assert status_properties["job_only"]["default"] is False
     assert status_properties["job_id"]["default"] is None
     assert "wiki_code_index" in status_properties["job_id"]["description"]
     assert "job_unknown" in status_properties["job_id"]["description"]
@@ -1342,6 +1348,8 @@ class _FakeRemoteSession:
 
     async def call_tool(self, name, arguments=None):
         self.calls.append(name)
+        if name == "wiki_code_status" and isinstance(self._status, Exception):
+            raise self._status
         return _FakeRemoteResult(
             self._status if name == "wiki_code_status" else {"state": "ready"}
         )
@@ -1590,3 +1598,209 @@ def test_unknown_job_id_warns_and_keeps_the_graph_answer(remote_read_binding):
     assert "job" not in answer
     assert "job_unknown" in answer["warnings"]
     assert "error" not in answer
+
+
+async def _dispatch(name, **arguments):
+    content = await server.mcp.call_tool(name, arguments)
+    return json.loads(content[0].text)
+
+
+@pytest.fixture
+def running_job(remote_read_binding, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    original = codegraph_store.CodeGraphStore.publish_metadata
+
+    def hold_build(store, *args, **kwargs):
+        entered.set()
+        assert release.wait(15)
+        return original(store, *args, **kwargs)
+
+    monkeypatch.setattr(codegraph_store.CodeGraphStore, "publish_metadata", hold_build)
+    started = server.wiki_code_index(force=True, wait_seconds=0)
+    try:
+        assert entered.wait(5)
+        yield started["job"]["id"]
+    finally:
+        release.set()
+        runtime_module._BUILD_WORKERS.join(timeout=10)
+
+
+async def test_job_only_returns_while_combined_poll_waits_for_remote(
+    remote_read_binding, running_job, monkeypatch,
+):
+    reader_entered, release_reader = threading.Event(), threading.Event()
+    original_call = remote_read_binding.call_tool
+    reader_calls = []
+    original_reader = application_module.code_reader
+
+    def count_reader(binding):
+        reader_calls.append(binding)
+        return original_reader(binding)
+
+    async def hold_remote(name, arguments=None):
+        if name == "wiki_code_status":
+            reader_entered.set()
+            assert release_reader.wait(10)
+        return await original_call(name, arguments)
+
+    monkeypatch.setattr(application_module, "code_reader", count_reader)
+    monkeypatch.setattr(remote_read_binding, "call_tool", hold_remote)
+    handle = running_job
+    combined = asyncio.create_task(_dispatch("wiki_code_status", job_id=handle))
+    try:
+        assert await asyncio.to_thread(reader_entered.wait, 5)
+        for name in ("index_and_publish", "publish_snapshot"):
+            monkeypatch.setattr(application_module, name, lambda *a, **kw: pytest.fail())
+        polled = await asyncio.wait_for(
+            _dispatch("wiki_code_status", job_id=handle, job_only=True), timeout=2,
+        )
+        assert set(polled) == {"job"}
+        assert polled["job"]["id"] == handle
+        assert polled["job"]["state"] == "running"
+        assert len(reader_calls) == 1
+        assert not combined.done()
+    finally:
+        release_reader.set()
+        await combined
+    assert remote_read_binding.calls.count("wiki_code_status") == 1
+
+
+@pytest.mark.parametrize(("remote", "code", "attached"), [
+    ({"error": "stale_snapshot", "binding_source": "session", "primary": "project"},
+     "stale_snapshot", True),
+    ({"error": "missing_snapshot", "binding_source": "session", "warnings": ["older"]},
+     "missing_snapshot", True),
+    (TimeoutError(), "remote_mcp_failed", True),
+    (ConnectionRefusedError(), "remote_mcp_failed", True),
+    ({"error": "remote_mcp_failed", "reason": "connect"}, "remote_mcp_failed", False),
+    ({"error": "stale_snapshot"}, "stale_snapshot", False),
+    ({"error": "stale_snapshot", "binding_source": "token_default"}, "stale_snapshot", False),
+    ({"error": "stale_snapshot", "binding_source": "session", "primary_substituted": True},
+     "stale_snapshot", False),
+    ({"error": "stale_snapshot", "binding_source": "session", "domain": "other"},
+     "stale_snapshot", False),
+    ({"error": "missing_snapshot", "binding_source": "session", "primary": "other"},
+     "missing_snapshot", False),
+    ({"error": "missing_snapshot", "binding_source": "session", "warnings": ["binding_defaulted"]},
+     "missing_snapshot", False),
+    ({"error": "remote_mcp_failed", "reason": "http_status", "status": 403,
+      "binding_source": "session"}, "remote_mcp_failed", False),
+    ({"error": "access_denied", "binding_source": "session"}, "access_denied", False),
+    ({"error": "unsafe_path", "binding_source": "session"}, "unsafe_path", False),
+    ({"error": "unexpected", "binding_source": "session"}, "unexpected", False),
+    ({"state": "ready", "binding_source": "token_default", "job": {"id": "foreign"}}, None, False),
+    ({"state": "missing", "code": "access_denied"}, "access_denied", False),
+    ({}, None, False),
+    ({"hint": "please retry"}, None, False),
+    ({"state": "ready", "fresh": 1}, None, False),
+    ({"state": "ready", "fresh": False}, None, False),
+    ({"error": "access_denied", "code": "missing_snapshot", "binding_source": "session"},
+     "missing_snapshot", False),
+    ({"error": "code graph snapshot is stale", "code": "stale_snapshot",
+      "binding_source": "session"}, "stale_snapshot", True),
+])
+async def test_combined_job_requires_verified_snapshot_or_transport_outage(
+    remote_read_binding, running_job, remote, code, attached,
+):
+    handle = running_job
+    remote_read_binding._status = remote
+    result = await _dispatch("wiki_code_status", job_id=handle)
+    assert result.get("code") == code
+    if code is not None and not (isinstance(remote, dict) and "error" not in remote):
+        assert result["error"]
+        assert result["fresh"] is False
+    if isinstance(remote, dict):
+        for field in ("reason", "status", "warnings", "domain", "binding_source"):
+            if field in remote:
+                assert result[field] == remote[field]
+    if attached:
+        assert result["job"]["id"] == handle
+        assert result["job"]["state"] == "running"
+    else:
+        assert "job" not in result
+
+
+def test_job_only_validates_id_and_scope_before_lookup(
+    remote_read_binding, seed_binding, monkeypatch
+):
+    handle = server.wiki_code_index(force=True)["job"]["id"]
+    assert server.wiki_code_status(job_only=True)["field"] == "job_id"
+    unknown = {"warnings": ["job_unknown"]}
+    assert server.wiki_code_status(job_only=True, job_id="unknown") == unknown
+    other = Path(seed_binding.project_dir).parent / "other-checkout"
+    other.mkdir()
+    for foreign in (replace(seed_binding, project_dir=str(other)),
+                    replace(seed_binding, primary="backend")):
+        monkeypatch.setattr(server.base, "resolve_binding", lambda: foreign)
+        assert server.wiki_code_status(job_only=True, job_id=handle) == unknown
+
+    def rejected():
+        raise server.base.BaseError("rejected binding")
+
+    monkeypatch.setattr(server.base, "resolve_binding", rejected)
+    result = server.wiki_code_status(job_only=True, job_id=handle)
+    assert result["code"] == "not_configured"
+    assert "job" not in result
+    assert not remote_read_binding.calls
+
+
+@pytest.mark.parametrize("bad_bind", [
+    {"primary": "elsewhere", "binding_source": "session"},
+    {"primary": "project", "binding_source": "token_default"},
+    {"primary": "project", "primary_substituted": True},
+    {"error": "stale_snapshot", "binding_source": "session"},
+])
+def test_combined_status_honors_the_remote_bind_before_reading(
+    remote_read_binding, monkeypatch, bad_bind,
+):
+    handle = server.wiki_code_index(force=True)["job"]["id"]
+    calls = []
+
+    async def refused(name, arguments=None):
+        calls.append(name)
+        return _FakeRemoteResult(bad_bind)
+
+    monkeypatch.setattr(remote_read_binding, "call_tool", refused)
+    result = server.wiki_code_status(job_id=handle)
+    assert result["error"]
+    assert "job" not in result
+    assert calls == ["wiki_bind"]
+
+
+def test_job_only_evicted_and_unknown_handles_have_the_same_response(
+    remote_read_binding, monkeypatch,
+):
+    monkeypatch.setattr(runtime_module, "_TERMINAL_HISTORY", 1)
+    first = server.wiki_code_index(force=True)["job"]["id"]
+    second = server.wiki_code_index(force=True)["job"]["id"]
+
+    assert server.wiki_code_status(job_only=True, job_id=second)["job"]["id"] == second
+    for handle in (first, "unknown"):
+        result = server.wiki_code_status(job_only=True, job_id=handle)
+        assert result == {"warnings": ["job_unknown"]}
+
+
+async def test_remote_bind_refusal_survives_a_cleanup_timeout(
+    remote_read_binding, running_job, monkeypatch,
+):
+    class Group(Exception):
+        def __init__(self, exceptions):
+            self.exceptions = exceptions
+
+    class ClosingConnection(_FakeRemoteConnection):
+        async def __aexit__(self, _kind, failure, _traceback):
+            if failure is not None:
+                raise Group((TimeoutError(), failure))
+
+    async def rejected(name, arguments=None):
+        assert name == "wiki_bind"
+        return _FakeRemoteResult({"error": "access_denied"})
+
+    monkeypatch.setattr(remote_read_binding, "call_tool", rejected)
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.mcp_adapter._official_session",
+        lambda url, headers: ClosingConnection(remote_read_binding),
+    )
+    status = await _dispatch("wiki_code_status", job_id=running_job)
+    assert status["code"] == "access_denied"
+    assert "job" not in status

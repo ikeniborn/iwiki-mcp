@@ -365,6 +365,14 @@ class PublishedSnapshotReader:
     def status(self) -> dict[str, object]:
         return _normalized_published_answer(self._reader.status())
 
+    def status_for_job(self, primary: str) -> tuple[dict[str, object], bool]:
+        """Keep job authorization evidence separate from the public snapshot answer."""
+        if isinstance(self._reader, McpCodeGraphReader):
+            raw, eligible = self._reader.status_for_job(primary)
+            return _normalized_published_answer(raw), eligible
+        status = self.status()
+        return status, "error" not in status and status.get("domain", primary) == primary
+
     def search(
         self,
         query: str,
@@ -757,18 +765,25 @@ def publish_snapshot(
     runtime: codegraph_runtime.CodeGraphRuntime,
     publisher: SnapshotPublisher,
     config,
+    control: codegraph_indexer.BuildControl | None = None,
 ) -> dict[str, object]:
+    if control is not None:
+        control.enter_phase("export")
     exported = runtime.export_snapshot()
     if isinstance(exported, dict):
         return exported
     header, rows = exported
     session = None
     try:
+        if control is not None:
+            control.enter_phase("publish_begin")
         opened = publisher.begin(header)
         if isinstance(opened, dict):
             return opened
         session = opened
         max_rows, max_bytes = effective_batch_bounds(session, config)
+        if control is not None:
+            control.enter_phase("transfer")
         for batch in iter_snapshot_batches(
             rows,
             max_rows=max_rows,
@@ -778,6 +793,10 @@ def publish_snapshot(
             if accepted.get("accepted") is not True:
                 _abort_preserving_failure(publisher, session)
                 return accepted
+            if control is not None:
+                control.acknowledge_batch(batch.kind, batch.ordinal, batch.byte_count)
+        if control is not None:
+            control.enter_phase("finalize")
         finalized = publisher.finalize(session)
         snapshot_revision = finalized.get("snapshot_revision")
         if finalized.get("state") != "ready":
@@ -803,6 +822,7 @@ def index_and_publish(
     environ: Mapping[str, str] | None = None,
     redact_failures: bool = False,
     wait_seconds: float | None = None,
+    _observe_job: codegraph_runtime._JobObserver | None = None,
 ) -> CodeGraphPublishOutcome:
     """Build the project's graph and publish the snapshot it produced.
 
@@ -848,7 +868,7 @@ def index_and_publish(
             else publisher_for(binding, config, environ=environ)
         )
 
-        def publish() -> dict[str, object]:
+        def publish(control: codegraph_indexer.BuildControl) -> dict[str, object]:
             """Publish the snapshot the build just produced.
 
             Runs on the build worker's thread, after a `ready` build and
@@ -857,7 +877,7 @@ def index_and_publish(
             to publish to.
             """
             assert config is not None and publisher is not None
-            return publish_snapshot(runtime, publisher, config)
+            return publish_snapshot(runtime, publisher, config, control)
 
         # `CodeGraphQueryError` (raised by `runtime.index`'s own `wait_seconds`
         # validation) is deliberately not caught here: it falls through to
@@ -871,6 +891,7 @@ def index_and_publish(
             languages=languages,
             wait_seconds=wait_seconds,
             publish=None if publisher is None else publish,
+            **({"_observe_job": _observe_job} if _observe_job is not None else {}),
         ))
         publication: dict[str, object] = indexed.pop("publication", {})
     except (
@@ -921,6 +942,7 @@ def publish_project(
     project_dir: str,
     *,
     environ: Mapping[str, str] | None = None,
+    _observe_job: codegraph_runtime._JobObserver | None = None,
 ) -> CodeGraphPublishOutcome:
     root = checkout_root(project_dir)
     binding = wiki_base.resolve_storage_binding(str(root), environ=environ)
@@ -928,4 +950,5 @@ def publish_project(
         binding,
         environ=environ,
         redact_failures=True,
+        **({"_observe_job": _observe_job} if _observe_job is not None else {}),
     )

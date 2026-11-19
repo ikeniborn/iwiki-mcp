@@ -5,11 +5,15 @@ import argparse
 from datetime import date, datetime
 import hashlib
 import json
+import logging
 import os
+import select
 from pathlib import Path
 import subprocess
 import sys
-from typing import Mapping, TextIO
+import threading
+import time
+from typing import Callable, Mapping, TextIO
 
 import psycopg
 from psycopg.conninfo import make_conninfo
@@ -321,6 +325,102 @@ def _write_code_failure(
     print(f"iwiki-mcp: {messages[error]} (code={error})", file=stream)
 
 
+class _CodePublishProgress:
+    """Render one invocation's job on a dedicated stderr consumer."""
+
+    _COUNTERS = ("files_parsed", "files_total", "batches_acknowledged", "bytes_acknowledged")
+
+    def __init__(self, stream: TextIO, *, clock: Callable[[], float] = time.monotonic):
+        self._stream = stream
+        self._clock = clock
+        self._last_phase = None
+        self._last_counts = None
+        self._last_output = 0.0
+        self._detached = threading.Event()
+
+    def _write_line(self, line: str) -> bool:
+        if self._stream is sys.__stderr__ and os.name == "posix":
+            # A daemon blocked inside the interpreter's stderr wrapper can
+            # prevent shutdown. Write directly for every inherited descriptor.
+            fd = self._stream.fileno()
+            if hasattr(select, "poll"):
+                writable = select.poll()
+                writable.register(fd, select.POLLOUT)
+                while not writable.poll(50):
+                    if self._detached.is_set():
+                        return False
+            if self._detached.is_set():
+                return False
+            data = line.encode("ascii")
+            return os.write(fd, data) == len(data)
+        self._stream.write(line)
+        self._stream.flush()
+        return True
+
+    def emit(self, job: dict) -> bool:
+        progress = job["progress"]
+        phase = (job["state"], progress["phase"])
+        counts = {key: progress[key] for key in self._COUNTERS if key in progress}
+        now = self._clock()
+        if phase == self._last_phase and (
+            counts == self._last_counts or now - self._last_output < 1
+        ):
+            return True
+        fields = {
+            "job": job["id"],
+            "state": job["state"],
+            "phase": progress["phase"],
+            **counts,
+            "updated_at": progress["updated_at"],
+        }
+        line = "code graph progress " + " ".join(f"{key}={value}" for key, value in fields.items())
+        try:
+            if not self._write_line(line + "\n"):
+                return False
+        except Exception:
+            # Only this sink is optional. Preserve final-result and operation errors.
+            return False
+        self._last_phase = phase
+        self._last_counts = counts
+        self._last_output = self._clock()
+        return True
+
+    def observe(self, job):
+        wake = threading.Event()
+
+        def consume():
+            cursor = 0
+            while True:
+                active = job
+                if active is None:
+                    return
+                boundaries, latest = active.progress_observations(cursor)
+                del active
+                cursor += len(boundaries)
+                for descriptor in (*boundaries, latest):
+                    if job is None or not self.emit(descriptor):
+                        return
+                if latest["state"] != "running":
+                    return
+                wake.wait(0.05)
+
+        consumer = threading.Thread(target=consume, name="iwiki-code-progress", daemon=True)
+        consumer.start()
+
+        def stop(completed: bool):
+            nonlocal job
+            if completed:
+                wake.set()
+                consumer.join(timeout=0.25)
+            # A stalled custom stream can still own its current line. Drop
+            # the worker and all future output before returning the result.
+            job = None
+            self._detached.set()
+            wake.set()
+
+        return stop
+
+
 def _run_code_publish(
     args,
     env: Mapping[str, str],
@@ -331,6 +431,7 @@ def _run_code_publish(
         outcome = _codegraph_application.publish_project(
             args.project,
             environ=env,
+            _observe_job=_CodePublishProgress(err).observe,
         )
     except _codegraph_application.CodeGraphPublishError as exc:
         error, exit_code = {
@@ -906,3 +1007,19 @@ def run(
     else:
         _write_json(out, result)
     return 0
+
+
+def main() -> None:
+    """Start one-shot publication before the MCP server configures stderr logging."""
+    if sys.argv[1:3] == ["code", "publish"]:
+        # Default logging's lastResort handler also writes synchronously to
+        # stderr. The standalone CLI already reports job failures to the user.
+        logger = logging.getLogger()
+        quiet = logging.NullHandler()
+        logger.addHandler(quiet)
+        try:
+            raise SystemExit(run(sys.argv[1:]))
+        finally:
+            logger.removeHandler(quiet)
+    from .server import main as server_main
+    server_main()

@@ -5,6 +5,7 @@ import atexit
 from dataclasses import asdict
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import secrets
@@ -84,6 +85,9 @@ class CodeGraphSource(Protocol):
     primary: str | None
 
 
+_WorkerDomainKey = tuple[str, str, str]
+
+
 class _JobSnapshot:
     """Terminal record of a finished build, free of the job's object graph.
 
@@ -109,6 +113,7 @@ class _JobSnapshot:
         self.explicit = job.explicit
         self.state = state
         self.finished_at = finished_at
+        self._progress = job.control.progress_snapshot()
         # Why this build failed, for the one reason a poller cannot see in
         # the graph status it asked for: the snapshot is locally complete and
         # the published one is not. Captured here, as a scalar, rather than by
@@ -122,13 +127,14 @@ class _JobSnapshot:
             "state": self.state,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "progress": self._progress.copy(),
         }
 
 
 class _BuildJob:
     def __init__(
         self,
-        domain_key: tuple[str, str],
+        domain_key: _WorkerDomainKey,
         *,
         force: bool,
         languages: list[str] | None,
@@ -148,7 +154,7 @@ class _BuildJob:
         # the *running* build can still publish must read it from here rather
         # than from the joining caller's own budget.
         self.build_deadline = build_deadline
-        self.control = BuildControl()
+        self.control = BuildControl(started_at=self.started_at)
         self.result: dict[str, object] = {}
         self.thread: threading.Thread | None = None
         self.terminal: _JobSnapshot | None = None
@@ -171,31 +177,39 @@ class _BuildJob:
             and self.explicit == explicit
         )
 
-    def describe(self) -> dict[str, object]:
-        """Return the caller-visible descriptor for this job.
-
-        Exactly one unsynchronised read -- of `terminal` -- decides the whole
-        answer, and the live branch then reads nothing else off the job. That
-        is what makes the descriptor atomic, not the order `finish()` writes
-        in: a second read could land after `finish()` published the snapshot
-        *and* set `job.state`, and would report a terminal state with no
-        `finished_at`. The write order only narrows that gap; removing the
-        read closes it.
-
-        The literal `"running"` is this branch's actual meaning rather than a
-        stand-in for `self.state`: the branch is reached only when no snapshot
-        was published, and an unpublished snapshot is precisely a job that has
-        not reached a terminal state. `state`/`finished_at` on the job stay
-        for direct readers after a join; they are never part of a descriptor.
-        """
-        terminal = self.terminal
-        if terminal is not None:
-            return terminal.describe()
+    def _running_descriptor(self, progress: dict, phases_done: list[str]) -> dict:
+        phase = progress["phase"]
         return {
             "id": self.job_id,
             "state": "running",
             "started_at": self.started_at,
+            "phase": None if phase == "queued" else phase,
+            "phases_done": phases_done,
+            "progress": progress,
         }
+
+    def describe(self) -> dict[str, object]:
+        """A published terminal record is final. Live fields share a single observation."""
+        terminal = self.terminal
+        if terminal is not None:
+            return terminal.describe()
+        _, progress, phases_done = self.control.observations(None)
+        return self._running_descriptor(progress, phases_done)
+
+    def progress_observations(self, cursor: int) -> tuple[list[dict], dict]:
+        """Replay phase entries and coalesce intervening file and transfer counts."""
+        # Read terminal first: once it exists every phase entry is available.
+        terminal = self.terminal
+        entries, progress, phases_done = self.control.observations(cursor)
+        boundaries = [
+            self._running_descriptor(entry, phases_done[:max(0, index - 1)])
+            for index, entry in enumerate(entries, start=cursor)
+        ]
+        latest = (
+            terminal.describe() if terminal is not None
+            else self._running_descriptor(progress, phases_done)
+        )
+        return boundaries, latest
 
     @property
     def publication_failed(self) -> bool:
@@ -209,6 +223,7 @@ class _BuildJob:
         return terminal is not None and terminal.publication_failed
 
 
+_JobObserver = Callable[[_BuildJob], Callable[[bool], None]]
 _TERMINAL_HISTORY = 16
 #: What a build records for itself when its publication raised. Mirrors the
 #: shape `application.publish_snapshot` returns when it detects an
@@ -418,14 +433,8 @@ class _BuildWorkerRegistry:
             snapshot = _JobSnapshot(
                 job, state=state, finished_at=finished_at
             )
-            # Publish it *first*, before the job's own fields. What makes a
-            # descriptor atomic is `describe()` reading `terminal` and nothing
-            # else (see its docstring); this order is the second half of that
-            # bargain, keeping the loose `state` from ever being the newer of
-            # the two facts. A reader that did consult `job.state` would, in
-            # the opposite order, see a terminal state with no `finished_at`
-            # -- the mirror of the race this snapshot exists to close, and one
-            # the READMEs forbid just as firmly.
+            # Descriptors switch atomically to this snapshot. The loose fields
+            # remain for callers inspecting the job after joining its thread.
             job.terminal = snapshot
             job.state = state
             job.finished_at = finished_at
@@ -447,7 +456,7 @@ class _BuildWorkerRegistry:
         cap can only be met by taking someone's last.
         """
         while len(self._terminal) > _TERMINAL_HISTORY:
-            per_domain: dict[tuple[str, str], int] = {}
+            per_domain: dict[_WorkerDomainKey, int] = {}
             for snapshot in self._terminal.values():
                 per_domain[snapshot.domain_key] = (
                     per_domain.get(snapshot.domain_key, 0) + 1
@@ -467,7 +476,7 @@ class _BuildWorkerRegistry:
                 evicted = next(iter(self._terminal))
             del self._terminal[evicted]
 
-    def is_active(self, domain_key: tuple[str, str]) -> bool:
+    def is_active(self, domain_key: _WorkerDomainKey) -> bool:
         """Report whether a worker for this domain is still alive.
 
         Thread liveness, publication included: the question asked by anything
@@ -477,12 +486,12 @@ class _BuildWorkerRegistry:
         with self._lock:
             return bool(
                 self._job is not None
-                and self._job.domain_key == domain_key
+                and self._job.domain_key[:2] == domain_key[:2]
                 and self._job.thread is not None
                 and self._job.thread.is_alive()
             )
 
-    def is_indexing(self, domain_key: tuple[str, str]) -> bool:
+    def is_indexing(self, domain_key: _WorkerDomainKey) -> bool:
         """Report whether a live build is still writing this domain's graph.
 
         The predicate every local read consults. It stops being true when the
@@ -495,7 +504,7 @@ class _BuildWorkerRegistry:
         with self._lock:
             return bool(
                 self._job is not None
-                and self._job.domain_key == domain_key
+                and self._job.domain_key[:2] == domain_key[:2]
                 and self._job.thread is not None
                 and self._job.thread.is_alive()
                 and self._job.control.indexing
@@ -548,37 +557,23 @@ class _BuildWorkerRegistry:
 _BUILD_WORKERS = _BuildWorkerRegistry()
 
 
-def worker_domain_key(binding: CodeGraphSource) -> tuple[str, str]:
-    """Derive the build registry's key for one bound domain.
-
-    A build belongs to the wiki base it publishes into and the primary
-    domain it indexes, so the tool layer can name the very job a runtime
-    started without holding -- or rebuilding -- that runtime.
-    """
-    return (str(Path(binding.base).absolute()), binding.primary or "")
+def worker_domain_key(binding: CodeGraphSource) -> _WorkerDomainKey:
+    """Scope job history to its checkout. The first two fields identify the cache."""
+    return (
+        str(Path(binding.base).absolute()),
+        binding.primary or "",
+        os.path.realpath(binding.project_dir),
+    )
 
 
 def _resolve_job(
-    domain_key: tuple[str, str], job_id: str | None
+    domain_key: _WorkerDomainKey, job_id: str | None
 ) -> _BuildJob | _JobSnapshot | None:
-    """Find the job an answer should describe, by id or by domain.
-
-    Without an id the domain's current job answers: the live one while a
-    build runs, its newest terminal snapshot afterwards. With an id only
-    that build answers -- the history first, because a finished build has
-    left the live slot and whatever occupies it now is someone else's.
-
-    Both lookups are scoped to `domain_key`, and neither is scoped here:
-    `current` and `terminal_by_id` own that themselves, so no caller of
-    either can widen it.
-    """
-    if job_id is None:
-        return _BUILD_WORKERS.current(domain_key)
-    remembered = _BUILD_WORKERS.terminal_by_id(domain_key, job_id)
-    if remembered is not None:
-        return remembered
-    live = _BUILD_WORKERS.current(domain_key)
-    return live if live is not None and live.job_id == job_id else None
+    """Read the live slot before history so a finishing job cannot slip between reads."""
+    current = _BUILD_WORKERS.current(domain_key)
+    if job_id is None or (current is not None and current.job_id == job_id):
+        return current
+    return _BUILD_WORKERS.terminal_by_id(domain_key, job_id)
 
 
 def _warned(status: dict[str, object], warning: str) -> dict[str, object]:
@@ -611,26 +606,14 @@ def job_unknown(status: dict[str, object]) -> dict[str, object]:
 
 
 def attach_job(
-    domain_key: tuple[str, str],
+    domain_key: _WorkerDomainKey,
     job_id: str | None,
     status: dict[str, object],
+    *,
+    allow_snapshot_error: bool = False,
 ) -> dict[str, object]:
-    """Attach this process's job descriptor to a non-error status answer.
-
-    Lives at the tool layer rather than inside any one reader: the job is a
-    fact about this process, not about the snapshot a `read_mode` selected,
-    so `wiki_code_status` answers with it whichever reader produced
-    `status`. An error answer explains why the graph cannot be read;
-    attaching a job to it would wrongly suggest the error belongs to that
-    job, and here -- above every branch that merges an error onto a status
-    -- is the one place that invariant can actually hold.
-
-    A named `job_id` that nothing knows is not an error: it may simply have
-    aged out of the bounded history, and the graph status the caller also
-    asked for is still valid. The answer keeps its shape, carries no job,
-    and says so with `job_unknown`.
-    """
-    if "error" in status:
+    """Attach an owned job to a snapshot, including verified availability diagnostics."""
+    if "error" in status and not allow_snapshot_error:
         return status
     job = _resolve_job(domain_key, job_id)
     if job is None:
@@ -639,17 +622,6 @@ def attach_job(
         # absence of a build, which `state`/`fresh` already report.
         return status if job_id is None else job_unknown(status)
     descriptor = job.describe()
-    # Read `state` once from the descriptor rather than re-reading
-    # `job.state`: the worker can finish between the two reads, and a
-    # second, later read could see "ready" after `describe()` already
-    # captured "running" -- leaving `phase`/`phases_done` off an answer
-    # that still claims `state: "running"`, a shape the README promises
-    # cannot occur. The same read is what keeps `control` a live-job-only
-    # attribute: a terminal snapshot never describes itself as running,
-    # and owns no `control` to read.
-    if descriptor["state"] == "running":
-        descriptor["phase"] = job.control.phase
-        descriptor["phases_done"] = list(job.control.phases_done)
     answer = {**status, "job": descriptor}
     # The detached poller's channel, and the one case where the graph status
     # it asked for cannot show the failure: the local snapshot is complete and
@@ -659,7 +631,7 @@ def attach_job(
     # point is to be read instead.
     return (
         _warned(answer, "publication_failed")
-        if job.publication_failed
+        if descriptor["state"] == "failed" and job.publication_failed
         else answer
     )
 
@@ -739,19 +711,10 @@ def _unsupported_language(available: tuple[str, ...]) -> dict[str, object]:
 
 def _rebuilding_job_answer(job: _BuildJob) -> dict[str, object]:
     """Answer a caller whose wait ended while its build kept running."""
-    descriptor = job.describe()
-    # Same single-read gate `attach_job` applies: progress fields belong to a
-    # running descriptor only. The worker publishes terminality from inside
-    # its own `finally`, while its thread is still alive, so this is reachable
-    # for a caller whose wait expires in that window -- and `phase` beside a
-    # terminal `state` is the one shape the READMEs promise cannot occur.
-    if descriptor["state"] == "running":
-        descriptor["phase"] = job.control.phase
-        descriptor["phases_done"] = list(job.control.phases_done)
     return {
         "state": "rebuilding",
         "fresh": False,
-        "job": descriptor,
+        "job": job.describe(),
         "hint": "poll wiki_code_status for this job",
     }
 
@@ -1571,7 +1534,8 @@ class CodeGraphRuntime:
         wait_deadline: float,
         restore_prior_on_abort: bool,
         cancel_on_wait: bool,
-        publish: Callable[[], dict[str, object]] | None = None,
+        publish: Callable[[BuildControl], dict[str, object]] | None = None,
+        _observe_job: _JobObserver | None = None,
     ) -> dict[str, object]:
         assert self._indexer is not None
         if time.monotonic() >= build_deadline:
@@ -1628,7 +1592,7 @@ class CodeGraphRuntime:
             # `rebuilding` for its entire duration.
             control.indexing = False
             try:
-                published = publish()
+                published = publish(control)
             except Exception:
                 # Nobody is watching this thread, so the failure has to be
                 # recorded rather than raised, and in the same redacted style
@@ -1665,8 +1629,14 @@ class CodeGraphRuntime:
             return _rebuild_failed()
         if job is None or job.thread is None:
             return self._busy_response()
-        job.thread.join(max(0.0, wait_deadline - time.monotonic()))
-        if job.thread.is_alive():
+        stop_observing = _observe_job(job) if _observe_job is not None else None
+        try:
+            job.thread.join(max(0.0, wait_deadline - time.monotonic()))
+        finally:
+            still_running = job.thread.is_alive()
+            if stop_observing is not None:
+                stop_observing(not still_running)
+        if still_running:
             if cancel_on_wait:
                 # Cancellation on wait expiry is a starter-only privilege: a
                 # caller that only joined someone else's job never asked for
@@ -1719,7 +1689,8 @@ class CodeGraphRuntime:
         force: bool = False,
         languages: list[str] | None = None,
         wait_seconds: float | None = None,
-        publish: Callable[[], dict[str, object]] | None = None,
+        publish: Callable[[BuildControl], dict[str, object]] | None = None,
+        _observe_job: _JobObserver | None = None,
     ) -> dict[str, object]:
         """Build the graph, publishing the snapshot the build produced.
 
@@ -1766,6 +1737,7 @@ class CodeGraphRuntime:
             restore_prior_on_abort=False,
             cancel_on_wait=False,
             publish=publish,
+            _observe_job=_observe_job,
         )
 
     def query_guard(

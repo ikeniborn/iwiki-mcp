@@ -73,22 +73,19 @@ def _remote_failed(exc: BaseException | None = None) -> dict[str, object]:
         reason, status = "unknown", None
         for current in _related(exc):
             code = _status_code(current)
-            name = type(current).__name__
             if code is not None:
                 reason, status = "http_status", code
                 break
-            if isinstance(current, TimeoutError) or "Timeout" in name:
-                reason = "timeout"
-                break
-            if isinstance(current, ConnectionError) or "Connect" in name:
-                reason = "connect"
-                break
-            if isinstance(current, ValueError):
-                reason = "malformed_response"
-                break
+            name = type(current).__name__
             if "Mcp" in name or "Protocol" in name:
                 reason = "protocol"
-                break
+            elif isinstance(current, ValueError):
+                reason = "malformed_response"
+            elif reason == "unknown":
+                if isinstance(current, TimeoutError) or "Timeout" in name:
+                    reason = "timeout"
+                elif isinstance(current, ConnectionError) or "Connect" in name:
+                    reason = "connect"
     payload: dict[str, object] = {
         "error": "remote_mcp_failed",
         "reason": reason,
@@ -170,6 +167,13 @@ class RemoteMcpTransport:
         self, tool_name: str, arguments: Mapping[str, object]
     ) -> dict[str, object]:
         """Invoke one remote tool, mapping every failure to a safe code."""
+        answer, _ = self.call_with_origin(tool_name, arguments)
+        return answer
+
+    def call_with_origin(
+        self, tool_name: str, arguments: Mapping[str, object]
+    ) -> tuple[dict[str, object], str]:
+        """Distinguish a tool response, a refused bind and a local transport failure."""
         # FastMCP runs sync tool functions inline on its own running event
         # loop thread, so anyio.run() here would raise "already running" -
         # run the coroutine on a fresh worker thread instead, which has no
@@ -178,11 +182,13 @@ class RemoteMcpTransport:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 return executor.submit(
                     anyio.run, self._invoke, tool_name, dict(arguments)
-                ).result()
-        except _RemoteBindError as exc:
-            return dict(exc.payload)
+                ).result(), "tool"
         except Exception as exc:
-            return _remote_failed(exc)
+            # A session's cleanup can group its own timeout with the bind refusal.
+            for cause in _related(exc):
+                if isinstance(cause, _RemoteBindError):
+                    return dict(cause.payload), "bind"
+            return _remote_failed(exc), "transport"
 
     async def _invoke(
         self, tool_name: str, arguments: dict[str, object]
@@ -197,6 +203,13 @@ class RemoteMcpTransport:
                 bind_payload = _decoded(bind_result)
                 if "error" in bind_payload:
                     raise _RemoteBindError(bind_payload)
+                if tool_name == "wiki_code_status" and not _matching_scope(
+                    bind_payload, self._primary
+                ):
+                    raise _RemoteBindError({
+                        "error": "binding_not_selected",
+                        "hint": "bind the remote session to the requested primary",
+                    })
             result = await session.call_tool(tool_name, arguments=arguments)
         return _decoded(result)
 
@@ -268,6 +281,15 @@ class McpSnapshotPublisher:
         )
 
 
+def _matching_scope(answer: Mapping[str, object], primary: str) -> bool:
+    return (
+        answer.get("binding_source", "session") == "session"
+        and not answer.get("primary_substituted")
+        and "binding_defaulted" not in (answer.get("warnings") or ())
+        and all(answer.get(field, primary) == primary for field in ("domain", "primary"))
+    )
+
+
 class McpCodeGraphReader:
     """Read one remote ready snapshot through the shared reader contract."""
 
@@ -281,6 +303,37 @@ class McpCodeGraphReader:
         """Report remote readiness without requesting any graph rows."""
         result = self._transport.call("wiki_code_status", {})
         return {**_UNREADABLE, **result} if "error" in result else result
+
+    def status_for_job(self, primary: str) -> tuple[dict[str, object], bool]:
+        """Check the origin and scope before combining remote status with a local job."""
+        raw, origin = self._transport.call_with_origin("wiki_code_status", {})
+        raw.pop("job", None)  # This caller's process owns its job descriptors.
+        if "error" not in raw:
+            healthy = raw.get("state") == "ready" and raw.get("fresh") is True
+            return raw, healthy and "code" not in raw and origin == "tool" and _matching_scope(
+                raw, primary
+            )
+        status = {**_UNREADABLE, **raw}
+        error = raw["error"]
+        code = raw.get("code", error)
+        # A normalized message can accompany a code. Two conflicting machine
+        # tokens, an HTTP status, or a malformed error are never evidence of availability.
+        if not isinstance(error, str) or not error.strip() or "status" in raw:
+            return status, False
+        if error.isidentifier() and error != code:
+            return status, False
+        outage = (
+            code == "remote_mcp_failed"
+            and raw.get("reason") in ("connect", "timeout")
+        )
+        if origin == "transport":
+            return status, outage
+        verified = (
+            origin == "tool"
+            and raw.get("binding_source") == "session"
+            and _matching_scope(raw, primary)
+        )
+        return status, verified and (code in ("missing_snapshot", "stale_snapshot") or outage)
 
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
         """Search the remote snapshot under the shared validated bounds.

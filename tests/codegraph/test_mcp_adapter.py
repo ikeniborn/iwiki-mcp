@@ -381,7 +381,7 @@ def test_transport_failures_carry_a_safe_reason(header, failure, reason, status)
 def test_grouped_and_chained_failures_are_classified(header):
     # Hand-rolled group instead of ExceptionGroup: the classifier duck-types
     # `.exceptions`, and the builtin only exists on Python 3.11+.
-    grouped = _Group([_HttpStatusError(403)])
+    grouped = _Group([TimeoutError(), _HttpStatusError(403)])
     chained = RuntimeError("session closed")
     chained.__cause__ = TimeoutError("read timed out")
 
@@ -396,6 +396,16 @@ def test_grouped_and_chained_failures_are_classified(header):
     assert McpSnapshotPublisher(
         _transport(_FakeSession(failure=chained))
     ).begin(header)["reason"] == "timeout"
+
+
+def test_protocol_refusal_takes_precedence_over_cleanup_timeout(header):
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    refused = McpError(ErrorData(code=-32001, message="access_denied"))
+    grouped = _Group([TimeoutError(), refused])
+    result = McpSnapshotPublisher(_transport(_FakeSession(failure=grouped))).begin(header)
+    assert result["reason"] == "protocol"
 
 
 def test_malformed_remote_payloads_are_rejected(header):
@@ -571,7 +581,7 @@ def test_adapter_failure_is_redacted_by_application_and_cli_formatter(
     }
     assert exit_code == 1
     assert stdout.getvalue().count("\n") == 1
-    assert stderr.getvalue() == ""
+    assert "state=failed" in stderr.getvalue().splitlines()[-1]
     assert payload["state"] == "failed"
     assert payload["publish_mode"] == "mcp"
     assert payload["error"] == "publication_failed"

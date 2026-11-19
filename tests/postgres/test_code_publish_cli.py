@@ -85,7 +85,7 @@ def test_code_publish_cli_activates_direct_postgres_snapshot(postgres_project):
     assert code == 0
     assert stdout.count("\n") == 1
     assert stdout == json.dumps(payload, separators=(",", ":")) + "\n"
-    assert stderr == ""
+    assert "state=ready phase=finalize" in stderr.splitlines()[-1]
     assert payload["state"] == "ready"
     assert payload["publish_mode"] == "postgres"
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", payload["snapshot_revision"])
@@ -173,7 +173,7 @@ def test_direct_postgres_failure_preserves_active_revision_and_redacts(
     _binding, reader = _resolved_reader(project)
     old_revision = reader.status()["snapshot_revision"]
     assert first_code == 0
-    assert first_stderr == ""
+    assert "state=ready phase=finalize" in first_stderr.splitlines()[-1]
     assert old_revision == first_payload["snapshot_revision"]
 
     project.joinpath("service.py").write_text(
@@ -220,7 +220,8 @@ def test_direct_postgres_failure_preserves_active_revision_and_redacts(
         "publish_mode": "postgres",
         "error": "publication_failed",
     }
-    assert stderr == ""
+    phase = "transfer" if failure_stage == "batch" else "finalize"
+    assert f"state=failed phase={phase}" in stderr.splitlines()[-1]
     assert reader.status()["snapshot_revision"] == old_revision
     assert sum(wrapper._failed for wrapper in wrappers) == 1
     assert sum(wrapper.abort_calls for wrapper in wrappers) == 1

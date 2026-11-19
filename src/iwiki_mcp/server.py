@@ -1864,42 +1864,40 @@ _CodeJobId = Annotated[
 ]
 
 
+_CodeJobOnly = Annotated[
+    bool,
+    Field(description="Poll the exact job_id without opening a snapshot reader."),
+]
+
+
 @_safe
 @_code_safe
-def wiki_code_status(job_id: _CodeJobId = None) -> dict:
-    """Report the code graph's state, plus this process's build job.
-
-    The job is attached here rather than inside a reader: `code_graph.read_mode`
-    decides which reader answers, but the build belongs to this process either
-    way, so a poller sees the same `job` descriptor under every mode. The
-    hosted PostgreSQL branch below is a server where `wiki_code_index` answers
-    `source_unavailable` and no local build can exist, so it carries no job --
-    and therefore knows no handle, which makes `job_unknown` its honest answer
-    to a named `job_id` rather than a silent omission.
-    """
+def wiki_code_status(job_id: _CodeJobId = None, job_only: _CodeJobOnly = False) -> dict:
+    """Report snapshot status and local build progress, or poll only the named job."""
     bind = _resolved_binding()
-    if _is_postgres(bind):
-        if _code_binding_blocked():
-            return dict(_CODE_BINDING_NOT_SELECTED)
-        if bind.primary is None:
-            return _missing_code_primary()
-        hosted = _defaulted_scope_answer(_postgres_code_reader(bind).status())
-        # Not a registry lookup: a hosted server issues no handles at all, so
-        # every id presented to it is unknown by construction. Consulting the
-        # process registry here could only match a build some *other*,
-        # local binding started.
-        return hosted if job_id is None else _codegraph_runtime.job_unknown(
-            hosted
-        )
+    hosted_reader = _is_postgres(bind)
+    if hosted_reader and _code_binding_blocked():
+        return dict(_CODE_BINDING_NOT_SELECTED)
     if bind.primary is None:
         return _missing_code_primary()
-    return _codegraph_runtime.attach_job(
-        _codegraph_runtime.worker_domain_key(
-            _codegraph_application.source_context(bind)
-        ),
-        job_id,
-        _codegraph_application.code_reader(bind).status(),
-    )
+    if job_only and job_id is None:
+        return _invalid_code_config("job_id")
+    if hosted_reader:
+        if job_only:
+            return _defaulted_scope_answer(_codegraph_runtime.job_unknown({}))
+        hosted = _defaulted_scope_answer(_postgres_code_reader(bind).status())
+        return hosted if job_id is None else _codegraph_runtime.job_unknown(hosted)
+
+    key = _codegraph_runtime.worker_domain_key(_codegraph_application.source_context(bind))
+    if job_only:
+        return _codegraph_runtime.attach_job(key, job_id, {})
+    reader = _codegraph_application.code_reader(bind)
+    if isinstance(reader, _codegraph_application.PublishedSnapshotReader):
+        status, eligible = reader.status_for_job(bind.primary)
+        if not eligible:
+            return status
+        return _codegraph_runtime.attach_job(key, job_id, status, allow_snapshot_error=True)
+    return _codegraph_runtime.attach_job(key, job_id, reader.status())
 
 
 _CodeWaitSeconds = Annotated[

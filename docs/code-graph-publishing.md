@@ -210,6 +210,8 @@ through `.git/info/exclude`, and is not fallback target.
 | Text | Human-readable output format | Either format exits by outcome |
 | `--json` | Compact machine-readable output format | Either format exits by outcome |
 
+Once a job starts, the CLI writes phase and counter updates to stderr, including when stderr is piped. Within a phase, counter updates appear at most once per second. With `--json`, stdout contains one final JSON document. A configuration error before job creation produces the final diagnostic immediately. If stderr stays full, the CLI can drop pending progress lines and still return the final JSON and exit code.
+
 Text and `--json` choose only output format. Either format exits `0` when ready, `1`
 for runtime/publication failure, or `2` for usage/configuration failure.
 
