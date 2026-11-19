@@ -296,6 +296,33 @@ def _write_code_json(stream: TextIO, value) -> None:
     print(json.dumps(value, separators=(",", ":")), file=stream)
 
 
+_CODE_STDERR_DRAIN_SECONDS = 0.25
+
+
+def _write_code_stderr(stream: TextIO, line: str, detached: threading.Event) -> bool:
+    """Write one CLI line without letting a broken stderr replace the command's outcome."""
+    try:
+        if stream is sys.__stderr__ and os.name == "posix":
+            # A daemon blocked inside the interpreter's stderr wrapper can
+            # prevent shutdown. Write directly for every inherited descriptor.
+            fd = stream.fileno()
+            if hasattr(select, "poll"):
+                writable = select.poll()
+                writable.register(fd, select.POLLOUT)
+                while not writable.poll(50):
+                    if detached.is_set():
+                        return False
+            if detached.is_set():
+                return False
+            data = line.encode("ascii")
+            return os.write(fd, data) == len(data)
+        stream.write(line)
+        stream.flush()
+        return True
+    except Exception:
+        return False
+
+
 def _write_code_failure(
     stream: TextIO,
     *,
@@ -322,7 +349,15 @@ def _write_code_failure(
         "publication_failed": "code graph publication failed",
         "internal_error": "code graph publication failed",
     }
-    print(f"iwiki-mcp: {messages[error]} (code={error})", file=stream)
+    line = f"iwiki-mcp: {messages[error]} (code={error})\n"
+    detached = threading.Event()
+    writer = threading.Thread(
+        target=_write_code_stderr, args=(stream, line, detached),
+        name="iwiki-code-diagnostic", daemon=True,
+    )
+    writer.start()
+    writer.join(timeout=_CODE_STDERR_DRAIN_SECONDS)
+    detached.set()
 
 
 class _CodePublishProgress:
@@ -337,25 +372,6 @@ class _CodePublishProgress:
         self._last_counts = None
         self._last_output = 0.0
         self._detached = threading.Event()
-
-    def _write_line(self, line: str) -> bool:
-        if self._stream is sys.__stderr__ and os.name == "posix":
-            # A daemon blocked inside the interpreter's stderr wrapper can
-            # prevent shutdown. Write directly for every inherited descriptor.
-            fd = self._stream.fileno()
-            if hasattr(select, "poll"):
-                writable = select.poll()
-                writable.register(fd, select.POLLOUT)
-                while not writable.poll(50):
-                    if self._detached.is_set():
-                        return False
-            if self._detached.is_set():
-                return False
-            data = line.encode("ascii")
-            return os.write(fd, data) == len(data)
-        self._stream.write(line)
-        self._stream.flush()
-        return True
 
     def emit(self, job: dict) -> bool:
         progress = job["progress"]
@@ -374,11 +390,7 @@ class _CodePublishProgress:
             "updated_at": progress["updated_at"],
         }
         line = "code graph progress " + " ".join(f"{key}={value}" for key, value in fields.items())
-        try:
-            if not self._write_line(line + "\n"):
-                return False
-        except Exception:
-            # Only this sink is optional. Preserve final-result and operation errors.
+        if not _write_code_stderr(self._stream, line + "\n", self._detached):
             return False
         self._last_phase = phase
         self._last_counts = counts
@@ -411,7 +423,7 @@ class _CodePublishProgress:
             nonlocal job
             if completed:
                 wake.set()
-                consumer.join(timeout=0.25)
+                consumer.join(timeout=_CODE_STDERR_DRAIN_SECONDS)
             # A stalled custom stream can still own its current line. Drop
             # the worker and all future output before returning the result.
             job = None

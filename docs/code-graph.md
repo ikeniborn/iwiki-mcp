@@ -124,7 +124,7 @@ To poll while the target is unavailable, call local `wiki_code_status` with thes
 {"job_only": true, "job_id": "8ad2043fd87339ac"}
 ```
 
-The response contains `job`. Job-only polling reads the local registry without contacting the snapshot reader. A process restart, an evicted handle, or a different checkout or primary returns the `job_unknown` warning. The process retains up to 16 terminal descriptors. A combined poll can include the job alongside `stale_snapshot`, `missing_snapshot`, or a classified connection failure. An authorization or binding error withholds the job.
+The response contains `job`. Job-only polling reads the local registry without contacting the snapshot reader. A process restart, an evicted handle, or a different checkout or primary returns the `job_unknown` warning. The process retains up to 16 terminal descriptors. A combined poll can include the job alongside `stale_snapshot`, `missing_snapshot`, or a classified connection failure. An authorization or binding error withholds the job. The client attaches a local job to a healthy remote snapshot only after the bind or status response confirms the selected scope. A refusal received before session cleanup remains visible if closing the connection times out.
 
 For example, `job.progress.phase="parsing"`, `files_parsed=4` and `files_total=12` indicate four accepted parse results out of twelve scheduled files. The total is omitted until known. During transfer, `batches_acknowledged` counts accepted batches and `bytes_acknowledged` counts their payload bytes. The Unix timestamp `updated_at` records the last change. Terminal jobs retain their final counters.
 

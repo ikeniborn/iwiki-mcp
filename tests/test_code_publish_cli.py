@@ -886,7 +886,8 @@ def test_fast_worker_replays_phase_boundaries_after_completion(tmp_path, monkeyp
 
 @pytest.mark.parametrize("publication_fails", [False, True])
 @pytest.mark.parametrize("sink", ["pipe", "socket"])
-def test_cli_process_exits_with_saturated_stderr(tmp_path, publication_fails, sink):
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_process_exits_with_saturated_stderr(tmp_path, publication_fails, sink, json_output):
     project = create_sqlite_project(tmp_path)
     env = {key: value for key, value in os.environ.items() if not key.startswith("IWIKI_")}
     # Reserve an unlistened local port for a deterministic connection refusal.
@@ -914,8 +915,11 @@ def test_cli_process_exits_with_saturated_stderr(tmp_path, publication_fails, si
             os.set_blocking(write_fd, True)
             # Leave the read end open and unread until the child exits.
             command = Path(sys.executable).with_name("iwiki-mcp")
+            argv = [command, "code", "publish", "--project", str(project)]
+            if json_output:
+                argv.append("--json")
             result = subprocess.run(
-                [command, "code", "publish", "--project", str(project), "--json"],
+                argv,
                 stdout=subprocess.PIPE, stderr=write_fd, env=env,
                 cwd=tmp_path, timeout=7, text=True,
             )
@@ -923,8 +927,38 @@ def test_cli_process_exits_with_saturated_stderr(tmp_path, publication_fails, si
             os.close(write_fd)
             os.close(read_fd)
     assert result.returncode == (1 if publication_fails else 0)
-    assert result.stdout.count("\n") == 1
-    payload = json.loads(result.stdout)
-    assert payload["state"] == ("failed" if publication_fails else "ready")
-    if publication_fails:
-        assert payload["error"] == "publication_failed"
+    if json_output:
+        assert result.stdout.count("\n") == 1
+        payload = json.loads(result.stdout)
+        assert payload["state"] == ("failed" if publication_fails else "ready")
+        if publication_fails:
+            assert payload["error"] == "publication_failed"
+    elif publication_fails:
+        assert result.stdout == ""
+    else:
+        assert result.stdout.startswith("code graph ready mode=sqlite ")
+
+
+def test_text_configuration_error_with_closed_stderr_retains_exit_two(tmp_path):
+    stderr = StringIO()
+    stderr.close()
+    stdout = StringIO()
+    code = admin.run(
+        ["code", "publish", "--project", str(tmp_path)], stdout=stdout, stderr=stderr, environ={},
+    )
+    assert code == 2
+    assert stdout.getvalue() == ""
+
+
+def test_text_usage_error_with_disconnected_stderr_pipe_retains_exit_two(tmp_path):
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run(
+            [Path(sys.executable).with_name("iwiki-mcp"), "code", "publish"],
+            stdout=subprocess.PIPE, stderr=write_fd, cwd=tmp_path, timeout=7, text=True,
+        )
+    finally:
+        os.close(write_fd)
+    assert result.returncode == 2
+    assert result.stdout == ""

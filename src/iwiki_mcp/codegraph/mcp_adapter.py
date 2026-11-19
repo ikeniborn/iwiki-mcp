@@ -182,7 +182,7 @@ class RemoteMcpTransport:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 return executor.submit(
                     anyio.run, self._invoke, tool_name, dict(arguments)
-                ).result(), "tool"
+                ).result()
         except Exception as exc:
             # A session's cleanup can group its own timeout with the bind refusal.
             for cause in _related(exc):
@@ -192,26 +192,53 @@ class RemoteMcpTransport:
 
     async def _invoke(
         self, tool_name: str, arguments: dict[str, object]
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], str]:
         headers = {"Authorization": f"Bearer {self._token}"}
-        async with self._session_factory(self._url, headers) as session:
-            await session.initialize()
-            if self._primary:
-                bind_result = await session.call_tool(
-                    "wiki_bind", arguments={"primary": self._primary}
-                )
-                bind_payload = _decoded(bind_result)
-                if "error" in bind_payload:
-                    raise _RemoteBindError(bind_payload)
-                if tool_name == "wiki_code_status" and not _matching_scope(
-                    bind_payload, self._primary
-                ):
-                    raise _RemoteBindError({
-                        "error": "binding_not_selected",
-                        "hint": "bind the remote session to the requested primary",
-                    })
-            result = await session.call_tool(tool_name, arguments=arguments)
-        return _decoded(result)
+        status_call = tool_name == "wiki_code_status"
+        status_reply = None
+        selected_session = None
+        origin = "tool"
+        try:
+            async with self._session_factory(self._url, headers) as session:
+                await session.initialize()
+                if self._primary:
+                    bind_result = await session.call_tool(
+                        "wiki_bind", arguments={"primary": self._primary}
+                    )
+                    binding = _decoded(bind_result)
+                    if "error" in binding:
+                        raise _RemoteBindError(binding)
+                    if status_call:
+                        if (
+                            getattr(bind_result, "isError", False) is not False
+                            or not _matching_bind(binding, self._primary)
+                        ):
+                            raise _RemoteBindError({
+                                "error": "binding_not_selected",
+                                "hint": "bind the remote session to the requested primary",
+                            })
+                        selected_session = binding.get("session_id")
+                        if _confirmed_bind(binding, self._primary):
+                            origin = "bound_tool"
+                result = await session.call_tool(tool_name, arguments=arguments)
+                if status_call:
+                    status_reply = _decoded(result)
+                    unexpected_session = (
+                        selected_session is not None
+                        and status_reply.get("session_id", selected_session) != selected_session
+                    )
+                    if getattr(result, "isError", False) is not False or unexpected_session:
+                        origin = "unverified"
+        except Exception as exc:
+            if status_reply is None:
+                raise
+            # The completed status takes precedence over a disconnect during close.
+            # Other teardown failures cannot authorize attaching a local descriptor.
+            if _remote_failed(exc)["reason"] not in ("connect", "timeout"):
+                origin = "unverified"
+        if status_reply is not None:
+            return status_reply, origin
+        return _decoded(result), origin
 
 
 class McpSnapshotPublisher:
@@ -282,12 +309,44 @@ class McpSnapshotPublisher:
 
 
 def _matching_scope(answer: Mapping[str, object], primary: str) -> bool:
+    """Reject malformed or contradictory scope fields, including on older responses."""
+    for field in ("read", "write"):
+        if field in answer:
+            domains = answer[field]
+            if not isinstance(domains, list) or primary not in domains:
+                return False
+            if not all(isinstance(domain, str) and domain for domain in domains):
+                return False
+    if "session_id" in answer:
+        session_id = answer["session_id"]
+        if not isinstance(session_id, str) or not session_id.strip():
+            return False
+    warnings = answer.get("warnings", [])
     return (
-        answer.get("binding_source", "session") == "session"
-        and not answer.get("primary_substituted")
-        and "binding_defaulted" not in (answer.get("warnings") or ())
+        isinstance(warnings, list)
+        and all(isinstance(warning, str) for warning in warnings)
+        and "binding_defaulted" not in warnings
+        and answer.get("binding_source", "session") == "session"
+        and answer.get("primary_substituted", False) is False
+        and "requested_primary" not in answer
+        and "status" not in answer
         and all(answer.get(field, primary) == primary for field in ("domain", "primary"))
     )
+
+
+def _matching_bind(binding: Mapping[str, object], primary: str) -> bool:
+    if "code" in binding or "reason" in binding or not _matching_scope(binding, primary):
+        return False
+    if "read" in binding and "write" in binding:
+        return set(binding["write"]).issubset(binding["read"])
+    return True
+
+
+def _confirmed_bind(binding: Mapping[str, object], primary: str) -> bool:
+    if binding.get("primary") != primary:
+        return False
+    # Older bind responses returned the selected read/write scope without provenance.
+    return binding.get("binding_source") == "session" or ("read" in binding and "write" in binding)
 
 
 class McpCodeGraphReader:
@@ -308,11 +367,16 @@ class McpCodeGraphReader:
         """Check the origin and scope before combining remote status with a local job."""
         raw, origin = self._transport.call_with_origin("wiki_code_status", {})
         raw.pop("job", None)  # This caller's process owns its job descriptors.
+        status_confirms_scope = (
+            raw.get("binding_source") == "session"
+            and primary in (raw.get("primary"), raw.get("domain"))
+        )
+        scoped_reply = _matching_scope(raw, primary) and (
+            origin == "bound_tool" or (origin == "tool" and status_confirms_scope)
+        )
         if "error" not in raw:
             healthy = raw.get("state") == "ready" and raw.get("fresh") is True
-            return raw, healthy and "code" not in raw and origin == "tool" and _matching_scope(
-                raw, primary
-            )
+            return raw, scoped_reply and healthy and "code" not in raw and "reason" not in raw
         status = {**_UNREADABLE, **raw}
         error = raw["error"]
         code = raw.get("code", error)
@@ -328,11 +392,7 @@ class McpCodeGraphReader:
         )
         if origin == "transport":
             return status, outage
-        verified = (
-            origin == "tool"
-            and raw.get("binding_source") == "session"
-            and _matching_scope(raw, primary)
-        )
+        verified = scoped_reply and raw.get("binding_source") == "session"
         return status, verified and (code in ("missing_snapshot", "stale_snapshot") or outage)
 
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:

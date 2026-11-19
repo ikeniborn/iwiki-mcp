@@ -1342,6 +1342,7 @@ class _FakeRemoteSession:
     def __init__(self, status):
         self.calls = []
         self._status = status
+        self.binding = {"binding_source": "session", "primary": "project"}
 
     async def initialize(self):
         return None
@@ -1351,7 +1352,7 @@ class _FakeRemoteSession:
         if name == "wiki_code_status" and isinstance(self._status, Exception):
             raise self._status
         return _FakeRemoteResult(
-            self._status if name == "wiki_code_status" else {"state": "ready"}
+            self._status if name == "wiki_code_status" else self.binding
         )
 
 
@@ -1575,12 +1576,14 @@ def test_job_id_from_another_domain_is_unknown_after_a_rebind(
     rebound = replace(seed_binding, primary="backend")
     monkeypatch.setattr(server.base, "resolve_binding", lambda: rebound)
 
+    remote_read_binding.binding = {"binding_source": "session", "primary": "backend"}
     answer = server.wiki_code_status(job_id=built["job"]["id"])
 
     assert answer["state"] == "ready"
     assert "job" not in answer
     assert "job_unknown" in answer["warnings"]
     # The build itself is untouched: its own domain still answers for it.
+    remote_read_binding.binding = {"binding_source": "session", "primary": "project"}
     monkeypatch.setattr(server.base, "resolve_binding", lambda: seed_binding)
     assert server.wiki_code_status(
         job_id=built["job"]["id"]
@@ -1749,6 +1752,13 @@ def test_job_only_validates_id_and_scope_before_lookup(
     {"primary": "project", "binding_source": "token_default"},
     {"primary": "project", "primary_substituted": True},
     {"error": "stale_snapshot", "binding_source": "session"},
+    {"binding_source": "session", "primary": "project", "read": ["other"]},
+    {"binding_source": "session", "primary": "project", "write": "project"},
+    {"binding_source": "session", "primary": "project", "read": ["project", None]},
+    {"binding_source": "session", "primary": "project", "read": ["project"],
+     "write": ["project", "other"]},
+    {"binding_source": "session", "primary": "project", "code": "access_denied"},
+    {"binding_source": "session", "primary": "project", "reason": "not_bound_primary"},
 ])
 def test_combined_status_honors_the_remote_bind_before_reading(
     remote_read_binding, monkeypatch, bad_bind,
@@ -1758,7 +1768,8 @@ def test_combined_status_honors_the_remote_bind_before_reading(
 
     async def refused(name, arguments=None):
         calls.append(name)
-        return _FakeRemoteResult(bad_bind)
+        reply = bad_bind if name == "wiki_bind" else {"state": "ready", "fresh": True}
+        return _FakeRemoteResult(reply)
 
     monkeypatch.setattr(remote_read_binding, "call_tool", refused)
     result = server.wiki_code_status(job_id=handle)
@@ -1804,3 +1815,78 @@ async def test_remote_bind_refusal_survives_a_cleanup_timeout(
     status = await _dispatch("wiki_code_status", job_id=running_job)
     assert status["code"] == "access_denied"
     assert "job" not in status
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": "access_denied", "binding_source": "session"},
+    {"error": "stale_snapshot", "binding_source": "token_default"},
+    {"error": "unsafe_path", "binding_source": "session"},
+    {"error": "remote_mcp_failed", "reason": "protocol"},
+])
+async def test_received_status_survives_session_cleanup_failure(
+    remote_read_binding, running_job, monkeypatch, payload,
+):
+    class ClosingConnection(_FakeRemoteConnection):
+        async def __aexit__(self, *_exc):
+            raise TimeoutError("closing the session")
+
+    remote_read_binding._status = payload
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.mcp_adapter._official_session",
+        lambda url, headers: ClosingConnection(remote_read_binding),
+    )
+    result = await _dispatch("wiki_code_status", job_id=running_job)
+    assert result["code"] == payload["error"]
+    for key in ("binding_source", "reason"):
+        if key in payload:
+            assert result[key] == payload[key]
+    assert "job" not in result
+
+
+@pytest.mark.parametrize(("bind", "status_scope", "eligible"), [
+    ({}, {}, False),
+    ({"state": "ready"}, {"binding_source": "session"}, False),
+    ({"binding_source": "session", "primary": "project"}, {}, True),
+    ({"read": ["project"], "write": ["project"], "primary": "project"}, {}, True),
+    ({}, {"binding_source": "session", "domain": "project"}, True),
+    ({"primary": "wrong"}, {"binding_source": "session", "domain": "project"}, False),
+    ({"binding_source": "session", "primary": "project"}, {"domain": "wrong"}, False),
+    ({"binding_source": "session", "primary": "project"}, {"warnings": 3}, False),
+    ({"binding_source": "session", "primary": "project"}, {"warnings": {"notice": 1}}, False),
+    ({"binding_source": "session", "primary": "project"}, {"warnings": ["ok", 0]}, False),
+    ({"binding_source": "session", "primary": "project"}, {"primary_substituted": 0}, False),
+    ({"binding_source": "session", "primary": "project"},
+     {"requested_primary": "elsewhere"}, False),
+    ({"binding_source": "session", "primary": "project", "session_id": "first"},
+     {"session_id": "other"}, False),
+    ({"binding_source": "session", "primary": "project"}, {"status": 403}, False),
+])
+async def test_job_attachment_needs_positive_binding_or_status_scope(
+    remote_read_binding, running_job, bind, status_scope, eligible,
+):
+    remote_read_binding.binding = bind
+    remote_read_binding._status = {"state": "ready", "fresh": True, **status_scope}
+    result = await _dispatch("wiki_code_status", job_id=running_job)
+    if eligible:
+        assert result["job"]["id"] == running_job
+    else:
+        assert "job" not in result
+        if bind.get("primary") != "wrong":
+            assert result == remote_read_binding._status
+
+
+def test_verified_result_received_before_cleanup_timeout_keeps_local_job(
+    remote_read_binding, running_job, monkeypatch,
+):
+    class ClosingConnection(_FakeRemoteConnection):
+        async def __aexit__(self, *_exc):
+            raise TimeoutError("closing the session")
+
+    remote_read_binding._status = {"error": "stale_snapshot", "binding_source": "session"}
+    monkeypatch.setattr(
+        "iwiki_mcp.codegraph.mcp_adapter._official_session",
+        lambda url, headers: ClosingConnection(remote_read_binding),
+    )
+    result = server.wiki_code_status(job_id=running_job)
+    assert result["code"] == "stale_snapshot"
+    assert result["job"]["id"] == running_job
