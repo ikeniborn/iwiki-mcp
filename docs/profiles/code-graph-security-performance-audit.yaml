@@ -8,6 +8,7 @@ registry:
 context_inputs:
   - docs/superpowers/intents/2026-11-19-code-graph-security-performance-audit-intent.md
   - docs/superpowers/specs/2026-11-19-code-graph-security-performance-audit-design.md
+  - docs/superpowers/plans/2026-11-19-code-graph-security-performance-audit-plan.md
 tasks:
   - id: intent-profile-selection
     requirements:
