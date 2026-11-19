@@ -14,6 +14,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: fe3276914f52b890
+  last_run: 2026-11-19
+  reviewed: true
+  docs_checked: true
 ---
 # Code graph job progress implementation plan
 
