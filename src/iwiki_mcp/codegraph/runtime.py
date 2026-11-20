@@ -758,6 +758,10 @@ def _typed_failure(error: CodeGraphError) -> dict[str, object]:
             "code graph parse failed",
             "inspect wiki_code_status and retry",
         ),
+        "parse_checkpoint_storage_failed": (
+            "code graph parse checkpoint storage failed",
+            "inspect local cache permissions and retry",
+        ),
         "store_failed": (
             "code graph store failed",
             "inspect wiki_code_status and retry",
@@ -1437,6 +1441,13 @@ class CodeGraphRuntime:
                 )
             ):
                 return True
+            if current.get("publication_phase") == "parsing" and self._indexer is not None:
+                try:
+                    with _wiki_read_lock(self.binding.base, 0):
+                        if self._indexer.recover_parsing_envelope(current):
+                            return True
+                except Timeout:
+                    return False
             normalization_versions = self._normalization_versions()
             authoritative = self._read_status(
                 persisted_metadata={},
@@ -1457,6 +1468,10 @@ class CodeGraphRuntime:
                 state = "failed"
             elif publication_phase == "provisional":
                 state = "failed"
+            elif publication_phase == "parsing":
+                state = (
+                    authoritative_state if authoritative_state in {"missing", "dirty"} else "failed"
+                )
             elif publication_phase == "building":
                 state = (
                     prior_state

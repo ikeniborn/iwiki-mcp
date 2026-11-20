@@ -520,3 +520,43 @@ def test_local_build_worker_suspends_crash_recovery(ready_runtime, monkeypatch):
     assert status["state"] == "rebuilding"
     assert status["revision"] == published["revision"]
     assert "error" not in status
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fork process evidence")
+@pytest.mark.parametrize("changed", [None, "source", "selector"])
+def test_reader_recovers_after_forced_writer_dies_while_parsing(
+    runtime_pair, changed, link_fixture, monkeypatch,
+):
+    writer, reader = runtime_pair
+    seeded = writer.runtime._indexer.build(force=True)
+    assert seeded["state"] == "ready"
+
+    def interrupted():
+        writer.runtime._indexer._parse = lambda *args, **kwargs: os._exit(31)
+        writer.runtime._indexer.build(force=True)
+
+    process = multiprocessing.get_context("fork").Process(target=interrupted)
+    process.start()
+    process.join(timeout=10)
+    assert process.exitcode == 31
+    if changed == "selector":
+        (Path(reader.binding.base) / "project" / "overview.md").write_text(link_fixture.markdown)
+    if changed == "source":
+        writer.project_file("src/pkg/service.py").write_text("def changed(): pass\n")
+    from iwiki_mcp.lock import mutation_lock
+
+    from iwiki_mcp.codegraph.parse_checkpoint import ParseCheckpoint
+
+    def forbid_checkpoint(*args, **kwargs):
+        pytest.fail("reader accessed the parse checkpoint")
+
+    monkeypatch.setattr(ParseCheckpoint, "open", forbid_checkpoint)
+    with mutation_lock(reader.binding.base, timeout=1):
+        assert reader.status()["state"] == "rebuilding"
+    recovered = reader.status()
+    assert recovered["state"] == ("dirty" if changed else "ready")
+    assert recovered["revision"] == seeded["revision"]
+    search = reader.runtime.search("Service")
+    assert search["state"] == recovered["state"]
+    if changed is None:
+        assert search["results"]
