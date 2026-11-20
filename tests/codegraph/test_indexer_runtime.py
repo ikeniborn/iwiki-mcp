@@ -1450,7 +1450,7 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
         )
     stale = json.loads(runtime.paths.metadata.read_text(encoding="utf-8"))
 
-    assert published_states == ["rebuilding", "rebuilding"]
+    assert published_states == ["rebuilding"]
     assert stale["state"] == "rebuilding"
     assert stale["prior_state"] == "dirty"
     assert stale["previous_revision"] == stale["revision"]
@@ -1460,7 +1460,7 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
 
     assert recovered["state"] == "dirty"
     assert recovered["fresh"] is False
-    assert published_states == ["rebuilding", "rebuilding"]
+    assert published_states == ["rebuilding"]
     assert repaired["state"] == "dirty"
     assert repaired["generation"] == stale["generation"]
 
@@ -3687,7 +3687,7 @@ def test_post_replace_row_mutation_fails_before_ready_metadata(
     status = ready_runtime.status()
 
     assert result["code"] == "store_failed"
-    assert published_states == ["rebuilding", "rebuilding"]
+    assert published_states == ["rebuilding"]
     assert status["state"] == "failed"
     assert status["fresh"] is False
 
