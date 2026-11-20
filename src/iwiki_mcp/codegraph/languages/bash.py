@@ -121,6 +121,10 @@ class BashAdapter:
             for start, end in ranges
         )
 
+    def parse_context(self, path: str) -> dict:
+        """Identify the path-dependent input to the grammar."""
+        return {"extension": PurePosixPath(path).suffix.casefold()}
+
     def parse_file(self, source: bytes, path: str) -> ParsedFile:
         if not isinstance(source, bytes):
             raise TypeError("source must be bytes")

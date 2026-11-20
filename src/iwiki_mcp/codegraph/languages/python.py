@@ -176,6 +176,10 @@ class PythonAdapter:
             _PARSER = self._parser
         return self._parser
 
+    def parse_context(self, path: str) -> dict:
+        """Return the module name from this build's bound discovery set."""
+        return {"module_name": self._module_names.get(_relative_path(path))}
+
     def parse_file(self, source: bytes, path: str) -> ParsedFile:
         if not isinstance(source, bytes):
             raise TypeError("source must be bytes")
