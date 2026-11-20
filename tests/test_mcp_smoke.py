@@ -24,7 +24,7 @@ EXPECTED_TOOLS = {
     "wiki_export_okf", "wiki_sync",
     "wiki_code_status", "wiki_code_index", "wiki_code_search",
     "wiki_code_context", "wiki_code_publish_begin", "wiki_code_publish_batch",
-    "wiki_code_publish_finalize", "wiki_code_publish_abort",
+    "wiki_code_publish_finalize", "wiki_code_publish_abort", "wiki_code_publish_inspect",
     "wiki_code_refresh_links",
     "wiki_spec_search", "wiki_spec_context", "wiki_spec_resolve",
 }
@@ -128,7 +128,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 await session.initialize()
                 listed = (await session.list_tools()).tools
                 tools = {tool.name: tool for tool in listed}
-                assert len(listed) == 36
+                assert len(listed) == 37
                 assert set(tools) == EXPECTED_TOOLS
                 search_schema = tools["wiki_search"].inputSchema
                 assert "mode" not in search_schema.get("required", [])
@@ -146,6 +146,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                     "wiki_code_search",
                     "wiki_code_context",
                     "wiki_code_publish_begin",
+                    "wiki_code_publish_inspect",
                     "wiki_code_publish_batch",
                     "wiki_code_publish_finalize",
                     "wiki_code_publish_abort",

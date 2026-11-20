@@ -42,6 +42,37 @@ _HINTS: dict[str, str] = {
 _UNREADABLE: dict[str, object] = {"state": "missing", "fresh": False}
 
 
+_RESUME_SCHEMA = {
+    "wiki_code_publish_begin": {"header", "attempt_key", "recovery_deadline"},
+    "wiki_code_publish_inspect": {"session_id", "cursor"},
+    "wiki_code_publish_batch": {"require_session_binding"},
+    "wiki_code_publish_finalize": {"require_session_binding"},
+}
+
+
+async def _resume_capabilities(session) -> dict[str, object]:
+    missing = set(_RESUME_SCHEMA)
+    seen_cursors = set()
+    cursor = None
+    while missing:
+        page = await session.list_tools(cursor=cursor)
+        for tool in page.tools:
+            name = tool.name
+            if name in missing and _RESUME_SCHEMA[name].issubset(
+                tool.inputSchema.get("properties", {})
+            ):
+                missing.remove(name)
+        cursor = page.nextCursor
+        if cursor is None:
+            break
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            return _remote_failed()
+        seen_cursors.add(cursor)
+    if missing:
+        return {"error": "incompatible_peer", "hint": "upgrade the hosted publication tools"}
+    return {}
+
+
 def _status_code(exc: BaseException) -> int | None:
     """Return an HTTP status carried by the exception, when it holds one."""
     for candidate in (getattr(getattr(exc, "response", None), "status_code", None),
@@ -147,6 +178,7 @@ class RemoteMcpTransport:
         environ: Mapping[str, str] | None = None,
         session_factory: Callable[[str, Mapping[str, str]], Any] | None = None,
         primary: str | None = None,
+        verify_binding: bool = False,
     ) -> None:
         values = os.environ if environ is None else environ
         url = values.get(ENDPOINT_ENV) or ""
@@ -157,6 +189,9 @@ class RemoteMcpTransport:
             )
         self._url = url
         self._token = token
+        if verify_binding and not primary:
+            raise CodeGraphAdapterError("recovery requires an explicit primary")
+        self._verify_binding = verify_binding
         self._primary = primary
         self._session_factory = session_factory or _official_session
 
@@ -174,6 +209,12 @@ class RemoteMcpTransport:
         self, tool_name: str, arguments: Mapping[str, object]
     ) -> tuple[dict[str, object], str]:
         """Distinguish a tool response, a refused bind and a local transport failure."""
+        recovery_request = tool_name in ("tools/list", "wiki_code_publish_inspect") or (
+            tool_name == "wiki_code_publish_begin"
+            and ("attempt_key" in arguments or "recovery_deadline" in arguments)
+        )
+        if recovery_request and not self._verify_binding:
+            return {"error": "invalid_config", "hint": "verify the recovery target binding"}, "bind"
         # FastMCP runs sync tool functions inline on its own running event
         # loop thread, so anyio.run() here would raise "already running" -
         # run the coroutine on a fresh worker thread instead, which has no
@@ -194,6 +235,10 @@ class RemoteMcpTransport:
         self, tool_name: str, arguments: dict[str, object]
     ) -> tuple[dict[str, object], str]:
         headers = {"Authorization": f"Bearer {self._token}"}
+        if self._verify_binding and tool_name in (
+            "wiki_code_publish_batch", "wiki_code_publish_finalize",
+        ):
+            arguments["require_session_binding"] = True
         status_call = tool_name == "wiki_code_status"
         status_reply = None
         selected_session = None
@@ -208,10 +253,14 @@ class RemoteMcpTransport:
                     binding = _decoded(bind_result)
                     if "error" in binding:
                         raise _RemoteBindError(binding)
-                    if status_call:
+                    if status_call or self._verify_binding:
                         if (
                             getattr(bind_result, "isError", False) is not False
                             or not _matching_bind(binding, self._primary)
+                            or (self._verify_binding and (
+                                binding.get("binding_source") != "session"
+                                or binding.get("primary") != self._primary
+                            ))
                         ):
                             raise _RemoteBindError({
                                 "error": "binding_not_selected",
@@ -220,7 +269,22 @@ class RemoteMcpTransport:
                         selected_session = binding.get("session_id")
                         if _confirmed_bind(binding, self._primary):
                             origin = "bound_tool"
+                if tool_name == "tools/list":
+                    return await _resume_capabilities(session), origin
                 result = await session.call_tool(tool_name, arguments=arguments)
+                if self._verify_binding:
+                    payload = _decoded(result)
+                    if "error" in payload:
+                        return payload, origin
+                    if getattr(result, "isError", False) is not False:
+                        return _remote_failed(), origin
+                    if payload.get("binding_source") != "session" or not _matching_scope(
+                        payload, self._primary, publication=True
+                    ):
+                        return {
+                            "error": "binding_not_selected", "hint": "verify the target binding",
+                        }, origin
+                    return payload, origin
                 if status_call:
                     status_reply = _decoded(result)
                     unexpected_session = (
@@ -250,13 +314,31 @@ class McpSnapshotPublisher:
     def __repr__(self) -> str:
         return "<remote code graph MCP publisher>"
 
-    def begin(self, header: SnapshotHeader) -> PublicationSession | dict:
-        """Open one remote session owned by the configured bearer identity."""
-        result = self._transport.call(
-            "wiki_code_publish_begin", {"header": header_payload(header)}
-        )
+    def check_resume_support(self) -> dict[str, object]:
+        """Verify the remote tool schemas before pinning or beginning an attempt."""
+        return self._transport.call("tools/list", {})
+
+    def begin(
+        self, header: SnapshotHeader, *, attempt_key: str | None = None,
+        recovery_deadline: int | None = None,
+    ) -> PublicationSession | dict:
+        """Open or recover one remote session owned by the configured bearer identity."""
+        arguments: dict[str, object] = {"header": header_payload(header)}
+        keyed = attempt_key is not None or recovery_deadline is not None
+        if keyed:
+            arguments.update(attempt_key=attempt_key, recovery_deadline=recovery_deadline)
+        result = self._transport.call("wiki_code_publish_begin", arguments)
         if "error" in result:
             return result
+        if keyed:
+            for field in ("session_id", "lease_expires_at"):
+                value = result.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    return _remote_failed()
+            for field in ("max_batch_rows", "max_batch_bytes"):
+                value = result.get(field)
+                if type(value) is not int or value <= 0:
+                    return _remote_failed()
         try:
             return PublicationSession(
                 session_id=str(result["session_id"]),
@@ -272,6 +354,15 @@ class McpSnapshotPublisher:
             )
         except KeyError:
             return _remote_failed()
+
+    def inspect(
+        self, session: PublicationSession, cursor: str | None = None,
+    ) -> dict[str, object]:
+        """Read the owner's receipt page or committed result."""
+        arguments = {"session_id": session.session_id}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        return self._transport.call("wiki_code_publish_inspect", arguments)
 
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
@@ -308,7 +399,9 @@ class McpSnapshotPublisher:
         )
 
 
-def _matching_scope(answer: Mapping[str, object], primary: str) -> bool:
+def _matching_scope(
+    answer: Mapping[str, object], primary: str, *, publication: bool = False,
+) -> bool:
     """Reject malformed or contradictory scope fields, including on older responses."""
     for field in ("read", "write"):
         if field in answer:
@@ -317,7 +410,8 @@ def _matching_scope(answer: Mapping[str, object], primary: str) -> bool:
                 return False
             if not all(isinstance(domain, str) and domain for domain in domains):
                 return False
-    if "session_id" in answer:
+    # Publication replies use session_id for the upload handle.
+    if not publication and "session_id" in answer:
         session_id = answer["session_id"]
         if not isinstance(session_id, str) or not session_id.strip():
             return False

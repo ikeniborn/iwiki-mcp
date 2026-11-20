@@ -74,10 +74,17 @@ def _add_config(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config")
 
 
-def _build_code_publish_parser() -> argparse.ArgumentParser:
-    parser = _CodeArgumentParser(prog="iwiki-mcp code publish")
+def _add_publish_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--json", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--resume", action="store_true")
+    mode.add_argument("--forget-resume", action="store_true")
+
+
+def _build_code_publish_parser() -> argparse.ArgumentParser:
+    parser = _CodeArgumentParser(prog="iwiki-mcp code publish")
+    _add_publish_arguments(parser)
     return parser
 
 
@@ -101,8 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser_class=_CodeArgumentParser,
     )
     publish = code_commands.add_parser("publish")
-    publish.add_argument("--project", required=True)
-    publish.add_argument("--json", action="store_true")
+    _add_publish_arguments(publish)
 
     base = commands.add_parser("base")
     base_commands = base.add_subparsers(
@@ -348,8 +354,17 @@ def _write_code_failure(
         "index_failed": "code graph indexing failed",
         "publication_failed": "code graph publication failed",
         "internal_error": "code graph publication failed",
+        "resume_busy": "another publisher holds this checkpoint",
+        "resume_expired": "the recovery window expired; check the active snapshot",
+        "resume_conflict": "publication state conflicts with the pinned upload",
+        "resume_incompatible": "the selected peer or mode does not support recovery",
+        "resume_invalid_checkpoint": "the local recovery checkpoint failed verification",
+        "resume_target_mismatch": "the checkpoint belongs to a different publication target",
+        "resume_access_denied": "the current publisher cannot access this attempt",
+        "resume_transport_failed": "the peer is unavailable; retry with --resume",
+        "resume_failed": "code graph recovery failed",
     }
-    line = f"iwiki-mcp: {messages[error]} (code={error})\n"
+    line = f"iwiki-mcp: {messages.get(error, 'code graph recovery failed')} (code={error})\n"
     detached = threading.Event()
     writer = threading.Thread(
         target=_write_code_stderr, args=(stream, line, detached),
@@ -440,11 +455,28 @@ def _run_code_publish(
     err: TextIO,
 ) -> int:
     try:
-        outcome = _codegraph_application.publish_project(
+        if args.forget_resume:
+            result = _codegraph_application.forget_resume_project(args.project, environ=env)
+            if args.json:
+                _write_code_json(out, result)
+            else:
+                print("Local recovery state cleared." + (
+                    " The remote outcome may still be unknown." if result["outcome_unknown"] else ""
+                ), file=out)
+            return 0
+        publish = (
+            _codegraph_application.resume_project if args.resume
+            else _codegraph_application.publish_project
+        )
+        outcome = publish(
             args.project,
             environ=env,
             _observe_job=_CodePublishProgress(err).observe,
         )
+    except _codegraph_application.CodeGraphResumeError as exc:
+        _write_code_failure(out if args.json else err, json_output=args.json,
+                            publish_mode=exc.publish_mode, error=exc.code, duration_ms=0)
+        return exc.exit_code
     except _codegraph_application.CodeGraphPublishError as exc:
         error, exit_code = {
             "configuration": ("invalid_config", 2),

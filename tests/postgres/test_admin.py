@@ -350,6 +350,7 @@ def test_principal_grant_inspect_and_schema_rollback_commands(admin_runtime):
             rollback_v7_compatibility,
             rollback_v8_compatibility,
             rollback_v9_compatibility,
+            rollback_v10_compatibility,
         )
 
         settings = MigrationSettings(
@@ -359,6 +360,7 @@ def test_principal_grant_inspect_and_schema_rollback_commands(admin_runtime):
             statement_timeout_ms=service.config.server.statement_timeout_ms,
             lock_timeout_ms=service.config.server.lock_timeout_ms,
         )
+        rollback_v10_compatibility(settings, confirm=True)
         rollback_v9_compatibility(settings, confirm=True)
         rollback_v8_compatibility(settings, confirm=True)
         rollback_v7_compatibility(settings, confirm=True)

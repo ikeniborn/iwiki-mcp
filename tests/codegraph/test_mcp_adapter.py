@@ -686,3 +686,119 @@ def test_mcp_read_mode_routes_every_read_through_the_remote_session(
     assert fake_session.calls[2][1] == {"primary": "docs"}
     # No local rebuild on a remote read: nothing indexed the checkout.
     assert not list((tmp_path / "wiki" / ".iwiki").glob("code-*.sqlite3"))
+
+
+def _resume_publisher(session):
+    return McpSnapshotPublisher(RemoteMcpTransport(
+        environ=_CONFIGURED, primary="docs", verify_binding=True,
+        session_factory=lambda url, headers: _FakeConnection(session),
+    ))
+
+
+@pytest.mark.parametrize("binding", [
+    {"primary": "other", "binding_source": "session"},
+    {"primary": "docs", "binding_source": "token_default"},
+    {"primary": "docs", "read": ["docs"], "write": ["docs"]},
+    {"primary": "docs", "binding_source": "session", "primary_substituted": True},
+])
+def test_resume_bind_mismatch_stops_before_any_operation(fake_session, binding, header):
+    fake_session._replies["wiki_bind"] = binding
+    publisher = _resume_publisher(fake_session)
+    result = publisher.begin(header, attempt_key="a" * 32, recovery_deadline=123)
+    assert result["error"] == "binding_not_selected"
+    assert [name for name, _ in fake_session.calls] == ["wiki_bind"]
+
+
+def test_resume_passes_pinned_inputs_and_guards_every_mutation(fake_session, header, batch):
+    fake_session._replies["wiki_bind"] = {"primary": "docs", "binding_source": "session"}
+    fake_session._replies["wiki_code_publish_begin"].update(max_batch_rows=10, max_batch_bytes=1000)
+    for op in ("begin", "batch", "finalize"):
+        fake_session._replies["wiki_code_publish_" + op]["binding_source"] = "session"
+    fake_session._replies["wiki_code_publish_inspect"] = {
+        "binding_source": "session", "state": "staging",
+    }
+    publisher = _resume_publisher(fake_session)
+    session = publisher.begin(header, attempt_key="a" * 32, recovery_deadline=123)
+    publisher.inspect(session, cursor="continuation")
+    publisher.publish_batch(session, batch)
+    publisher.finalize(session)
+
+    names = [name for name, _ in fake_session.calls]
+    assert names[::2] == ["wiki_bind"] * 4
+    assert names[1::2] == [
+        "wiki_code_publish_" + op for op in ("begin", "inspect", "batch", "finalize")
+    ]
+    begin, inspect, batch_call, finalize = [args for _, args in fake_session.calls[1::2]]
+    assert begin["attempt_key"] == "a" * 32 and begin["recovery_deadline"] == 123
+    assert inspect == {"session_id": session.session_id, "cursor": "continuation"}
+    assert batch_call["require_session_binding"] is True
+    assert finalize["require_session_binding"] is True
+
+
+@pytest.mark.parametrize("compatible", [False, True])
+def test_resume_discovers_schema_without_opening_an_attempt(fake_session, compatible):
+    from types import SimpleNamespace
+
+    def tool(op, fields):
+        return SimpleNamespace(name="wiki_code_publish_" + op,
+                               inputSchema={"properties": {key: {} for key in fields}})
+
+    async def listing(cursor=None):
+        fake_session.calls.append(("list_tools", cursor))
+        if cursor is None:
+            fields = ["header", "attempt_key", "recovery_deadline"] if compatible else ["header"]
+            return SimpleNamespace(tools=[tool("begin", fields)], nextCursor="page2")
+        other = [tool("inspect", ["session_id", "cursor"])] if compatible else []
+        other.extend(tool(name, ["require_session_binding"]) for name in ("batch", "finalize"))
+        return SimpleNamespace(tools=other, nextCursor=None)
+
+    fake_session.list_tools = listing
+    fake_session._replies["wiki_bind"] = {"primary": "docs", "binding_source": "session"}
+    result = _resume_publisher(fake_session).check_resume_support()
+    if compatible:
+        assert result == {}
+    else:
+        assert result["error"] == "incompatible_peer"
+    assert [name for name, _ in fake_session.calls] == ["wiki_bind", "list_tools", "list_tools"]
+
+
+def test_resume_rejects_mcp_error_envelope_with_success_shaped_payload(fake_session, header):
+    original = fake_session.call_tool
+    fake_session._replies["wiki_bind"] = {"primary": "docs", "binding_source": "session"}
+
+    async def marked(name, arguments=None):
+        result = await original(name, arguments)
+        if name != "wiki_bind":
+            result.isError = True
+        return result
+
+    fake_session.call_tool = marked
+    result = _resume_publisher(fake_session).begin(
+        header, attempt_key="a" * 32, recovery_deadline=123,
+    )
+    assert result["error"] == "remote_mcp_failed"
+
+
+@pytest.mark.parametrize("malformed", [
+    {"session_id": None}, {"session_id": ""}, {"lease_expires_at": None},
+    {"max_batch_rows": True}, {"max_batch_bytes": 0},
+])
+def test_resume_begin_requires_an_exact_handle_and_negotiated_limits(
+    fake_session, header, malformed,
+):
+    fake_session._replies["wiki_bind"] = {"primary": "docs", "binding_source": "session"}
+    fake_session._replies["wiki_code_publish_begin"].update(
+        binding_source="session", max_batch_rows=10, max_batch_bytes=1_000,
+    )
+    fake_session._replies["wiki_code_publish_begin"].update(malformed)
+    result = _resume_publisher(fake_session).begin(
+        header, attempt_key="a" * 32, recovery_deadline=123,
+    )
+    assert result["error"] == "remote_mcp_failed" and result["reason"] == "malformed_response"
+
+
+def test_unverified_transport_cannot_start_a_recoverable_attempt(fake_session, header):
+    publisher = McpSnapshotPublisher(_transport(fake_session, primary="docs"))
+    result = publisher.begin(header, attempt_key="a" * 32, recovery_deadline=123)
+    assert result["error"] == "invalid_config"
+    assert fake_session.calls == []

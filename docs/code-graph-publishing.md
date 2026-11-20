@@ -300,3 +300,21 @@ PostgreSQL and remote MCP never emit `commit_uncertain`.
 
 Before rolling back to a pre-publication binary, retain or restore a legacy snapshot, or
 reindex with that binary, because it may reject the internal table.
+
+## Recover an interrupted hosted upload
+
+An upgraded CLI and hosted server are both required. Choose resume mode before the first upload. Run the same command after a disconnect or process restart:
+
+```bash
+iwiki-mcp code publish --project /path/to/checkout --resume --json
+```
+
+The CLI pins the exported graph privately on the publishing machine. Keep that local cache until publication finishes. Recovery uses the pinned bytes even if the checkout changes. The client checks the original session's receipts and sends missing batches. If finalization already succeeded, the command returns that attempt's revision, even when another snapshot has since become active. The CLI requests 23 h 55 min under the server’s 24-hour cap. A client clock ahead by over five minutes can cause rejection. Check clock synchronization before retrying. The original deadline is fixed and the staging lease can expire earlier.
+
+Use the same checkout, domain, endpoint and authorized owner. After expiry or a conflict inspect the active snapshot before starting another upload. Repeating a completed attempt replays its result. To discard its local record, run:
+
+```bash
+iwiki-mcp code publish --project /path/to/checkout --forget-resume --json
+```
+
+Forgetting an unresolved attempt can lose the ability to determine its outcome. The server session follows its own lease and retention rules. A subsequent resume starts a new attempt. Ordinary publication remains available on older peers. Resume applies to transfer after pinning; interrupted parsing starts again.

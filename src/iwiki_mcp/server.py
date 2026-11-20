@@ -1732,7 +1732,10 @@ class _UnsupportedPublication:
     def __init__(self, result: dict) -> None:
         self._result = result
 
-    def begin_from_mapping(self, _header) -> dict:
+    def begin_from_mapping(self, _header, **_resume) -> dict:
+        return dict(self._result)
+
+    def inspect(self, _session_id, _cursor) -> dict:
         return dict(self._result)
 
     def publish_from_mapping(self, *_arguments) -> dict:
@@ -1752,7 +1755,7 @@ class _HostedPublication:
         self._store = store
         self._settings = settings
 
-    def begin_from_mapping(self, header) -> dict:
+    def begin_from_mapping(self, header, *, attempt_key=None, recovery_deadline=None) -> dict:
         if not isinstance(header, dict):
             return dict(_CODE_INVALID_HEADER)
         try:
@@ -1775,7 +1778,15 @@ class _HostedPublication:
                 "error": "scope_mismatch",
                 "hint": "publish the bound primary domain only",
             }
-        session = self._store.begin(parsed)
+        keyed = attempt_key is not None or recovery_deadline is not None
+        if keyed:
+            session = self._store.begin(
+                parsed, attempt_key=attempt_key, recovery_deadline=recovery_deadline,
+                max_batch_rows=self._settings.max_batch_rows,
+                max_batch_bytes=self._settings.max_batch_bytes,
+            )
+        else:
+            session = self._store.begin(parsed)
         if isinstance(session, dict):
             return session
         return {
@@ -1783,9 +1794,21 @@ class _HostedPublication:
             "lease_expires_at": session.lease_expires_at,
             "base_snapshot_revision": session.base_snapshot_revision,
             "base_markdown_token": session.base_markdown_token,
-            "max_batch_rows": self._settings.max_batch_rows,
-            "max_batch_bytes": self._settings.max_batch_bytes,
+            "max_batch_rows": session.max_batch_rows if keyed else self._settings.max_batch_rows,
+            "max_batch_bytes": session.max_batch_bytes if keyed else self._settings.max_batch_bytes,
         }
+
+    def inspect(self, session_id, cursor) -> dict:
+        answer = self._store.inspect(session_id, cursor)
+        if answer.get("state") == "staging" and (
+            answer["max_batch_rows"] > self._settings.max_batch_rows
+            or answer["max_batch_bytes"] > self._settings.max_batch_bytes
+        ):
+            return {
+                "error": "resume_limits_changed",
+                "hint": "the host can no longer accept the negotiated batch limits",
+            }
+        return answer
 
     def publish_from_mapping(
         self, session_id, kind, ordinal, rows, payload_hash
@@ -1831,7 +1854,7 @@ _CODE_INVALID_HEADER = {
 }
 
 
-def _code_publication_service(binding):
+def _code_publication_service(binding, *, require_session_binding=False):
     """Resolve the only publication target this authenticated call may use."""
     if not _is_postgres(binding):
         return _UnsupportedPublication(_unsupported_storage())
@@ -1840,10 +1863,16 @@ def _code_publication_service(binding):
         return _UnsupportedPublication(_unsupported_hosted_transport(binding))
     if binding.primary is None or binding.primary not in binding.write:
         return _UnsupportedPublication(dict(_CODE_UNAUTHORIZED))
-    return _HostedPublication(
-        _postgres_code_store(binding, context.token_id),
-        _hosted_code_graph_settings(),
+    provenance = _hosted_binding_provenance()
+    selected = provenance.get("binding_source") == "session" and not provenance.get(
+        "primary_substituted"
     )
+    if require_session_binding and not selected:
+        return _UnsupportedPublication(dict(_CODE_BINDING_NOT_SELECTED))
+    store = _postgres_code_store(binding, context.token_id)
+    if not selected:
+        store.restrict_to_legacy_sessions()
+    return _HostedPublication(store, _hosted_code_graph_settings())
 
 
 _CodeJobId = Annotated[
@@ -2068,14 +2097,27 @@ def wiki_code_context(
 
 @_safe
 @_code_safe
-def wiki_code_publish_begin(header: dict) -> dict:
+def wiki_code_publish_begin(
+    header: dict, attempt_key: str | None = None, recovery_deadline: int | None = None,
+) -> dict:
     """Open one owned publication session for the authenticated primary."""
     binding = _resolved_binding()
-    result = _with_binding_provenance(
-        _code_publication_service(binding).begin_from_mapping(header)
-    )
-    _schedule_wiki_code_graph_cleanup(binding)
+    keyed = attempt_key is not None or recovery_deadline is not None
+    service = _code_publication_service(binding, require_session_binding=keyed)
+    result = _with_binding_provenance(service.begin_from_mapping(
+        header, attempt_key=attempt_key, recovery_deadline=recovery_deadline,
+    ))
+    if not keyed or "error" not in result:
+        _schedule_wiki_code_graph_cleanup(binding)
     return result
+
+
+@_safe
+@_code_safe
+def wiki_code_publish_inspect(session_id: str, cursor: str | None = None) -> dict:
+    """Read one page of this owner's recoverable attempt without renewing its lease."""
+    service = _code_publication_service(_resolved_binding(), require_session_binding=True)
+    return _with_binding_provenance(service.inspect(session_id, cursor))
 
 
 def _schedule_wiki_code_graph_cleanup(binding) -> None:
@@ -2111,20 +2153,25 @@ def wiki_code_publish_batch(
     ordinal: int,
     rows: list[dict],
     payload_hash: str,
+    require_session_binding: bool = False,
 ) -> dict:
     """Accept one canonical row batch of an owned publication session."""
-    return _code_publication_service(_resolved_binding()).publish_from_mapping(
-        session_id, kind, ordinal, rows, payload_hash
+    service = _code_publication_service(
+        _resolved_binding(), require_session_binding=require_session_binding,
     )
+    result = service.publish_from_mapping(session_id, kind, ordinal, rows, payload_hash)
+    return _with_binding_provenance(result) if require_session_binding else result
 
 
 @_safe
 @_code_safe
-def wiki_code_publish_finalize(session_id: str) -> dict:
+def wiki_code_publish_finalize(session_id: str, require_session_binding: bool = False) -> dict:
     """Recompute revisions and activate one complete staged snapshot."""
-    return _code_publication_service(_resolved_binding()).finalize_from_mapping(
-        session_id
+    service = _code_publication_service(
+        _resolved_binding(), require_session_binding=require_session_binding,
     )
+    result = service.finalize_from_mapping(session_id)
+    return _with_binding_provenance(result) if require_session_binding else result
 
 
 @_safe
@@ -5959,6 +6006,7 @@ mcp.tool()(_threaded(wiki_code_index))
 mcp.tool()(_threaded(wiki_code_search))
 mcp.tool()(_threaded(wiki_code_context))
 mcp.tool()(_threaded(wiki_code_publish_begin))
+mcp.tool()(_threaded(wiki_code_publish_inspect))
 mcp.tool()(_threaded(wiki_code_publish_batch))
 mcp.tool()(_threaded(wiki_code_publish_finalize))
 mcp.tool()(_threaded(wiki_code_publish_abort))
@@ -6037,7 +6085,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     if not _is_postgres(binding):
         return
     _postgres_migrations.require_schema_version(
-        binding.connection_dsn(), expected_version=9
+        binding.connection_dsn(), expected_version=10
     )
 
 

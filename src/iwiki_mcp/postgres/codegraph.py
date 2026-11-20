@@ -5,8 +5,10 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 import datetime
+import hmac
 import json
 import logging
+import re
 import secrets
 from typing import Any, ContextManager, Iterator
 
@@ -83,6 +85,24 @@ _INVALID_BATCH = _error(
 )
 
 
+_INVALID_ATTEMPT = _error("invalid_attempt", "check the recovery key, deadline and limits")
+_BIND_REQUIRED = _error(
+    "binding_not_selected", "call wiki_bind to select a primary domain for this session"
+)
+_INVALID_CURSOR = _error("invalid_cursor", "use the continuation returned for this session")
+_RECOVERY_SECONDS = 86400
+_ATTEMPT_KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
+_RECEIPT_CURSOR = re.compile(
+    r"(repositories|files|symbols|relations):(0|[1-9][0-9]{0,9}):[0-9a-f]{32}"
+)
+
+
+def _receipt_cursor(key: str, session_id: str, kind: str, ordinal: int) -> str:
+    position = f"{kind}:{ordinal}"
+    signature = hmac.digest(bytes.fromhex(key), f"{session_id}:{position}".encode(), "sha256")
+    return f"{position}:{signature[:16].hex()}"
+
+
 def _current_markdown_revision(cursor, iwiki_id, domain_id: int) -> str:
     """Hash the domain's current Markdown exactly as a publication does."""
     cursor.execute(
@@ -106,6 +126,7 @@ class PostgresCodeGraphStore:
     # ceiling only stops one cycle running unboundedly against a pathological
     # backlog; it sits far above the ~30000 rows one publication adds, so a
     # ceiling-limited cycle still drains faster than publications accumulate.
+    _RECEIPT_PAGE_SIZE = 256
     _CLEANUP_BATCH_ROWS = 10000
     _CLEANUP_CYCLE_ROWS = 200000
 
@@ -132,6 +153,7 @@ class PostgresCodeGraphStore:
         self.iwiki_id = iwiki_id
         self.domain = domain
         self.owner_id = owner_id
+        self._legacy_sessions_only = False
         self._lock_timeout_ms = lock_timeout_ms
         self._session_ttl_seconds = session_ttl_seconds
         self._staging_retention_seconds = staging_retention_seconds
@@ -235,12 +257,14 @@ class PostgresCodeGraphStore:
 
     def _load_session(self, cursor, domain_id: int, session_id: str):
         cursor.execute(
-            "SELECT snapshot_id, owner_id, state, lease_expires_at, "
-            "base_snapshot_revision, captured_markdown_generation, "
-            "terminal_result "
-            "FROM iwiki.code_graph_publication_sessions "
-            "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s "
-            "FOR UPDATE",
+            "SELECT s.snapshot_id, s.owner_id, s.state, s.lease_expires_at, "
+            "s.base_snapshot_revision, s.captured_markdown_generation, "
+            "s.terminal_result, s.recovery_deadline, a.max_batch_rows, a.max_batch_bytes "
+            "FROM iwiki.code_graph_publication_sessions s "
+            "LEFT JOIN iwiki.code_graph_publication_attempts a "
+            "USING (iwiki_id, domain_id, session_id) "
+            "WHERE s.iwiki_id = %s AND s.domain_id = %s AND s.session_id = %s "
+            "FOR UPDATE OF s",
             (self.iwiki_id, domain_id, session_id),
         )
         row = cursor.fetchone()
@@ -254,11 +278,28 @@ class PostgresCodeGraphStore:
             "base_snapshot_revision": row[4],
             "captured_markdown_generation": row[5],
             "terminal_result": row[6],
+            "recovery_deadline": row[7],
+            "max_batch_rows": row[8],
+            "max_batch_bytes": row[9],
         }
 
-    def _guard(self, record, now: datetime.datetime) -> dict[str, object] | None:
+    def restrict_to_legacy_sessions(self) -> None:
+        """Restrict this request's store when its hosted binding is defaulted."""
+        self._legacy_sessions_only = True
+
+    def _session_access(self, record) -> dict[str, object] | None:
         if record is None or record["owner_id"] != self.owner_id:
             return dict(_UNAUTHORIZED)
+        if self._legacy_sessions_only and record["recovery_deadline"] is not None:
+            return dict(_BIND_REQUIRED)
+        return None
+
+    def _guard(self, record, now: datetime.datetime) -> dict[str, object] | None:
+        rejection = self._session_access(record)
+        if rejection is not None:
+            return rejection
+        if record["recovery_deadline"] is not None and record["recovery_deadline"] <= now:
+            return dict(_EXPIRED)
         if record["state"] != "staging":
             return None
         if record["lease_expires_at"] <= now:
@@ -269,25 +310,61 @@ class PostgresCodeGraphStore:
         expires = now + datetime.timedelta(seconds=self._session_ttl_seconds)
         cursor.execute(
             "UPDATE iwiki.code_graph_publication_sessions "
-            "SET lease_expires_at = %s, updated_at = %s "
+            "SET lease_expires_at = LEAST(%s, recovery_deadline), updated_at = %s "
             "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
             (expires, now, self.iwiki_id, domain_id, session_id),
         )
 
     # -- lifecycle ------------------------------------------------------
 
-    def begin(self, header: SnapshotHeader) -> PublicationSession:
+    def begin(
+        self, header: SnapshotHeader, *, attempt_key: str | None = None,
+        recovery_deadline: int | None = None, max_batch_rows: int | None = None,
+        max_batch_bytes: int | None = None,
+    ) -> PublicationSession | dict[str, object]:
         """Stage one owned session after bounded expired-staging cleanup."""
         now = self._clock()
         expires = now + datetime.timedelta(seconds=self._session_ttl_seconds)
+        deadline = None
+        if attempt_key is not None or recovery_deadline is not None:
+            if self._legacy_sessions_only:
+                return dict(_BIND_REQUIRED)
+            if (not isinstance(attempt_key, str) or not _ATTEMPT_KEY.fullmatch(attempt_key)
+                    or type(recovery_deadline) is not int
+                    or type(max_batch_rows) is not int or max_batch_rows <= 0
+                    or type(max_batch_bytes) is not int or max_batch_bytes <= 0):
+                return dict(_INVALID_ATTEMPT)
+            if recovery_deadline <= now.timestamp():
+                return dict(_EXPIRED)
+            if recovery_deadline > now.timestamp() + _RECOVERY_SECONDS:
+                return dict(_INVALID_ATTEMPT)
+            deadline = datetime.datetime.fromtimestamp(recovery_deadline, datetime.timezone.utc)
+            expires = min(deadline, expires)
         session_id = secrets.token_hex(16)
         snapshot_id = secrets.token_hex(16)
         with self._transaction() as cursor:
             domain_id = self._domain_id(cursor)
             self._domain_state(cursor, domain_id)
-            self._cleanup_staging(cursor, domain_id, now)
             generation = self._markdown_generation(cursor, domain_id)
             base_revision = self._active_revision(cursor, domain_id)
+            if deadline is not None:
+                digest = canonical_sha256(header_payload(header), prefix=True)
+                cursor.execute(
+                    "INSERT INTO iwiki.code_graph_publication_attempts "
+                    "(iwiki_id, domain_id, owner_id, attempt_key, session_id, recovery_deadline, "
+                    "header_digest, graph_payload_revision, cursor_key, max_batch_rows, "
+                    "max_batch_bytes, initial_lease, base_snapshot_revision, base_markdown_token) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (iwiki_id, domain_id, attempt_key) DO NOTHING",
+                    (self.iwiki_id, domain_id, self.owner_id, attempt_key, session_id, deadline,
+                     digest, header.graph_payload_revision, secrets.token_hex(32),
+                     max_batch_rows, max_batch_bytes, expires, base_revision, generation),
+                )
+                if not cursor.rowcount:
+                    return self._repeat_begin(
+                        cursor, domain_id, attempt_key, digest, deadline, self._clock()
+                    )
+            self._cleanup_staging(cursor, domain_id, now)
             cursor.execute(
                 "INSERT INTO iwiki.code_graph_snapshots "
                 "(iwiki_id, domain_id, snapshot_id, state, header, "
@@ -310,8 +387,8 @@ class PostgresCodeGraphStore:
                 "INSERT INTO iwiki.code_graph_publication_sessions "
                 "(iwiki_id, domain_id, session_id, snapshot_id, owner_id, "
                 "state, lease_expires_at, base_snapshot_revision, "
-                "captured_markdown_generation, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, 'staging', %s, %s, %s, %s, %s)",
+                "captured_markdown_generation, created_at, updated_at, recovery_deadline) "
+                "VALUES (%s, %s, %s, %s, %s, 'staging', %s, %s, %s, %s, %s, %s)",
                 (
                     self.iwiki_id,
                     domain_id,
@@ -323,6 +400,7 @@ class PostgresCodeGraphStore:
                     generation,
                     now,
                     now,
+                    deadline,
                 ),
             )
         self._schedule_local_cleanup()
@@ -331,7 +409,94 @@ class PostgresCodeGraphStore:
             lease_expires_at=expires.isoformat(),
             base_snapshot_revision=base_revision,
             base_markdown_token=generation,
+            max_batch_rows=max_batch_rows,
+            max_batch_bytes=max_batch_bytes,
         )
+
+    def _repeat_begin(self, cursor, domain_id, key, digest, deadline, now):
+        cursor.execute(
+            "SELECT a.header_digest, a.recovery_deadline, a.session_id, a.initial_lease, "
+            "a.base_snapshot_revision, a.base_markdown_token, a.max_batch_rows, a.max_batch_bytes, "
+            "a.terminal_result, s.lease_expires_at "
+            "FROM iwiki.code_graph_publication_attempts a "
+            "LEFT JOIN iwiki.code_graph_publication_sessions s "
+            "USING (iwiki_id, domain_id, session_id) "
+            "WHERE a.iwiki_id = %s AND a.domain_id = %s AND a.owner_id = %s AND a.attempt_key = %s",
+            (self.iwiki_id, domain_id, self.owner_id, key),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return dict(_UNAUTHORIZED)
+        if row[1] <= now:
+            return dict(_EXPIRED)
+        if row[:2] != (digest, deadline):
+            return dict(_SNAPSHOT_CONFLICT)
+        if row[8] is None and (row[9] is None or row[9] <= now):
+            return dict(_EXPIRED)
+        return PublicationSession(row[2], row[3].isoformat(), row[4], row[5], row[6], row[7])
+
+    def inspect(self, session_id: str, cursor: str | None = None) -> dict[str, object]:
+        """Read one stable receipt page or the outcome preserved across snapshot cleanup."""
+        if self._legacy_sessions_only:
+            return dict(_BIND_REQUIRED)
+        with self._transaction() as db:
+            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            domain_id = self._domain_id(db)
+            db.execute(
+                "SELECT a.recovery_deadline, a.header_digest, a.graph_payload_revision, "
+                "a.max_batch_rows, a.max_batch_bytes, a.terminal_result, a.cursor_key, "
+                "s.lease_expires_at FROM iwiki.code_graph_publication_attempts a "
+                "LEFT JOIN iwiki.code_graph_publication_sessions s "
+                "USING (iwiki_id, domain_id, session_id) "
+                "WHERE a.iwiki_id = %s AND a.domain_id = %s "
+                "AND a.owner_id = %s AND a.session_id = %s",
+                (self.iwiki_id, domain_id, self.owner_id, session_id),
+            )
+            row = db.fetchone()
+            if row is None:
+                return dict(_UNAUTHORIZED)
+            deadline, digest, revision, max_rows, max_bytes, terminal, secret, lease = row
+            now = self._clock()
+            if deadline <= now:
+                return dict(_EXPIRED)
+            after = ("", -1)
+            if cursor is not None:
+                match = _RECEIPT_CURSOR.fullmatch(cursor) if isinstance(cursor, str) else None
+                if not match:
+                    return dict(_INVALID_CURSOR)
+                after = (match[1], int(match[2]))
+                if not hmac.compare_digest(cursor, _receipt_cursor(secret, session_id, *after)):
+                    return dict(_INVALID_CURSOR)
+            answer = {
+                "session_id": session_id, "header_digest": digest,
+                "graph_payload_revision": revision,
+                "max_batch_rows": max_rows, "max_batch_bytes": max_bytes,
+                "recovery_deadline": int(deadline.timestamp()),
+            }
+            if terminal is not None:
+                if terminal.get("state") != "ready":
+                    return dict(_SNAPSHOT_CONFLICT)
+                return {**answer, "state": "ready",
+                        "snapshot_revision": terminal["snapshot_revision"]}
+            if lease is None or lease <= now:
+                return dict(_EXPIRED)
+            db.execute(
+                "SELECT kind, ordinal, payload_hash FROM iwiki.code_graph_batches "
+                "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s "
+                "AND (kind, ordinal) > (%s, %s) ORDER BY kind, ordinal LIMIT %s",
+                (self.iwiki_id, domain_id, session_id, *after, self._RECEIPT_PAGE_SIZE + 1),
+            )
+            rows = db.fetchall()
+        page = rows[:self._RECEIPT_PAGE_SIZE]
+        next_cursor = None
+        if len(rows) > len(page):
+            next_cursor = _receipt_cursor(secret, session_id, page[-1][0], page[-1][1])
+        return {
+            **answer, "state": "staging", "lease_expires_at": lease.isoformat(),
+            "receipts": [{"kind": kind, "ordinal": ordinal, "payload_hash": digest}
+                         for kind, ordinal, digest in page],
+            "next_cursor": next_cursor,
+        }
 
     def _schedule_local_cleanup(self) -> None:
         """R7 fallback: sweep on `begin` when no hosted runtime ever will.
@@ -368,15 +533,21 @@ class PostgresCodeGraphStore:
         self, session: PublicationSession, batch: SnapshotBatch
     ) -> dict[str, object]:
         """Accept one idempotent batch under owner, state, and lease checks."""
-        now = self._clock()
         with self._transaction() as cursor:
             domain_id = self._domain_id(cursor)
             record = self._load_session(cursor, domain_id, session.session_id)
+            now = self._clock()
             rejection = self._guard(record, now)
             if rejection is not None:
                 return rejection
             if record["state"] != "staging":
                 return dict(_SNAPSHOT_CONFLICT)
+            if record["recovery_deadline"] is not None and (
+                record["max_batch_rows"] is None
+                or batch.row_count > record["max_batch_rows"]
+                or batch.byte_count > record["max_batch_bytes"]
+            ):
+                return dict(_INVALID_BATCH)
             if batch.kind not in _ROW_KINDS or batch.ordinal < 0:
                 return dict(_INVALID_BATCH)
             cursor.execute(
@@ -472,6 +643,10 @@ class PostgresCodeGraphStore:
                     "captured_markdown_generation"
                 ]:
                     return dict(_SNAPSHOT_CONFLICT)
+                if record["recovery_deadline"] is not None:
+                    rejection = self._guard(record, self._clock())
+                    if rejection is not None:
+                        return rejection
                 return self._activate(
                     cursor,
                     domain_id,
@@ -496,8 +671,9 @@ class PostgresCodeGraphStore:
         with self._transaction() as cursor:
             domain_id = self._domain_id(cursor)
             record = self._load_session(cursor, domain_id, session.session_id)
-            if record is None or record["owner_id"] != self.owner_id:
-                return dict(_UNAUTHORIZED)
+            rejection = self._session_access(record)
+            if rejection is not None:
+                return rejection
             if record["state"] != "staging":
                 terminal = record["terminal_result"]
                 return dict(terminal) if terminal else {"state": record["state"]}
@@ -673,7 +849,19 @@ class PostgresCodeGraphStore:
 
     # -- helpers --------------------------------------------------------
 
+    def _cleanup_attempts(self, cursor, domain_id: int, now) -> None:
+        cursor.execute(
+            "WITH expired AS MATERIALIZED ("
+            "SELECT session_id FROM iwiki.code_graph_publication_attempts "
+            "WHERE iwiki_id = %s AND domain_id = %s AND recovery_deadline <= %s "
+            "ORDER BY recovery_deadline LIMIT %s FOR UPDATE SKIP LOCKED) "
+            "DELETE FROM iwiki.code_graph_publication_attempts a USING expired "
+            "WHERE a.iwiki_id = %s AND a.domain_id = %s AND a.session_id = expired.session_id",
+            (self.iwiki_id, domain_id, now, self._staging_cleanup_limit, self.iwiki_id, domain_id),
+        )
+
     def _cleanup_staging(self, cursor, domain_id: int, now) -> int:
+        self._cleanup_attempts(cursor, domain_id, now)
         threshold = now - datetime.timedelta(
             seconds=self._staging_retention_seconds
         )
@@ -682,7 +870,7 @@ class PostgresCodeGraphStore:
             "FROM iwiki.code_graph_publication_sessions "
             "WHERE iwiki_id = %s AND domain_id = %s AND state = 'staging' "
             "AND lease_expires_at <= %s "
-            "ORDER BY lease_expires_at LIMIT %s",
+            "ORDER BY lease_expires_at LIMIT %s FOR UPDATE SKIP LOCKED",
             (self.iwiki_id, domain_id, threshold, self._staging_cleanup_limit),
         )
         expired = cursor.fetchall()
@@ -727,6 +915,7 @@ class PostgresCodeGraphStore:
         try:
             with self._transaction_on(connection) as cursor:
                 domain_id = self._domain_id(cursor)
+                self._cleanup_attempts(cursor, domain_id, self._clock())
             while progress[0] < self._CLEANUP_CYCLE_ROWS:
                 with self._transaction_on(connection) as cursor:
                     candidates = self._superseded_candidates(

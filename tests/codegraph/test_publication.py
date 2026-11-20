@@ -384,11 +384,15 @@ def test_publication_contract_values_are_closed_and_immutable():
         "snapshot_conflict",
         "markdown_unavailable",
         "commit_uncertain",
+        "invalid_attempt",
+        "invalid_cursor",
+        "resume_limits_changed",
     )
     assert ADAPTER_ERROR_CODES == (
         "invalid_config",
         "remote_mcp_failed",
         "source_unavailable",
+        "incompatible_peer",
     )
     assert READINESS_ERROR_CODES == ("missing_snapshot", "stale_snapshot")
 

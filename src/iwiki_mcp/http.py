@@ -57,6 +57,7 @@ _WRITE_DOMAIN_TOOLS = {
 }
 _CODE_PUBLISH_TOOLS = {
     "wiki_code_publish_begin",
+    "wiki_code_publish_inspect",
     "wiki_code_publish_batch",
     "wiki_code_publish_finalize",
     "wiki_code_publish_abort",
@@ -778,7 +779,7 @@ def prepare_runtime(
     cfg = admin._engine_config(config, env)
     probe(cfg)
     dsn = admin._dsn(config)
-    require_schema_version(dsn, expected_version=9)
+    require_schema_version(dsn, expected_version=10)
     require_hosted_runtime_principal(dsn)
     options = (
         f"-c statement_timeout={config.server.statement_timeout_ms} "

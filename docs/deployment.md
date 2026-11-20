@@ -211,7 +211,7 @@ first is a network, credential, or container problem, the second is a migration 
 shared message once sent an operator looking for a migration while the database was
 listening on no TCP port at all. Neither message contains the DSN or the password.
 
-The runtime pins one exact schema version, currently 9. An image is therefore not
+The runtime pins one exact schema version, currently 10. An image is therefore not
 deployable against a database the operator has not migrated to that version, and an older
 image is not deployable against a newer database. Version 8 releases the foreign key that
 let derived code-graph links block deletion of the Markdown page they were derived from:
@@ -225,6 +225,18 @@ measurement behind them, including the write-blocking window below, is
 `rollback_v9_compatibility`, which restores version 8 by dropping the three indexes; it
 ships no separate raw-SQL compatibility artifact, since nothing beyond the rollback chain
 itself needs one.
+
+Version 10 adds durable publication attempts, a nullable deadline for keyed sessions,
+and a trigger that records their terminal result in the activation transaction.
+Stop schema-9 runtimes before migration. Apply migrations with the restricted runtime
+offline and verify schema 10 before starting the new server. Existing clients can
+continue ordinary publication; upgrade clients before enabling `--resume`.
+
+For binary rollback, first stop all schema-10 writers and suspend recovery jobs.
+Run `rollback_v10_compatibility(settings, confirm=True)` using the schema-10 migrator, retaining
+the attempt table and receipts. Start the old binary only after checking the schema
+marker. Reapply migration 10 before restarting recovery jobs. Normal lease and
+recovery deadlines continue to elapse during downtime.
 
 `run_migrations` applies every pending migration inside one transaction, and `CREATE
 INDEX CONCURRENTLY` cannot run inside a transaction block, so version 9 uses a plain

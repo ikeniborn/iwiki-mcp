@@ -907,6 +907,7 @@ async def test_fastmcp_registry_has_exact_code_tools():
         "wiki_code_search",
         "wiki_code_context",
         "wiki_code_publish_begin",
+        "wiki_code_publish_inspect",
         "wiki_code_publish_batch",
         "wiki_code_publish_finalize",
         "wiki_code_publish_abort",
@@ -955,11 +956,17 @@ async def test_fastmcp_registry_has_exact_code_tools():
     assert search_schema["properties"]["languages"]["default"] is None
     assert search_schema["properties"]["limit"]["default"] == 20
     assert "domain" not in search_schema["properties"]
+    begin = tools["wiki_code_publish_begin"].inputSchema
+    assert begin["required"] == ["header"]
+    assert set(begin["properties"]) == {"header", "attempt_key", "recovery_deadline"}
+    inspect = tools["wiki_code_publish_inspect"].inputSchema
+    assert inspect["required"] == ["session_id"]
+    assert set(inspect["properties"]) == {"session_id", "cursor"}
     assert set(tools["wiki_code_publish_batch"].inputSchema["properties"]) == {
-        "session_id", "kind", "ordinal", "rows", "payload_hash",
+        "session_id", "kind", "ordinal", "rows", "payload_hash", "require_session_binding",
     }
     assert set(tools["wiki_code_publish_finalize"].inputSchema["properties"]) == {
-        "session_id",
+        "session_id", "require_session_binding",
     }
     assert all(
         "iwiki_id" not in tool.inputSchema.get("properties", {})
@@ -992,6 +999,7 @@ def test_wiki_search_regression_keeps_existing_function():
     ("handler", "args"),
     [
         (lambda: server.wiki_code_publish_begin({}), ()),
+        (lambda: server.wiki_code_publish_inspect("s"), ()),
         (lambda: server.wiki_code_publish_batch("s", "files", 0, [], "h"), ()),
         (lambda: server.wiki_code_publish_finalize("s"), ()),
         (lambda: server.wiki_code_publish_abort("s"), ()),

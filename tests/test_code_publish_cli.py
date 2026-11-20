@@ -962,3 +962,20 @@ def test_text_usage_error_with_disconnected_stderr_pipe_retains_exit_two(tmp_pat
         os.close(write_fd)
     assert result.returncode == 2
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize("flag,state", [("--resume", "ready"), ("--forget-resume", "forgotten")])
+def test_resume_cli_dispatch(flag, state, monkeypatch, tmp_path):
+    def resume(project, **kwargs):
+        assert project == str(tmp_path)
+        return _outcome()
+
+    monkeypatch.setattr(application, "resume_project", resume, raising=False)
+    monkeypatch.setattr(application, "forget_resume_project",
+                        lambda *a, **kw: {"state": "forgotten", "outcome_unknown": True},
+                        raising=False)
+    out = StringIO()
+    code = admin.run(["code", "publish", "--project", str(tmp_path), flag, "--json"],
+                     stdout=out, stderr=StringIO(), environ={})
+    assert code == 0
+    assert json.loads(out.getvalue())["state"] == state
