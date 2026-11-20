@@ -100,6 +100,9 @@ class ParseCheckpoint:
                         info = os.fstat(fd)
                         if info.st_uid != os.geteuid() or info.st_mode & 0o077:
                             raise ParseCheckpointError()
+                        if create:
+                            # The previous writer may have died just after replacement.
+                            os.fsync(fd)
             # Do not translate exceptions from the build into storage failures.
             try:
                 yield cls(fd) if fd is not None else None

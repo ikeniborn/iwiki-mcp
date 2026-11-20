@@ -192,3 +192,20 @@ def test_shared_parent_requires_traversal_protection():
         folder.chmod(0o1775)
         with ParseCheckpoint.open(base, base, "books") as cache:
             assert cache.load("a", {}) == "stored"
+
+
+def test_reopen_syncs_scope_before_serving_hits(tmp_path, monkeypatch):
+    with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
+        assert cache.save("completed", {}, "old")
+        scope = os.fstat(cache.directory)
+    fsync = os.fsync
+
+    def fail_directory_sync(fd):
+        if os.path.samestat(scope, os.fstat(fd)):
+            raise OSError("private filesystem diagnostic")
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_sync)
+    with pytest.raises(ParseCheckpointError, match="^parse_checkpoint_storage_failed$"):
+        with ParseCheckpoint.open(tmp_path, tmp_path, "books"):
+            pytest.fail("cache opened while preceding replacement was not durable")
