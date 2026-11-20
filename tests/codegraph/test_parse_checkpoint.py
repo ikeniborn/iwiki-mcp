@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from iwiki_mcp.codegraph.location import _descriptor_path
 from iwiki_mcp.codegraph.parse_checkpoint import ParseCheckpoint, ParseCheckpointError
 
 
@@ -17,7 +18,7 @@ def test_scope_prune_and_persistence(tmp_path):
     pin = tmp_path / ".iwiki" / "resume-pin"
     pin.write_bytes(b"pin")
     with ParseCheckpoint.open(tmp_path, original, "books") as cache:
-        folder = Path(f"/proc/self/fd/{cache.directory}")
+        folder = _descriptor_path(cache.directory)
         (folder / "unknown").write_bytes(b"private")
         cache.prune(["a.py"])
         assert cache.load("b.py", {"hash": "b"}) is None
@@ -34,7 +35,7 @@ def test_unsafe_entry_is_rejected(tmp_path, kind):
     neighbor.write_bytes(b"neighbor")
     with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
         cache.save("a", {}, {})
-        folder = Path(f"/proc/self/fd/{cache.directory}")
+        folder = _descriptor_path(cache.directory)
         entry, = folder.iterdir()
         entry.unlink()
         if kind == "symlink":
@@ -57,7 +58,7 @@ def test_complete_record_size_limit(tmp_path):
 
     with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
         assert cache.save("a", {}, "")
-        entry, = Path(f"/proc/self/fd/{cache.directory}").iterdir()
+        entry, = _descriptor_path(cache.directory).iterdir()
         padding = MAX_RECORD_BYTES - entry.stat().st_size
         for difference in (-1, 0, 1):
             value = "a" * (padding + difference)
@@ -77,7 +78,7 @@ def test_damage_or_wrong_format_is_a_miss(tmp_path):
 
     with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
         cache.save("a", {}, {"test": 1})
-        entry, = Path(f"/proc/self/fd/{cache.directory}").iterdir()
+        entry, = _descriptor_path(cache.directory).iterdir()
         document = json.loads(entry.read_bytes())
         document["record"]["payload"] = {"test": 2}
         entry.write_text(json.dumps(document))
@@ -120,7 +121,7 @@ def test_failed_write_preserves_committed_result(tmp_path, monkeypatch):
     with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
         cache.prune(["a"])
         assert cache.load("a", {}) == 1
-        entry, = Path(f"/proc/self/fd/{cache.directory}").iterdir()
+        entry, = _descriptor_path(cache.directory).iterdir()
         assert entry.is_file()
 
 
@@ -164,7 +165,7 @@ with ParseCheckpoint.open(root, root, "books") as cache:
 def test_foreign_owned_file_if_permitted(tmp_path):
     with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
         cache.save("a", {}, {})
-        entry, = Path(f"/proc/self/fd/{cache.directory}").iterdir()
+        entry, = _descriptor_path(cache.directory).iterdir()
         try:
             os.chown(entry, (os.geteuid() + 1) % 65535, -1)
         except PermissionError:
@@ -178,7 +179,7 @@ def test_shared_parent_requires_traversal_protection():
 
     # Start directly under the host's public temporary directory. pytest's
     # per-user ancestor would protect even a deliberately exposed test base.
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(dir="/tmp") as root:
         base = Path(root)
         folder = base / ".iwiki"
         folder.mkdir()
