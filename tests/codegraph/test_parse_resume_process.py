@@ -85,6 +85,7 @@ def test_new_cli_reuses_only_compatible_completed_files(tmp_path):
     (project / removed).unlink()
     (project / moved).rename(project / 'moved.py')
     (project / 'replacement.py').write_text('def replacement(): return 1\n')
+
     def content_tables():
         from iwiki_mcp import base
         from iwiki_mcp.codegraph import application
