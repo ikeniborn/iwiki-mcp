@@ -1,6 +1,7 @@
 """Closed JSON codec for local, intermediate language-adapter results."""
 from __future__ import annotations
 
+from dataclasses import fields
 from functools import lru_cache
 from typing import Literal, get_args, get_origin, get_type_hints, TYPE_CHECKING
 
@@ -49,6 +50,15 @@ def _variants(language):
     }[language]
 
 
+@lru_cache(maxsize=None)
+def _field_names(cls):
+    return tuple(field.name for field in fields(cls))
+
+
+def _encode_record(cls, record):
+    return {name: getattr(record, name) for name in _field_names(cls)}
+
+
 def encode_parsed(parsed: ParsedFile, identity: dict) -> dict:
     for variant, cls in _variants(identity["language"]).items():
         if type(parsed) is cls:
@@ -57,9 +67,9 @@ def encode_parsed(parsed: ParsedFile, identity: dict) -> dict:
         raise ValueError("unsupported parsed variant")
     result = {
         "variant": variant,
-        "file": vars(parsed.file).copy(),
-        "symbols": [vars(item).copy() for item in parsed.symbols],
-        "references": [vars(item).copy() for item in parsed.references],
+        "file": _encode_record(FileRecord, parsed.file),
+        "symbols": [_encode_record(SymbolRecord, item) for item in parsed.symbols],
+        "references": [_encode_record(ReferenceRecord, item) for item in parsed.references],
         "warnings": list(parsed.warnings),
     }
     if variant == "python":
@@ -122,8 +132,11 @@ def decode_parsed(payload: object, identity: dict) -> ParsedFile:
         or any(getattr(file, key) != identity[key] for key in
                ("path", "content_hash", "size_bytes", "parser_version"))
         or file.module_key != file.path
-        or file.file_id != file_id(file.language, prefix[file.language], file.repository_id, file.path)
-        or (file.language == "python" and file.module_qualified_name != identity["context"]["module_name"])
+        or file.file_id != file_id(
+            file.language, prefix[file.language], file.repository_id, file.path
+        )
+        or (file.language == "python"
+            and file.module_qualified_name != identity["context"]["module_name"])
     ):
         raise ValueError("invalid parse file identity")
     symbols = tuple(_record(SymbolRecord, row) for row in payload["symbols"])
@@ -134,6 +147,9 @@ def decode_parsed(payload: object, identity: dict) -> ParsedFile:
     warnings = tuple(payload["warnings"])
     if any(type(item) is not str for item in warnings):
         raise ValueError("invalid parse warning")
+    if file.language == "python" and variant == "base":
+        if symbols or references or "parse_error" not in warnings:
+            raise ValueError("invalid Python parser-error variant")
     if variant == "python":
         evidence = payload["evidence"]
         if any(type(row) is not list or len(row) != 5

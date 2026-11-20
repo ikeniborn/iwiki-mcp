@@ -50,6 +50,7 @@ def test_context_uses_bound_module_names_once(monkeypatch):
 
     calls = []
     derive = python.derive_module_names
+
     def count(paths):
         calls.append(paths)
         return derive(paths)
@@ -61,6 +62,7 @@ def test_context_uses_bound_module_names_once(monkeypatch):
     assert identity(PythonAdapter("domain", (path, "pkg/__init__.py")), path, b"") != key
     assert len(calls) == 2
     assert identity(adapter, path, b"", normalization_versions=("changed", "u")) != key
+
     class Unknown(PythonAdapter):
         pass
     assert identity(Unknown("domain", (path,)), path, b"") is None
@@ -86,6 +88,7 @@ def test_cross_file_mutation_survives_restore():
     assert fresh[1]._adapter_evidence
     restored = [restore(item, identity(adapter, path, data))
                 for item, (path, data) in zip(fresh, sources.items())]
+
     def resolve(items):
         return adapter.resolve_references(items[0], SymbolIndex.from_parsed_files(items))
     assert resolve(fresh) == resolve(restored)
@@ -136,6 +139,7 @@ def test_typescript_boost_runs_on_current_resolver_after_restore(monkeypatch):
     assert identity(boosted, path, data) == key
     parsed = restore(plain.parse_file(data, path), key)
     calls = []
+
     def probe(item):
         calls.append(item.file.path)
         return ("probe_warning",)
@@ -143,3 +147,14 @@ def test_typescript_boost_runs_on_current_resolver_after_restore(monkeypatch):
     result = boosted.resolve_references(parsed, SymbolIndex.from_parsed_files((parsed,)))
     assert calls == [path]
     assert result.warnings == ("probe_warning",)
+
+
+def test_python_success_cannot_be_restored_as_base_parser_error():
+    path, data = "pkg.py", b"class C: pass\n"
+    adapter = PythonAdapter("domain", (path,))
+    key = identity(adapter, path, data)
+    payload = encode_parsed(adapter.parse_file(data, path), key)
+    payload["variant"] = "base"
+    del payload["evidence"]
+    with pytest.raises(ValueError):
+        decode_parsed(payload, key)
