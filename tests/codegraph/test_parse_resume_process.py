@@ -85,7 +85,17 @@ def test_new_cli_reuses_only_compatible_completed_files(tmp_path):
     (project / removed).unlink()
     (project / moved).rename(project / 'moved.py')
     (project / 'replacement.py').write_text('def replacement(): return 1\n')
+    def content_tables():
+        from iwiki_mcp import base
+        from iwiki_mcp.codegraph import application
+
+        binding = base.resolve_storage_binding(str(project), environ={})
+        runtime = application.code_runtime(application.source_context(binding), environ={})
+        store = runtime._indexer.store
+        return {kind: store.stable_rows(kind) for kind in ('files', 'symbols', 'relations')}
+
     resumed_calls, resumed = publish('resumed')
+    resumed_rows = content_tables()
     assert hit not in resumed_calls
     # Preserve the entire first cache, then rebuild the identical checkout.
     (tmp_path / 'wiki' / '.iwiki').rename(tmp_path / 'previous-cache')
@@ -94,6 +104,8 @@ def test_new_cli_reuses_only_compatible_completed_files(tmp_path):
     assert removed not in clean_calls and moved not in clean_calls
     assert resumed['snapshot_revision'] == clean['snapshot_revision']
     assert resumed['counts'] == clean['counts']
+    assert resumed_rows == content_tables()
+    assert resumed.get('warnings', []) == clean.get('warnings', [])
 
 
 def test_new_stdio_job_recovers_after_worker_exit(tmp_path):
@@ -139,7 +151,7 @@ async def _recover_stdio(tmp_path, url):
                 await call(session, 'wiki_bind', read=['docs'], write=['docs'], primary='docs')
                 if old_job:
                     old = await call(session, 'wiki_code_status', job_id=old_job, job_only=True)
-                    assert not old.get('job')
+                    assert 'job_unknown' in old['warnings'] and not old.get('job')
                 started = await call(session, 'wiki_code_index', wait_seconds=0)
                 job = started['job']['id']
                 if attempt == 'first':
@@ -152,6 +164,7 @@ async def _recover_stdio(tmp_path, url):
                         assert (tmp_path / 'exit.ready').exists()
                         current = await call(session, 'wiki_code_status', job_id=job, job_only=True)
                         assert current['job']['state'] == 'running'
+                        assert current['job']['progress']['files_parsed'] == 4
                     finally:
                         gate.touch()
                     await asyncio.sleep(.15)
@@ -163,5 +176,8 @@ async def _recover_stdio(tmp_path, url):
                             break
                         await asyncio.sleep(.05)
                     assert current['job']['state'] == 'ready'
+                    assert current['job']['progress']['files_parsed'] == 9
+                    snapshot = await call(session, 'wiki_code_status')
+                    assert snapshot['fresh'] and snapshot['revision']
                     assert set(log.read_text().splitlines()).isdisjoint(
                         (tmp_path / 'first').read_text().splitlines())
