@@ -8,6 +8,7 @@ registry:
 context_inputs:
   - docs/superpowers/intents/2026-11-20-code-graph-parse-resume-intent.md
   - docs/superpowers/specs/2026-11-20-code-graph-parse-resume-design.md
+  - docs/superpowers/plans/2026-11-20-code-graph-parse-resume-plan.md
 tasks:
   - id: intent-profile-selection
     requirements:
