@@ -113,7 +113,17 @@ def test_resume_after_process_loss(live_target, tmp_path, point, monkeypatch, re
         later_revision = json.loads(later.stdout)["snapshot_revision"]
     # A fresh invocation on this checkout would now build different source.
     (project / "service.py").unlink()
-    command = [str(Path(sys.executable).with_name("iwiki-mcp")), *args]
+    # A valid upload pin must bypass the local build even with new inputs.
+    (project / "unpinned.py").write_text("def unpinned(): return 2\n")
+    replay_driver = """
+from iwiki_mcp import admin
+from iwiki_mcp.codegraph.indexer import CodeGraphIndexer
+def unexpected_build(*args, **kwargs):
+    raise AssertionError("upload replay entered the local builder")
+CodeGraphIndexer.build = unexpected_build
+admin.main()
+"""
+    command = [sys.executable, "-c", replay_driver, *args]
 
     def run():
         reply = subprocess.run(command, env=env, capture_output=True, timeout=45)
