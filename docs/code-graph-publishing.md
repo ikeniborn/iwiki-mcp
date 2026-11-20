@@ -317,7 +317,7 @@ Use the same checkout, domain, endpoint and authorized owner. After expiry or a 
 iwiki-mcp code publish --project /path/to/checkout --forget-resume --json
 ```
 
-Forgetting an unresolved attempt can lose the ability to determine its outcome. The server session follows its own lease and retention rules. A subsequent resume starts a new attempt. Ordinary publication remains available on older peers. Resume applies to transfer after pinning; interrupted parsing starts again.
+Forgetting an unresolved attempt can lose the ability to determine its outcome. The server session follows its own lease and retention rules. A subsequent resume starts a new attempt. Ordinary publication remains available on older peers. Before a snapshot is pinned, repeat the original command on the publishing machine. A local build reuses durably saved parse results for compatible files. Once a pin exists, upload recovery uses its original revision even if the checkout changes.
 
 ### Operator checks after interruption
 
