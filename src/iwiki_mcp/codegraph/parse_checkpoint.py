@@ -42,6 +42,23 @@ def _validate_file(info):
         raise ParseCheckpointError()
 
 
+def _private_ancestor(directory):
+    """A private ancestor prevents other users entering a legacy shared cache."""
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        while True:
+            info = os.fstat(fd)
+            if info.st_uid == os.geteuid() and not info.st_mode & 0o011:
+                return True
+            parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = parent
+            if os.path.samestat(info, os.fstat(fd)):
+                return False
+    finally:
+        os.close(fd)
+
+
 class ParseCheckpoint:
     def __init__(self, directory):
         self.directory = directory
@@ -56,7 +73,9 @@ class ParseCheckpoint:
                 fd = None
                 if cache is not None:
                     parent = cache.stat()
-                    if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+                    if (parent.st_uid != os.geteuid() or
+                            (parent.st_mode & 0o022 and not parent.st_mode & stat.S_ISVTX
+                             and not _private_ancestor(cache))):
                         raise ParseCheckpointError()
                     folder = cache / scope
                     if create:

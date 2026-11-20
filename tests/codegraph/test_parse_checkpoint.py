@@ -171,3 +171,23 @@ def test_foreign_owned_file_if_permitted(tmp_path):
             pytest.skip("changing file ownership requires privilege")
         with pytest.raises(ParseCheckpointError):
             cache.load("a", {})
+
+
+def test_shared_parent_requires_traversal_protection():
+    import tempfile
+
+    # Start directly under the host's public temporary directory. pytest's
+    # per-user ancestor would protect even a deliberately exposed test base.
+    with tempfile.TemporaryDirectory() as root:
+        base = Path(root)
+        folder = base / ".iwiki"
+        folder.mkdir()
+        folder.chmod(0o775)
+        with ParseCheckpoint.open(base, base, "books") as cache:
+            assert cache.save("a", {}, "stored")
+        base.chmod(0o755)
+        with pytest.raises(ParseCheckpointError), ParseCheckpoint.open(base, base, "books"):
+            pass
+        folder.chmod(0o1775)
+        with ParseCheckpoint.open(base, base, "books") as cache:
+            assert cache.load("a", {}) == "stored"
