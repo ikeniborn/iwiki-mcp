@@ -318,3 +318,16 @@ iwiki-mcp code publish --project /path/to/checkout --forget-resume --json
 ```
 
 Forgetting an unresolved attempt can lose the ability to determine its outcome. The server session follows its own lease and retention rules. A subsequent resume starts a new attempt. Ordinary publication remains available on older peers. Resume applies to transfer after pinning; interrupted parsing starts again.
+
+### Operator checks after interruption
+
+| Result | Operator action |
+|--------|-----------------|
+| Transport failure | Keep the checkpoint and repeat the original resume command with the original token. |
+| Local storage I/O failed | Check free space, quotas and filesystem health. Keep the checkpoint and repeat the same command after storage recovers. |
+| Busy | Wait for the publisher holding the checkpoint or the server lock to finish. |
+| Expired or conflicting attempt | Read `wiki_code_status` in the verified primary. Record the active revision before deciding whether to start another upload. |
+| Target mismatch or access denied | Restore the original project configuration, endpoint and credential. Changing the primary selects another checkpoint. |
+| Ready after replay | Record the returned revision as the outcome of this attempt. Query status separately when the currently active revision matters. |
+
+A rotated bearer cannot replay the locally pinned attempt. Local forget requires access to the original checkpoint and target configuration. It does not require the original bearer or contact the server.

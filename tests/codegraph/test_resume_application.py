@@ -213,3 +213,41 @@ def test_expired_inspection_lease_sends_no_batch(project, monkeypatch):
     with pytest.raises(application.CodeGraphResumeError, match="resume_expired"):
         application.resume_project(str(project), environ=ENV)
     assert len(peer.receipts) == 5
+
+
+def test_local_disk_failure_after_remote_commit_recovers_same_attempt(project, monkeypatch):
+    import errno
+    import os
+
+    peer = Peer(None)
+    monkeypatch.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+    real_fsync = os.fsync
+
+    def fail_completion_sync(fd):
+        if peer.terminal is not None:
+            raise OSError(errno.ENOSPC, "fixture disk full")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "fsync", fail_completion_sync)
+        with pytest.raises(application.CodeGraphResumeError, match="resume_local_io_failed"):
+            application.resume_project(str(project), environ=ENV)
+    first_calls = list(peer.calls)
+    assert peer.terminal and first_calls.count("finalize") == 1
+    monkeypatch.setattr(application, "code_runtime", lambda *a, **kw: pytest.fail("rebuilt pin"))
+    recovered = application.resume_project(str(project), environ=ENV)
+    assert recovered.snapshot_revision == peer.terminal
+    assert peer.calls[len(first_calls):] == ["capabilities", "inspect"]
+
+
+def test_malformed_remote_receipt_preserves_local_checkpoint(project, monkeypatch):
+    peer = Peer("batch")
+    monkeypatch.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+    with pytest.raises(application.CodeGraphResumeError, match="resume_transport_failed"):
+        application.resume_project(str(project), environ=ENV)
+    page = peer.inspect(peer.session)
+    page["receipts"][0]["kind"] = []
+    peer.reject = page
+    with pytest.raises(application.CodeGraphResumeError, match="resume_conflict"):
+        application.resume_project(str(project), environ=ENV)
+    assert len(peer.receipts) == 5

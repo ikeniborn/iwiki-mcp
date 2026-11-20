@@ -602,12 +602,16 @@ def _maybe_sweep_code_graph_cleanup() -> None:
         LOGGER.debug("opportunistic code graph cleanup sweep was not started")
 
 
-def _safe(fn):
+def _safe(fn=None, *, sweep_cleanup=True):
+    if fn is None:
+        return functools.partial(_safe, sweep_cleanup=sweep_cleanup)
+
     @functools.wraps(fn)
     def wrap(*a, **k):
         try:
             result = fn(*a, **k)
-            _maybe_sweep_code_graph_cleanup()
+            if sweep_cleanup:
+                _maybe_sweep_code_graph_cleanup()
             return result
         except _codegraph_models.CodeGraphError as e:
             return _codegraph_runtime.sanitized_error(e)
@@ -2112,7 +2116,7 @@ def wiki_code_publish_begin(
     return result
 
 
-@_safe
+@_safe(sweep_cleanup=False)
 @_code_safe
 def wiki_code_publish_inspect(session_id: str, cursor: str | None = None) -> dict:
     """Read one page of this owner's recoverable attempt without renewing its lease."""

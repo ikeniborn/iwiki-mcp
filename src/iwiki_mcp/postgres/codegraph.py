@@ -97,6 +97,10 @@ _RECEIPT_CURSOR = re.compile(
 )
 
 
+class _ActivationExpired(Exception):
+    """Leave the activation transaction before reporting an expired attempt."""
+
+
 def _receipt_cursor(key: str, session_id: str, kind: str, ordinal: int) -> str:
     position = f"{kind}:{ordinal}"
     signature = hmac.digest(bytes.fromhex(key), f"{session_id}:{position}".encode(), "sha256")
@@ -647,7 +651,7 @@ class PostgresCodeGraphStore:
                     rejection = self._guard(record, self._clock())
                     if rejection is not None:
                         return rejection
-                return self._activate(
+                result = self._activate(
                     cursor,
                     domain_id,
                     session,
@@ -658,6 +662,13 @@ class PostgresCodeGraphStore:
                     revision,
                     links,
                 )
+                if record["recovery_deadline"] is not None and self._guard(record, self._clock()):
+                    # All activation writes are still private to this transaction.
+                    # Roll them back if bulk inserts or a later lock wait used up the lease.
+                    raise _ActivationExpired
+                return result
+        except _ActivationExpired:
+            return dict(_EXPIRED)
         except psycopg.errors.LockNotAvailable:
             return dict(_BUSY)
         except psycopg.Error as exc:

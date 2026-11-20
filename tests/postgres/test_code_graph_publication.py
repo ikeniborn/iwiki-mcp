@@ -1483,3 +1483,35 @@ def test_unselected_owner_can_only_mutate_legacy_sessions(pg_graph):
     assert pg_graph.batch_count(keyed) == 0
     assert restricted.publish_batch(legacy, pg_graph.batches[0]) == {"accepted": True}
     assert restricted.abort(legacy) == {"state": "aborted"}
+
+
+@pytest.mark.parametrize("expires", ["lease", "deadline"])
+def test_expiry_during_activation_rolls_back_graph_rows(pg_graph, monkeypatch, expires):
+    from iwiki_mcp.postgres import codegraph
+
+    previous = pg_graph.finalize(pg_graph.complete_session())
+    ttl = 10 if expires == "deadline" else 600
+    session = pg_graph.store.begin(
+        pg_graph.header,
+        **_recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + ttl),
+    )
+    pg_graph.upload_all(session)
+    insert_links = codegraph._insert_wiki_links
+
+    def slow_insert(*args):
+        insert_links(*args)
+        pg_graph.advance_clock(12 if expires == "deadline" else pg_graph.session_ttl_seconds + 1)
+
+    monkeypatch.setattr(codegraph, "_insert_wiki_links", slow_insert)
+    assert pg_graph.finalize(session).get("error") == "session_expired"
+    assert pg_graph.reader_status()["snapshot_id"] == previous["snapshot_id"]
+    assert pg_graph.snapshot_state(session) == "staging"
+    assert pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_files f "
+        "JOIN iwiki.code_graph_publication_sessions s USING (iwiki_id, domain_id, snapshot_id) "
+        "WHERE s.session_id = %s", (session.session_id,),
+    ) == [(0,)]
+    assert pg_graph._query(
+        "SELECT terminal_result FROM iwiki.code_graph_publication_attempts WHERE session_id = %s",
+        (session.session_id,),
+    ) == [(None,)]

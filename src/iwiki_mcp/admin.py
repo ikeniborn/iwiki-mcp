@@ -359,6 +359,7 @@ def _write_code_failure(
         "resume_conflict": "publication state conflicts with the pinned upload",
         "resume_incompatible": "the selected peer or mode does not support recovery",
         "resume_invalid_checkpoint": "the local recovery checkpoint failed verification",
+        "resume_local_io_failed": "local storage I/O failed. Check storage and retry the command",
         "resume_target_mismatch": "the checkpoint belongs to a different publication target",
         "resume_access_denied": "the current publisher cannot access this attempt",
         "resume_transport_failed": "the peer is unavailable; retry with --resume",

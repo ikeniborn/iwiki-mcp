@@ -132,7 +132,11 @@ def transfer(pin, publisher, progress):
         ):
             raise CodeGraphResumeError("resume_conflict")
         for receipt in receipts:
-            if not isinstance(receipt, dict) or type(receipt.get("ordinal")) is not int:
+            if (
+                not isinstance(receipt, dict)
+                or not isinstance(receipt.get("kind"), str)
+                or type(receipt.get("ordinal")) is not int
+            ):
                 raise CodeGraphResumeError("resume_conflict")
             key = (receipt.get("kind"), receipt["ordinal"])
             if (

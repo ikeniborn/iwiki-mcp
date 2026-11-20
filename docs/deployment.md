@@ -231,6 +231,19 @@ and a trigger that records their terminal result in the activation transaction.
 Stop schema-9 runtimes before migration. Apply migrations with the restricted runtime
 offline and verify schema 10 before starting the new server. Existing clients can
 continue ordinary publication; upgrade clients before enabling `--resume`.
+Use the owner-role `base list` procedure below to apply the migration.
+Verify that the hosted runtime starts with its restricted role. Bind the complete project
+scope and check that the tool list includes `wiki_code_publish_inspect`.
+For an acceptance upload to a designated writable test primary, run the following
+command twice on the publishing machine with the same private cache and bearer:
+
+```bash
+iwiki-mcp code publish --project . --resume --json
+```
+
+Both commands must return the same ready revision. If no other publisher ran,
+`wiki_code_status` on that primary must report that revision as active. For interrupted
+uploads, follow the [publisher recovery procedure](code-graph-publishing.md#operator-checks-after-interruption).
 
 For binary rollback, first stop all schema-10 writers and suspend recovery jobs.
 Run `rollback_v10_compatibility(settings, confirm=True)` using the schema-10 migrator, retaining

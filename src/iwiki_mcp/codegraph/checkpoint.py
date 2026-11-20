@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict
+import errno
 import hashlib
 import hmac
 import json
@@ -40,6 +41,15 @@ class CodeGraphResumeError(Exception):
 
 def _invalid():
     return CodeGraphResumeError("resume_invalid_checkpoint")
+
+
+def _raise_storage_failure(exc):
+    # Missing payloads and rejected paths still fail checkpoint verification.
+    # A storage device or capacity error says nothing about the recorded bytes.
+    if isinstance(exc, OSError) and exc.errno in (
+        errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EROFS,
+    ):
+        raise CodeGraphResumeError("resume_local_io_failed") from None
 
 
 class Checkpoint:
@@ -87,7 +97,8 @@ class Checkpoint:
                     yield pin
                 finally:
                     os.close(fd)
-        except CodeGraphLocationError:
+        except CodeGraphLocationError as exc:
+            _raise_storage_failure(exc.__cause__)
             raise _invalid() from None
 
     def _file(self, name, *, create=False):
@@ -147,6 +158,7 @@ class Checkpoint:
             # No remote mutation can precede the first durable manifest.
             self._unlink("rows")
         except (KeyError, TypeError, ValueError, OSError, CodeGraphResumeError) as exc:
+            _raise_storage_failure(exc)
             if not forget or (
                 isinstance(exc, CodeGraphResumeError) and exc.code == "resume_target_mismatch"
             ):
@@ -217,7 +229,8 @@ class Checkpoint:
                     digest.update(chunk)
             if digest.hexdigest() != self.record["rows_hash"]:
                 raise _invalid()
-        except OSError:
+        except OSError as exc:
+            _raise_storage_failure(exc)
             raise _invalid() from None
 
     def _layout(self, session):
@@ -284,7 +297,8 @@ class Checkpoint:
             return SnapshotBatch(
                 item["kind"], item["ordinal"], len(lines), len(payload), item["hash"], payload
             )
-        except (KeyError, ValueError, TypeError, OSError):
+        except (KeyError, ValueError, TypeError, OSError) as exc:
+            _raise_storage_failure(exc)
             raise _invalid() from None
 
     def complete(self, revision):
