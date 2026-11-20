@@ -15,6 +15,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: adb7e8ac4fd8574e
+  last_run: 2026-11-20
+  reviewed: true
+  docs_checked: true
 ---
 # Code graph publication resume implementation plan
 
