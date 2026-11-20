@@ -9,6 +9,7 @@ from iwiki_mcp.postgres.auth import AccessError, AuthContext
 
 PUBLICATION_TOOLS = (
     "wiki_code_publish_begin",
+    "wiki_code_publish_inspect",
     "wiki_code_publish_batch",
     "wiki_code_publish_finalize",
     "wiki_code_publish_abort",
@@ -138,6 +139,8 @@ def test_hosted_context_never_returns_source(hosted_ready_code):
 def test_hosted_reads_report_missing_before_publication(hosted_empty_code):
     from iwiki_mcp import server
 
+    polled = server.wiki_code_status(job_id="unknown", job_only=True)
+    assert polled["warnings"] == ["job_unknown"]
     assert server.wiki_code_status()["state"] == "missing"
     assert server.wiki_code_search("needle")["results"] == []
 
@@ -429,6 +432,7 @@ def test_fail_closed_option_refuses_a_defaulted_code_read(
     }
 
     assert server.wiki_code_status() == refusal
+    assert server.wiki_code_status(job_id="unknown", job_only=True) == refusal
     assert server.wiki_code_search("parse") == refusal
     assert server.wiki_code_context(["py:module:" + "a" * 64]) == refusal
     assert hosted_session.readers == []
@@ -464,3 +468,117 @@ def test_wiki_status_and_bind_report_the_session_binding(
     assert bound["binding_source"] == "session"
     assert bound["session_id"] == "session-a"
     assert server.wiki_status()["binding_source"] == "session"
+
+
+@pytest.mark.parametrize(("source", "warnings"), [
+    ("session", ["job_unknown"]),
+    ("token_default", ["job_unknown", "binding_defaulted"]),
+])
+def test_hosted_job_only_reports_provenance_without_a_reader(hosted_session, source, warnings):
+    from iwiki_mcp import server
+
+    hosted_session(source)
+    assert server.wiki_code_status(job_id="unknown", job_only=True) == {
+        "binding_source": source, "warnings": warnings,
+    }
+    assert hosted_session.readers == []
+
+
+@pytest.mark.postgres_integration
+def test_hosted_job_only_uses_the_selected_http_session(hosted_runtime):
+    from starlette.testclient import TestClient
+    from tests.postgres.test_code_graph_contract import _McpRoute, _open_session
+
+    with TestClient(hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session = _open_session(client, hosted_runtime.token)
+        route = _McpRoute(client, hosted_runtime.token, session)
+        assert route.call("wiki_bind", {"primary": "docs"})["binding_source"] == "session"
+        assert route.call("wiki_code_status", {"job_only": True, "job_id": "unknown"}) == {
+            "binding_source": "session", "warnings": ["job_unknown"],
+        }
+
+
+@pytest.mark.postgres_integration
+def test_resume_http_requires_selected_session_and_returns_stable_receipts(
+    hosted_ranked_runtime, hosted_runtime, monkeypatch,
+):
+    import time
+    from uuid import uuid4
+
+    from starlette.testclient import TestClient
+    from iwiki_mcp.codegraph.publication import header_payload, iter_snapshot_batches
+    from iwiki_mcp.postgres.codegraph import PostgresCodeGraphStore
+    from tests.postgres.test_code_graph_contract import _McpRoute, _open_session
+
+    monkeypatch.setattr(PostgresCodeGraphStore, "_RECEIPT_PAGE_SIZE", 2)
+    graph = hosted_ranked_runtime.graph
+    begin = {
+        "header": header_payload(graph.header), "attempt_key": uuid4().hex,
+        "recovery_deadline": int(time.time()) + 1800,
+    }
+    batches = list(iter_snapshot_batches(graph.rows, max_rows=1, max_bytes=100_000))
+    partial = [b for b in batches if (b.kind, b.ordinal) in {
+        ("repositories", 0), ("files", 0), ("files", 2),
+    }]
+    assert len(partial) == 3
+    other_token = hosted_runtime.auth.create_token(
+        "wiki-a", "other", read_domains=["docs"], write_domains=["docs"],
+    )["token"]
+    with TestClient(hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765") as client:
+        route = _McpRoute(client, hosted_runtime.token, _open_session(client, hosted_runtime.token))
+        other = _McpRoute(client, other_token, _open_session(client, other_token))
+        assert route.call("wiki_code_publish_begin", begin)["error"] == "binding_not_selected"
+        route.call("wiki_bind", {"primary": "docs"})
+        started = route.call("wiki_code_publish_begin", begin)
+        assert "session_id" in started, started
+        assert route.call("wiki_code_publish_begin", begin) == started
+        fallback = _McpRoute(
+            client, hosted_runtime.token, _open_session(client, hosted_runtime.token),
+        )
+        assert fallback.status()["binding_source"] == "token_default"
+        refused = [
+            fallback.publish_batch(started, batches[0]), fallback.finalize(started),
+            fallback.abort(started),
+        ]
+        assert [reply.get("error") for reply in refused] == ["binding_not_selected"] * 3
+        legacy = fallback.begin(graph.header)
+        assert "error" not in fallback.publish_batch(legacy, batches[0])
+        assert fallback.abort(legacy)["state"] == "aborted"
+        args = {"session_id": started["session_id"]}
+        empty = route.call("wiki_code_publish_inspect", args)
+        assert empty["state"] == "staging"
+        assert empty["binding_source"] == "session"
+        assert empty["receipts"] == [] and empty["next_cursor"] is None
+        assert empty["lease_expires_at"] == started["lease_expires_at"]
+
+        assert other.call("wiki_code_publish_inspect", args)["error"] == "binding_not_selected"
+        guarded = {**args, "require_session_binding": True}
+        assert other.call("wiki_code_publish_finalize", guarded)["error"] == "binding_not_selected"
+        other.call("wiki_bind", {"primary": "docs"})
+        assert other.call("wiki_code_publish_inspect", args)["error"] == "unauthorized"
+
+        for batch in partial[:2]:
+            assert "error" not in route.publish_batch(started, batch)
+        exact = route.call("wiki_code_publish_inspect", args)
+        assert len(exact["receipts"]) == 2 and exact["next_cursor"] is None
+        assert "error" not in route.publish_batch(started, partial[2])
+        page = route.call("wiki_code_publish_inspect", args)
+        last = route.call("wiki_code_publish_inspect", {**args, "cursor": page["next_cursor"]})
+        assert len(page["receipts"]) == 2 and len(last["receipts"]) == 1
+        assert last["next_cursor"] is None and last["lease_expires_at"] == page["lease_expires_at"]
+        assert page["receipts"] + last["receipts"] == [
+            {"kind": b.kind, "ordinal": b.ordinal, "payload_hash": b.payload_hash}
+            for b in sorted(partial, key=lambda b: (b.kind, b.ordinal))
+        ]
+        assert route.call("wiki_code_publish_inspect", {**args, "cursor": "wrong"})[
+            "error"
+        ] == "invalid_cursor"
+        for batch in batches:
+            if batch not in partial:
+                assert "error" not in route.publish_batch(started, batch)
+        complete = route.call("wiki_code_publish_finalize", guarded)
+        assert complete["state"] == "ready"
+        terminal = route.call("wiki_code_publish_inspect", {**args, "cursor": page["next_cursor"]})
+        assert terminal["state"] == "ready"
+        assert terminal["snapshot_revision"] == complete["snapshot_revision"]
+        assert "receipts" not in terminal

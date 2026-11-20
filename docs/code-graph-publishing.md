@@ -210,6 +210,8 @@ through `.git/info/exclude`, and is not fallback target.
 | Text | Human-readable output format | Either format exits by outcome |
 | `--json` | Compact machine-readable output format | Either format exits by outcome |
 
+Once a job starts, the CLI writes phase and counter updates to stderr, including when stderr is piped. Within a phase, counter updates appear at most once per second. With `--json`, stdout contains one final JSON document. A configuration error before job creation produces the final diagnostic immediately. If stderr stays full, the CLI may drop progress lines. A text-mode failure can also omit the final diagnostic when stderr cannot accept it. The exit code still reports the failure.
+
 Text and `--json` choose only output format. Either format exits `0` when ready, `1`
 for runtime/publication failure, or `2` for usage/configuration failure.
 
@@ -298,3 +300,34 @@ PostgreSQL and remote MCP never emit `commit_uncertain`.
 
 Before rolling back to a pre-publication binary, retain or restore a legacy snapshot, or
 reindex with that binary, because it may reject the internal table.
+
+## Recover an interrupted hosted upload
+
+An upgraded CLI and hosted server are both required. Choose resume mode before the first upload. Run the same command after a disconnect or process restart:
+
+```bash
+iwiki-mcp code publish --project /path/to/checkout --resume --json
+```
+
+The CLI pins the exported graph privately on the publishing machine. Keep that local cache until publication finishes. Recovery uses the pinned bytes even if the checkout changes. The client checks the original session's receipts and sends missing batches. If finalization already succeeded, the command returns that attempt's revision, even when another snapshot has since become active. The CLI requests 23 h 55 min under the server’s 24-hour cap. A client clock ahead by over five minutes can cause rejection. Check clock synchronization before retrying. The original deadline is fixed and the staging lease can expire earlier.
+
+Use the same checkout, domain, endpoint and authorized owner. After expiry or a conflict inspect the active snapshot before starting another upload. Repeating a completed attempt replays its result. To discard its local record, run:
+
+```bash
+iwiki-mcp code publish --project /path/to/checkout --forget-resume --json
+```
+
+Forgetting an unresolved attempt can lose the ability to determine its outcome. The server session follows its own lease and retention rules. A subsequent resume starts a new attempt. Ordinary publication remains available on older peers. Resume applies to transfer after pinning; interrupted parsing starts again.
+
+### Operator checks after interruption
+
+| Result | Operator action |
+|--------|-----------------|
+| Transport failure | Keep the checkpoint and repeat the original resume command with the original token. |
+| Local storage I/O failed | Check free space, quotas and filesystem health. Keep the checkpoint and repeat the same command after storage recovers. |
+| Busy | Wait for the publisher holding the checkpoint or the server lock to finish. |
+| Expired or conflicting attempt | Read `wiki_code_status` in the verified primary. Record the active revision before deciding whether to start another upload. |
+| Target mismatch or access denied | Restore the original project configuration, endpoint and credential. Changing the primary selects another checkpoint. |
+| Ready after replay | Record the returned revision as the outcome of this attempt. Query status separately when the currently active revision matters. |
+
+A rotated bearer cannot replay the locally pinned attempt. Local forget requires access to the original checkpoint and target configuration. It does not require the original bearer or contact the server.

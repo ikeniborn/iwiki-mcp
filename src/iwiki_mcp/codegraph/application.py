@@ -23,10 +23,13 @@ from . import config as codegraph_config
 from . import indexer as codegraph_indexer
 from . import linking
 from . import maintenance
+from . import resume
 from . import runtime as codegraph_runtime
+from .checkpoint import Checkpoint, CodeGraphResumeError
 from .context import validate_context_request
 from .languages import bash, javascript, python, typescript
 from .mcp_adapter import (
+    ENDPOINT_ENV, TOKEN_ENV,
     CodeGraphAdapterError,
     McpCodeGraphReader,
     McpSnapshotPublisher,
@@ -39,7 +42,7 @@ from .publication import (
     iter_snapshot_batches,
 )
 from .query import validate_search_request
-from .store import _is_canonical_revision
+from .store import _is_canonical_revision, code_graph_read_lock
 from .sqlite_adapter import SqliteCodeGraphReader
 from iwiki_mcp.specifications import (
     UnavailableSpecificationGraphResolver,
@@ -364,6 +367,14 @@ class PublishedSnapshotReader:
 
     def status(self) -> dict[str, object]:
         return _normalized_published_answer(self._reader.status())
+
+    def status_for_job(self, primary: str) -> tuple[dict[str, object], bool]:
+        """Keep job authorization evidence separate from the public snapshot answer."""
+        if isinstance(self._reader, McpCodeGraphReader):
+            raw, eligible = self._reader.status_for_job(primary)
+            return _normalized_published_answer(raw), eligible
+        status = self.status()
+        return status, "error" not in status and status.get("domain", primary) == primary
 
     def search(
         self,
@@ -757,18 +768,25 @@ def publish_snapshot(
     runtime: codegraph_runtime.CodeGraphRuntime,
     publisher: SnapshotPublisher,
     config,
+    control: codegraph_indexer.BuildControl | None = None,
 ) -> dict[str, object]:
+    if control is not None:
+        control.enter_phase("export")
     exported = runtime.export_snapshot()
     if isinstance(exported, dict):
         return exported
     header, rows = exported
     session = None
     try:
+        if control is not None:
+            control.enter_phase("publish_begin")
         opened = publisher.begin(header)
         if isinstance(opened, dict):
             return opened
         session = opened
         max_rows, max_bytes = effective_batch_bounds(session, config)
+        if control is not None:
+            control.enter_phase("transfer")
         for batch in iter_snapshot_batches(
             rows,
             max_rows=max_rows,
@@ -778,6 +796,10 @@ def publish_snapshot(
             if accepted.get("accepted") is not True:
                 _abort_preserving_failure(publisher, session)
                 return accepted
+            if control is not None:
+                control.acknowledge_batch(batch.kind, batch.ordinal, batch.byte_count)
+        if control is not None:
+            control.enter_phase("finalize")
         finalized = publisher.finalize(session)
         snapshot_revision = finalized.get("snapshot_revision")
         if finalized.get("state") != "ready":
@@ -803,6 +825,7 @@ def index_and_publish(
     environ: Mapping[str, str] | None = None,
     redact_failures: bool = False,
     wait_seconds: float | None = None,
+    _observe_job: codegraph_runtime._JobObserver | None = None,
 ) -> CodeGraphPublishOutcome:
     """Build the project's graph and publish the snapshot it produced.
 
@@ -848,7 +871,7 @@ def index_and_publish(
             else publisher_for(binding, config, environ=environ)
         )
 
-        def publish() -> dict[str, object]:
+        def publish(control: codegraph_indexer.BuildControl) -> dict[str, object]:
             """Publish the snapshot the build just produced.
 
             Runs on the build worker's thread, after a `ready` build and
@@ -857,7 +880,7 @@ def index_and_publish(
             to publish to.
             """
             assert config is not None and publisher is not None
-            return publish_snapshot(runtime, publisher, config)
+            return publish_snapshot(runtime, publisher, config, control)
 
         # `CodeGraphQueryError` (raised by `runtime.index`'s own `wait_seconds`
         # validation) is deliberately not caught here: it falls through to
@@ -871,6 +894,7 @@ def index_and_publish(
             languages=languages,
             wait_seconds=wait_seconds,
             publish=None if publisher is None else publish,
+            **({"_observe_job": _observe_job} if _observe_job is not None else {}),
         ))
         publication: dict[str, object] = indexed.pop("publication", {})
     except (
@@ -921,6 +945,7 @@ def publish_project(
     project_dir: str,
     *,
     environ: Mapping[str, str] | None = None,
+    _observe_job: codegraph_runtime._JobObserver | None = None,
 ) -> CodeGraphPublishOutcome:
     root = checkout_root(project_dir)
     binding = wiki_base.resolve_storage_binding(str(root), environ=environ)
@@ -928,4 +953,83 @@ def publish_project(
         binding,
         environ=environ,
         redact_failures=True,
+        **({"_observe_job": _observe_job} if _observe_job is not None else {}),
     )
+
+
+def _resume_context(project_dir, env):
+    try:
+        root = checkout_root(project_dir)
+        config = codegraph_config.load_code_graph_config(str(root), environ=env)
+        if config.publish_mode != "mcp" or not config.enabled or not env.get(ENDPOINT_ENV):
+            raise CodeGraphResumeError("invalid_config", publish_mode=config.publish_mode)
+        binding = wiki_base.resolve_storage_binding(str(root), environ=env)
+        source = source_context(binding)
+        if binding.primary not in binding.write:
+            raise CodeGraphResumeError("resume_access_denied")
+        endpoint = [env[ENDPOINT_ENV], getattr(binding, "iwiki_id", None)]
+        return source, endpoint
+    except (wiki_base.BaseError, CodeGraphApplicationError, codegraph_config.CodeGraphConfigError):
+        raise CodeGraphResumeError("invalid_config", publish_mode=None) from None
+
+
+def _prepare_resume(source, env, pin, progress):
+    runtime = code_runtime(source, environ=env)
+    indexed = runtime.index(_observe_job=progress.observe_build)
+    if indexed.get("state") != "ready":
+        code = "resume_busy" if indexed.get("code") == "busy" else "resume_failed"
+        raise CodeGraphResumeError(code)
+    progress.control.enter_phase("export")
+    # The exporter reads each table separately. Pin all four under the same
+    # shared writer-exclusion lock, even if another process requests a rebuild.
+    with code_graph_read_lock(runtime.paths.lock):
+        exported = runtime.export_snapshot()
+    if isinstance(exported, dict):
+        raise CodeGraphResumeError("resume_failed")
+    header, rows = exported
+    repository = next(row for row in rows["repositories"] if row["repository_id"] == source.primary)
+    if repository["revision"] != indexed.get("revision"):
+        raise CodeGraphResumeError("resume_conflict")
+    pin.prepare(header, rows, credential=env[TOKEN_ENV])
+
+
+def resume_project(project_dir, *, environ=None, _observe_job=None) -> CodeGraphPublishOutcome:
+    env = os.environ if environ is None else environ
+    started = time.monotonic()
+    source, endpoint = _resume_context(project_dir, env)
+    if not env.get(TOKEN_ENV):
+        raise CodeGraphResumeError("invalid_config")
+    with Checkpoint.open(source.base, source.project_dir, source.primary, endpoint) as pin:
+        if pin.record is not None:
+            pin.verify_credential(env[TOKEN_ENV])
+        if pin.record is None or pin.record["state"] != "ready":
+            publisher = McpSnapshotPublisher(
+                RemoteMcpTransport(environ=env, primary=source.primary, verify_binding=True)
+            )
+            resume.require_response(publisher.check_resume_support())
+            progress = resume.ResumeProgress()
+            stop = _observe_job(progress) if _observe_job is not None else None
+            try:
+                if pin.record is None:
+                    _prepare_resume(source, env, pin, progress)
+                resume.transfer(pin, publisher, progress.control)
+                progress.state = "ready"
+            finally:
+                if progress.state == "running":
+                    progress.state = "failed"
+                if stop is not None:
+                    stop(True)
+        return CodeGraphPublishOutcome(
+            publish_mode="mcp", index={"state": "ready", "counts": dict(pin.record["counts"])},
+            publication={"state": "ready", "snapshot_revision": pin.record["revision"]},
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+
+
+def forget_resume_project(project_dir, *, environ=None):
+    env = os.environ if environ is None else environ
+    source, endpoint = _resume_context(project_dir, env)
+    with Checkpoint.open(
+        source.base, source.project_dir, source.primary, endpoint, forget=True,
+    ) as pin:
+        return {"state": "forgotten", "outcome_unknown": pin.forget()}

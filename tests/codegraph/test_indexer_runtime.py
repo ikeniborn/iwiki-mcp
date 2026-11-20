@@ -320,7 +320,7 @@ def test_failed_writer_leaves_rebuilding_for_later_status_recovery(
         published_states.append(payload["state"])
         return real_publish(metadata_path, staging, **kwargs)
 
-    def fail_parse(_discovered, _config):
+    def fail_parse(_discovered, _config, _control):
         raise CodeGraphParseError("parse fixture secret")
 
     monkeypatch.setattr(indexer.store, "publish_metadata", observed_publish)
@@ -971,10 +971,10 @@ def test_status_and_guard_show_rebuilding_during_current_process_build(
     release = threading.Event()
     real_parse = ready_runtime.runtime._indexer._parse
 
-    def held_parse(discovered, config):
+    def held_parse(discovered, config, control):
         entered.set()
         assert release.wait(timeout=5)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1001,10 +1001,10 @@ def test_second_runtime_observes_shared_writer_as_rebuilding(
     release = threading.Event()
     real_parse = ready_runtime.runtime._indexer._parse
 
-    def held_parse(discovered, config):
+    def held_parse(discovered, config, control):
         entered.set()
         assert release.wait(timeout=5)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1040,10 +1040,10 @@ def test_writer_waits_for_status_shared_snapshot(
         assert release_status.wait(timeout=5)
         return result
 
-    def held_parse(discovered, config):
+    def held_parse(discovered, config, control):
         writer_entered.set()
         assert release_writer.wait(timeout=5)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     monkeypatch.setattr(observer.runtime, "_read_status", paused_status_read)
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
@@ -1131,7 +1131,7 @@ def test_old_writer_recovery_cannot_overwrite_new_writer_generation(
     observer = ready_runtime.with_config()
     old_indexer = old_writer.runtime._indexer
 
-    def fail_old_parse(_discovered, _config):
+    def fail_old_parse(_discovered, _config, _control):
         raise CodeGraphParseError("old writer failed")
 
     monkeypatch.setattr(old_indexer, "_parse", fail_old_parse)
@@ -1153,10 +1153,10 @@ def test_old_writer_recovery_cannot_overwrite_new_writer_generation(
         assert release_recovery.wait(timeout=5)
         return real_recover(expected)
 
-    def held_new_parse(discovered, config):
+    def held_new_parse(discovered, config, control):
         new_writer_entered.set()
         assert release_new_writer.wait(timeout=5)
-        return real_new_parse(discovered, config)
+        return real_new_parse(discovered, config, control)
 
     monkeypatch.setattr(observer.runtime, "_recover_stale_metadata", paused_recovery)
     monkeypatch.setattr(new_writer.runtime._indexer, "_parse", held_new_parse)
@@ -1314,13 +1314,13 @@ def test_bounded_rebuild_checks_one_shared_deadline_before_publication(
     real_parse = indexer._parse
     jobs = []
     now = time.monotonic()
-    clock = SimpleNamespace(monotonic=lambda: now, sleep=time.sleep)
+    clock = SimpleNamespace(monotonic=lambda: now, sleep=time.sleep, time=time.time)
     # Replace only the indexer's clock; thread waits retain the real clock.
     monkeypatch.setattr(codegraph_indexer, "time", clock)
 
-    def expired_parse(discovered, config):
+    def expired_parse(discovered, config, control):
         nonlocal now
-        parsed = real_parse(discovered, config)
+        parsed = real_parse(discovered, config, control)
         job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
         assert job is not None
         jobs.append(job)
@@ -1360,9 +1360,9 @@ def test_bounded_rebuild_caps_larger_request_budget_at_configured_limit(
     )
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered, config):
+    def slow_parse(discovered, config, control):
         time.sleep(1.1)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -1383,9 +1383,9 @@ def test_explicit_index_uses_one_deadline_and_discards_staging(
     runtime = seed_runtime.with_config(max_rebuild_seconds=1)
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered, config):
+    def slow_parse(discovered, config, control):
         time.sleep(1.05)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -1408,9 +1408,9 @@ def test_explicit_index_deadline_is_independent_of_bounded_rebuild_deadline(
     )
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered, config):
+    def slow_parse(discovered, config, control):
         time.sleep(1.5)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -1430,9 +1430,9 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
     real_publish = indexer.store.publish_metadata
     published_states = []
 
-    def slow_parse(discovered, config):
+    def slow_parse(discovered, config, control):
         time.sleep(1.05)
-        return real_parse(discovered, config)
+        return real_parse(discovered, config, control)
 
     def observed_publish(metadata_path, staging, **kwargs):
         payload = json.loads(Path(staging).read_text(encoding="utf-8"))
@@ -1534,7 +1534,7 @@ def test_worker_records_a_raised_publication_as_a_failed_job(
     runtime = seed_runtime.with_config(max_full_rebuild_seconds=30)
     secret = "publication-token /absolute/private/path"
 
-    def explode():
+    def explode(_control):
         raise RuntimeError(secret)
 
     caplog.clear()
@@ -1581,7 +1581,7 @@ def test_local_reads_are_served_while_the_snapshot_is_publishing(
     publishing = threading.Event()
     release = threading.Event()
 
-    def blocking_publish() -> dict[str, object]:
+    def blocking_publish(_control) -> dict[str, object]:
         publishing.set()
         release.wait(20)
         return {"state": "ready"}
@@ -1635,7 +1635,7 @@ def test_a_cancelled_build_publishes_nothing(seed_runtime, monkeypatch):
     out = runtime.index(
         force=True,
         wait_seconds=0,
-        publish=lambda: published.append("published") or {"state": "ready"},
+        publish=lambda _control: published.append("published") or {"state": "ready"},
     )
     shutdown_code_graph_workers(timeout=30)
     snapshot = _BUILD_WORKERS.terminal_by_id(
@@ -2842,20 +2842,17 @@ def test_finish_records_the_terminal_state_exactly_once():
     assert len(registry._terminal) == 1
 
 
-def test_eviction_spares_a_domains_last_remaining_answer():
-    """A busy domain must not evict another domain's only answer.
-
-    The cap is global on purpose -- a per-domain cap grows without bound in
-    the number of domains a session rebinds through -- so the protection has
-    to come from the eviction order instead: take the oldest snapshot of a
-    domain that still has more than one, and only fall back to the global
-    oldest when every domain holds exactly one.
-    """
+@pytest.mark.parametrize("other_primary, other_checkout", [
+    ("notes", "/tmp/checkout"),
+    ("docs", "/tmp/other-checkout"),
+])
+def test_eviction_spares_an_owners_last_remaining_answer(other_primary, other_checkout):
+    """Retain each owner's only answer when a busier owner holds spare history."""
     from iwiki_mcp.codegraph import runtime as runtime_module
 
     registry = runtime_module._BuildWorkerRegistry()
-    docs = ("/tmp/base", "docs")
-    notes = ("/tmp/base", "notes")
+    docs = ("/tmp/base", "docs", "/tmp/checkout")
+    notes = ("/tmp/base", other_primary, other_checkout)
     limit = runtime_module._TERMINAL_HISTORY
 
     only_docs_answer = _run_to_completion(registry, docs)
@@ -2864,10 +2861,10 @@ def test_eviction_spares_a_domains_last_remaining_answer():
     ]
 
     assert len(registry._terminal) == limit
-    # The oldest snapshot overall belongs to `docs` and is its only one.
+    # The oldest owner holds only this snapshot.
     assert registry.terminal_by_id(docs, only_docs_answer.job_id) is not None
     assert registry.current(docs).job_id == only_docs_answer.job_id
-    # `notes` paid for its own crowding instead.
+    # Eviction removed spare snapshots from the busier owner.
     assert registry.terminal_by_id(notes, crowd[0].job_id) is None
     assert registry.terminal_by_id(notes, crowd[1].job_id) is None
     assert registry.current(notes).job_id == crowd[-1].job_id
@@ -4918,3 +4915,207 @@ def test_current_graph_answers_with_its_report_inside_the_grace(seed_runtime):
     assert answer["no_op"] is True
     assert "job" not in answer or answer["job"]["state"] == "ready"
     assert elapsed < 1.0
+
+
+def test_checkout_owns_jobs_while_destinations_share_writer_exclusion(
+    seed_runtime, production_runtime_factory, tmp_path, monkeypatch
+):
+    import shutil
+
+    binding = seed_runtime.binding
+    other_checkout = tmp_path / "second-checkout"
+    shutil.copytree(binding.project_dir, other_checkout)
+    other_binding = replace(binding, project_dir=str(other_checkout))
+    other_runtime = production_runtime_factory(other_binding)
+    release = threading.Event()
+    entered = threading.Event()
+    original_build = seed_runtime.runtime._indexer.build
+
+    def held_build(**kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(seed_runtime.runtime._indexer, "build", held_build)
+    first = seed_runtime.index(force=True, wait_seconds=0)
+    handle = first["job"]["id"]
+    owner = worker_domain_key(binding)
+    other = worker_domain_key(other_binding)
+    foreign_keys = (
+        other,
+        worker_domain_key(replace(binding, primary="other")),
+        worker_domain_key(replace(other_binding, primary="other")),
+    )
+    try:
+        assert entered.wait(timeout=5)
+        foreign = other_runtime.index(force=True, wait_seconds=0)
+        assert foreign.get("code") == "busy"
+        assert "job" not in foreign
+        assert seed_runtime.index(force=True, wait_seconds=0)["job"]["id"] == handle
+        equivalent = replace(binding, project_dir=str(Path(binding.project_dir) / "src" / ".."))
+        assert worker_domain_key(equivalent) == owner
+        for key in foreign_keys:
+            assert attach_job(key, handle, {}) == {"warnings": ["job_unknown"]}
+            assert attach_job(key, None, {}) == {}
+            assert _BUILD_WORKERS.is_active(key) is (key == other)
+            assert _BUILD_WORKERS.is_indexing(key) is (key == other)
+    finally:
+        release.set()
+        seed_runtime.runtime.join_workers(timeout=10)
+
+    assert attach_job(owner, handle, {})["job"]["state"] == "ready"
+    for key in foreign_keys:
+        assert attach_job(key, handle, {}) == {"warnings": ["job_unknown"]}
+        assert attach_job(key, None, {}) == {}
+
+
+def test_job_progress_counts_only_context_checked_files(seed_runtime, monkeypatch):
+    release_discovery = threading.Event()
+    entered_parse = threading.Event()
+    release_parse = threading.Event()
+    original_build = seed_runtime.runtime._indexer.build
+    original_parse = PythonAdapter.parse_file
+
+    def held_build(**kwargs):
+        assert release_discovery.wait(timeout=5)
+        return original_build(**kwargs)
+
+    def break_second_file(adapter, content, path):
+        parsed = original_parse(adapter, content, path)
+        if path.endswith("service.py"):
+            entered_parse.set()
+            assert release_parse.wait(timeout=5)
+            return replace(parsed, file=replace(parsed.file, path="wrong.py"))
+        return parsed
+
+    monkeypatch.setattr(seed_runtime.runtime._indexer, "build", held_build)
+    monkeypatch.setattr(PythonAdapter, "parse_file", break_second_file)
+    key = worker_domain_key(seed_runtime.binding)
+    job = seed_runtime.index(force=True, wait_seconds=0)["job"]
+    handle = job["id"]
+    try:
+        assert attach_job(key, handle, {})["job"] == job
+        progress = job.get("progress")
+        assert progress is not None
+        assert progress == {
+            "phase": "queued", "files_parsed": 0,
+            "batches_acknowledged": 0, "bytes_acknowledged": 0,
+            "updated_at": job["started_at"],
+        }
+        release_discovery.set()
+        assert entered_parse.wait(timeout=5)
+        live = attach_job(key, handle, {})["job"]
+        assert live["state"] == "running"
+        assert live["phase"] == live["progress"]["phase"] == "parsing"
+        assert live["progress"]["files_parsed"] == 1
+        assert live["progress"]["files_total"] == 2
+        assert live["progress"]["updated_at"] >= job["started_at"]
+        assert seed_runtime.index(force=True, wait_seconds=0)["job"] == live
+    finally:
+        release_discovery.set()
+        release_parse.set()
+        seed_runtime.runtime.join_workers(timeout=10)
+
+    terminal = attach_job(key, handle, {})["job"]
+    assert terminal["state"] == "failed"
+    assert "phase" not in terminal
+    assert terminal["progress"] == live["progress"]
+
+
+def test_cache_hit_schedules_zero_files_and_retains_progress(seed_runtime):
+    first = seed_runtime.index(force=False)["job"]
+    assert first.get("progress", {}).get("files_parsed") == 2
+    cached = seed_runtime.index(force=False)
+    assert cached["no_op"] is True
+    job = cached["job"]
+    progress = job["progress"]
+    assert progress["phase"] == "fingerprint"
+    assert progress["files_parsed"] == progress["files_total"] == 0
+    assert progress["batches_acknowledged"] == progress["bytes_acknowledged"] == 0
+    assert attach_job(worker_domain_key(seed_runtime.binding), job["id"], {})["job"] == job
+
+
+def test_portable_rows_count_accepted_parses(seed_runtime):
+    control = codegraph_indexer.BuildControl()
+    seed_runtime.runtime._indexer.build_rows(control=control)
+    assert control.progress_snapshot()["files_parsed"] == 2
+    assert control.progress_snapshot()["files_total"] == 2
+
+
+def test_observer_can_replay_a_finished_jobs_phase_boundaries():
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    key = ("/tmp/base", "docs", "/tmp/project")
+
+    def target(control, result):
+        control.enter_phase("discovery")
+        control.enter_phase("parsing")
+        control.enter_phase("metadata")
+        result["state"] = "ready"
+
+    job, _ = registry.start(key, target, build_deadline=time.monotonic() + 10)
+    registry.join(timeout=5)
+    boundaries, latest = job.progress_observations(0)
+    assert [item["progress"]["phase"] for item in boundaries] == [
+        "queued", "discovery", "parsing", "metadata"
+    ]
+    assert all(item["state"] == "running" for item in boundaries)
+    assert [item["id"] for item in boundaries] == [job.job_id] * 4
+    assert latest == registry.current(key).describe()
+    assert latest["state"] == "ready"
+    assert job.progress_observations(len(boundaries)) == ([], latest)
+
+
+def test_poll_during_handoff_returns_retained_exact_job(monkeypatch):
+    from iwiki_mcp.codegraph import runtime as runtime_module
+
+    registry = runtime_module._BuildWorkerRegistry()
+    monkeypatch.setattr(runtime_module, "_BUILD_WORKERS", registry)
+    key = ("/tmp/base", "docs", "/tmp/project")
+    release = threading.Event()
+
+    def first_target(control, result):
+        assert release.wait(timeout=5)
+        result["state"] = "ready"
+
+    first, _ = registry.start(key, first_target, build_deadline=time.monotonic() + 10)
+    current = registry.current
+
+    def next_job_finishes_before_current_read(domain_key):
+        release.set()
+        registry.join(timeout=5)
+        _run_to_completion(registry, key, state="failed")
+        return current(domain_key)
+
+    monkeypatch.setattr(registry, "current", next_job_finishes_before_current_read)
+    try:
+        answer = attach_job(key, first.job_id, {})
+    finally:
+        release.set()
+        registry.join(timeout=5)
+    assert answer.get("job", {}).get("id") == first.job_id
+    assert answer["job"]["state"] == "ready"
+
+
+def test_forced_build_knows_parse_total_during_fingerprinting(seed_runtime, monkeypatch):
+    indexer = seed_runtime.runtime._indexer
+    original_fingerprints = indexer._fingerprints
+    release = threading.Event()
+    entered = threading.Event()
+
+    def held_fingerprints(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_fingerprints(*args, **kwargs)
+
+    monkeypatch.setattr(indexer, "_fingerprints", held_fingerprints)
+    try:
+        job = seed_runtime.index(force=True, wait_seconds=0)["job"]
+        assert entered.wait(timeout=5)
+        live = attach_job(worker_domain_key(seed_runtime.binding), job["id"], {})["job"]
+        assert live["progress"]["phase"] == "fingerprint"
+        assert live["progress"].get("files_total") == 2
+    finally:
+        release.set()
+        seed_runtime.runtime.join_workers(timeout=5)

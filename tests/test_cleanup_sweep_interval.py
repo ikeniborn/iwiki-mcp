@@ -205,3 +205,38 @@ def test_local_fallback_carries_partial_rows_into_the_failure_log(
             time.sleep(0.01)
 
     assert "1234 rows removed before the failure" in caplog.text
+
+
+@pytest.mark.parametrize("inspect_result", [{"state": "staging"}, {"error": "unauthorized"}])
+async def test_registered_receipt_inspection_does_not_start_due_cleanup(
+    monkeypatch, inspect_result,
+):
+    import json
+    from types import SimpleNamespace
+
+    from iwiki_mcp import server
+
+    binding = _binding(iwiki_id="personal", write=["docs"])
+    scheduled = []
+
+    class Service:
+        def inspect(self, session_id, cursor):
+            return inspect_result
+
+        def finalize_from_mapping(self, session_id):
+            return {"state": "ready"}
+
+    monkeypatch.setattr(server, "_resolved_binding", lambda: binding)
+    monkeypatch.setattr(
+        server, "_request_auth_context", lambda: SimpleNamespace(iwiki_id="personal")
+    )
+    monkeypatch.setattr(server, "_code_publication_service", lambda *a, **kw: Service())
+    monkeypatch.setattr(server, "_schedule_wiki_code_graph_cleanup", scheduled.append)
+
+    assert application.cleanup_sweep_due("personal")
+    reply = await server.mcp.call_tool("wiki_code_publish_inspect", {"session_id": "session"})
+    assert json.loads(reply[0].text) == inspect_result
+    assert scheduled == []
+
+    await server.mcp.call_tool("wiki_code_publish_finalize", {"session_id": "session"})
+    assert scheduled == [binding]

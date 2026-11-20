@@ -1331,3 +1331,228 @@ def test_run_cleanup_job_runs_on_the_maintenance_pool_connection(pg_graph):
         "for the drain; the pass-through is not reaching both"
     )
     assert _relation_rows(other) < before
+
+
+def _recoverable(graph, **overrides):
+    fields = dict(attempt_key="a" * 32, recovery_deadline=int(graph._now().timestamp()) + 600,
+                  max_batch_rows=128, max_batch_bytes=65536)
+    return {**fields, **overrides}
+
+
+def test_keyed_begin_recovers_one_session_and_original_limits(pg_graph):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    options = _recoverable(pg_graph)
+    barrier = threading.Barrier(2)
+
+    def begin():
+        barrier.wait(timeout=5)
+        return pg_graph.store.begin(pg_graph.header, **options)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [workers.submit(begin) for _ in range(2)]
+        original, concurrent = [future.result(timeout=10) for future in futures]
+    assert original == concurrent
+    assert original.max_batch_rows == 128
+    foreign = pg_graph.with_owner("rotated-owner").store.begin(pg_graph.header, **options)
+    assert isinstance(foreign, dict) and foreign["error"] == "unauthorized"
+    assert pg_graph.store.begin(
+        pg_graph.header, **{**options, "max_batch_rows": 256}
+    ) == original
+    assert pg_graph._query("SELECT COUNT(*) FROM iwiki.code_graph_publication_sessions") == [(1,)]
+    assert pg_graph.store.begin(
+        pg_graph.header_with_revision("sha256:" + "a" * 64), **options
+    )["error"] == "snapshot_conflict"
+    assert pg_graph.store.begin(
+        pg_graph.header, **{**options, "recovery_deadline": options["recovery_deadline"] + 1}
+    )["error"] == "snapshot_conflict"
+
+
+def test_inspect_receipts_is_owner_scoped_read_only_and_terminally_durable(pg_graph):
+    options = _recoverable(pg_graph)
+    original = pg_graph.store.begin(pg_graph.header, **options)
+    assert pg_graph.store.inspect(original.session_id)["receipts"] == []
+    other = pg_graph.with_owner("another-owner")
+    assert other.store.inspect(original.session_id)["error"] == "unauthorized"
+    pg_graph.upload_all(original)
+    lease = pg_graph.session(original)["lease_expires_at"]
+    pg_graph.advance_clock(1)
+    result = pg_graph.store.inspect(original.session_id)
+    assert result["state"] == "staging"
+    assert result["lease_expires_at"] == lease
+    assert pg_graph.session(original)["lease_expires_at"] == lease
+    assert result["graph_payload_revision"] == pg_graph.header.graph_payload_revision
+    assert result["receipts"] == sorted(
+        [{"kind": b.kind, "ordinal": b.ordinal, "payload_hash": b.payload_hash}
+         for b in pg_graph.batches], key=lambda row: (row["kind"], row["ordinal"])
+    )
+    first = pg_graph.finalize(original)
+    pg_graph.write_markdown_page("new", "# New\n\n## Body\nNew revision.\n")
+    later = pg_graph.finalize(pg_graph.complete_session())
+    assert first["snapshot_revision"] != later["snapshot_revision"]
+    pg_graph.advance_clock(pg_graph.superseded_retention_seconds + 1)
+    pg_graph.store.run_cleanup_cycle()
+    assert pg_graph.session(original) is None
+    committed = pg_graph.store.inspect(original.session_id)
+    assert committed["state"] == "ready"
+    assert committed["snapshot_revision"] == first["snapshot_revision"]
+    assert pg_graph.reader_status()["snapshot_revision"] == later["snapshot_revision"]
+    assert pg_graph.store.begin(pg_graph.header, **options) == original
+
+
+def test_cleanup_retains_attempt_through_deadline_and_bounds_expired_cleanup(pg_graph):
+    options = _recoverable(pg_graph)
+    sessions = [pg_graph.store.begin(pg_graph.header, **{**options, "attempt_key": c * 32})
+                for c in "abc"]
+    assert pg_graph._query("SELECT count(*) FROM iwiki.code_graph_publication_attempts") == [(3,)]
+    pg_graph.advance_clock(pg_graph.session_ttl_seconds + pg_graph.staging_retention_seconds + 1)
+    pg_graph.store.cleanup_staging(pg_graph._now())
+    for session in sessions:
+        assert pg_graph.store.inspect(session.session_id)["error"] == "session_expired"
+    assert pg_graph.store.begin(pg_graph.header, **options)["error"] == "session_expired"
+    assert pg_graph._query("SELECT count(*) FROM iwiki.code_graph_publication_attempts") == [(3,)]
+    pg_graph.advance_clock(600)
+    assert pg_graph.store.begin(pg_graph.header, **options)["error"] == "session_expired"
+    pg_graph.store.run_cleanup_cycle()
+    assert pg_graph._query("SELECT count(*) FROM iwiki.code_graph_publication_attempts") == [(1,)]
+    assert pg_graph.store.begin(pg_graph.header, **options)["error"] == "session_expired"
+
+
+def test_keyed_batch_limits_and_recovery_deadline_do_not_expand(pg_graph):
+    options = _recoverable(pg_graph, max_batch_bytes=8,
+                           recovery_deadline=int(pg_graph._now().timestamp()) + 10)
+    session = pg_graph.store.begin(pg_graph.header, **options)
+    assert pg_graph.publish_batch(session, pg_graph.batches[0]).get("error") == "invalid_batch"
+    assert pg_graph.batch_count(session) == 0
+    pg_graph.advance_clock(12)
+    assert pg_graph.store.inspect(session.session_id)["error"] == "session_expired"
+    assert pg_graph.store.finalize(session)["error"] == "session_expired"
+
+
+def test_attempt_evidence_survives_binary_rollback_and_reapplication(pg_graph):
+    from iwiki_mcp.postgres.migrations import (
+        MigrationSettings,
+        require_schema_version,
+        rollback_v10_compatibility,
+        run_migrations,
+    )
+
+    settings = MigrationSettings(pg_graph.admin_dsn, "fixture-model", 3, 30_000, 5_000)
+    original = pg_graph.store.begin(pg_graph.header, **_recoverable(pg_graph))
+    pg_graph.upload_all(original)
+    terminal = pg_graph.finalize(original)
+    legacy_staging = pg_graph.begin()
+
+    rollback_v10_compatibility(settings, confirm=True)
+    require_schema_version(pg_graph.admin_dsn, expected_version=9)
+    assert pg_graph.reader_status()["snapshot_revision"] == terminal["snapshot_revision"]
+    assert run_migrations(settings).applied_versions == (10,)
+    require_schema_version(pg_graph.admin_dsn)
+    inspected = pg_graph.store.inspect(original.session_id)
+    assert inspected["snapshot_revision"] == terminal["snapshot_revision"]
+    assert pg_graph.session(legacy_staging)["state"] == "staging"
+
+
+def test_recovery_that_expires_during_finalize_cannot_activate(pg_graph, monkeypatch):
+    options = _recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + 12)
+    session = pg_graph.store.begin(pg_graph.header, **options)
+    pg_graph.upload_all(session)
+    materialize = pg_graph.store._materialize
+
+    def delayed_materialize(*args):
+        rows = materialize(*args)
+        pg_graph.advance_clock(15)
+        return rows
+
+    monkeypatch.setattr(pg_graph.store, "_materialize", delayed_materialize)
+    assert pg_graph.finalize(session).get("error") == "session_expired"
+    assert pg_graph.reader_status()["state"] == "missing"
+
+
+def test_unselected_owner_can_only_mutate_legacy_sessions(pg_graph):
+    options = _recoverable(pg_graph)
+    keyed = pg_graph.store.begin(pg_graph.header, **options)
+    legacy = pg_graph.begin()
+    restricted = pg_graph.with_owner(pg_graph.owner_id).store
+    restricted.restrict_to_legacy_sessions()
+    assert restricted.publish_batch(keyed, pg_graph.batches[0])["error"] == "binding_not_selected"
+    assert restricted.finalize(keyed)["error"] == "binding_not_selected"
+    assert restricted.abort(keyed)["error"] == "binding_not_selected"
+    assert pg_graph.session(keyed)["state"] == "staging"
+    assert pg_graph.batch_count(keyed) == 0
+    assert restricted.publish_batch(legacy, pg_graph.batches[0]) == {"accepted": True}
+    assert restricted.abort(legacy) == {"state": "aborted"}
+
+
+@pytest.mark.parametrize("expires", ["lease", "deadline"])
+def test_expiry_during_activation_rolls_back_graph_rows(pg_graph, monkeypatch, expires):
+    from iwiki_mcp.postgres import codegraph
+
+    previous = pg_graph.finalize(pg_graph.complete_session())
+    ttl = 10 if expires == "deadline" else 600
+    session = pg_graph.store.begin(
+        pg_graph.header,
+        **_recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + ttl),
+    )
+    pg_graph.upload_all(session)
+    insert_links = codegraph._insert_wiki_links
+
+    def slow_insert(*args):
+        insert_links(*args)
+        pg_graph.advance_clock(12 if expires == "deadline" else pg_graph.session_ttl_seconds + 1)
+
+    monkeypatch.setattr(codegraph, "_insert_wiki_links", slow_insert)
+    assert pg_graph.finalize(session).get("error") == "session_expired"
+    assert pg_graph.reader_status()["snapshot_id"] == previous["snapshot_id"]
+    assert pg_graph.snapshot_state(session) == "staging"
+    assert pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_files f "
+        "JOIN iwiki.code_graph_publication_sessions s USING (iwiki_id, domain_id, snapshot_id) "
+        "WHERE s.session_id = %s", (session.session_id,),
+    ) == [(0,)]
+    assert pg_graph._query(
+        "SELECT terminal_result FROM iwiki.code_graph_publication_attempts WHERE session_id = %s",
+        (session.session_id,),
+    ) == [(None,)]
+
+
+def test_new_keyed_begin_that_expires_in_transaction_allocates_nothing(pg_graph, monkeypatch):
+    options = _recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + 10)
+    cleanup = pg_graph.store._cleanup_staging
+
+    def delayed_cleanup(*args):
+        removed = cleanup(*args)
+        pg_graph.advance_clock(12)
+        return removed
+
+    monkeypatch.setattr(pg_graph.store, "_cleanup_staging", delayed_cleanup)
+    result = pg_graph.store.begin(pg_graph.header, **options)
+    assert isinstance(result, dict) and result.get("error") == "session_expired"
+    for table in ("publication_attempts", "snapshots", "publication_sessions"):
+        assert pg_graph._query(f"SELECT count(*) FROM iwiki.code_graph_{table}") == [(0,)]
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+@pytest.mark.parametrize("expires", ["lease", "deadline"])
+def test_keyed_batch_expiry_rolls_back_receipt_and_renewal(
+    pg_graph, monkeypatch, duplicate, expires,
+):
+    ttl = 25 if expires == "deadline" else 600
+    options = _recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + ttl)
+    session = pg_graph.store.begin(pg_graph.header, **options)
+    batch = pg_graph.batches[0]
+    if duplicate:
+        assert pg_graph.publish_batch(session, batch) == {"accepted": True}
+    previous = pg_graph.session(session)["lease_expires_at"]
+    pg_graph.advance_clock(20)
+    renew = pg_graph.store._renew
+
+    def delayed_renew(*args):
+        renew(*args)
+        pg_graph.advance_clock(12)
+
+    monkeypatch.setattr(pg_graph.store, "_renew", delayed_renew)
+    assert pg_graph.publish_batch(session, batch).get("error") == "session_expired"
+    assert pg_graph.batch_count(session) == int(duplicate)
+    assert pg_graph.session(session)["lease_expires_at"] == previous

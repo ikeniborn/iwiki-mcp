@@ -5,11 +5,15 @@ import argparse
 from datetime import date, datetime
 import hashlib
 import json
+import logging
 import os
+import select
 from pathlib import Path
 import subprocess
 import sys
-from typing import Mapping, TextIO
+import threading
+import time
+from typing import Callable, Mapping, TextIO
 
 import psycopg
 from psycopg.conninfo import make_conninfo
@@ -70,10 +74,17 @@ def _add_config(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config")
 
 
-def _build_code_publish_parser() -> argparse.ArgumentParser:
-    parser = _CodeArgumentParser(prog="iwiki-mcp code publish")
+def _add_publish_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--json", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--resume", action="store_true")
+    mode.add_argument("--forget-resume", action="store_true")
+
+
+def _build_code_publish_parser() -> argparse.ArgumentParser:
+    parser = _CodeArgumentParser(prog="iwiki-mcp code publish")
+    _add_publish_arguments(parser)
     return parser
 
 
@@ -97,8 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser_class=_CodeArgumentParser,
     )
     publish = code_commands.add_parser("publish")
-    publish.add_argument("--project", required=True)
-    publish.add_argument("--json", action="store_true")
+    _add_publish_arguments(publish)
 
     base = commands.add_parser("base")
     base_commands = base.add_subparsers(
@@ -292,6 +302,33 @@ def _write_code_json(stream: TextIO, value) -> None:
     print(json.dumps(value, separators=(",", ":")), file=stream)
 
 
+_CODE_STDERR_DRAIN_SECONDS = 0.25
+
+
+def _write_code_stderr(stream: TextIO, line: str, detached: threading.Event) -> bool:
+    """Write one CLI line without letting a broken stderr replace the command's outcome."""
+    try:
+        if stream is sys.__stderr__ and os.name == "posix":
+            # A daemon blocked inside the interpreter's stderr wrapper can
+            # prevent shutdown. Write directly for every inherited descriptor.
+            fd = stream.fileno()
+            if hasattr(select, "poll"):
+                writable = select.poll()
+                writable.register(fd, select.POLLOUT)
+                while not writable.poll(50):
+                    if detached.is_set():
+                        return False
+            if detached.is_set():
+                return False
+            data = line.encode("ascii")
+            return os.write(fd, data) == len(data)
+        stream.write(line)
+        stream.flush()
+        return True
+    except Exception:
+        return False
+
+
 def _write_code_failure(
     stream: TextIO,
     *,
@@ -317,8 +354,99 @@ def _write_code_failure(
         "index_failed": "code graph indexing failed",
         "publication_failed": "code graph publication failed",
         "internal_error": "code graph publication failed",
+        "resume_busy": "another publisher holds this checkpoint",
+        "resume_expired": "the recovery window expired; check the active snapshot",
+        "resume_conflict": "publication state conflicts with the pinned upload",
+        "resume_incompatible": "the selected peer or mode does not support recovery",
+        "resume_invalid_checkpoint": "the local recovery checkpoint failed verification",
+        "resume_local_io_failed": "local storage I/O failed. Check storage and retry the command",
+        "resume_target_mismatch": "the checkpoint belongs to a different publication target",
+        "resume_access_denied": "the current publisher cannot access this attempt",
+        "resume_transport_failed": "the peer is unavailable; retry with --resume",
+        "resume_failed": "code graph recovery failed",
     }
-    print(f"iwiki-mcp: {messages[error]} (code={error})", file=stream)
+    line = f"iwiki-mcp: {messages.get(error, 'code graph recovery failed')} (code={error})\n"
+    detached = threading.Event()
+    writer = threading.Thread(
+        target=_write_code_stderr, args=(stream, line, detached),
+        name="iwiki-code-diagnostic", daemon=True,
+    )
+    writer.start()
+    writer.join(timeout=_CODE_STDERR_DRAIN_SECONDS)
+    detached.set()
+
+
+class _CodePublishProgress:
+    """Render one invocation's job on a dedicated stderr consumer."""
+
+    _COUNTERS = ("files_parsed", "files_total", "batches_acknowledged", "bytes_acknowledged")
+
+    def __init__(self, stream: TextIO, *, clock: Callable[[], float] = time.monotonic):
+        self._stream = stream
+        self._clock = clock
+        self._last_phase = None
+        self._last_counts = None
+        self._last_output = 0.0
+        self._detached = threading.Event()
+
+    def emit(self, job: dict) -> bool:
+        progress = job["progress"]
+        phase = (job["state"], progress["phase"])
+        counts = {key: progress[key] for key in self._COUNTERS if key in progress}
+        now = self._clock()
+        if phase == self._last_phase and (
+            counts == self._last_counts or now - self._last_output < 1
+        ):
+            return True
+        fields = {
+            "job": job["id"],
+            "state": job["state"],
+            "phase": progress["phase"],
+            **counts,
+            "updated_at": progress["updated_at"],
+        }
+        line = "code graph progress " + " ".join(f"{key}={value}" for key, value in fields.items())
+        if not _write_code_stderr(self._stream, line + "\n", self._detached):
+            return False
+        self._last_phase = phase
+        self._last_counts = counts
+        self._last_output = self._clock()
+        return True
+
+    def observe(self, job):
+        wake = threading.Event()
+
+        def consume():
+            cursor = 0
+            while True:
+                active = job
+                if active is None:
+                    return
+                boundaries, latest = active.progress_observations(cursor)
+                del active
+                cursor += len(boundaries)
+                for descriptor in (*boundaries, latest):
+                    if job is None or not self.emit(descriptor):
+                        return
+                if latest["state"] != "running":
+                    return
+                wake.wait(0.05)
+
+        consumer = threading.Thread(target=consume, name="iwiki-code-progress", daemon=True)
+        consumer.start()
+
+        def stop(completed: bool):
+            nonlocal job
+            if completed:
+                wake.set()
+                consumer.join(timeout=_CODE_STDERR_DRAIN_SECONDS)
+            # A stalled custom stream can still own its current line. Drop
+            # the worker and all future output before returning the result.
+            job = None
+            self._detached.set()
+            wake.set()
+
+        return stop
 
 
 def _run_code_publish(
@@ -328,10 +456,28 @@ def _run_code_publish(
     err: TextIO,
 ) -> int:
     try:
-        outcome = _codegraph_application.publish_project(
+        if args.forget_resume:
+            result = _codegraph_application.forget_resume_project(args.project, environ=env)
+            if args.json:
+                _write_code_json(out, result)
+            else:
+                print("Local recovery state cleared." + (
+                    " The remote outcome may still be unknown." if result["outcome_unknown"] else ""
+                ), file=out)
+            return 0
+        publish = (
+            _codegraph_application.resume_project if args.resume
+            else _codegraph_application.publish_project
+        )
+        outcome = publish(
             args.project,
             environ=env,
+            _observe_job=_CodePublishProgress(err).observe,
         )
+    except _codegraph_application.CodeGraphResumeError as exc:
+        _write_code_failure(out if args.json else err, json_output=args.json,
+                            publish_mode=exc.publish_mode, error=exc.code, duration_ms=0)
+        return exc.exit_code
     except _codegraph_application.CodeGraphPublishError as exc:
         error, exit_code = {
             "configuration": ("invalid_config", 2),
@@ -906,3 +1052,19 @@ def run(
     else:
         _write_json(out, result)
     return 0
+
+
+def main() -> None:
+    """Start one-shot publication before the MCP server configures stderr logging."""
+    if sys.argv[1:3] == ["code", "publish"]:
+        # Default logging's lastResort handler also writes synchronously to
+        # stderr. The standalone CLI already reports job failures to the user.
+        logger = logging.getLogger()
+        quiet = logging.NullHandler()
+        logger.addHandler(quiet)
+        try:
+            raise SystemExit(run(sys.argv[1:]))
+        finally:
+            logger.removeHandler(quiet)
+    from .server import main as server_main
+    server_main()

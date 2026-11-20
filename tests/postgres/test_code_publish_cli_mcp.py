@@ -913,7 +913,7 @@ def hosted_mcp_cli(
 def _failure_payload(stdout, stderr):
     payload = json.loads(stdout)
     assert stdout.count("\n") == 1
-    assert stderr == ""
+    assert "state=failed" in stderr.splitlines()[-1]
     assert payload["state"] == "failed"
     assert payload["publish_mode"] == "mcp"
     assert payload["error"] == "publication_failed"
@@ -933,7 +933,7 @@ def test_code_publish_cli_activates_snapshot_through_hosted_mcp(
     assert exit_code == 0
     assert stdout.count("\n") == 1
     assert stdout == json.dumps(payload, separators=(",", ":")) + "\n"
-    assert stderr == ""
+    assert "state=ready phase=finalize" in stderr.splitlines()[-1]
     assert payload["state"] == "ready"
     assert payload["publish_mode"] == "mcp"
     assert re.fullmatch(
@@ -967,7 +967,7 @@ def test_read_only_hosted_grant_denies_publication_without_begin_or_abort(
         "wiki_code_status", {}
     )["snapshot_revision"]
     assert first_code == 0
-    assert first_stderr == ""
+    assert "state=ready phase=finalize" in first_stderr.splitlines()[-1]
     assert json.loads(first_stdout)["snapshot_revision"] == old_revision
 
     read_only = hosted_mcp_cli.hosted.auth.create_token(
@@ -1006,7 +1006,7 @@ def test_later_batch_failure_preserves_revision_and_aborts_once(
         "wiki_code_status", {}
     )["snapshot_revision"]
     assert first_code == 0
-    assert first_stderr == ""
+    assert "state=ready phase=finalize" in first_stderr.splitlines()[-1]
     assert json.loads(first_stdout)["snapshot_revision"] == old_revision
 
     hosted_mcp_cli.project.joinpath("service.py").write_text(

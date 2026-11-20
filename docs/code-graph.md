@@ -118,17 +118,15 @@ A single build runs at a time, so when you poll without the handle, always check
 returned `id` against the one you hold — a different `id` means your own build's outcome
 is no longer what the answer describes.
 
-The job is session-scoped either way. A new process (a server restart, a fresh stdio
-connection) knows no build and reports no `job` key at all, and neither does a `job_id`
-that has aged out of the process's bounded history of recent builds (16, shared across
-every domain that process builds for) — an unknown id is not an error, so the answer
-keeps its normal shape and adds `job_unknown` to its `warnings`. A handle is also
-unknown to a session bound to a different primary: a build belongs to exactly one domain,
-and `wiki_code_status` reports only builds of the domain it is bound to, so a rebound
-session is never told its graph is `ready` on the strength of another domain's build.
-Fall back to `state`/`fresh` in each of those cases rather than wait forever for a
-terminal job this process cannot answer for. An answer that carries `error` never
-carries a `job`: the error describes the graph, not the build.
+To poll while the target is unavailable, call local `wiki_code_status` with these arguments. Substitute the `job.id` returned by `wiki_code_index` in the same process.
+
+```json
+{"job_only": true, "job_id": "8ad2043fd87339ac"}
+```
+
+The response contains `job`. Job-only polling reads the local registry without contacting the snapshot reader. A process restart, an evicted handle, or a different checkout or primary returns the `job_unknown` warning. The process retains up to 16 terminal descriptors. A combined poll can include the job alongside `stale_snapshot`, `missing_snapshot`, or a classified connection failure. An authorization or binding error withholds the job. The client attaches a local job to a healthy remote snapshot only after the bind or status response confirms the selected scope. A refusal received before session cleanup remains visible if closing the connection times out.
+
+For example, `job.progress.phase="parsing"`, `files_parsed=4` and `files_total=12` indicate four accepted parse results out of twelve scheduled files. The total is omitted until known. During transfer, `batches_acknowledged` counts accepted batches and `bytes_acknowledged` counts their payload bytes. The Unix timestamp `updated_at` records the last change. Terminal jobs retain their final counters.
 
 The descriptor does not depend on `code_graph.read_mode`. The build belongs to this
 process, not to the snapshot a reader answered from, so a local server reports it whether

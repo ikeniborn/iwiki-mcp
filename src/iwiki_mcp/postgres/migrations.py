@@ -742,6 +742,89 @@ CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION = Migration(
 )
 
 
+# Attempts outlive the snapshots and staging sessions they identify. Only
+# domain removal or bounded expiry cleanup may remove their terminal evidence.
+PUBLICATION_RESUME_MIGRATION = Migration(version=10, statements=(
+    """
+    CREATE TABLE IF NOT EXISTS iwiki.code_graph_publication_attempts (
+        iwiki_id text NOT NULL, domain_id bigint NOT NULL, owner_id text NOT NULL,
+        attempt_key text NOT NULL, session_id text NOT NULL,
+        recovery_deadline timestamptz NOT NULL, header_digest text NOT NULL,
+        graph_payload_revision text NOT NULL, cursor_key text NOT NULL,
+        max_batch_rows integer NOT NULL CHECK (max_batch_rows > 0),
+        max_batch_bytes integer NOT NULL CHECK (max_batch_bytes > 0),
+        initial_lease timestamptz NOT NULL, base_snapshot_revision text,
+        base_markdown_token bigint NOT NULL, terminal_result jsonb,
+        PRIMARY KEY (iwiki_id, domain_id, attempt_key),
+        UNIQUE (iwiki_id, domain_id, session_id),
+        FOREIGN KEY (iwiki_id, domain_id) REFERENCES iwiki.domains (iwiki_id, domain_id)
+            ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS code_graph_attempts_expiry_idx
+        ON iwiki.code_graph_publication_attempts (iwiki_id, domain_id, recovery_deadline)
+    """,
+    """
+    ALTER TABLE iwiki.code_graph_publication_attempts ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS principal_read ON iwiki.code_graph_publication_attempts;
+    CREATE POLICY principal_read ON iwiki.code_graph_publication_attempts FOR SELECT
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, false));
+    DROP POLICY IF EXISTS principal_write ON iwiki.code_graph_publication_attempts;
+    CREATE POLICY principal_write ON iwiki.code_graph_publication_attempts
+        USING (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+        WITH CHECK (iwiki.database_principal_can_access(iwiki_id, domain_id, true))
+    """,
+    """
+    DO $body$ DECLARE grant_row record;
+    BEGIN
+        FOR grant_row IN SELECT grantee, privilege_type FROM information_schema.role_table_grants
+            WHERE table_schema = 'iwiki' AND table_name = 'code_graph_publication_sessions'
+            AND grantee <> current_user AND grantee <> 'PUBLIC'
+            AND privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+        LOOP
+            EXECUTE format('GRANT %s ON iwiki.code_graph_publication_attempts TO %I',
+                           grant_row.privilege_type, grant_row.grantee);
+        END LOOP;
+    END $body$
+    """,
+    """
+    ALTER TABLE iwiki.code_graph_publication_sessions ADD COLUMN IF NOT EXISTS
+        recovery_deadline timestamptz
+    """,
+    """
+    CREATE OR REPLACE FUNCTION iwiki.record_code_graph_attempt_result() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+    BEGIN
+        UPDATE iwiki.code_graph_publication_attempts SET terminal_result = NEW.terminal_result
+        WHERE iwiki_id = NEW.iwiki_id AND domain_id = NEW.domain_id
+        AND owner_id = NEW.owner_id AND session_id = NEW.session_id;
+        IF NOT FOUND AND NEW.state = 'ready' THEN
+            RAISE EXCEPTION 'publication attempt unavailable';
+        END IF;
+        RETURN NEW;
+    END $body$;
+    DROP TRIGGER IF EXISTS record_attempt_result ON iwiki.code_graph_publication_sessions;
+    CREATE TRIGGER record_attempt_result AFTER UPDATE OF state
+        ON iwiki.code_graph_publication_sessions FOR EACH ROW
+        WHEN (NEW.recovery_deadline IS NOT NULL
+              AND OLD.state = 'staging' AND NEW.state <> 'staging')
+        EXECUTE FUNCTION iwiki.record_code_graph_attempt_result()
+    """,
+))
+
+# Keep the additive objects and attempt records when reverting the binary.
+SCHEMA10_COMPATIBILITY_ROLLBACK_SQL = f"""
+SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
+DO $body$ BEGIN
+    IF (SELECT max(version) FROM iwiki.schema_migrations) IS DISTINCT FROM 10 THEN
+        RAISE EXCEPTION 'schema version 10 compatibility rollback is unavailable';
+    END IF;
+    DELETE FROM iwiki.schema_migrations WHERE version = 10;
+END $body$;
+"""
+
+
 SCHEMA6_COMPATIBILITY_ROLLBACK_SQL = f"""
 SELECT pg_advisory_xact_lock({_MIGRATION_LOCK});
 DROP TABLE iwiki.specification_evidence;
@@ -1006,6 +1089,7 @@ MIGRATIONS = (
     SPECIFICATION_METADATA_MIGRATION,
     WIKI_LINK_CASCADE_MIGRATION,
     CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION,
+    PUBLICATION_RESUME_MIGRATION,
 )
 
 
@@ -1160,7 +1244,7 @@ def _safe_server_label(dsn: str) -> str:
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 9,
+    expected_version: int = 10,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -1543,3 +1627,25 @@ def rollback_v9_compatibility(
         "schema_version": 8,
         "removed_marker": 9,
     }
+
+
+def rollback_v10_compatibility(
+    settings: MigrationSettings, *, confirm: bool
+) -> dict[str, int | bool]:
+    """Permit a v9 binary to start while retaining durable attempt evidence."""
+    if confirm is not True:
+        raise ValueError("confirmation must be literal true")
+    try:
+        with psycopg.connect(
+            settings.dsn, connect_timeout=settings.connect_timeout_s
+        ) as connection:
+            with connection.transaction(), connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('lock_timeout', %s, true), "
+                    "set_config('statement_timeout', %s, true)",
+                    (str(settings.lock_timeout_ms), str(settings.statement_timeout_ms)),
+                )
+                cursor.execute(SCHEMA10_COMPATIBILITY_ROLLBACK_SQL)
+    except psycopg.Error as exc:
+        raise MigrationError("schema version 10 compatibility rollback is unavailable") from exc
+    return {"dry_run": False, "schema_version": 9, "removed_marker": 10}

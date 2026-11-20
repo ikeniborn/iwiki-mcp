@@ -3,18 +3,24 @@ from __future__ import annotations
 
 from io import StringIO
 import json
+import os
+import select
+import socket
 from pathlib import Path
 import subprocess
+import sys
+import threading
 import traceback
 
 import psycopg
 import pytest
 
 from iwiki_mcp import admin, base, server
-from iwiki_mcp.codegraph import application
+from iwiki_mcp.codegraph import application, indexer
 from iwiki_mcp.codegraph.application import CodeGraphPublishOutcome
 from iwiki_mcp.codegraph.config import CodeGraphConfig, CodeGraphConfigError
 from iwiki_mcp.codegraph.mcp_adapter import CodeGraphAdapterError
+from tests.codegraph.synthetic_wiki import create_sqlite_project
 
 
 _LOCAL_REVISION = "sha256:" + "c" * 64
@@ -102,7 +108,7 @@ def _run_post_resolution_failure(
 
         def index(
             self, *, force=False, languages=None, wait_seconds=None,
-            publish=None,
+            publish=None, _observe_job=None,
         ):
             raise failure
 
@@ -652,3 +658,324 @@ def test_code_command_is_recognized_as_admin_route():
     assert admin.is_admin_command(
         ["code", "publish", "--project", str(Path("/repo"))]
     )
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("publication_fails", [False, True])
+def test_publish_flushes_progress_to_pipe_before_worker_finishes(
+    tmp_path, monkeypatch, json_output, publication_fails,
+):
+    project = create_sqlite_project(tmp_path)
+    if publication_fails:
+        config = project / ".iwiki.toml"
+        config.write_text(config.read_text().replace(
+            'publish_mode = "sqlite"', 'publish_mode = "mcp"'
+        ))
+
+        class RejectedPublisher:
+            def begin(self, header):
+                raise RuntimeError("private-token-and-endpoint")
+
+        monkeypatch.setattr(application, "publisher_for", lambda *a, **kw: RejectedPublisher())
+
+    entered, release = threading.Event(), threading.Event()
+    discover = indexer.discover_sources
+
+    def hold_discovery(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return discover(*args, **kwargs)
+
+    monkeypatch.setattr(indexer, "discover_sources", hold_discovery)
+    argv = ["code", "publish", "--project", str(project)]
+    if json_output:
+        argv.append("--json")
+    stdout = StringIO()
+    read_fd, write_fd = os.pipe()
+    codes = []
+    with os.fdopen(read_fd, "rb", buffering=0) as reader, os.fdopen(write_fd, "w") as stderr:
+        cli = threading.Thread(
+            target=lambda: codes.append(admin.run(argv, stdout=stdout, stderr=stderr, environ={}))
+        )
+        cli.start()
+        try:
+            assert entered.wait(5)
+            assert select.select([reader], [], [], 1)[0], "no flushed progress while worker held"
+            startup = reader.readline().decode()
+            assert "state=running phase=queued" in startup
+            assert stdout.getvalue() == ""
+        finally:
+            release.set()
+            cli.join(10)
+        assert not cli.is_alive()
+        stderr.close()
+        lines = (startup + reader.read().decode()).splitlines()
+
+    progress = [line for line in lines if line.startswith("code graph progress ")]
+    phases = [line.split("phase=")[1].split()[0] for line in progress]
+    assert phases[:3] == ["queued", "discovery", "fingerprint"]
+    assert "files_total=" not in progress[0]
+    assert "files_parsed=1" in progress[-1]
+    assert "updated_at=" in progress[-1]
+    state = "failed" if publication_fails else "ready"
+    assert f"state={state}" in progress[-1]
+    assert codes == [1 if publication_fails else 0]
+    if json_output:
+        assert stdout.getvalue().count("\n") == 1
+        payload = json.loads(stdout.getvalue())
+        assert payload["state"] == state
+        if publication_fails:
+            assert payload["error"] == "publication_failed"
+    elif publication_fails:
+        assert stdout.getvalue() == ""
+        assert lines[-1] == "iwiki-mcp: code graph publication failed (code=publication_failed)"
+    else:
+        assert stdout.getvalue().startswith("code graph ready mode=sqlite ")
+    assert "private-token-and-endpoint" not in "".join(lines)
+    assert str(project) not in "".join(lines)
+
+
+def test_progress_lines_rate_limit_changed_counters_within_phase():
+    stream = StringIO()
+    now = 0.0
+    progress = admin._CodePublishProgress(stream, clock=lambda: now)
+
+    def record(phase, files, state="running"):
+        progress.emit({
+            "id": "a" * 16, "state": state, "private": "secret",
+            "progress": {
+                "phase": phase, "files_parsed": files, "files_total": 50,
+                "batches_acknowledged": 0, "bytes_acknowledged": 0,
+                "updated_at": 123 + files, "filename": "private-source",
+            },
+        })
+
+    for files in range(50):
+        now = files / 20
+        record("parsing", files)
+    now = 9.0
+    record("parsing", 49)
+    now = 11.0
+    record("parsing", 49)
+    record("resolution", 49)
+    record("resolution", 49, state="ready")
+    lines = stream.getvalue().splitlines()
+    assert [int(line.split("files_parsed=")[1].split()[0]) for line in lines] == [
+        0, 20, 40, 49, 49, 49,
+    ]
+    assert all("secret" not in line and "private-source" not in line for line in lines)
+    assert "state=ready phase=resolution" in lines[-1]
+
+
+def test_closed_progress_sink_preserves_final_result(tmp_path):
+    project = create_sqlite_project(tmp_path)
+    stream = StringIO()
+    stream.close()
+    stdout = StringIO()
+    code = admin.run(
+        ["code", "publish", "--project", str(project), "--json"],
+        stderr=stream, stdout=stdout, environ={},
+    )
+    assert code == 0
+    assert json.loads(stdout.getvalue())["state"] == "ready"
+
+
+def test_blocked_progress_sink_leaves_worker_and_command_free_to_finish(tmp_path, monkeypatch):
+    project = create_sqlite_project(tmp_path)
+    writing, release_sink = threading.Event(), threading.Event()
+    building = threading.Event()
+    workers = []
+    build = indexer.CodeGraphIndexer.build
+
+    def build_after_output_stalls(*args, **kwargs):
+        workers.append(threading.current_thread())
+        building.set()
+        assert writing.wait(5)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(indexer.CodeGraphIndexer, "build", build_after_output_stalls)
+
+    consumers = []
+
+    class HeldStream(StringIO):
+        def write(self, data):
+            consumers.append(threading.current_thread())
+            writing.set()
+            assert release_sink.wait(10)
+            return super().write(data)
+
+    codes, sink, stdout = [], HeldStream(), StringIO()
+    cli = threading.Thread(target=lambda: codes.append(admin.run(
+        ["code", "publish", "--project", str(project), "--json"],
+        stderr=sink, stdout=stdout, environ={},
+    )))
+    cli.start()
+    try:
+        assert writing.wait(5)
+        assert building.wait(5)
+        workers[0].join(3)
+        assert not workers[0].is_alive()
+        cli.join(1.5)
+        assert not cli.is_alive(), "final stdout is blocked by the progress sink"
+        assert codes == [0]
+        assert json.loads(stdout.getvalue())["state"] == "ready"
+    finally:
+        release_sink.set()
+        cli.join(10)
+    consumers[0].join(1)
+    assert not consumers[0].is_alive()
+    assert len(sink.getvalue().splitlines()) == 1
+
+
+def test_early_join_observes_same_job_and_detaches_before_termination(tmp_path, monkeypatch):
+    project = create_sqlite_project(tmp_path)
+    binding = base.resolve_storage_binding(str(project), environ={})
+    runtime = application.code_runtime(application.source_context(binding), environ={})
+    builds, release = [], threading.Event()
+    build = indexer.CodeGraphIndexer.build
+
+    def hold_build(*args, **kwargs):
+        builds.append(threading.current_thread())
+        assert release.wait(10)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(indexer.CodeGraphIndexer, "build", hold_build)
+    first_stream, second_stream = StringIO(), StringIO()
+    try:
+        first = runtime.index(
+            wait_seconds=0, _observe_job=admin._CodePublishProgress(first_stream).observe,
+        )
+        second = runtime.index(
+            wait_seconds=0, _observe_job=admin._CodePublishProgress(second_stream).observe,
+        )
+        assert first["state"] == second["state"] == "rebuilding"
+        handle = first["job"]["id"]
+        assert second["job"]["id"] == handle
+        expected = (first_stream.getvalue(), second_stream.getvalue())
+        assert all(f"job={handle} state=running phase=queued" in output for output in expected)
+    finally:
+        release.set()
+        runtime.join_workers(timeout=5)
+    assert len(builds) == 1
+    assert expected == (first_stream.getvalue(), second_stream.getvalue())
+
+
+def test_fast_worker_replays_phase_boundaries_after_completion(tmp_path, monkeypatch):
+    project = create_sqlite_project(tmp_path)
+    observe = admin._CodePublishProgress.observe
+
+    def observe_finished_job(output, job):
+        job.thread.join(5)
+        assert not job.thread.is_alive()
+        return observe(output, job)
+
+    monkeypatch.setattr(admin._CodePublishProgress, "observe", observe_finished_job)
+    stderr = StringIO()
+    code = admin.run(
+        ["code", "publish", "--project", str(project), "--json"],
+        stderr=stderr, stdout=StringIO(), environ={},
+    )
+    assert code == 0
+    lines = stderr.getvalue().splitlines()
+    assert "state=running phase=queued" in lines[0]
+    phases = [line.split("phase=")[1].split()[0] for line in lines]
+    assert phases[:4] == ["queued", "discovery", "fingerprint", "parsing"]
+    assert phases[-3:] == ["final_verification", "metadata", "metadata"]
+    assert "state=ready" in lines[-1]
+
+
+@pytest.mark.parametrize("publication_fails", [False, True])
+@pytest.mark.parametrize("sink", ["pipe", "socket"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_process_exits_with_saturated_stderr(tmp_path, publication_fails, sink, json_output):
+    project = create_sqlite_project(tmp_path)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("IWIKI_")}
+    # Reserve an unlistened local port for a deterministic connection refusal.
+    with socket.socket() as unavailable:
+        if publication_fails:
+            unavailable.bind(("127.0.0.1", 0))
+            env.update({
+                "IWIKI_CODE_GRAPH_MCP_URL": f"http://127.0.0.1:{unavailable.getsockname()[1]}/mcp",
+                "IWIKI_CODE_GRAPH_MCP_TOKEN": "test-token",
+            })
+            config = project / ".iwiki.toml"
+            config.write_text(config.read_text().replace(
+                'publish_mode = "sqlite"', 'publish_mode = "mcp"'
+            ))
+        if sink == "socket":
+            read_end, write_end = socket.socketpair()
+            read_fd, write_fd = read_end.detach(), write_end.detach()
+        else:
+            read_fd, write_fd = os.pipe()
+        try:
+            os.set_blocking(write_fd, False)
+            with pytest.raises(BlockingIOError):
+                while True:
+                    os.write(write_fd, b"x" * 4096)
+            os.set_blocking(write_fd, True)
+            # Leave the read end open and unread until the child exits.
+            command = Path(sys.executable).with_name("iwiki-mcp")
+            argv = [command, "code", "publish", "--project", str(project)]
+            if json_output:
+                argv.append("--json")
+            result = subprocess.run(
+                argv,
+                stdout=subprocess.PIPE, stderr=write_fd, env=env,
+                cwd=tmp_path, timeout=7, text=True,
+            )
+        finally:
+            os.close(write_fd)
+            os.close(read_fd)
+    assert result.returncode == (1 if publication_fails else 0)
+    if json_output:
+        assert result.stdout.count("\n") == 1
+        payload = json.loads(result.stdout)
+        assert payload["state"] == ("failed" if publication_fails else "ready")
+        if publication_fails:
+            assert payload["error"] == "publication_failed"
+    elif publication_fails:
+        assert result.stdout == ""
+    else:
+        assert result.stdout.startswith("code graph ready mode=sqlite ")
+
+
+def test_text_configuration_error_with_closed_stderr_retains_exit_two(tmp_path):
+    stderr = StringIO()
+    stderr.close()
+    stdout = StringIO()
+    code = admin.run(
+        ["code", "publish", "--project", str(tmp_path)], stdout=stdout, stderr=stderr, environ={},
+    )
+    assert code == 2
+    assert stdout.getvalue() == ""
+
+
+def test_text_usage_error_with_disconnected_stderr_pipe_retains_exit_two(tmp_path):
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run(
+            [Path(sys.executable).with_name("iwiki-mcp"), "code", "publish"],
+            stdout=subprocess.PIPE, stderr=write_fd, cwd=tmp_path, timeout=7, text=True,
+        )
+    finally:
+        os.close(write_fd)
+    assert result.returncode == 2
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("flag,state", [("--resume", "ready"), ("--forget-resume", "forgotten")])
+def test_resume_cli_dispatch(flag, state, monkeypatch, tmp_path):
+    def resume(project, **kwargs):
+        assert project == str(tmp_path)
+        return _outcome()
+
+    monkeypatch.setattr(application, "resume_project", resume, raising=False)
+    monkeypatch.setattr(application, "forget_resume_project",
+                        lambda *a, **kw: {"state": "forgotten", "outcome_unknown": True},
+                        raising=False)
+    out = StringIO()
+    code = admin.run(["code", "publish", "--project", str(tmp_path), flag, "--json"],
+                     stdout=out, stderr=StringIO(), environ={})
+    assert code == 0
+    assert json.loads(out.getvalue())["state"] == state

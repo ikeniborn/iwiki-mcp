@@ -49,7 +49,12 @@ def test_code_publish_cli_reuses_local_sqlite_snapshot(tmp_path, monkeypatch):
     assert first["publish_mode"] == second["publish_mode"] == "sqlite"
     assert first["snapshot_revision"] == second["snapshot_revision"]
     assert first["counts"]["files"] == second["counts"]["files"] == 1
-    assert first_stderr == second_stderr == ""
+    for output, parsed in ((first_stderr, 1), (second_stderr, 0)):
+        lines = output.splitlines()
+        assert "state=running phase=queued" in lines[0]
+        assert "state=ready" in lines[-1]
+        assert f"files_parsed={parsed} files_total={parsed}" in lines[-1]
+        assert "batches_acknowledged=0 bytes_acknowledged=0" in lines[-1]
     assert wiki_markdown.read_bytes() == before
 
     binding = base.resolve_storage_binding(str(project), environ={})

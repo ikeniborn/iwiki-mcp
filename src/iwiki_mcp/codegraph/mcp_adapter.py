@@ -42,6 +42,37 @@ _HINTS: dict[str, str] = {
 _UNREADABLE: dict[str, object] = {"state": "missing", "fresh": False}
 
 
+_RESUME_SCHEMA = {
+    "wiki_code_publish_begin": {"header", "attempt_key", "recovery_deadline"},
+    "wiki_code_publish_inspect": {"session_id", "cursor"},
+    "wiki_code_publish_batch": {"require_session_binding"},
+    "wiki_code_publish_finalize": {"require_session_binding"},
+}
+
+
+async def _resume_capabilities(session) -> dict[str, object]:
+    missing = set(_RESUME_SCHEMA)
+    seen_cursors = set()
+    cursor = None
+    while missing:
+        page = await session.list_tools(cursor=cursor)
+        for tool in page.tools:
+            name = tool.name
+            if name in missing and _RESUME_SCHEMA[name].issubset(
+                tool.inputSchema.get("properties", {})
+            ):
+                missing.remove(name)
+        cursor = page.nextCursor
+        if cursor is None:
+            break
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            return _remote_failed()
+        seen_cursors.add(cursor)
+    if missing:
+        return {"error": "incompatible_peer", "hint": "upgrade the hosted publication tools"}
+    return {}
+
+
 def _status_code(exc: BaseException) -> int | None:
     """Return an HTTP status carried by the exception, when it holds one."""
     for candidate in (getattr(getattr(exc, "response", None), "status_code", None),
@@ -73,22 +104,19 @@ def _remote_failed(exc: BaseException | None = None) -> dict[str, object]:
         reason, status = "unknown", None
         for current in _related(exc):
             code = _status_code(current)
-            name = type(current).__name__
             if code is not None:
                 reason, status = "http_status", code
                 break
-            if isinstance(current, TimeoutError) or "Timeout" in name:
-                reason = "timeout"
-                break
-            if isinstance(current, ConnectionError) or "Connect" in name:
-                reason = "connect"
-                break
-            if isinstance(current, ValueError):
-                reason = "malformed_response"
-                break
+            name = type(current).__name__
             if "Mcp" in name or "Protocol" in name:
                 reason = "protocol"
-                break
+            elif isinstance(current, ValueError):
+                reason = "malformed_response"
+            elif reason == "unknown":
+                if isinstance(current, TimeoutError) or "Timeout" in name:
+                    reason = "timeout"
+                elif isinstance(current, ConnectionError) or "Connect" in name:
+                    reason = "connect"
     payload: dict[str, object] = {
         "error": "remote_mcp_failed",
         "reason": reason,
@@ -150,6 +178,7 @@ class RemoteMcpTransport:
         environ: Mapping[str, str] | None = None,
         session_factory: Callable[[str, Mapping[str, str]], Any] | None = None,
         primary: str | None = None,
+        verify_binding: bool = False,
     ) -> None:
         values = os.environ if environ is None else environ
         url = values.get(ENDPOINT_ENV) or ""
@@ -160,6 +189,9 @@ class RemoteMcpTransport:
             )
         self._url = url
         self._token = token
+        if verify_binding and not primary:
+            raise CodeGraphAdapterError("recovery requires an explicit primary")
+        self._verify_binding = verify_binding
         self._primary = primary
         self._session_factory = session_factory or _official_session
 
@@ -170,6 +202,19 @@ class RemoteMcpTransport:
         self, tool_name: str, arguments: Mapping[str, object]
     ) -> dict[str, object]:
         """Invoke one remote tool, mapping every failure to a safe code."""
+        answer, _ = self.call_with_origin(tool_name, arguments)
+        return answer
+
+    def call_with_origin(
+        self, tool_name: str, arguments: Mapping[str, object]
+    ) -> tuple[dict[str, object], str]:
+        """Distinguish a tool response, a refused bind and a local transport failure."""
+        recovery_request = tool_name in ("tools/list", "wiki_code_publish_inspect") or (
+            tool_name == "wiki_code_publish_begin"
+            and ("attempt_key" in arguments or "recovery_deadline" in arguments)
+        )
+        if recovery_request and not self._verify_binding:
+            return {"error": "invalid_config", "hint": "verify the recovery target binding"}, "bind"
         # FastMCP runs sync tool functions inline on its own running event
         # loop thread, so anyio.run() here would raise "already running" -
         # run the coroutine on a fresh worker thread instead, which has no
@@ -179,26 +224,85 @@ class RemoteMcpTransport:
                 return executor.submit(
                     anyio.run, self._invoke, tool_name, dict(arguments)
                 ).result()
-        except _RemoteBindError as exc:
-            return dict(exc.payload)
         except Exception as exc:
-            return _remote_failed(exc)
+            # A session's cleanup can group its own timeout with the bind refusal.
+            for cause in _related(exc):
+                if isinstance(cause, _RemoteBindError):
+                    return dict(cause.payload), "bind"
+            return _remote_failed(exc), "transport"
 
     async def _invoke(
         self, tool_name: str, arguments: dict[str, object]
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], str]:
         headers = {"Authorization": f"Bearer {self._token}"}
-        async with self._session_factory(self._url, headers) as session:
-            await session.initialize()
-            if self._primary:
-                bind_result = await session.call_tool(
-                    "wiki_bind", arguments={"primary": self._primary}
-                )
-                bind_payload = _decoded(bind_result)
-                if "error" in bind_payload:
-                    raise _RemoteBindError(bind_payload)
-            result = await session.call_tool(tool_name, arguments=arguments)
-        return _decoded(result)
+        if self._verify_binding and tool_name in (
+            "wiki_code_publish_batch", "wiki_code_publish_finalize",
+        ):
+            arguments["require_session_binding"] = True
+        status_call = tool_name == "wiki_code_status"
+        status_reply = None
+        selected_session = None
+        origin = "tool"
+        try:
+            async with self._session_factory(self._url, headers) as session:
+                await session.initialize()
+                if self._primary:
+                    bind_result = await session.call_tool(
+                        "wiki_bind", arguments={"primary": self._primary}
+                    )
+                    binding = _decoded(bind_result)
+                    if "error" in binding:
+                        raise _RemoteBindError(binding)
+                    if status_call or self._verify_binding:
+                        if (
+                            getattr(bind_result, "isError", False) is not False
+                            or not _matching_bind(binding, self._primary)
+                            or (self._verify_binding and (
+                                binding.get("binding_source") != "session"
+                                or binding.get("primary") != self._primary
+                            ))
+                        ):
+                            raise _RemoteBindError({
+                                "error": "binding_not_selected",
+                                "hint": "bind the remote session to the requested primary",
+                            })
+                        selected_session = binding.get("session_id")
+                        if _confirmed_bind(binding, self._primary):
+                            origin = "bound_tool"
+                if tool_name == "tools/list":
+                    return await _resume_capabilities(session), origin
+                result = await session.call_tool(tool_name, arguments=arguments)
+                if self._verify_binding:
+                    payload = _decoded(result)
+                    if "error" in payload:
+                        return payload, origin
+                    if getattr(result, "isError", False) is not False:
+                        return _remote_failed(), origin
+                    if payload.get("binding_source") != "session" or not _matching_scope(
+                        payload, self._primary, publication=True
+                    ):
+                        return {
+                            "error": "binding_not_selected", "hint": "verify the target binding",
+                        }, origin
+                    return payload, origin
+                if status_call:
+                    status_reply = _decoded(result)
+                    unexpected_session = (
+                        selected_session is not None
+                        and status_reply.get("session_id", selected_session) != selected_session
+                    )
+                    if getattr(result, "isError", False) is not False or unexpected_session:
+                        origin = "unverified"
+        except Exception as exc:
+            if status_reply is None:
+                raise
+            # The completed status takes precedence over a disconnect during close.
+            # Other teardown failures cannot authorize attaching a local descriptor.
+            if _remote_failed(exc)["reason"] not in ("connect", "timeout"):
+                origin = "unverified"
+        if status_reply is not None:
+            return status_reply, origin
+        return _decoded(result), origin
 
 
 class McpSnapshotPublisher:
@@ -210,13 +314,31 @@ class McpSnapshotPublisher:
     def __repr__(self) -> str:
         return "<remote code graph MCP publisher>"
 
-    def begin(self, header: SnapshotHeader) -> PublicationSession | dict:
-        """Open one remote session owned by the configured bearer identity."""
-        result = self._transport.call(
-            "wiki_code_publish_begin", {"header": header_payload(header)}
-        )
+    def check_resume_support(self) -> dict[str, object]:
+        """Verify the remote tool schemas before pinning or beginning an attempt."""
+        return self._transport.call("tools/list", {})
+
+    def begin(
+        self, header: SnapshotHeader, *, attempt_key: str | None = None,
+        recovery_deadline: int | None = None,
+    ) -> PublicationSession | dict:
+        """Open or recover one remote session owned by the configured bearer identity."""
+        arguments: dict[str, object] = {"header": header_payload(header)}
+        keyed = attempt_key is not None or recovery_deadline is not None
+        if keyed:
+            arguments.update(attempt_key=attempt_key, recovery_deadline=recovery_deadline)
+        result = self._transport.call("wiki_code_publish_begin", arguments)
         if "error" in result:
             return result
+        if keyed:
+            for field in ("session_id", "lease_expires_at"):
+                value = result.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    return _remote_failed()
+            for field in ("max_batch_rows", "max_batch_bytes"):
+                value = result.get(field)
+                if type(value) is not int or value <= 0:
+                    return _remote_failed()
         try:
             return PublicationSession(
                 session_id=str(result["session_id"]),
@@ -232,6 +354,15 @@ class McpSnapshotPublisher:
             )
         except KeyError:
             return _remote_failed()
+
+    def inspect(
+        self, session: PublicationSession, cursor: str | None = None,
+    ) -> dict[str, object]:
+        """Read the owner's receipt page or committed result."""
+        arguments = {"session_id": session.session_id}
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        return self._transport.call("wiki_code_publish_inspect", arguments)
 
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
@@ -268,6 +399,50 @@ class McpSnapshotPublisher:
         )
 
 
+def _matching_scope(
+    answer: Mapping[str, object], primary: str, *, publication: bool = False,
+) -> bool:
+    """Reject malformed or contradictory scope fields, including on older responses."""
+    for field in ("read", "write"):
+        if field in answer:
+            domains = answer[field]
+            if not isinstance(domains, list) or primary not in domains:
+                return False
+            if not all(isinstance(domain, str) and domain for domain in domains):
+                return False
+    # Publication replies use session_id for the upload handle.
+    if not publication and "session_id" in answer:
+        session_id = answer["session_id"]
+        if not isinstance(session_id, str) or not session_id.strip():
+            return False
+    warnings = answer.get("warnings", [])
+    return (
+        isinstance(warnings, list)
+        and all(isinstance(warning, str) for warning in warnings)
+        and "binding_defaulted" not in warnings
+        and answer.get("binding_source", "session") == "session"
+        and answer.get("primary_substituted", False) is False
+        and "requested_primary" not in answer
+        and "status" not in answer
+        and all(answer.get(field, primary) == primary for field in ("domain", "primary"))
+    )
+
+
+def _matching_bind(binding: Mapping[str, object], primary: str) -> bool:
+    if "code" in binding or "reason" in binding or not _matching_scope(binding, primary):
+        return False
+    if "read" in binding and "write" in binding:
+        return set(binding["write"]).issubset(binding["read"])
+    return True
+
+
+def _confirmed_bind(binding: Mapping[str, object], primary: str) -> bool:
+    if binding.get("primary") != primary:
+        return False
+    # Older bind responses returned the selected read/write scope without provenance.
+    return binding.get("binding_source") == "session" or ("read" in binding and "write" in binding)
+
+
 class McpCodeGraphReader:
     """Read one remote ready snapshot through the shared reader contract."""
 
@@ -281,6 +456,38 @@ class McpCodeGraphReader:
         """Report remote readiness without requesting any graph rows."""
         result = self._transport.call("wiki_code_status", {})
         return {**_UNREADABLE, **result} if "error" in result else result
+
+    def status_for_job(self, primary: str) -> tuple[dict[str, object], bool]:
+        """Check the origin and scope before combining remote status with a local job."""
+        raw, origin = self._transport.call_with_origin("wiki_code_status", {})
+        raw.pop("job", None)  # This caller's process owns its job descriptors.
+        status_confirms_scope = (
+            raw.get("binding_source") == "session"
+            and primary in (raw.get("primary"), raw.get("domain"))
+        )
+        scoped_reply = _matching_scope(raw, primary) and (
+            origin == "bound_tool" or (origin == "tool" and status_confirms_scope)
+        )
+        if "error" not in raw:
+            healthy = raw.get("state") == "ready" and raw.get("fresh") is True
+            return raw, scoped_reply and healthy and "code" not in raw and "reason" not in raw
+        status = {**_UNREADABLE, **raw}
+        error = raw["error"]
+        code = raw.get("code", error)
+        # A normalized message can accompany a code. Two conflicting machine
+        # tokens, an HTTP status, or a malformed error are never evidence of availability.
+        if not isinstance(error, str) or not error.strip() or "status" in raw:
+            return status, False
+        if error.isidentifier() and error != code:
+            return status, False
+        outage = (
+            code == "remote_mcp_failed"
+            and raw.get("reason") in ("connect", "timeout")
+        )
+        if origin == "transport":
+            return status, outage
+        verified = scoped_reply and raw.get("binding_source") == "session"
+        return status, verified and (code in ("missing_snapshot", "stale_snapshot") or outage)
 
     def search(self, request: ValidatedSearchRequest) -> dict[str, object]:
         """Search the remote snapshot under the shared validated bounds.

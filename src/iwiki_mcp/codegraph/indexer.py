@@ -206,13 +206,22 @@ class CodeGraphUnsafePathError(CodeGraphError):
 class BuildControl:
     """Linearize caller cancellation against atomic publication entry."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, started_at: float | None = None) -> None:
         self.cancelled = threading.Event()
         self.publication_attempted = threading.Event()
         self.publication_entered = threading.Event()
         self._publication_gate = threading.Lock()
         self._phase: str | None = None
-        self._phases_done: list[str] = []
+        self._progress_lock = threading.Lock()
+        self._updated_at = time.time() if started_at is None else started_at
+        self._files_total: int | None = None
+        self._files_parsed = 0
+        self._batches_acknowledged = 0
+        self._bytes_acknowledged = 0
+        self._last_ordinal: dict[RowKind, int] = {}
+        # One startup record and one per build phase. File and batch counters
+        # update only the current observation, independent of subscriber speed.
+        self._boundaries = [self._progress_locked()]
         # Whether the build is still writing this domain's graph. It is
         # cleared by whoever runs a post-build snapshot publication: by then
         # the local graph is written, complete, and readable, and only work
@@ -223,25 +232,67 @@ class BuildControl:
         # the worker thread's own liveness answers the second.
         self.indexing = True
 
+    def _progress_locked(self) -> dict:
+        progress = {
+            "phase": self._phase or "queued",
+            "files_parsed": self._files_parsed,
+            "batches_acknowledged": self._batches_acknowledged,
+            "bytes_acknowledged": self._bytes_acknowledged,
+            "updated_at": self._updated_at,
+        }
+        if self._files_total is not None:
+            progress["files_total"] = self._files_total
+        return progress
+
+    def progress_snapshot(self) -> dict:
+        with self._progress_lock:
+            return self._progress_locked()
+
+    def observations(self, cursor: int | None) -> tuple[list[dict], dict, list[str]]:
+        with self._progress_lock:
+            boundaries = (
+                [item.copy() for item in self._boundaries[cursor:]]
+                if cursor is not None else []
+            )
+            done = [item["phase"] for item in self._boundaries[1:-1]]
+            return boundaries, self._progress_locked(), done
+
     @property
     def phase(self) -> str | None:
-        return self._phase
+        with self._progress_lock:
+            return self._phase
 
     @property
     def phases_done(self) -> tuple[str, ...]:
-        return tuple(self._phases_done)
+        with self._progress_lock:
+            return tuple(item["phase"] for item in self._boundaries[1:-1])
 
     def enter_phase(self, name: str) -> float:
-        """Mark the phase the build is entering and return its start time.
-
-        The phase marker exists because `phase_timings_ms` cannot answer this:
-        `_elapsed_ms` rounds to whole milliseconds over a map pre-seeded with
-        zeros, so a fast phase is indistinguishable from one never run.
-        """
-        if self._phase is not None:
-            self._phases_done.append(self._phase)
-        self._phase = name
+        """Record a phase transition and return its monotonic start time."""
+        with self._progress_lock:
+            if self._phase != name:
+                self._phase = name
+                self._updated_at = time.time()
+                self._boundaries.append(self._progress_locked())
         return time.monotonic()
+
+    def schedule_files(self, count: int) -> None:
+        with self._progress_lock:
+            self._files_total = count
+            self._updated_at = time.time()
+
+    def accept_file(self) -> None:
+        with self._progress_lock:
+            self._files_parsed += 1
+            self._updated_at = time.time()
+
+    def acknowledge_batch(self, kind: RowKind, ordinal: int, byte_count: int) -> None:
+        with self._progress_lock:
+            if ordinal > self._last_ordinal.get(kind, -1):
+                self._last_ordinal[kind] = ordinal
+                self._batches_acknowledged += 1
+                self._bytes_acknowledged += byte_count
+                self._updated_at = time.time()
 
     def cancel(self) -> None:
         if self._publication_gate.acquire(blocking=False):
@@ -866,6 +917,7 @@ class CodeGraphIndexer:
         self,
         discovered: DiscoverySnapshot,
         config: CodeGraphConfig,
+        control: BuildControl | None,
     ) -> tuple[
         tuple[ParsedFile, ...],
         tuple[str, ...],
@@ -922,6 +974,8 @@ class CodeGraphIndexer:
             if actual != expected:
                 raise CodeGraphParseError("adapter record context mismatch")
             parsed_files.append(parsed)
+            if control is not None:
+                control.accept_file()
             warnings.extend(parsed.warnings)
         return tuple(parsed_files), tuple(warnings), adapters
 
@@ -1427,6 +1481,8 @@ class CodeGraphIndexer:
                 extensions=self._extensions(config),
             )
             timings["discovery"] = _elapsed_ms(phase)
+            if control is not None:
+                control.schedule_files(len(discovered.files))
             check_control()
 
             phase = _enter(control, "fingerprint")
@@ -1452,7 +1508,7 @@ class CodeGraphIndexer:
 
             phase = _enter(control, "parsing")
             parsed_files, parser_warnings, adapters = self._parse(
-                discovered, config
+                discovered, config, control
             )
             timings["parsing"] = _elapsed_ms(phase)
             normalization_started = _enter(control, "normalization")
@@ -1632,6 +1688,8 @@ class CodeGraphIndexer:
                     extensions=self._extensions(config),
                 )
                 timings["discovery"] = _elapsed_ms(phase)
+                if force and control is not None:
+                    control.schedule_files(len(discovered.files))
                 _check_deadline(deadline, self.paths.lock)
 
                 phase = _enter(control, "fingerprint")
@@ -1694,9 +1752,13 @@ class CodeGraphIndexer:
                                 result["phase_timings_ms"] = {
                                     "no_op": result["duration_ms"]
                                 }
+                                if control is not None:
+                                    control.schedule_files(0)
                                 return result
                     except CodeGraphStoreError:
                         pass
+                    if control is not None:
+                        control.schedule_files(len(discovered.files))
 
                 self._publish_metadata_record(
                     self._transition_metadata(
@@ -1721,6 +1783,7 @@ class CodeGraphIndexer:
                 parsed_files, parser_warnings, adapters = self._parse(
                     discovered,
                     config,
+                    control,
                 )
                 timings["parsing"] = _elapsed_ms(phase)
                 normalization_started = _enter(control, "normalization")

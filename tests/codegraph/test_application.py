@@ -95,7 +95,7 @@ def _indexed(built, publish):
     """
     if publish is None or built.get("state") != "ready":
         return built
-    published = publish()
+    published = publish(codegraph_runtime.BuildControl())
     return {**built, "publication": published} if published else built
 
 
@@ -555,6 +555,51 @@ def test_advertised_server_limits_control_every_batch(snapshot_fixture):
     batch_calls = [call for call in publisher.calls if call[0] == "batch"]
     assert len([call for call in batch_calls if call[1] == "files"]) == 2
     assert all(call[3] <= 1 for call in batch_calls)
+
+
+@pytest.mark.parametrize("reject_last", [False, True])
+def test_publication_progress_counts_only_accepted_payloads(
+    snapshot_fixture, reject_last
+):
+    control = codegraph_runtime.BuildControl()
+    observed = []
+    runtime = snapshot_fixture.runtime
+
+    class ObservedRuntime:
+        def export_snapshot(self):
+            assert control.phase == "export"
+            return runtime.export_snapshot()
+
+    class ObservedPublisher(RecordingPublisher):
+        def begin(self, header):
+            assert control.phase == "publish_begin"
+            return super().begin(header)
+
+        def publish_batch(self, session, batch):
+            assert control.phase == "transfer"
+            if reject_last and batch.ordinal == 1:
+                return {"error": "batch_conflict"}
+            observed.append((batch.kind, batch.ordinal, batch.byte_count))
+            return super().publish_batch(session, batch)
+
+        def finalize(self, session):
+            assert control.phase == "finalize"
+            return super().finalize(session)
+
+    result = application.publish_snapshot(
+        ObservedRuntime(), ObservedPublisher(), snapshot_fixture.config, control
+    )
+    assert [entry[:2] for entry in observed][:2] == [
+        ("repositories", 0), ("files", 0)
+    ]
+    assert len(observed) == (2 if reject_last else 3)
+    progress = control.progress_snapshot()
+    assert progress["batches_acknowledged"] == len(observed)
+    assert progress["bytes_acknowledged"] == sum(entry[2] for entry in observed)
+    if reject_last:
+        assert result["error"] == "batch_conflict"
+    else:
+        assert result["state"] == "ready"
 
 
 def test_export_failure_returns_without_opening_session(snapshot_fixture):

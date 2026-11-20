@@ -31,11 +31,15 @@ PublicationErrorCode = Literal[
     "snapshot_conflict",
     "markdown_unavailable",
     "commit_uncertain",
+    "invalid_attempt",
+    "invalid_cursor",
+    "resume_limits_changed",
 ]
 AdapterErrorCode = Literal[
     "invalid_config",
     "remote_mcp_failed",
     "source_unavailable",
+    "incompatible_peer",
 ]
 ReadinessErrorCode = Literal["missing_snapshot", "stale_snapshot"]
 
@@ -52,11 +56,15 @@ PUBLICATION_ERROR_CODES: tuple[PublicationErrorCode, ...] = (
     "snapshot_conflict",
     "markdown_unavailable",
     "commit_uncertain",
+    "invalid_attempt",
+    "invalid_cursor",
+    "resume_limits_changed",
 )
 ADAPTER_ERROR_CODES: tuple[AdapterErrorCode, ...] = (
     "invalid_config",
     "remote_mcp_failed",
     "source_unavailable",
+    "incompatible_peer",
 )
 READINESS_ERROR_CODES: tuple[ReadinessErrorCode, ...] = (
     "missing_snapshot",

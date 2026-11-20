@@ -47,6 +47,7 @@ _PROTECTED_TABLES = (
     "links",
     "code_graph_domain_state",
     "code_graph_publication_sessions",
+    "code_graph_publication_attempts",
     "code_graph_snapshots",
     "code_graph_batches",
     "code_graph_files",
@@ -179,7 +180,7 @@ def provision_runtime_grant(
                     "iwiki.token_domain_management_grants, iwiki.domains, "
                     "iwiki.pages, iwiki.chunks, iwiki.links, "
                     "iwiki.code_graph_domain_state, "
-                    "iwiki.code_graph_publication_sessions, "
+                    "iwiki.code_graph_publication_sessions, iwiki.code_graph_publication_attempts, "
                     "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
                     "iwiki.code_graph_files, iwiki.code_graph_symbols, "
                     "iwiki.code_graph_relations, iwiki.code_graph_wiki_links, "
@@ -205,7 +206,7 @@ def provision_runtime_grant(
                     "iwiki.links, iwiki.token_domain_grants, "
                     "iwiki.token_domain_management_grants, "
                     "iwiki.code_graph_domain_state, "
-                    "iwiki.code_graph_publication_sessions, "
+                    "iwiki.code_graph_publication_sessions, iwiki.code_graph_publication_attempts, "
                     "iwiki.code_graph_snapshots, iwiki.code_graph_batches, "
                     "iwiki.code_graph_files, iwiki.code_graph_symbols, "
                     "iwiki.code_graph_relations, iwiki.code_graph_wiki_links, "
