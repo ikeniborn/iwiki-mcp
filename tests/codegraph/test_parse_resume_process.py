@@ -148,7 +148,8 @@ async def _recover_stdio(tmp_path, url):
                 reader, writer, read_timeout_seconds=timedelta(seconds=15)
             ) as session:
                 await session.initialize()
-                await call(session, 'wiki_bind', read=['docs'], write=['docs'], primary='docs')
+                binding = await call(session, 'wiki_status')
+                assert binding['primary'] == 'docs' and binding['write'] == ['docs']
                 if old_job:
                     old = await call(session, 'wiki_code_status', job_id=old_job, job_only=True)
                     assert 'job_unknown' in old['warnings'] and not old.get('job')
