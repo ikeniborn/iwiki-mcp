@@ -320,7 +320,7 @@ def test_failed_writer_leaves_rebuilding_for_later_status_recovery(
         published_states.append(payload["state"])
         return real_publish(metadata_path, staging, **kwargs)
 
-    def fail_parse(_discovered, _config, _control):
+    def fail_parse(_discovered, _config, _control, **kwargs):
         raise CodeGraphParseError("parse fixture secret")
 
     monkeypatch.setattr(indexer.store, "publish_metadata", observed_publish)
@@ -330,7 +330,7 @@ def test_failed_writer_leaves_rebuilding_for_later_status_recovery(
     stale = json.loads(seed_runtime.paths.metadata.read_text(encoding="utf-8"))
 
     assert failed["code"] == "parse_failed"
-    assert published_states == ["rebuilding"]
+    assert published_states == ["rebuilding", "rebuilding"]
     assert stale["state"] == "rebuilding"
 
     recovered = seed_runtime.status()
@@ -971,10 +971,10 @@ def test_status_and_guard_show_rebuilding_during_current_process_build(
     release = threading.Event()
     real_parse = ready_runtime.runtime._indexer._parse
 
-    def held_parse(discovered, config, control):
+    def held_parse(discovered, config, control, **kwargs):
         entered.set()
         assert release.wait(timeout=5)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1001,10 +1001,10 @@ def test_second_runtime_observes_shared_writer_as_rebuilding(
     release = threading.Event()
     real_parse = ready_runtime.runtime._indexer._parse
 
-    def held_parse(discovered, config, control):
+    def held_parse(discovered, config, control, **kwargs):
         entered.set()
         assert release.wait(timeout=5)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1040,10 +1040,10 @@ def test_writer_waits_for_status_shared_snapshot(
         assert release_status.wait(timeout=5)
         return result
 
-    def held_parse(discovered, config, control):
+    def held_parse(discovered, config, control, **kwargs):
         writer_entered.set()
         assert release_writer.wait(timeout=5)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(observer.runtime, "_read_status", paused_status_read)
     monkeypatch.setattr(ready_runtime.runtime._indexer, "_parse", held_parse)
@@ -1131,7 +1131,7 @@ def test_old_writer_recovery_cannot_overwrite_new_writer_generation(
     observer = ready_runtime.with_config()
     old_indexer = old_writer.runtime._indexer
 
-    def fail_old_parse(_discovered, _config, _control):
+    def fail_old_parse(_discovered, _config, _control, **kwargs):
         raise CodeGraphParseError("old writer failed")
 
     monkeypatch.setattr(old_indexer, "_parse", fail_old_parse)
@@ -1153,10 +1153,10 @@ def test_old_writer_recovery_cannot_overwrite_new_writer_generation(
         assert release_recovery.wait(timeout=5)
         return real_recover(expected)
 
-    def held_new_parse(discovered, config, control):
+    def held_new_parse(discovered, config, control, **kwargs):
         new_writer_entered.set()
         assert release_new_writer.wait(timeout=5)
-        return real_new_parse(discovered, config, control)
+        return real_new_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(observer.runtime, "_recover_stale_metadata", paused_recovery)
     monkeypatch.setattr(new_writer.runtime._indexer, "_parse", held_new_parse)
@@ -1318,9 +1318,9 @@ def test_bounded_rebuild_checks_one_shared_deadline_before_publication(
     # Replace only the indexer's clock; thread waits retain the real clock.
     monkeypatch.setattr(codegraph_indexer, "time", clock)
 
-    def expired_parse(discovered, config, control):
+    def expired_parse(discovered, config, control, **kwargs):
         nonlocal now
-        parsed = real_parse(discovered, config, control)
+        parsed = real_parse(discovered, config, control, **kwargs)
         job = _BUILD_WORKERS.current(runtime.runtime._worker_domain_key)
         assert job is not None
         jobs.append(job)
@@ -1360,9 +1360,9 @@ def test_bounded_rebuild_caps_larger_request_budget_at_configured_limit(
     )
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered, config, control):
+    def slow_parse(discovered, config, control, **kwargs):
         time.sleep(1.1)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -1383,9 +1383,9 @@ def test_explicit_index_uses_one_deadline_and_discards_staging(
     runtime = seed_runtime.with_config(max_rebuild_seconds=1)
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered, config, control):
+    def slow_parse(discovered, config, control, **kwargs):
         time.sleep(1.05)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -1408,9 +1408,9 @@ def test_explicit_index_deadline_is_independent_of_bounded_rebuild_deadline(
     )
     real_parse = runtime.runtime._indexer._parse
 
-    def slow_parse(discovered, config, control):
+    def slow_parse(discovered, config, control, **kwargs):
         time.sleep(1.5)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     monkeypatch.setattr(runtime.runtime._indexer, "_parse", slow_parse)
 
@@ -1430,9 +1430,9 @@ def test_timeout_does_not_publish_metadata_after_deadline_and_restores_dirty(
     real_publish = indexer.store.publish_metadata
     published_states = []
 
-    def slow_parse(discovered, config, control):
+    def slow_parse(discovered, config, control, **kwargs):
         time.sleep(1.05)
-        return real_parse(discovered, config, control)
+        return real_parse(discovered, config, control, **kwargs)
 
     def observed_publish(metadata_path, staging, **kwargs):
         payload = json.loads(Path(staging).read_text(encoding="utf-8"))
@@ -5119,3 +5119,103 @@ def test_forced_build_knows_parse_total_during_fingerprinting(seed_runtime, monk
     finally:
         release.set()
         seed_runtime.runtime.join_workers(timeout=5)
+
+
+def test_parse_checkpoint_hit_obeys_deadline_and_force_replaces_records(seed_runtime, monkeypatch):
+    indexer = seed_runtime.runtime._indexer
+    original_parse = PythonAdapter.parse_file
+    parsed_paths = []
+
+    def count_parse(self, content, path):
+        parsed_paths.append(path)
+        return original_parse(self, content, path)
+
+    monkeypatch.setattr(PythonAdapter, "parse_file", count_parse)
+    original_resolve = indexer._resolve
+
+    def interrupt(*args):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(indexer, "_resolve", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        indexer.build(force=True)
+    paths = list(parsed_paths)
+    assert len(paths) == 2
+    monkeypatch.setattr(indexer, "_resolve", original_resolve)
+    original_load = codegraph_indexer.ParseCheckpoint.load
+    control = codegraph_indexer.BuildControl()
+
+    clock = [time.monotonic()]
+    deadline = clock[0] + 30
+
+    def expire_after_hit(store, path, identity):
+        payload = original_load(store, path, identity)
+        assert payload is not None
+        clock[0] = deadline + 1
+        return payload
+
+    with monkeypatch.context() as patch:
+        patch.setattr(codegraph_indexer.ParseCheckpoint, "load", expire_after_hit)
+        patch.setattr(time, "monotonic", lambda: clock[0])
+        with pytest.raises(Timeout):
+            indexer.build(control=control, deadline=deadline)
+    assert parsed_paths == paths
+    assert control.progress_snapshot()["files_parsed"] == 0
+    monkeypatch.setattr(codegraph_indexer.ParseCheckpoint, "load", original_load)
+    with pytest.raises(KeyboardInterrupt):
+        monkeypatch.setattr(indexer, "_resolve", interrupt)
+        indexer.build(force=True)
+    assert parsed_paths == paths + paths
+    monkeypatch.setattr(indexer, "_resolve", original_resolve)
+    restored = indexer.build()
+    assert restored["state"] == "ready"
+    assert parsed_paths == paths + paths
+    assert indexer.build()["no_op"] is True
+    assert parsed_paths == paths + paths
+
+
+def test_rebuild_prunes_excluded_parse_records_before_parsing(seed_runtime, monkeypatch):
+    indexer = seed_runtime.runtime._indexer
+    with monkeypatch.context() as patch:
+        def stop_before_resolution(*args):
+            raise KeyboardInterrupt()
+
+        patch.setattr(indexer, "_resolve", stop_before_resolution)
+        with pytest.raises(KeyboardInterrupt):
+            indexer.build(force=True)
+
+    def cached_paths():
+        directory, = indexer.paths.database.parent.glob("parse-*")
+        return {
+            json.loads(record.read_bytes())["record"]["identity"]["path"]
+            for record in directory.iterdir()
+        }
+
+    assert cached_paths() == {"src/pkg/__init__.py", "src/pkg/service.py"}
+    (seed_runtime.project_dir / ".gitignore").write_text("src/pkg/service.py\n")
+
+    def stop_before_parse(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(indexer, "_parse", stop_before_parse)
+    with pytest.raises(KeyboardInterrupt):
+        indexer.build()
+    assert cached_paths() == {"src/pkg/__init__.py"}
+
+
+def test_cleanup_failure_retries_on_verified_noop(seed_runtime, monkeypatch):
+    indexer = seed_runtime.runtime._indexer
+
+    def refuse_cleanup(store):
+        raise codegraph_indexer.ParseCheckpointError()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(codegraph_indexer.ParseCheckpoint, "clear", refuse_cleanup)
+        result = indexer.build(force=True)
+    assert result["state"] == "ready"
+    assert "parse_checkpoint_cleanup_failed" in result["warnings"]
+    scope, = indexer.paths.database.parent.glob("parse-*")
+    assert any(scope.iterdir())
+    result = indexer.build()
+    assert result["no_op"] is True
+    assert not list(scope.iterdir())

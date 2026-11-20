@@ -232,3 +232,7 @@ and dynamic command names are omitted.
 shell, `source`, `eval`, expansions, or substitutions; graph metadata stores neither
 source bodies nor command arguments. `wiki_code_context` accepts `sh:` entity IDs, and
 source remains excluded by default.
+
+## Restart a local build after interruption
+
+Repeat the original publish command or start a new local indexing job. A restarted MCP process assigns a new job ID. Poll that job to completion. The builder checks saved file results against current contents, adapter versions and path context, then resolves references against the current checkout. The files_parsed counter includes validated saved results. A forced build parses every selected file. Large or unsupported parse results require another parse after interruption. Successful activation clears the private recovery records.

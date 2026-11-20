@@ -42,6 +42,8 @@ from .models import (
     RelationRecord,
     relation_id,
 )
+from .parse_checkpoint import ParseCheckpoint, ParseCheckpointError
+from .parse_codec import parse_identity, encode_parsed, decode_parsed
 from .publication import RowKind, SnapshotHeader, graph_payload_revision
 from .resolver import SymbolIndex, sort_relations
 from .schema import SCHEMA_VERSION, TABLES, CodeGraphStoreError
@@ -90,6 +92,7 @@ KNOWN_WARNING_CODES = frozenset({
     # and persisted vocabularies stay one vocabulary. A future path that
     # routed a build answer's warnings through `sanitize_warning_codes` would
     # otherwise drop exactly the warning that says the publication failed.
+    "parse_checkpoint_cleanup_failed",
     "publication_failed",
     "secret_excluded",
     "symlink_excluded",
@@ -918,6 +921,7 @@ class CodeGraphIndexer:
         discovered: DiscoverySnapshot,
         config: CodeGraphConfig,
         control: BuildControl | None,
+        *, checkpoint=None, force=False, check_control=None,
     ) -> tuple[
         tuple[ParsedFile, ...],
         tuple[str, ...],
@@ -934,6 +938,8 @@ class CodeGraphIndexer:
                 )
             ))
             adapters[language] = factory.bind(source_paths)
+        checkout = str(Path(self.project_dir).resolve()) if checkpoint is not None else None
+        versions = self._normalization_versions() if checkpoint is not None else None
         parsed_files = []
         warnings = []
         for source in discovered.files:
@@ -951,10 +957,28 @@ class CodeGraphIndexer:
             if binding is None:
                 raise CodeGraphParseError("source adapter is unavailable")
             adapter = binding.adapter
-            try:
-                parsed = adapter.parse_file(source.content, source.path)
-            except Exception as exc:
-                raise CodeGraphParseError("code graph parse failed") from exc
+            if check_control:
+                check_control()
+            identity = None
+            parsed = None
+            if checkpoint is not None:
+                identity = parse_identity(
+                    binding, source, checkout=checkout,
+                    domain=self.domain, normalization_versions=versions,
+                )
+            if identity is not None and not force:
+                payload = checkpoint.load(source.path, identity)
+                if payload is not None:
+                    try:
+                        parsed = decode_parsed(payload, identity)
+                    except ValueError:
+                        pass
+            hit = parsed is not None
+            if not hit:
+                try:
+                    parsed = adapter.parse_file(source.content, source.path)
+                except Exception as exc:
+                    raise CodeGraphParseError("code graph parse failed") from exc
             expected = (
                 self.domain,
                 source.path,
@@ -973,6 +997,10 @@ class CodeGraphIndexer:
             )
             if actual != expected:
                 raise CodeGraphParseError("adapter record context mismatch")
+            if not hit and identity is not None:
+                checkpoint.save(source.path, identity, encode_parsed(parsed, identity))
+            if check_control:
+                check_control()
             parsed_files.append(parsed)
             if control is not None:
                 control.accept_file()
@@ -1375,6 +1403,69 @@ class CodeGraphIndexer:
     def _verify_published(self, revision: str) -> None:
         self.store.verify_canonical(self.domain, revision)
 
+    def _prior_parsing_envelope(self, transition: Mapping[str, object]) -> dict | None:
+        """Read the previous verified envelope under the graph writer lock."""
+        if (transition.get("state") != "rebuilding"
+                or transition.get("publication_phase") != "parsing"):
+            return None
+        prior = transition.get("prior_envelope")
+        if not isinstance(prior, dict) or not exact_ready_metadata(prior):
+            return None
+        revision = prior.get("revision")
+        if (
+            not isinstance(revision, str)
+            or transition.get("domain") != self.domain
+            or prior.get("domain") != self.domain
+            or prior["generation"] + 1 != transition.get("generation")
+            or transition.get("previous_revision") != revision
+            or transition.get("revision") != revision
+            or self.store.storage_stamp() != prior["storage_stamp"]
+        ):
+            return None
+        with self.store.read_lease() as connection:
+            row = connection.execute(
+                "SELECT revision, root_path, state FROM repositories WHERE repository_id = ?",
+                (self.domain,),
+            ).fetchone()
+        if row != (revision, str(Path(self.project_dir).resolve()), "ready"):
+            return None
+        self._verify_published(revision)
+        return prior
+
+    def recover_parsing_envelope(self, transition: Mapping[str, object]) -> bool:
+        """Verify the prior graph while holding both freshness locks."""
+        prior = self._prior_parsing_envelope(transition)
+        if prior is None:
+            return False
+        config = self.config
+        versions = self._normalization_versions()
+        snapshot = None
+        try:
+            discovered = discover_sources(
+                self.project_dir, config, extensions=self._extensions(config)
+            )
+            fingerprints, commit, _, snapshot = self._fingerprints(
+                discovered, config, normalization_versions=versions
+            )
+            ready = self._ready_metadata(
+                fingerprints, commit, config, versions, persisted=prior
+            )
+            verify = getattr(self.wiki_selector_resolver, "verify_snapshot", None)
+            if ready is not None and snapshot is not None and callable(verify):
+                verify(snapshot)
+        except (DiscoveryError, SelectorError):
+            ready = None
+        finally:
+            close = getattr(self.wiki_selector_resolver, "close_snapshot", None)
+            if snapshot is not None and callable(close):
+                close(snapshot)
+        state = "ready" if ready is not None else "dirty"
+        if state == "dirty":
+            self.store.set_repository_state(self.domain, state)
+        restored = self.reseal_envelope(prior, state=state, generation=transition["generation"])
+        self._publish_metadata_record(restored, deadline=None)
+        return True
+
     def mark_dirty_if_stale(
         self,
         *,
@@ -1598,6 +1689,16 @@ class CodeGraphIndexer:
         except Exception as exc:
             raise CodeGraphBuildError("code graph rebuild failed") from exc
 
+    def _clear_parse_checkpoint(self, result):
+        try:
+            with ParseCheckpoint.open(
+                self.cache_base, self.project_dir, self.domain, create=False
+            ) as checkpoint:
+                if checkpoint is not None:
+                    checkpoint.clear()
+        except ParseCheckpointError:
+            result["warnings"] = [*result.get("warnings", []), "parse_checkpoint_cleanup_failed"]
+
     def build(
         self,
         *,
@@ -1754,37 +1855,50 @@ class CodeGraphIndexer:
                                 }
                                 if control is not None:
                                     control.schedule_files(0)
+                                self._clear_parse_checkpoint(result)
                                 return result
                     except CodeGraphStoreError:
                         pass
                     if control is not None:
                         control.schedule_files(len(discovered.files))
 
-                self._publish_metadata_record(
-                    self._transition_metadata(
-                        state="rebuilding",
-                        generation=generation,
-                        revision=previous_revision,
-                        prior_state=prior_state,
-                        publication_phase="building",
-                        recovery_policy=(
-                            "restore_prior"
-                            if restore_prior_on_abort
-                            else "failed"
-                        ),
-                    ),
-                    deadline=deadline,
+                transition = self._transition_metadata(
+                    state="rebuilding", generation=generation, revision=previous_revision,
+                    prior_state=prior_state, publication_phase="building",
+                    recovery_policy="restore_prior" if restore_prior_on_abort else "failed",
                 )
+                parsing = dict(transition, publication_phase="parsing")
+                if exact_ready_metadata(previous_metadata):
+                    parsing["prior_envelope"] = previous_metadata
+                elif previous_metadata.get("publication_phase") == "parsing":
+                    try:
+                        prior = self._prior_parsing_envelope(previous_metadata)
+                    except CodeGraphStoreError:
+                        prior = None
+                    if prior is not None:
+                        # Advance only generation. Keep the original storage and input proofs.
+                        carried = dict(prior, generation=previous_metadata["generation"])
+                        _seal_ready_metadata(carried)
+                        parsing["prior_envelope"] = carried
+                self._publish_metadata_record(parsing, deadline=deadline)
                 _check_deadline(deadline, self.paths.lock)
 
                 staging = self.store.create_staging_path()
                 _check_deadline(deadline, self.paths.lock)
                 phase = _enter(control, "parsing")
-                parsed_files, parser_warnings, adapters = self._parse(
-                    discovered,
-                    config,
-                    control,
-                )
+                try:
+                    with ParseCheckpoint.open(
+                        self.cache_base, self.project_dir, self.domain
+                    ) as checkpoint:
+                        checkpoint.prune(source.path for source in discovered.files)
+                        parsed_files, parser_warnings, adapters = self._parse(
+                            discovered, config, control, checkpoint=checkpoint,
+                            force=force, check_control=selector_control,
+                        )
+                except CodeGraphParseError:
+                    self._publish_metadata_record(transition, deadline=deadline)
+                    raise
+                self._publish_metadata_record(transition, deadline=deadline)
                 timings["parsing"] = _elapsed_ms(phase)
                 normalization_started = _enter(control, "normalization")
                 parsed_files = tuple(parsed_files)
@@ -2058,6 +2172,7 @@ class CodeGraphIndexer:
                     verify_selectors(selector_snapshot)
                 result = dict(metadata)
                 result.pop("storage_stamp", None)
+                self._clear_parse_checkpoint(result)
                 result["no_op"] = False
                 return result
         except Timeout:
