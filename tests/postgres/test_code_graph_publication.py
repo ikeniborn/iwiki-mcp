@@ -1515,3 +1515,44 @@ def test_expiry_during_activation_rolls_back_graph_rows(pg_graph, monkeypatch, e
         "SELECT terminal_result FROM iwiki.code_graph_publication_attempts WHERE session_id = %s",
         (session.session_id,),
     ) == [(None,)]
+
+
+def test_new_keyed_begin_that_expires_in_transaction_allocates_nothing(pg_graph, monkeypatch):
+    options = _recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + 10)
+    cleanup = pg_graph.store._cleanup_staging
+
+    def delayed_cleanup(*args):
+        removed = cleanup(*args)
+        pg_graph.advance_clock(12)
+        return removed
+
+    monkeypatch.setattr(pg_graph.store, "_cleanup_staging", delayed_cleanup)
+    result = pg_graph.store.begin(pg_graph.header, **options)
+    assert isinstance(result, dict) and result.get("error") == "session_expired"
+    for table in ("publication_attempts", "snapshots", "publication_sessions"):
+        assert pg_graph._query(f"SELECT count(*) FROM iwiki.code_graph_{table}") == [(0,)]
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+@pytest.mark.parametrize("expires", ["lease", "deadline"])
+def test_keyed_batch_expiry_rolls_back_receipt_and_renewal(
+    pg_graph, monkeypatch, duplicate, expires,
+):
+    ttl = 25 if expires == "deadline" else 600
+    options = _recoverable(pg_graph, recovery_deadline=int(pg_graph._now().timestamp()) + ttl)
+    session = pg_graph.store.begin(pg_graph.header, **options)
+    batch = pg_graph.batches[0]
+    if duplicate:
+        assert pg_graph.publish_batch(session, batch) == {"accepted": True}
+    previous = pg_graph.session(session)["lease_expires_at"]
+    pg_graph.advance_clock(20)
+    renew = pg_graph.store._renew
+
+    def delayed_renew(*args):
+        renew(*args)
+        pg_graph.advance_clock(12)
+
+    monkeypatch.setattr(pg_graph.store, "_renew", delayed_renew)
+    assert pg_graph.publish_batch(session, batch).get("error") == "session_expired"
+    assert pg_graph.batch_count(session) == int(duplicate)
+    assert pg_graph.session(session)["lease_expires_at"] == previous

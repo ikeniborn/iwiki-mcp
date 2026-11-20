@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import contextmanager
+from functools import wraps
 from dataclasses import asdict, replace
 import datetime
 import hmac
@@ -97,8 +98,18 @@ _RECEIPT_CURSOR = re.compile(
 )
 
 
-class _ActivationExpired(Exception):
-    """Leave the activation transaction before reporting an expired attempt."""
+class _AttemptExpired(Exception):
+    """Roll back tentative writes before reporting an expired recoverable upload."""
+
+
+def _report_expiry(operation):
+    @wraps(operation)
+    def wrapped(*args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except _AttemptExpired:
+            return dict(_EXPIRED)
+    return wrapped
 
 
 def _receipt_cursor(key: str, session_id: str, kind: str, ordinal: int) -> str:
@@ -310,6 +321,10 @@ class PostgresCodeGraphStore:
             return dict(_EXPIRED)
         return None
 
+    def _check_commit_deadline(self, deadline, lease_expires_at):
+        if deadline is not None and self._clock() >= min(deadline, lease_expires_at):
+            raise _AttemptExpired
+
     def _renew(self, cursor, domain_id: int, session_id: str, now):
         expires = now + datetime.timedelta(seconds=self._session_ttl_seconds)
         cursor.execute(
@@ -321,6 +336,7 @@ class PostgresCodeGraphStore:
 
     # -- lifecycle ------------------------------------------------------
 
+    @_report_expiry
     def begin(
         self, header: SnapshotHeader, *, attempt_key: str | None = None,
         recovery_deadline: int | None = None, max_batch_rows: int | None = None,
@@ -407,6 +423,7 @@ class PostgresCodeGraphStore:
                     deadline,
                 ),
             )
+            self._check_commit_deadline(deadline, expires)
         self._schedule_local_cleanup()
         return PublicationSession(
             session_id=session_id,
@@ -533,6 +550,7 @@ class PostgresCodeGraphStore:
                 type(exc).__name__,
             )
 
+    @_report_expiry
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
     ) -> dict[str, object]:
@@ -567,32 +585,33 @@ class PostgresCodeGraphStore:
                 ),
             )
             stored = cursor.fetchone()
-            if stored is not None:
-                if stored[0] != batch.payload_hash:
-                    return dict(_BATCH_CONFLICT)
-                self._renew(cursor, domain_id, session.session_id, now)
-                return {"accepted": True}
-            cursor.execute(
-                "INSERT INTO iwiki.code_graph_batches "
-                "(iwiki_id, domain_id, session_id, kind, ordinal, "
-                "payload_hash, row_count, byte_count, payload, accepted_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    self.iwiki_id,
-                    domain_id,
-                    session.session_id,
-                    batch.kind,
-                    batch.ordinal,
-                    batch.payload_hash,
-                    batch.row_count,
-                    batch.byte_count,
-                    batch.payload,
-                    now,
-                ),
-            )
+            if stored is not None and stored[0] != batch.payload_hash:
+                return dict(_BATCH_CONFLICT)
+            if stored is None:
+                cursor.execute(
+                    "INSERT INTO iwiki.code_graph_batches "
+                    "(iwiki_id, domain_id, session_id, kind, ordinal, "
+                    "payload_hash, row_count, byte_count, payload, accepted_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        self.iwiki_id,
+                        domain_id,
+                        session.session_id,
+                        batch.kind,
+                        batch.ordinal,
+                        batch.payload_hash,
+                        batch.row_count,
+                        batch.byte_count,
+                        batch.payload,
+                        now,
+                    ),
+                )
             self._renew(cursor, domain_id, session.session_id, now)
+            # Judge acceptance against the original lease, before this batch's renewal.
+            self._check_commit_deadline(record["recovery_deadline"], record["lease_expires_at"])
         return {"accepted": True}
 
+    @_report_expiry
     def finalize(self, session: PublicationSession) -> dict[str, object]:
         """Activate one complete snapshot atomically or return an exact code."""
         now = self._clock()
@@ -662,13 +681,8 @@ class PostgresCodeGraphStore:
                     revision,
                     links,
                 )
-                if record["recovery_deadline"] is not None and self._guard(record, self._clock()):
-                    # All activation writes are still private to this transaction.
-                    # Roll them back if bulk inserts or a later lock wait used up the lease.
-                    raise _ActivationExpired
+                self._check_commit_deadline(record["recovery_deadline"], record["lease_expires_at"])
                 return result
-        except _ActivationExpired:
-            return dict(_EXPIRED)
         except psycopg.errors.LockNotAvailable:
             return dict(_BUSY)
         except psycopg.Error as exc:
