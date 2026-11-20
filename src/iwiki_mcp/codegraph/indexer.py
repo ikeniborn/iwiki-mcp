@@ -1403,11 +1403,14 @@ class CodeGraphIndexer:
     def _verify_published(self, revision: str) -> None:
         self.store.verify_canonical(self.domain, revision)
 
-    def recover_parsing_envelope(self, transition: Mapping[str, object]) -> bool:
-        """Verify the prior graph while holding both freshness locks."""
+    def _prior_parsing_envelope(self, transition: Mapping[str, object]) -> dict | None:
+        """Read the previous verified envelope under the graph writer lock."""
+        if (transition.get("state") != "rebuilding"
+                or transition.get("publication_phase") != "parsing"):
+            return None
         prior = transition.get("prior_envelope")
         if not isinstance(prior, dict) or not exact_ready_metadata(prior):
-            return False
+            return None
         revision = prior.get("revision")
         if (
             not isinstance(revision, str)
@@ -1418,15 +1421,22 @@ class CodeGraphIndexer:
             or transition.get("revision") != revision
             or self.store.storage_stamp() != prior["storage_stamp"]
         ):
-            return False
+            return None
         with self.store.read_lease() as connection:
             row = connection.execute(
                 "SELECT revision, root_path, state FROM repositories WHERE repository_id = ?",
                 (self.domain,),
             ).fetchone()
         if row != (revision, str(Path(self.project_dir).resolve()), "ready"):
-            return False
+            return None
         self._verify_published(revision)
+        return prior
+
+    def recover_parsing_envelope(self, transition: Mapping[str, object]) -> bool:
+        """Verify the prior graph while holding both freshness locks."""
+        prior = self._prior_parsing_envelope(transition)
+        if prior is None:
+            return False
         config = self.config
         versions = self._normalization_versions()
         snapshot = None
@@ -1860,6 +1870,16 @@ class CodeGraphIndexer:
                 parsing = dict(transition, publication_phase="parsing")
                 if exact_ready_metadata(previous_metadata):
                     parsing["prior_envelope"] = previous_metadata
+                elif previous_metadata.get("publication_phase") == "parsing":
+                    try:
+                        prior = self._prior_parsing_envelope(previous_metadata)
+                    except CodeGraphStoreError:
+                        prior = None
+                    if prior is not None:
+                        # Advance only generation. Keep the original storage and input proofs.
+                        carried = dict(prior, generation=previous_metadata["generation"])
+                        _seal_ready_metadata(carried)
+                        parsing["prior_envelope"] = carried
                 self._publish_metadata_record(parsing, deadline=deadline)
                 _check_deadline(deadline, self.paths.lock)
 

@@ -523,22 +523,29 @@ def test_local_build_worker_suspends_crash_recovery(ready_runtime, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="fork process evidence")
-@pytest.mark.parametrize("changed", [None, "source", "selector"])
+@pytest.mark.parametrize("changed, attempts", [
+    (None, [True]), ("source", [True]), ("selector", [True]),
+    (None, [True, True]), (None, [True, False]), ("selector", [True, True]),
+])
 def test_reader_recovers_after_forced_writer_dies_while_parsing(
-    runtime_pair, changed, link_fixture, monkeypatch,
+    runtime_pair, changed, attempts, link_fixture, monkeypatch,
 ):
     writer, reader = runtime_pair
     seeded = writer.runtime._indexer.build(force=True)
     assert seeded["state"] == "ready"
 
-    def interrupted():
+    def interrupted(force):
         writer.runtime._indexer._parse = lambda *args, **kwargs: os._exit(31)
-        writer.runtime._indexer.build(force=True)
+        writer.runtime._indexer.build(force=force)
 
-    process = multiprocessing.get_context("fork").Process(target=interrupted)
-    process.start()
-    process.join(timeout=10)
-    assert process.exitcode == 31
+    generation = json.loads(writer.paths.metadata.read_bytes())["generation"]
+    for force in attempts:
+        process = multiprocessing.get_context("fork").Process(target=interrupted, args=(force,))
+        process.start()
+        process.join(timeout=10)
+        assert process.exitcode == 31
+        generation += 1
+        assert json.loads(writer.paths.metadata.read_bytes())["generation"] == generation
     if changed == "selector":
         (Path(reader.binding.base) / "project" / "overview.md").write_text(link_fixture.markdown)
     if changed == "source":
@@ -556,6 +563,7 @@ def test_reader_recovers_after_forced_writer_dies_while_parsing(
     recovered = reader.status()
     assert recovered["state"] == ("dirty" if changed else "ready")
     assert recovered["revision"] == seeded["revision"]
+    assert json.loads(reader.paths.metadata.read_bytes())["generation"] == generation
     search = reader.runtime.search("Service")
     assert search["state"] == recovered["state"]
     if changed is None:
