@@ -15,6 +15,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: 9732726d43539949
+  last_run: 2026-11-21
+  reviewed: true
+  docs_checked: true
 ---
 # File-level code graph recovery implementation plan
 
