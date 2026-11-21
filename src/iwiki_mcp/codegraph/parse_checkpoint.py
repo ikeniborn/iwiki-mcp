@@ -1,6 +1,7 @@
 """Private parse records accessed only while the caller holds the graph writer lock."""
 
 from contextlib import ExitStack, contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,31 @@ def _private_ancestor(directory):
                 return False
     finally:
         os.close(fd)
+
+
+def _fits_json(value, budget):
+    """Return remaining canonical ASCII JSON bytes, or a negative value on overflow."""
+    if isinstance(value, str):
+        budget -= 2
+        if len(value) > budget:
+            return -1
+        if value.isascii() and value.isprintable() and '"' not in value and "\\" not in value:
+            return budget - len(value)
+        for start in range(0, len(value), 8192):
+            budget -= len(json.dumps(value[start:start + 8192])) - 2
+            if budget < 0:
+                break
+        return budget
+    if isinstance(value, (list, tuple, dict)):
+        budget -= 2 + max(0, len(value) - 1)
+        for key in value:
+            if budget < 0:
+                break
+            budget = _fits_json(key, budget)
+            if isinstance(value, dict) and budget >= 0:
+                budget = _fits_json(value[key], budget - 1)
+        return budget
+    return budget - len(canonical_json_bytes(value))
 
 
 class ParseCheckpoint:
@@ -148,10 +174,13 @@ class ParseCheckpoint:
 
     def save(self, path, identity, payload):
         record = {"version": 1, "identity": identity, "payload": payload}
-        digest = canonical_sha256(record, prefix=False)
-        data = canonical_json_bytes({"record": record, "digest": digest})
-        if len(data) > MAX_RECORD_BYTES:
+        prefix = b'{"digest":"'
+        separator = b'","record":'
+        overhead = len(prefix) + 64 + len(separator) + 1
+        if _fits_json(record, MAX_RECORD_BYTES - overhead) < 0:
             return False
+        data = canonical_json_bytes(record)
+        digest = hashlib.sha256(data).hexdigest().encode("ascii")
         name = _name(path)
         with _storage():
             self._checked(name)
@@ -161,7 +190,7 @@ class ParseCheckpoint:
                          0o600, dir_fd=self.directory)
             with os.fdopen(fd, "wb") as stream:
                 _validate_file(os.fstat(fd))
-                stream.write(data)
+                stream.writelines((prefix, digest, separator, data, b"}"))
                 stream.flush()
                 os.fsync(fd)
             os.replace(_TEMP, name, src_dir_fd=self.directory, dst_dir_fd=self.directory)

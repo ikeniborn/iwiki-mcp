@@ -321,6 +321,8 @@ Forgetting an unresolved attempt can lose the ability to determine its outcome. 
 
 ### Operator checks after interruption
 
+If publication returns `index_failed` with reason `parse_checkpoint_storage_failed`, inspect the local publisher cache permissions, free space and filesystem health. The CLI also writes this reason to stderr in JSON mode. After correcting the local error, repeat the original command.
+
 | Result | Operator action |
 |--------|-----------------|
 | Transport failure | Keep the checkpoint and repeat the original resume command with the original token. |
