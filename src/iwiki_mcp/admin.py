@@ -336,6 +336,7 @@ def _write_code_failure(
     publish_mode: str | None,
     error: str,
     duration_ms: int,
+    checkpoint_failure: bool = False,
 ) -> None:
     if json_output:
         _write_code_json(
@@ -345,6 +346,7 @@ def _write_code_failure(
                 "publish_mode": publish_mode,
                 "error": error,
                 "duration_ms": duration_ms,
+                **({"reason": "parse_checkpoint_storage_failed"} if checkpoint_failure else {}),
             },
         )
         return
@@ -366,6 +368,9 @@ def _write_code_failure(
         "resume_failed": "code graph recovery failed",
     }
     line = f"iwiki-mcp: {messages.get(error, 'code graph recovery failed')} (code={error})\n"
+    if checkpoint_failure:
+        line = ("iwiki-mcp: parse_checkpoint_storage_failed: check local cache permissions "
+                "and available space (code=index_failed)\n")
     detached = threading.Event()
     writer = threading.Thread(
         target=_write_code_stderr, args=(stream, line, detached),
@@ -530,12 +535,21 @@ def _run_code_publish(
             if outcome.index.get("state") != "ready"
             else "publication_failed"
         )
+        checkpoint_failure = error == "index_failed" and (
+            outcome.index.get("code") == "parse_checkpoint_storage_failed"
+        )
+        if args.json and checkpoint_failure:
+            _write_code_failure(
+                err, json_output=False, publish_mode=outcome.publish_mode, error=error,
+                duration_ms=outcome.duration_ms, checkpoint_failure=True,
+            )
         _write_code_failure(
             out if args.json else err,
             json_output=args.json,
             publish_mode=outcome.publish_mode,
             error=error,
             duration_ms=outcome.duration_ms,
+            checkpoint_failure=checkpoint_failure,
         )
         return 1
 

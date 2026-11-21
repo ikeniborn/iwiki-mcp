@@ -979,3 +979,17 @@ def test_resume_cli_dispatch(flag, state, monkeypatch, tmp_path):
                      stdout=out, stderr=StringIO(), environ={})
     assert code == 0
     assert json.loads(out.getvalue())["state"] == state
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_checkpoint_storage_failure_exposes_safe_reason(monkeypatch, json_mode):
+    outcome = _outcome(index_state="failed")
+    outcome.index.update(code="parse_checkpoint_storage_failed", hint="secret-sentinel")
+    args = ["code", "publish", "--project", "/repo"]
+    code, stdout, stderr = _run(args + (["--json"] if json_mode else []), monkeypatch, outcome)
+    assert code == 1
+    assert "parse_checkpoint_storage_failed" in stderr
+    assert "secret-sentinel" not in stdout + stderr
+    if json_mode:
+        assert json.loads(stdout)["reason"] == "parse_checkpoint_storage_failed"
+        assert json.loads(stdout)["error"] == "index_failed"

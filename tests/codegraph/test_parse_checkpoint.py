@@ -209,3 +209,17 @@ def test_reopen_syncs_scope_before_serving_hits(tmp_path, monkeypatch):
     with pytest.raises(ParseCheckpointError, match="^parse_checkpoint_storage_failed$"):
         with ParseCheckpoint.open(tmp_path, tmp_path, "books"):
             pytest.fail("cache opened while preceding replacement was not durable")
+
+
+def test_oversize_checkpoint_uses_bounded_scratch_memory(tmp_path):
+    import tracemalloc
+    from iwiki_mcp.codegraph.parse_checkpoint import MAX_RECORD_BYTES
+
+    with ParseCheckpoint.open(tmp_path, tmp_path, "books") as cache:
+        for payload in ("x" * (MAX_RECORD_BYTES + 1), ["x" * 1024] * 17000):
+            tracemalloc.start()
+            try:
+                assert not cache.save("file.py", {}, payload)
+                assert tracemalloc.get_traced_memory()[1] < 1024 * 1024
+            finally:
+                tracemalloc.stop()
