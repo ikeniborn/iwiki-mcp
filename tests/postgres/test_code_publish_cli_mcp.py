@@ -1045,3 +1045,29 @@ def test_later_batch_failure_preserves_revision_and_aborts_once(
         "wiki_code_publish_abort"
     )
     assert "wiki_code_publish_finalize" not in call_names
+
+
+def test_quota_refusal_through_hosted_mcp_preserves_the_active_revision(
+    hosted_mcp_cli, clean_postgres, monkeypatch,
+):
+    from dataclasses import replace
+    import os
+
+    from iwiki_mcp.postgres.publication_roles import provision_publication_pair
+
+    status, out, _ = hosted_mcp_cli.run()
+    assert status == 0
+    revision = json.loads(out)["snapshot_revision"]
+    settings = replace(server._HOSTED_CODE_GRAPH, max_publisher_staged_bytes=1)
+    provision_publication_pair(
+        clean_postgres, hosted_mcp_cli.hosted.runtime.config.storage.user,
+        os.environ["IWIKI_PUBLICATION_DB_USER"], settings.publication_limits,
+    )
+    monkeypatch.setattr(server, "_HOSTED_CODE_GRAPH", settings)
+    code, stdout, stderr = hosted_mcp_cli.run()
+    failure = _failure_payload(stdout, stderr)
+    assert code == 1
+    assert failure["code"] == "publication_quota_exceeded"
+    assert failure["resource"] == "staged_bytes"
+    assert set(failure) == {"state", "publish_mode", "error", "code", "resource", "duration_ms"}
+    assert hosted_mcp_cli.transport.call("wiki_code_status", {})["snapshot_revision"] == revision

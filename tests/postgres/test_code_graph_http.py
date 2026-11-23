@@ -582,3 +582,50 @@ def test_resume_http_requires_selected_session_and_returns_stable_receipts(
         assert terminal["state"] == "ready"
         assert terminal["snapshot_revision"] == complete["snapshot_revision"]
         assert "receipts" not in terminal
+
+
+@pytest.mark.postgres_integration
+def test_global_quota_refusal_discloses_only_the_resource_and_allows_retry(
+    hosted_ranked_runtime, hosted_runtime, clean_postgres, monkeypatch,
+):
+    from dataclasses import replace
+    import os
+
+    from starlette.testclient import TestClient
+    from iwiki_mcp import server
+    from iwiki_mcp.codegraph.publication import iter_snapshot_batches
+    from iwiki_mcp.postgres.publication_roles import provision_publication_pair
+    from tests.postgres.test_code_graph_contract import _McpRoute, _open_session
+
+    settings = replace(server._HOSTED_CODE_GRAPH, max_server_sessions=1)
+    provision_publication_pair(
+        clean_postgres, hosted_runtime.runtime.config.storage.user,
+        os.environ["IWIKI_PUBLICATION_DB_USER"], settings.publication_limits,
+    )
+    monkeypatch.setattr(server, "_HOSTED_CODE_GRAPH", settings)
+    hidden = hosted_runtime.auth.create_token(
+        "wiki-a", "unrelated-owner", read_domains=["private"], write_domains=["private"],
+    )
+    header = hosted_ranked_runtime.graph.header
+    with TestClient(hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765") as client:
+        other = _McpRoute(client, hidden["token"], _open_session(client, hidden["token"]))
+        caller = _McpRoute(
+            client, hosted_runtime.token, _open_session(client, hosted_runtime.token),
+        )
+        other.call("wiki_bind", {"primary": "private"})
+        caller.call("wiki_bind", {"primary": "docs"})
+        holding = other.begin(replace(header, repository_id="private"))
+        assert "session_id" in holding
+
+        refusal = caller.begin(header)
+        assert refusal["error"] == "publication_quota_exceeded"
+        assert refusal["resource"] == "sessions"
+        assert set(refusal) <= {"error", "code", "resource", "hint", "binding_source"}
+        for private in ("private", "unrelated-owner", hidden["token_id"], holding["session_id"]):
+            assert private not in repr(refusal)
+        batches = iter_snapshot_batches(hosted_ranked_runtime.graph.rows, max_rows=1,
+                                        max_bytes=100_000)
+        batch = next(batches)
+        assert caller.publish_batch(holding, batch)["error"] == "unauthorized"
+        assert other.abort(holding)["state"] == "aborted"
+        assert "session_id" in caller.begin(header)

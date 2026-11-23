@@ -32,11 +32,14 @@ _CLIENT_WINDOW_SECONDS = (23 * 60 + 55) * 60
 
 
 class CodeGraphResumeError(Exception):
-    def __init__(self, code: str, *, publish_mode: str | None = "mcp") -> None:
+    def __init__(
+        self, code: str, *, publish_mode: str | None = "mcp", quota_resource: str | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.exit_code = 2 if code in ("invalid_config", "resume_incompatible") else 1
         self.publish_mode = publish_mode
+        self.quota_resource = quota_resource
 
 
 def _invalid():

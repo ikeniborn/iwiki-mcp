@@ -843,6 +843,8 @@ def test_begin_schedules_cleanup_for_the_direct_publisher(pg_graph):
         def connection_dsn(self):
             return pg_graph.dsn
 
+    pg_graph._query("UPDATE iwiki.publication_policy SET superseded_retention_seconds = 0 "
+                    "RETURNING singleton", admin=True)
     cleanup_settings = SimpleNamespace(
         publication_session_ttl_seconds=pg_graph.session_ttl_seconds,
         staging_retention_seconds=pg_graph.staging_retention_seconds,
@@ -904,11 +906,10 @@ def test_a_reactivated_snapshot_stops_its_drain_within_one_batch(
     def reactivate_then_delete(cursor, table, domain_id, sid, limit):
         calls["n"] += 1
         if calls["n"] == 2:
-            cursor.execute(
-                "UPDATE iwiki.code_graph_domain_state "
-                "SET active_snapshot_id = %s "
-                "WHERE iwiki_id = %s AND domain_id = %s",
-                (sid, store.iwiki_id, domain_id),
+            pg_graph._query(
+                "UPDATE iwiki.code_graph_domain_state SET active_snapshot_id = %s "
+                "WHERE iwiki_id = %s AND domain_id = %s RETURNING active_snapshot_id",
+                (sid, store.iwiki_id, domain_id), admin=True,
             )
         return original(cursor, table, domain_id, sid, limit)
 
@@ -1181,6 +1182,8 @@ def test_the_sweep_drains_a_domain_that_did_not_publish(pg_graph):
     """
     from iwiki_mcp.codegraph import application
 
+    pg_graph._query("UPDATE iwiki.publication_policy SET superseded_retention_seconds = 0 "
+                    "RETURNING singleton", admin=True)
     other = pg_graph.for_domain("private")
     for _ in range(3):
         other.finalize(other.complete_session())
@@ -1291,6 +1294,8 @@ def test_run_cleanup_job_runs_on_the_maintenance_pool_connection(pg_graph):
 
     from iwiki_mcp.codegraph import application, maintenance
 
+    pg_graph._query("UPDATE iwiki.publication_policy SET superseded_retention_seconds = 0 "
+                    "RETURNING singleton", admin=True)
     other = pg_graph.for_domain("private")
     for _ in range(3):
         other.finalize(other.complete_session())
@@ -1360,7 +1365,9 @@ def test_keyed_begin_recovers_one_session_and_original_limits(pg_graph):
     assert pg_graph.store.begin(
         pg_graph.header, **{**options, "max_batch_rows": 256}
     ) == original
-    assert pg_graph._query("SELECT COUNT(*) FROM iwiki.code_graph_publication_sessions") == [(1,)]
+    assert pg_graph._query(
+        "SELECT COUNT(*) FROM iwiki.code_graph_publication_sessions", admin=True
+    ) == [(1,)]
     assert pg_graph.store.begin(
         pg_graph.header_with_revision("sha256:" + "a" * 64), **options
     )["error"] == "snapshot_conflict"
@@ -1405,17 +1412,23 @@ def test_cleanup_retains_attempt_through_deadline_and_bounds_expired_cleanup(pg_
     options = _recoverable(pg_graph)
     sessions = [pg_graph.store.begin(pg_graph.header, **{**options, "attempt_key": c * 32})
                 for c in "abc"]
-    assert pg_graph._query("SELECT count(*) FROM iwiki.code_graph_publication_attempts") == [(3,)]
+    assert pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_publication_attempts", admin=True
+    ) == [(3,)]
     pg_graph.advance_clock(pg_graph.session_ttl_seconds + pg_graph.staging_retention_seconds + 1)
     pg_graph.store.cleanup_staging(pg_graph._now())
     for session in sessions:
         assert pg_graph.store.inspect(session.session_id)["error"] == "session_expired"
     assert pg_graph.store.begin(pg_graph.header, **options)["error"] == "session_expired"
-    assert pg_graph._query("SELECT count(*) FROM iwiki.code_graph_publication_attempts") == [(3,)]
+    assert pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_publication_attempts", admin=True
+    ) == [(3,)]
     pg_graph.advance_clock(600)
     assert pg_graph.store.begin(pg_graph.header, **options)["error"] == "session_expired"
     pg_graph.store.run_cleanup_cycle()
-    assert pg_graph._query("SELECT count(*) FROM iwiki.code_graph_publication_attempts") == [(1,)]
+    assert pg_graph._query(
+        "SELECT count(*) FROM iwiki.code_graph_publication_attempts", admin=True
+    ) == [(1,)]
     assert pg_graph.store.begin(pg_graph.header, **options)["error"] == "session_expired"
 
 
@@ -1435,6 +1448,7 @@ def test_attempt_evidence_survives_binary_rollback_and_reapplication(pg_graph):
         MigrationSettings,
         require_schema_version,
         rollback_v10_compatibility,
+        rollback_v11_compatibility,
         run_migrations,
     )
 
@@ -1444,10 +1458,11 @@ def test_attempt_evidence_survives_binary_rollback_and_reapplication(pg_graph):
     terminal = pg_graph.finalize(original)
     legacy_staging = pg_graph.begin()
 
+    rollback_v11_compatibility(settings, confirm=True)
     rollback_v10_compatibility(settings, confirm=True)
     require_schema_version(pg_graph.admin_dsn, expected_version=9)
     assert pg_graph.reader_status()["snapshot_revision"] == terminal["snapshot_revision"]
-    assert run_migrations(settings).applied_versions == (10,)
+    assert run_migrations(settings).applied_versions == (10, 11)
     require_schema_version(pg_graph.admin_dsn)
     inspected = pg_graph.store.inspect(original.session_id)
     assert inspected["snapshot_revision"] == terminal["snapshot_revision"]
@@ -1509,11 +1524,11 @@ def test_expiry_during_activation_rolls_back_graph_rows(pg_graph, monkeypatch, e
     assert pg_graph._query(
         "SELECT count(*) FROM iwiki.code_graph_files f "
         "JOIN iwiki.code_graph_publication_sessions s USING (iwiki_id, domain_id, snapshot_id) "
-        "WHERE s.session_id = %s", (session.session_id,),
+        "WHERE s.session_id = %s", (session.session_id,), admin=True,
     ) == [(0,)]
     assert pg_graph._query(
         "SELECT terminal_result FROM iwiki.code_graph_publication_attempts WHERE session_id = %s",
-        (session.session_id,),
+        (session.session_id,), admin=True,
     ) == [(None,)]
 
 
@@ -1530,7 +1545,9 @@ def test_new_keyed_begin_that_expires_in_transaction_allocates_nothing(pg_graph,
     result = pg_graph.store.begin(pg_graph.header, **options)
     assert isinstance(result, dict) and result.get("error") == "session_expired"
     for table in ("publication_attempts", "snapshots", "publication_sessions"):
-        assert pg_graph._query(f"SELECT count(*) FROM iwiki.code_graph_{table}") == [(0,)]
+        assert pg_graph._query(
+            f"SELECT count(*) FROM iwiki.code_graph_{table}", admin=True
+        ) == [(0,)]
 
 
 @pytest.mark.parametrize("duplicate", [False, True])

@@ -245,15 +245,35 @@ def store_factory(clean_postgres):
 
 
 @pytest.fixture
-def hosted_runtime(clean_postgres, tmp_path, monkeypatch):
-    import psycopg
-    from psycopg import sql
+def publication_pair(clean_postgres, runtime_principal):
+    """Provision distinct hosted logins after the fixture's domains exist."""
+    from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+    from iwiki_mcp.postgres.publication_roles import provision_publication_pair
+
+    publishers = []
+
+    def provision(iwiki_id, domains):
+        issuer = runtime_principal(domains, domains, runtime="hosted", iwiki_id=iwiki_id)
+        publisher = create_runtime_role(clean_postgres, prefix="publisher")
+        publishers.append(publisher[0])
+        provision_publication_pair(
+            clean_postgres, issuer[0], publisher[0], HostedCodeGraphConfig().publication_limits,
+        )
+        return issuer, publisher
+
+    yield provision
+
+    for role in publishers:
+        drop_runtime_role(clean_postgres, role)
+
+
+@pytest.fixture
+def hosted_runtime(clean_postgres, tmp_path, monkeypatch, publication_pair):
     from psycopg.conninfo import conninfo_to_dict
 
     from iwiki_mcp import http, server
     from iwiki_mcp.postgres.auth import AuthStore
     from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
-    from iwiki_mcp.postgres.store import provision_runtime_grant
 
     values = conninfo_to_dict(clean_postgres)
     run_migrations(
@@ -288,25 +308,8 @@ def hosted_runtime(clean_postgres, tmp_path, monkeypatch):
         read_domains=["docs"],
         write_domains=[],
     )["token"]
-    hosted_role = f"iwiki_t3_hosted_{secrets.token_hex(5)}"
-    hosted_password = secrets.token_urlsafe(24)
-    with psycopg.connect(clean_postgres, autocommit=True) as connection:
-        with connection.cursor() as cursor:
-            try:
-                cursor.execute(
-                    sql.SQL("CREATE ROLE {} LOGIN NOBYPASSRLS PASSWORD {}").format(
-                        sql.Identifier(hosted_role), sql.Literal(hosted_password)
-                    )
-                )
-            except psycopg.Error:
-                pytest.fail("disposable hosted PostgreSQL role setup failed")
-    provision_runtime_grant(
-        clean_postgres,
-        principal=hosted_role,
-        iwiki_id="wiki-a",
-        read_domains=["docs", "private"],
-        write_domains=["docs", "private"],
-        runtime="hosted",
+    (hosted_role, hosted_password), (publisher, publisher_password) = publication_pair(
+        "wiki-a", ["docs", "private"],
     )
     runtime_values = {
         **values,
@@ -318,6 +321,8 @@ def hosted_runtime(clean_postgres, tmp_path, monkeypatch):
     environ = RedactedEnv(
         {
             "IWIKI_DB_PASSWORD": hosted_password,
+            "IWIKI_PUBLICATION_DB_USER": publisher,
+            "IWIKI_PUBLICATION_DB_PASSWORD": publisher_password,
             "IWIKI_LLM_BASE_URL": "http://provider.internal/v1",
             "IWIKI_LLM_KEY": "server-only-model-key",
             "IWIKI_EMBED_MODEL": "fixture-model",
@@ -338,14 +343,6 @@ def hosted_runtime(clean_postgres, tmp_path, monkeypatch):
     auth.set_wiki_active("wiki-a", True)
     runtime.close()
     server.mcp._session_manager = None
-    with psycopg.connect(clean_postgres, autocommit=True) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("DROP OWNED BY {} CASCADE").format(
-                    sql.Identifier(hosted_role)
-                )
-            )
-            cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(hosted_role)))
 
 
 class GraphFixture:
@@ -424,7 +421,13 @@ class GraphFixture:
         )
 
     def advance_clock(self, seconds):
+        import psycopg
+
         self._offset += seconds
+        with psycopg.connect(self.admin_dsn) as connection:
+            connection.execute(
+                "UPDATE iwiki.fixture_publication_clock SET offset_seconds = %s", (self._offset,)
+            )
 
     def header_with_revision(self, revision):
         from dataclasses import replace
@@ -1038,6 +1041,23 @@ def _provisioned_graph(
             lock_timeout_ms=5_000,
         )
     )
+    import psycopg
+
+    with psycopg.connect(clean_postgres) as connection:
+        connection.execute("""
+            CREATE TABLE iwiki.fixture_publication_clock (offset_seconds double precision NOT NULL);
+            INSERT INTO iwiki.fixture_publication_clock VALUES (0);
+            CREATE OR REPLACE FUNCTION iwiki.publication_now() RETURNS timestamptz
+            LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS $$
+                SELECT clock_timestamp() + make_interval(secs => offset_seconds)
+                FROM iwiki.fixture_publication_clock
+            $$;
+        """)
+        connection.execute(
+            "UPDATE iwiki.publication_policy SET staging_retention_seconds = %s, "
+            "superseded_retention_seconds = %s",
+            (GraphFixture.staging_retention_seconds, GraphFixture.superseded_retention_seconds),
+        )
     auth = AuthStore(clean_postgres)
     auth.create_wiki("wiki-a", "wiki-a")
     auth.create_domain("wiki-a", "docs")
@@ -1102,22 +1122,35 @@ class HostedCodeBinding:
         return "<redacted hosted code graph binding>"
 
 
-def _bind_hosted_code(graph, monkeypatch, token_id="token-a"):
-    from psycopg.conninfo import conninfo_to_dict
+@contextmanager
+def _bind_hosted_code(graph, monkeypatch, publication_pair):
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+    from psycopg_pool import ConnectionPool
 
     from iwiki_mcp import server
-    from iwiki_mcp.postgres.auth import AuthContext
+    from iwiki_mcp.postgres.auth import AuthStore
     from iwiki_mcp.postgres.config import HostedCodeGraphConfig
     from iwiki_mcp.storage import PostgresBinding
 
-    values = conninfo_to_dict(str(graph.dsn))
+    (issuer, issuer_password), (publisher, publisher_password) = publication_pair(
+        graph.iwiki_id, [graph.domain],
+    )
+    values = conninfo_to_dict(graph.admin_dsn)
+    issuer_dsn = make_conninfo(graph.admin_dsn, user=issuer, password=issuer_password)
+    publisher_dsn = make_conninfo(graph.admin_dsn, user=publisher, password=publisher_password)
+    auth = AuthStore(graph.admin_dsn)
+    bearer = auth.create_token(
+        graph.iwiki_id, "fixture", read_domains=[graph.domain], write_domains=[graph.domain],
+    )["token"]
+    context = AuthStore(issuer_dsn).authenticate(bearer)
+    assert context is not None
     binding = PostgresBinding(
         host=values.get("host", "127.0.0.1"),
         port=int(values.get("port", 5432)),
         database=values["dbname"],
-        user=values["user"],
+        user=issuer,
         sslmode=values.get("sslmode", "prefer"),
-        password=values.get("password", ""),
+        password=issuer_password,
         iwiki_id=graph.iwiki_id,
         read=(graph.domain,),
         write=(graph.domain,),
@@ -1131,48 +1164,35 @@ def _bind_hosted_code(graph, monkeypatch, token_id="token-a"):
     monkeypatch.setattr(server.base, "resolve_binding", lambda: binding)
     monkeypatch.setattr(server, "_HOSTED_CODE_GRAPH", HostedCodeGraphConfig())
     monkeypatch.setattr(server, "_HOSTED_CONFIG", _cfg())
-    token = server._AUTH_CONTEXT.set(
-        AuthContext(
-            iwiki_id=graph.iwiki_id,
-            token_id=token_id,
-            read_domains=(graph.domain,),
-            write_domains=(graph.domain,),
-            primary=graph.domain,
-        )
-    )
-    monkeypatch.setattr(
-        server,
-        "_SESSION_BINDING",
-        server._SESSION_BINDING,
-    )
-    return HostedCodeBinding(graph, binding), token
+    with (
+        ConnectionPool(issuer_dsn, min_size=1, max_size=2) as pool,
+        ConnectionPool(publisher_dsn, min_size=1, max_size=2) as publisher_pool,
+    ):
+        monkeypatch.setattr(server, "_HOSTED_POOL", pool)
+        monkeypatch.setattr(server, "_HOSTED_PUBLICATION_POOL", publisher_pool)
+        token = server._AUTH_CONTEXT.set(context)
+        try:
+            yield HostedCodeBinding(graph, binding)
+        finally:
+            server._AUTH_CONTEXT.reset(token)
 
 
 @pytest.fixture
-def hosted_ready_code(pg_ready_graph, monkeypatch):
-    from iwiki_mcp import server
-
-    bound, token = _bind_hosted_code(pg_ready_graph, monkeypatch)
-    yield bound
-    server._AUTH_CONTEXT.reset(token)
+def hosted_ready_code(pg_ready_graph, monkeypatch, publication_pair):
+    with _bind_hosted_code(pg_ready_graph, monkeypatch, publication_pair) as bound:
+        yield bound
 
 
 @pytest.fixture
-def hosted_mixed_language_code(pg_mixed_language_graph, monkeypatch):
-    from iwiki_mcp import server
-
-    bound, token = _bind_hosted_code(pg_mixed_language_graph, monkeypatch)
-    yield bound
-    server._AUTH_CONTEXT.reset(token)
+def hosted_mixed_language_code(pg_mixed_language_graph, monkeypatch, publication_pair):
+    with _bind_hosted_code(pg_mixed_language_graph, monkeypatch, publication_pair) as bound:
+        yield bound
 
 
 @pytest.fixture
-def hosted_empty_code(pg_ranked_graph, monkeypatch):
-    from iwiki_mcp import server
-
-    bound, token = _bind_hosted_code(pg_ranked_graph, monkeypatch)
-    yield bound
-    server._AUTH_CONTEXT.reset(token)
+def hosted_empty_code(pg_ranked_graph, monkeypatch, publication_pair):
+    with _bind_hosted_code(pg_ranked_graph, monkeypatch, publication_pair) as bound:
+        yield bound
 
 
 class HostedRankedRuntime:

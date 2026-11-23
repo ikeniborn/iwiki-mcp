@@ -157,8 +157,8 @@ def test_graph_migration_creates_v5_objects_and_composite_integrity(clean_postgr
     from iwiki_mcp.postgres.migrations import run_migrations
 
     result = run_migrations(_settings(clean_postgres))
-    assert result.schema_version == 10
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    assert result.schema_version == 11
+    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
     assert {
         "code_graph_domain_state",
         "code_graph_publication_sessions",
@@ -336,5 +336,5 @@ def test_rls_is_enabled_not_forced_and_uses_one_qualified_scope_function(
             )
             assert cursor.fetchone() == (
                 True,
-                ["search_path=pg_catalog, iwiki"],
+                ["search_path=pg_catalog"],
             )

@@ -9,6 +9,13 @@
 | `IWIKI_LLM_BASE_URL` | none | Base URL for an OpenAI-compatible embeddings endpoint, usually ending in `/v1`. |
 | `IWIKI_LLM_KEY` | none | API key for the embeddings endpoint. |
 
+**Hosted PostgreSQL publication**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IWIKI_PUBLICATION_DB_USER` | none | Separate PostgreSQL login provisioned to consume publication tickets. Required for hosted HTTP. |
+| `IWIKI_PUBLICATION_DB_PASSWORD` | none | Password of the publication login. Supply it through the server's protected environment. |
+
 **Embedding model**
 
 | Variable | Default | Meaning |

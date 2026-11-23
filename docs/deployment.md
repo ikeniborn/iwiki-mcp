@@ -92,6 +92,12 @@ pool_min_size = 2
 pool_max_size = 10
 statement_timeout_ms = 30000
 lock_timeout_ms = 5000
+
+[code_graph]
+max_server_sessions = 64
+max_publisher_sessions = 8
+max_server_staged_bytes = 2147483648
+max_publisher_staged_bytes = 268435456
 ```
 
 `statement_timeout_ms` and `lock_timeout_ms` bound the code-graph maintenance pool exactly
@@ -103,6 +109,17 @@ cycle at the shipped `lock_timeout_ms = 5000` (5s) rather than queuing indefinit
 [code-graph-publishing.md](code-graph-publishing.md) for what a failed cycle does with the
 rows it already committed.
 
+Each replica also opens a publication pool with a separate login. Its minimum size
+is zero and its maximum is `pool_max_size`. Include its connections alongside the
+authentication and tools pool, maintenance workers, and transient role checks.
+For the sample configuration, allow up to 30 PostgreSQL connections per replica.
+
+The issuer and publication connections carry single-use capabilities in bound SQL
+parameters. Disable capture of parameter values in database logs, audit extensions,
+proxies and tracing. For PostgreSQL statement and error logging on these logins,
+set both `log_parameter_max_length` and `log_parameter_max_length_on_error` to
+`0`. Keep password and ticket values out of diagnostics and support bundles.
+
 A same-host PostgreSQL container must publish a host port such as
 `127.0.0.1:55432`; configure that host and port rather than a bridge-only service name.
 A remote database supplies its DNS name and custom port and should retain
@@ -113,6 +130,8 @@ reads it; never commit the populated file.
 
 ```dotenv
 IWIKI_DB_PASSWORD=<postgres-runtime-password>
+IWIKI_PUBLICATION_DB_USER=<publication-login>
+IWIKI_PUBLICATION_DB_PASSWORD=<publication-password>
 IWIKI_LLM_BASE_URL=https://<server-inference-host>/v1
 IWIKI_LLM_KEY=<server-inference-key>
 IWIKI_EMBED_MODEL=<exact-embedding-model-id>
@@ -211,7 +230,7 @@ first is a network, credential, or container problem, the second is a migration 
 shared message once sent an operator looking for a migration while the database was
 listening on no TCP port at all. Neither message contains the DSN or the password.
 
-The runtime pins one exact schema version, currently 10. An image is therefore not
+The runtime pins one exact schema version, currently 11. An image is therefore not
 deployable against a database the operator has not migrated to that version, and an older
 image is not deployable against a newer database. Version 8 releases the foreign key that
 let derived code-graph links block deletion of the Markdown page they were derived from:
@@ -229,7 +248,7 @@ itself needs one.
 Version 10 adds durable publication attempts, a nullable deadline for keyed sessions,
 and a trigger that records their terminal result in the activation transaction.
 Stop schema-9 runtimes before migration. Apply migrations with the restricted runtime
-offline and verify schema 10 before starting the new server. Existing clients can
+offline and verify schema 10 before starting a schema-10 server. Existing clients can
 continue ordinary publication; upgrade clients before enabling `--resume`.
 Use the owner-role `base list` procedure below to apply the migration.
 Verify that the hosted runtime starts with its restricted role. Bind the complete project
@@ -245,11 +264,64 @@ Both commands must return the same ready revision. If no other publisher ran,
 `wiki_code_status` on that primary must report that revision as active. For interrupted
 uploads, follow the [publisher recovery procedure](code-graph-publishing.md#operator-checks-after-interruption).
 
-For binary rollback, first stop all schema-10 writers and suspend recovery jobs.
+For rollback from version 10 to version 9, first stop all schema-10 writers and suspend recovery jobs.
 Run `rollback_v10_compatibility(settings, confirm=True)` using the schema-10 migrator, retaining
 the attempt table and receipts. Start the old binary only after checking the schema
 marker. Reapply migration 10 before restarting recovery jobs. Normal lease and
 recovery deadlines continue to elapse during downtime.
+
+Version 11 introduces database-wide publication accounting and single-use publication tickets.
+Use this sequence for an upgrade from version 10.
+
+1. Stop every hosted replica, direct publisher, scheduled recovery job and cleanup worker using the database.
+2. Keep a restorable database backup and the old binary. Record the active revision and outstanding attempts before changing the schema.
+3. Run the schema-owner migration command below. Check live sessions and retained batch bytes against their pre-migration values, including expired and terminal sessions.
+4. Create a separate PostgreSQL login for publication. Keep it outside inherited roles with database administration, token issuance or direct publisher privileges.
+5. Register the hosted issuer and publication login using the commands below. The issuer is the existing hosted login in `[storage].user`. The publication login consumes tickets for authorized operations.
+6. Put identical `[code_graph]` limits in the admin configuration and every serving replica. The pairing command sets the database policy. Repeat it with the same roles to change policy during a coordinated deployment.
+7. Bring up the new runtime with both credentials and verify an upload and recovery replay before enabling scheduled jobs.
+
+With writers stopped, run this reconciliation as the schema owner after migration.
+Expect zero discrepancies. It compares every retained session and batch charge,
+including zero-byte sessions and expired sessions awaiting cleanup.
+
+```sql
+WITH expected AS (
+    SELECT s.iwiki_id, s.domain_id, s.session_id, s.owner_id,
+           s.state = 'staging' AS is_staging,
+           least(s.lease_expires_at, s.recovery_deadline) AS expires_at,
+           coalesce(sum(b.byte_count), 0) AS charged_bytes
+    FROM iwiki.code_graph_publication_sessions AS s
+    LEFT JOIN iwiki.code_graph_batches AS b USING (iwiki_id, domain_id, session_id)
+    GROUP BY s.iwiki_id, s.domain_id, s.session_id, s.owner_id,
+             s.state, s.lease_expires_at, s.recovery_deadline
+)
+SELECT count(*) AS discrepancies
+FROM expected AS e
+FULL JOIN iwiki.publication_usage AS u USING (iwiki_id, domain_id, session_id)
+WHERE e.session_id IS NULL OR u.session_id IS NULL
+   OR (e.owner_id, e.is_staging, e.expires_at, e.charged_bytes)
+      IS DISTINCT FROM (u.session_owner, u.is_staging, u.expires_at, u.charged_bytes);
+```
+
+For rollback to version 10, stop all writers and cleanup again. Retain the current database
+and reconcile attempts, receipts, staged bytes and active revisions, including work accepted
+since the upgrade. Preview the rollback using the version-11 binary and schema-owner credential.
+
+```bash
+iwiki-mcp schema rollback-v11-compat --config /opt/iwiki-mcp/admin-server.toml --json
+```
+
+Verify that the target is schema 10. After all writers and cleanup workers have stopped
+and the reconciliation is complete, apply the rollback.
+
+```bash
+iwiki-mcp schema rollback-v11-compat --config /opt/iwiki-mcp/admin-server.toml --confirm --json
+```
+
+Verify the restored role grants and the version-10 marker before starting
+the old runtime. Remove the publication credential from the old runtime environment.
+Resume jobs only after checking the active revision and replaying a completed attempt.
 
 `run_migrations` applies every pending migration inside one transaction, and `CREATE
 INDEX CONCURRENTLY` cannot run inside a transaction block, so version 9 uses a plain
@@ -359,7 +431,7 @@ iwiki-mcp domain create --config /opt/iwiki-mcp/admin-server.toml --iwiki replac
 )
 ```
 
-Next, ensure the PostgreSQL runtime login named `replace-with-runtime-role` exists. This
+Next, create separate PostgreSQL logins for the hosted issuer (`replace-with-runtime-role`) and publication (`replace-with-publication-role`). This
 is an out-of-band database/platform operation: iwiki does not create the login or accept
 its password. Keep its password and runtime configuration separate from the schema-owner
 configuration. The schema-owner configuration and credential are never mounted into the
@@ -398,6 +470,7 @@ export IWIKI_EMBED_MODEL='replace-with-exact-embedding-model-id'
 export IWIKI_EMBED_DIMENSIONS='replace-with-exact-embedding-dimensions'
 export IWIKI_RERANK_MODEL='replace-with-exact-rerank-model-id-or-empty'
 iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --principal replace-with-runtime-role --iwiki replace-with-iwiki-id --read-domain replace-with-domain --write-domain replace-with-domain --runtime hosted --json
+iwiki-mcp principal publication-pair --config /opt/iwiki-mcp/admin-server.toml --issuer replace-with-runtime-role --publisher replace-with-publication-role
 iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal replace-with-runtime-role --json
 unset RUNTIME_TOKEN 2>/dev/null || true
 TOKEN_ISSUANCE_STARTED=0

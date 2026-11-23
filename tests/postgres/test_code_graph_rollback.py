@@ -320,6 +320,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
         rollback_v8_compatibility,
         rollback_v9_compatibility,
         rollback_v10_compatibility,
+        rollback_v11_compatibility,
         rollback_v5_compatibility,
         run_migrations,
     )
@@ -357,6 +358,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
                 write_domains=["docs"],
                 runtime=name,
             )
+        rollback_v11_compatibility(settings, confirm=True)
         rollback_v10_compatibility(settings, confirm=True)
         rollback_v9_compatibility(settings, confirm=True)
         rollback_v8_compatibility(settings, confirm=True)
@@ -454,7 +456,7 @@ def test_compatibility_artifact_serves_pre_v5_runtime_under_restricted_roles(
                 assert [row[0] for row in cursor.fetchall()] == [1, 2, 3, 4]
 
         reapplied = run_migrations(settings)
-        assert reapplied.applied_versions == (5, 6, 7, 8, 9, 10)
+        assert reapplied.applied_versions == (5, 6, 7, 8, 9, 10, 11)
         # An upgraded database must reach the same delete rule a fresh one
         # does, not merely the same version number.
         with psycopg.connect(clean_postgres) as connection:

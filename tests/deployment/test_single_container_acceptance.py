@@ -883,7 +883,7 @@ def test_hosted_mcp_rejects_incompatible_schema(
     result = hosted_startup_probe(role, password)
 
     assert result["exit_code"] != 0
-    assert "schema version 10 is required" in result["logs"]
+    assert "schema version 11 is required" in result["logs"]
     assert password not in result["logs"]
 
 
@@ -1211,6 +1211,7 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
         "proxy_password",
         "proxy_origin",
         "database_password",
+        "publication_password",
     }
     content_markers = set(full_stack.markers) - credentials
     runtime_env = full_stack.runtime_env.read_text(encoding="utf-8")

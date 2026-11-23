@@ -34,6 +34,7 @@ PublicationErrorCode = Literal[
     "invalid_attempt",
     "invalid_cursor",
     "resume_limits_changed",
+    "publication_quota_exceeded",
 ]
 AdapterErrorCode = Literal[
     "invalid_config",
@@ -59,6 +60,7 @@ PUBLICATION_ERROR_CODES: tuple[PublicationErrorCode, ...] = (
     "invalid_attempt",
     "invalid_cursor",
     "resume_limits_changed",
+    "publication_quota_exceeded",
 )
 ADAPTER_ERROR_CODES: tuple[AdapterErrorCode, ...] = (
     "invalid_config",
@@ -217,6 +219,16 @@ class SnapshotPublisher(Protocol):
     def finalize(self, session: PublicationSession) -> dict[str, object]: ...
 
     def abort(self, session: PublicationSession) -> dict[str, object]: ...
+
+
+def quota_resource(reply: Mapping[str, object]) -> str | None:
+    """Return only a recognized resource from a publication quota refusal."""
+    if (reply.get("code") or reply.get("error")) != "publication_quota_exceeded":
+        return None
+    resource = reply.get("resource")
+    if isinstance(resource, str) and resource in ("sessions", "staged_bytes"):
+        return resource
+    return None
 
 
 def header_payload(header: SnapshotHeader) -> dict[str, object]:

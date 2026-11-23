@@ -692,6 +692,8 @@ class FullStackHarness:
         from psycopg.conninfo import make_conninfo
 
         from iwiki_mcp.postgres.auth import AuthStore
+        from iwiki_mcp.postgres.config import HostedCodeGraphConfig
+        from iwiki_mcp.postgres.publication_roles import provision_publication_pair
         from iwiki_mcp.postgres.migrations import MigrationSettings, run_migrations
         from iwiki_mcp.postgres.store import provision_runtime_grant
 
@@ -747,6 +749,11 @@ class FullStackHarness:
             write_domains=["docs"],
             runtime="hosted",
         )
+        self.publisher_role, publisher_password = endpoint.create_role("publisher")
+        provision_publication_pair(
+            endpoint.dsn, role, self.publisher_role, HostedCodeGraphConfig().publication_limits,
+        )
+        self.markers["publication_password"] = publisher_password
         self.markers["database_password"] = password
         runtime_values = {
             **endpoint.values,
@@ -842,6 +849,8 @@ class FullStackHarness:
         )
         values = {
             "IWIKI_DB_PASSWORD": self.markers["database_password"],
+            "IWIKI_PUBLICATION_DB_USER": self.publisher_role,
+            "IWIKI_PUBLICATION_DB_PASSWORD": self.markers["publication_password"],
             "IWIKI_LLM_BASE_URL": self.inference.base_url,
             "IWIKI_LLM_KEY": self.markers["llm_key"],
             "IWIKI_EMBED_MODEL": "acceptance-embedding",
@@ -1324,6 +1333,7 @@ def hosted_startup_probe(
     created = []
 
     def probe(role, password):
+        publisher, publisher_password = postgres_endpoint.create_role("probe_publisher")
         values = {**postgres_endpoint.values, "user": role}
         directory = tmp_path / f"startup-{len(created)}"
         directory.mkdir()
@@ -1372,6 +1382,10 @@ def hosted_startup_probe(
                 "ALL",
                 "-e",
                 f"IWIKI_DB_PASSWORD={password}",
+                "-e",
+                f"IWIKI_PUBLICATION_DB_USER={publisher}",
+                "-e",
+                f"IWIKI_PUBLICATION_DB_PASSWORD={publisher_password}",
                 "-e",
                 f"IWIKI_LLM_BASE_URL={inference.base_url}",
                 "-e",

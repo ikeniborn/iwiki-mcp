@@ -802,3 +802,34 @@ def test_unverified_transport_cannot_start_a_recoverable_attempt(fake_session, h
     result = publisher.begin(header, attempt_key="a" * 32, recovery_deadline=123)
     assert result["error"] == "invalid_config"
     assert fake_session.calls == []
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("resource", ["sessions", "staged_bytes"])
+def test_ordinary_cli_reports_quota_resource_through_mcp(
+    tmp_path, monkeypatch, fake_session, resource, json_output,
+):
+    project = create_sqlite_project(tmp_path)
+    config = project / ".iwiki.toml"
+    config.write_text(config.read_text().replace('publish_mode = "sqlite"', 'publish_mode = "mcp"'))
+    method = "begin" if resource == "sessions" else "batch"
+    fake_session._replies["wiki_code_publish_" + method] = {
+        "error": "publication_quota_exceeded", "resource": resource, "hint": "private-detail",
+    }
+    monkeypatch.setattr(application, "RemoteMcpTransport", lambda **kw: _transport(fake_session))
+    out, err = StringIO(), StringIO()
+    args = ["code", "publish", "--project", str(project)]
+    if json_output:
+        args.append("--json")
+    rc = admin.run(args, environ=_CONFIGURED, stdout=out, stderr=err)
+    assert rc == 1
+    if json_output:
+        failure = json.loads(out.getvalue())
+        assert failure["error"] == "publication_failed"
+        assert failure["code"] == "publication_quota_exceeded"
+        assert failure["resource"] == resource
+    else:
+        assert "publication_quota_exceeded" in err.getvalue()
+        assert resource in err.getvalue()
+    assert "wiki_code_publish_abort" not in [name for name, args in fake_session.calls]
+    assert "private-detail" not in out.getvalue() + err.getvalue()

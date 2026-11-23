@@ -369,6 +369,7 @@ _LOCAL_POSTGRES_BINDING: base.PostgresBinding | None = None
 _HOSTED_POOL = None
 _HOSTED_CONFIG: Config | None = None
 _HOSTED_CODE_GRAPH = None
+_HOSTED_PUBLICATION_POOL = None
 _HOSTED_SPECIFICATIONS = None
 _MAINTENANCE_RUNTIME = None
 
@@ -379,11 +380,13 @@ def _install_hosted_runtime(
     code_graph=None,
     specifications=None,
     *,
+    publication_pool=None,
     maintenance_dsn: str | None = None,
     maintenance_options: str | None = None,
 ) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
-    global _HOSTED_SPECIFICATIONS, _MAINTENANCE_RUNTIME
+    global _HOSTED_SPECIFICATIONS, _HOSTED_PUBLICATION_POOL, _MAINTENANCE_RUNTIME
+    _HOSTED_PUBLICATION_POOL = publication_pool
     _HOSTED_POOL = pool
     _HOSTED_CONFIG = cfg
     _HOSTED_CODE_GRAPH = code_graph
@@ -415,13 +418,14 @@ def _stop_maintenance_runtime() -> None:
 
 def _clear_hosted_runtime(pool) -> None:
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
-    global _HOSTED_SPECIFICATIONS
+    global _HOSTED_SPECIFICATIONS, _HOSTED_PUBLICATION_POOL
     # Symmetric with the guard below: a foreign `pool` -- not the one
     # currently installed -- must not stop maintenance either, or clearing
     # it would kill a live maintenance runtime while leaving the actually
     # hosted pool (and its own runtime) installed and untouched.
     if _HOSTED_POOL is pool:
         _stop_maintenance_runtime()
+        _HOSTED_PUBLICATION_POOL = None
         _HOSTED_POOL = None
         _HOSTED_CONFIG = None
         _HOSTED_CODE_GRAPH = None
@@ -431,8 +435,9 @@ def _clear_hosted_runtime(pool) -> None:
 def _clear_hosted_runtime_for_test() -> None:
     """Restore the import-time ceiling; used by tests that install a fake pool."""
     global _HOSTED_POOL, _HOSTED_CONFIG, _HOSTED_CODE_GRAPH
-    global _HOSTED_SPECIFICATIONS
+    global _HOSTED_SPECIFICATIONS, _HOSTED_PUBLICATION_POOL
     _stop_maintenance_runtime()
+    _HOSTED_PUBLICATION_POOL = None
     _HOSTED_POOL = None
     _HOSTED_CONFIG = None
     _HOSTED_CODE_GRAPH = None
@@ -1713,11 +1718,28 @@ _CODE_PUBLICATION_LOCK_TIMEOUT_MS = 5000
 
 
 def _postgres_code_store(binding: base.PostgresBinding, owner_id: str):
+    from psycopg.types.json import Jsonb
+
+    if _HOSTED_POOL is None or _HOSTED_PUBLICATION_POOL is None:
+        raise ValueError("publication credentials unavailable")
+    settings = _hosted_code_graph_settings()
+
+    def issue_ticket(operation: str, arguments: dict) -> bytes:
+        ticket = secrets.token_bytes(32)
+        with _HOSTED_POOL.connection() as connection:
+            connection.execute(
+                "SELECT iwiki.issue_publication_ticket("
+                "%s, %s, %s, %s, %s, %s)",
+                (sha256(ticket).digest(), binding.iwiki_id, owner_id,
+                 binding.primary, operation, Jsonb(arguments)),
+            )
+        return ticket
+
     return _codegraph_application.create_postgres_publisher(
-        binding,
-        owner_id,
-        _hosted_code_graph_settings(),
+        binding, owner_id, settings,
         lock_timeout_ms=_CODE_PUBLICATION_LOCK_TIMEOUT_MS,
+        connection_factory=_HOSTED_PUBLICATION_POOL.connection,
+        issue_ticket=issue_ticket,
     )
 
 
@@ -6089,7 +6111,7 @@ def _initialize_postgres_storage(cfg: Config) -> None:
     if not _is_postgres(binding):
         return
     _postgres_migrations.require_schema_version(
-        binding.connection_dsn(), expected_version=10
+        binding.connection_dsn(), expected_version=11
     )
 
 

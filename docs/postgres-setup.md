@@ -66,14 +66,13 @@ pg_restore --dbname=service=iwiki_restore --clean --if-exists --schema=iwiki /se
 
 ## Runtime principals for the code graph
 
-Three database roles stay separate. The schema owner and migrator is an
-administration-only credential: it owns the `iwiki` schema and applies migrations
-through the admin commands, and it is never configured as a running server's login.
-The hosted service principal is the role a hosted server connects as. The direct
-runtime principal is the role a local direct-PostgreSQL indexer connects as. Both
-runtime roles are non-owner, hold no `BYPASSRLS`, run no migrations, and receive no
-database or schema `CREATE`. Row-level security is enabled with ordinary
-`ENABLE ROW LEVEL SECURITY`, never `FORCE`, because the owner is administration-only.
+Keep four database roles separate. The schema owner applies migrations and grants.
+The hosted service login authenticates requests and issues single-use publication
+tickets. A separate publication login consumes them. Direct PostgreSQL clients use
+their own runtime login. Give runtime logins no ownership, database or schema
+`CREATE`, or `BYPASSRLS`. Keep both hosted credentials in the protected server
+environment. Set `IWIKI_PUBLICATION_DB_USER` and `IWIKI_PUBLICATION_DB_PASSWORD`
+for the publication login. Keep the issuer in `[storage].user`.
 
 First use the administration-only configuration to apply migrations and create the base
 and domains. Any non-dry-run admin command except the schema compatibility path checks
@@ -95,6 +94,7 @@ token.
 ```bash
 iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_hosted --runtime hosted --read-domain backend --write-domain backend
 iwiki-mcp principal grant --config /opt/iwiki-mcp/admin-server.toml --iwiki team-wiki --principal iwiki_indexer --runtime direct --read-domain backend --write-domain backend
+iwiki-mcp principal publication-pair --config /opt/iwiki-mcp/admin-server.toml --issuer iwiki_hosted --publisher iwiki_publisher
 iwiki-mcp principal inspect --config /opt/iwiki-mcp/admin-server.toml --principal iwiki_hosted --json
 ```
 

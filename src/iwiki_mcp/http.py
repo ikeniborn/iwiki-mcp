@@ -16,6 +16,7 @@ from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp.server.auth.provider import AccessToken
 from mcp.server.transport_security import TransportSecuritySettings
 import psycopg
+from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
 import uvicorn
 
@@ -744,6 +745,7 @@ class HostedRuntime:
     pool: ConnectionPool
     app: Any
     dsn: str = field(repr=False)
+    publication_pool: ConnectionPool
     _closed: bool = field(default=False, init=False, repr=False)
 
     def close(self) -> None:
@@ -752,6 +754,7 @@ class HostedRuntime:
         from . import server
 
         server._clear_hosted_runtime(self.pool)
+        self.publication_pool.close()
         self.pool.close()
         self._closed = True
 
@@ -767,6 +770,14 @@ def _allowed_hosts(config: ServerConfig) -> list[str]:
     return sorted(hosts)
 
 
+def _publication_dsn(config: ServerConfig, env: Mapping[str, str]) -> str:
+    user = env.get("IWIKI_PUBLICATION_DB_USER", "").strip()
+    password = env.get("IWIKI_PUBLICATION_DB_PASSWORD", "")
+    if not user or not password or user == config.storage.user:
+        raise ConfigError("a separate publication database login is required")
+    return make_conninfo(admin._dsn(config), user=user, password=password)
+
+
 def prepare_runtime(
     config_path: str,
     *,
@@ -779,8 +790,14 @@ def prepare_runtime(
     cfg = admin._engine_config(config, env)
     probe(cfg)
     dsn = admin._dsn(config)
-    require_schema_version(dsn, expected_version=10)
+    require_schema_version(dsn, expected_version=11)
     require_hosted_runtime_principal(dsn)
+    from .postgres.publication_roles import require_publication_pair
+
+    publication_dsn = _publication_dsn(config, env)
+    require_publication_pair(
+        dsn, publication_dsn, config.code_graph.publication_limits, settings=config.code_graph,
+    )
     options = (
         f"-c statement_timeout={config.server.statement_timeout_ms} "
         f"-c lock_timeout={config.server.lock_timeout_ms}"
@@ -793,8 +810,17 @@ def prepare_runtime(
         name="iwiki-http",
         open=False,
     )
+    publication_pool = ConnectionPool(
+        publication_dsn,
+        min_size=0,
+        max_size=config.server.pool_max_size,
+        kwargs={"options": options},
+        name="iwiki-publication",
+        open=False,
+    )
     try:
         pool.open(wait=True)
+        publication_pool.open(wait=True)
         from . import server
 
         server._install_hosted_runtime(
@@ -802,6 +828,7 @@ def prepare_runtime(
             cfg,
             config.code_graph,
             config.specifications,
+            publication_pool=publication_pool,
             maintenance_dsn=dsn,
             maintenance_options=options,
         )
@@ -822,9 +849,10 @@ def prepare_runtime(
         from . import server
 
         server._clear_hosted_runtime(pool)
+        publication_pool.close()
         pool.close()
         raise
-    return HostedRuntime(config, cfg, pool, app, dsn)
+    return HostedRuntime(config, cfg, pool, app, dsn, publication_pool)
 
 
 def run_server(

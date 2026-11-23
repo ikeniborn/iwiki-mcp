@@ -130,6 +130,7 @@ def test_resume_lost_reply_pins_once_and_replays_committed_revision(project, mon
     "error,expected",
     [
         ("session_expired", "resume_expired"),
+        ("busy", "resume_busy"),
         ("snapshot_conflict", "resume_conflict"),
         ("unauthorized", "resume_access_denied"),
     ],
@@ -251,3 +252,35 @@ def test_malformed_remote_receipt_preserves_local_checkpoint(project, monkeypatc
     with pytest.raises(application.CodeGraphResumeError, match="resume_conflict"):
         application.resume_project(str(project), environ=ENV)
     assert len(peer.receipts) == 5
+
+
+@pytest.mark.parametrize("resource", ["sessions", "staged_bytes"])
+def test_resume_cli_reports_quota_then_completes_the_pinned_upload(project, monkeypatch, resource):
+    from io import StringIO
+    import json
+    from iwiki_mcp import admin
+
+    peer = Peer(None)
+    monkeypatch.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+    args = ["code", "publish", "--project", str(project), "--resume", "--json"]
+    refuse = {"error": "publication_quota_exceeded", "resource": resource, "hint": "private-detail"}
+    original_batch = peer.publish_batch
+    with monkeypatch.context() as limited:
+        if resource == "sessions":
+            limited.setattr(peer, "begin", lambda *args, **kw: refuse)
+        else:
+            def capped_batch(session, batch):
+                return refuse if peer.receipts else original_batch(session, batch)
+            limited.setattr(peer, "publish_batch", capped_batch)
+        out, err = StringIO(), StringIO()
+        assert admin.run(args, environ=ENV, stdout=out, stderr=err) == 1
+        failure = json.loads(out.getvalue())
+        assert failure["error"] == "resume_failed"
+        assert failure["code"] == "publication_quota_exceeded"
+        assert failure["resource"] == resource
+        assert "private-detail" not in out.getvalue() + err.getvalue()
+    assert len(peer.receipts) == (1 if resource == "staged_bytes" else 0)
+    monkeypatch.setattr(application, "code_runtime", lambda *args, **kw: pytest.fail("rebuilt pin"))
+    out = StringIO()
+    assert admin.run(args, environ=ENV, stdout=out, stderr=StringIO()) == 0
+    assert json.loads(out.getvalue())["snapshot_revision"] == peer.terminal

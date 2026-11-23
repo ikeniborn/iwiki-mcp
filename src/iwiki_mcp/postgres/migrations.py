@@ -9,6 +9,9 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict
 
 
+from .publication_schema import quota_migration_sql
+
+
 class MigrationError(RuntimeError):
     """Safe startup error for PostgreSQL migration failures."""
 
@@ -1090,6 +1093,7 @@ MIGRATIONS = (
     WIKI_LINK_CASCADE_MIGRATION,
     CODE_GRAPH_RELATIONS_FK_INDEX_MIGRATION,
     PUBLICATION_RESUME_MIGRATION,
+    Migration(version=11, statements=quota_migration_sql()),
 )
 
 
@@ -1244,7 +1248,7 @@ def _safe_server_label(dsn: str) -> str:
 
 def require_schema_version(
     dsn: str,
-    expected_version: int = 10,
+    expected_version: int = 11,
     *,
     connect_timeout_s: int = 10,
 ) -> None:
@@ -1649,3 +1653,72 @@ def rollback_v10_compatibility(
     except psycopg.Error as exc:
         raise MigrationError("schema version 10 compatibility rollback is unavailable") from exc
     return {"dry_run": False, "schema_version": 9, "removed_marker": 10}
+
+
+def rollback_v11_compatibility(settings, *, confirm: bool) -> dict[str, int | bool]:
+    """Remove quota enforcement and preserve every accepted graph and attempt."""
+    from .publication_roles import _set_grants
+    from .publication_schema import (
+        PRIVATE_FUNCTIONS, PRIVATE_TABLES, ROOT_TABLES, preserve_rollback_owners_sql,
+    )
+
+    if confirm is not True:
+        raise ValueError("confirmation must be literal true")
+    try:
+        with psycopg.connect(settings.dsn, connect_timeout=settings.connect_timeout_s) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('lock_timeout', %s, true), "
+                    "set_config('statement_timeout', %s, true)",
+                    (str(settings.lock_timeout_ms), str(settings.statement_timeout_ms)),
+                )
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK,))
+                cur.execute("SELECT max(version) FROM iwiki.schema_migrations")
+                if cur.fetchone() != (11,):
+                    raise MigrationError("schema version 11 compatibility rollback is unavailable")
+                cur.execute(
+                    "SELECT i.rolname,p.rolname FROM iwiki.publication_principals x "
+                    "JOIN pg_roles i ON i.oid=x.issuer JOIN pg_roles p ON p.oid=x.publisher"
+                )
+                for issuer, publisher in cur.fetchall():
+                    _set_grants(cur, publisher, issuer, revoke=True)
+                cur.execute(preserve_rollback_owners_sql())
+                for table in (*ROOT_TABLES, "code_graph_publication_sessions"):
+                    cur.execute("DROP TRIGGER quota_guard ON iwiki." + table)
+                cur.execute("DROP TRIGGER quota_account ON iwiki.code_graph_batches")
+                cur.execute(
+                    "ALTER TABLE iwiki.code_graph_publication_sessions DROP CONSTRAINT "
+                    "quota_usage_required"
+                )
+                cur.execute(
+                    "DROP POLICY quota_session_visibility ON iwiki.code_graph_publication_sessions"
+                )
+                cur.execute(
+                    "DROP POLICY quota_attempt_visibility ON iwiki.code_graph_publication_attempts"
+                )
+                cur.execute("DROP POLICY quota_batch_visibility ON iwiki.code_graph_batches")
+                cur.execute("DROP POLICY quota_snapshot_visibility ON iwiki.code_graph_snapshots")
+                for table in (
+                    "code_graph_files",
+                    "code_graph_symbols",
+                    "code_graph_relations",
+                    "code_graph_wiki_links",
+                ):
+                    cur.execute("DROP TRIGGER quota_child_insert ON iwiki." + table)
+                cur.execute(
+                    "ALTER TABLE iwiki.code_graph_publication_attempts "
+                    "DROP COLUMN quota_owner_kind, DROP COLUMN quota_owner"
+                )
+                cur.execute(
+                    next(
+                        s
+                        for s in GRAPH_MIGRATION_STATEMENTS
+                        if "CREATE OR REPLACE FUNCTION iwiki.database_principal_can_access" in s
+                    )
+                )
+                cur.execute("DROP TABLE " + ", ".join("iwiki." + t for t in PRIVATE_TABLES))
+                cur.execute("DROP FUNCTION " + ", ".join("iwiki." + f for f in PRIVATE_FUNCTIONS))
+                cur.execute("DELETE FROM iwiki.schema_migrations WHERE version=11")
+    except psycopg.Error as exc:
+        raise MigrationError("schema version 11 compatibility rollback is unavailable") from exc
+    return {"dry_run": False, "schema_version": 10, "removed_marker": 11}

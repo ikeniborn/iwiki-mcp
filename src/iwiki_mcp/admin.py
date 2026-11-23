@@ -22,6 +22,7 @@ from . import base as wiki_base
 from .codegraph import application as _codegraph_application
 from .codegraph.config import CodeGraphConfigError
 from .codegraph.mcp_adapter import CodeGraphAdapterError
+from .codegraph.publication import quota_resource
 from .engine.config import Config
 from .engine.config import ConfigError as _EngineConfigError
 from .engine.config import (
@@ -172,6 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
     principal_grant.add_argument("--write-domain", action="append", default=[])
     principal_grant.add_argument("--runtime", choices=("hosted", "direct"), required=True)
     principal_grant.add_argument("--json", action="store_true")
+    publication_pair = principal_commands.add_parser("publication-pair")
+    _add_config(publication_pair)
+    publication_pair.add_argument("--issuer", required=True)
+    publication_pair.add_argument("--publisher", required=True)
+    publication_pair.add_argument("--json", action="store_true")
     principal_inspect = principal_commands.add_parser("inspect")
     _add_config(principal_inspect)
     principal_inspect.add_argument("--principal", required=True)
@@ -181,10 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
     schema_commands = schema.add_subparsers(
         dest="schema_command", required=True, parser_class=_StrictArgumentParser
     )
-    rollback = schema_commands.add_parser("rollback-v5-compat")
-    _add_config(rollback)
-    rollback.add_argument("--confirm", action="store_true")
-    rollback.add_argument("--json", action="store_true")
+    for name in ("rollback-v5-compat", "rollback-v11-compat"):
+        rollback = schema_commands.add_parser(name)
+        _add_config(rollback)
+        rollback.add_argument("--confirm", action="store_true")
+        rollback.add_argument("--json", action="store_true")
 
     for name in ("set-create-domain", "set-domain-management"):
         action = token_commands.add_parser(name)
@@ -337,6 +344,7 @@ def _write_code_failure(
     error: str,
     duration_ms: int,
     checkpoint_failure: bool = False,
+    resource: str | None = None,
 ) -> None:
     if json_output:
         _write_code_json(
@@ -346,6 +354,8 @@ def _write_code_failure(
                 "publish_mode": publish_mode,
                 "error": error,
                 "duration_ms": duration_ms,
+                **({"code": "publication_quota_exceeded", "resource": resource}
+                   if resource else {}),
                 **({"reason": "parse_checkpoint_storage_failed"} if checkpoint_failure else {}),
             },
         )
@@ -368,6 +378,9 @@ def _write_code_failure(
         "resume_failed": "code graph recovery failed",
     }
     line = f"iwiki-mcp: {messages.get(error, 'code graph recovery failed')} (code={error})\n"
+    if resource:
+        line = (f"iwiki-mcp: publication_quota_exceeded (resource={resource}, category={error}). "
+                "Retry after capacity is available.\n")
     if checkpoint_failure:
         line = ("iwiki-mcp: parse_checkpoint_storage_failed: check local cache permissions "
                 "and available space (code=index_failed)\n")
@@ -481,7 +494,8 @@ def _run_code_publish(
         )
     except _codegraph_application.CodeGraphResumeError as exc:
         _write_code_failure(out if args.json else err, json_output=args.json,
-                            publish_mode=exc.publish_mode, error=exc.code, duration_ms=0)
+                            publish_mode=exc.publish_mode, error=exc.code, duration_ms=0,
+                            resource=exc.quota_resource)
         return exc.exit_code
     except _codegraph_application.CodeGraphPublishError as exc:
         error, exit_code = {
@@ -550,6 +564,7 @@ def _run_code_publish(
             error=error,
             duration_ms=outcome.duration_ms,
             checkpoint_failure=checkpoint_failure,
+            resource=quota_resource(outcome.publication) if error == "publication_failed" else None,
         )
         return 1
 
@@ -844,17 +859,17 @@ class AdminService:
     def inspect_principal(self, principal: str) -> dict:
         return inspect_runtime_principal(self.dsn, principal)
 
-    def rollback_schema_v5(self, *, confirm: bool) -> dict:
-        return rollback_v5_compatibility(
-            MigrationSettings(
-                dsn=self.dsn,
-                embed_model=self.config.models.embed_model,
-                embed_dimensions=self.config.models.embed_dimensions,
-                statement_timeout_ms=self.config.server.statement_timeout_ms,
-                lock_timeout_ms=self.config.server.lock_timeout_ms,
-            ),
-            confirm=confirm,
+    def migration_settings(self) -> MigrationSettings:
+        return MigrationSettings(
+            dsn=self.dsn,
+            embed_model=self.config.models.embed_model,
+            embed_dimensions=self.config.models.embed_dimensions,
+            statement_timeout_ms=self.config.server.statement_timeout_ms,
+            lock_timeout_ms=self.config.server.lock_timeout_ms,
         )
+
+    def rollback_schema_v5(self, *, confirm: bool) -> dict:
+        return rollback_v5_compatibility(self.migration_settings(), confirm=confirm)
 
     def import_git(self, iwiki_id: str, path: str, *, dry_run: bool) -> dict:
         if _embed is embed_texts and (
@@ -984,8 +999,22 @@ def _dispatch(args, service: AdminService):
                 args.write_domain,
                 args.runtime,
             )
+        if args.principal_command == "publication-pair":
+            from .postgres.publication_roles import provision_publication_pair
+
+            provision_publication_pair(
+                service.dsn, args.issuer, args.publisher,
+                service.config.code_graph.publication_limits, settings=service.config.code_graph,
+            )
+            return {"issuer": args.issuer, "publisher": args.publisher}
         if args.principal_command == "inspect":
             return service.inspect_principal(args.principal)
+    if args.command == "schema" and args.schema_command == "rollback-v11-compat":
+        from .postgres.migrations import rollback_v11_compatibility
+
+        if not args.confirm:
+            return {"dry_run": True, "target_schema_version": 10, "requires_quiescence": True}
+        return rollback_v11_compatibility(service.migration_settings(), confirm=True)
     if args.command == "schema" and args.schema_command == "rollback-v5-compat":
         return service.rollback_schema_v5(confirm=args.confirm)
     raise ValueError("unsupported administration command")

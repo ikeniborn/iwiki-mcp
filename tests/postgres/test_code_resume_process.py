@@ -139,3 +139,45 @@ admin.main()
         assert first["snapshot_revision"] != later_revision
         transport = RemoteMcpTransport(environ=env, primary="docs", verify_binding=True)
         assert McpCodeGraphReader(transport).status()["snapshot_revision"] == later_revision
+
+
+def test_resume_cli_retries_a_quota_refused_batch_on_the_original_session(
+    live_target, hosted_runtime, clean_postgres, tmp_path, monkeypatch,
+):
+    from dataclasses import replace
+    from io import StringIO
+    from iwiki_mcp import admin
+    from iwiki_mcp.postgres.publication_roles import provision_publication_pair
+
+    project = create_sqlite_project(tmp_path)
+    _configure_mcp_project(project)
+    args = ["code", "publish", "--project", str(project), "--resume", "--json"]
+    original = server._HOSTED_CODE_GRAPH
+
+    def install(settings):
+        provision_publication_pair(
+            clean_postgres, hosted_runtime.runtime.config.storage.user,
+            os.environ["IWIKI_PUBLICATION_DB_USER"], settings.publication_limits,
+        )
+        monkeypatch.setattr(server, "_HOSTED_CODE_GRAPH", settings)
+
+    install(replace(original, max_publisher_staged_bytes=1))
+    stdout = StringIO()
+    assert admin.run(args, environ=live_target, stdout=stdout, stderr=StringIO()) == 1
+    refusal = json.loads(stdout.getvalue())
+    assert refusal["error"] == "resume_failed"
+    assert refusal["code"] == "publication_quota_exceeded"
+    assert refusal["resource"] == "staged_bytes"
+
+    import psycopg
+    with psycopg.connect(clean_postgres, autocommit=True) as conn:
+        [(session_id,)] = conn.execute(
+            "SELECT session_id FROM iwiki.code_graph_publication_sessions WHERE state='staging'"
+        ).fetchall()
+        install(original)
+        stdout = StringIO()
+        assert admin.run(args, environ=live_target, stdout=stdout, stderr=StringIO()) == 0
+        assert json.loads(stdout.getvalue())["state"] == "ready"
+        assert conn.execute(
+            "SELECT session_id,state FROM iwiki.code_graph_publication_sessions"
+        ).fetchall() == [(session_id, "ready")]

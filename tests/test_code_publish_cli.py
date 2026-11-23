@@ -455,6 +455,25 @@ def test_non_ready_text_outcomes_are_stable_runtime_failures(
     assert stable_code in stderr
 
 
+@pytest.mark.parametrize(
+    "error,resource",
+    [
+        ("publication_quota_exceeded", "private-owner"),
+        ("busy", "staged_bytes"),
+        ("unauthorized", "sessions"),
+    ],
+)
+def test_cli_only_reports_resources_for_recognized_quota_refusals(monkeypatch, error, resource):
+    outcome = _outcome(publication_state="failed")
+    outcome.publication.update(error=error, resource=resource)
+    args = ["code", "publish", "--project", "/repo", "--json"]
+    code, stdout, _ = _run(args, monkeypatch, outcome)
+    failure = json.loads(stdout)
+    assert code == 1
+    assert failure["error"] == "publication_failed"
+    assert "resource" not in failure and "code" not in failure
+
+
 def test_json_publication_failure_keeps_selected_mode(monkeypatch):
     code, stdout, stderr = _run(
         ["code", "publish", "--project", "/repo", "--json"],

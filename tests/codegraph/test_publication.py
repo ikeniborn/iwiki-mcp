@@ -387,6 +387,7 @@ def test_publication_contract_values_are_closed_and_immutable():
         "invalid_attempt",
         "invalid_cursor",
         "resume_limits_changed",
+        "publication_quota_exceeded",
     )
     assert ADAPTER_ERROR_CODES == (
         "invalid_config",

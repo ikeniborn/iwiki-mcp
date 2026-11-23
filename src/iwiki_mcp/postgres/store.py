@@ -151,6 +151,17 @@ def provision_runtime_grant(
             exists, invalid = _principal_shape(cursor, principal)
             if not exists or invalid:
                 raise ValueError("invalid runtime principal")
+            cursor.execute("SELECT to_regclass('iwiki.publication_principals')")
+            if cursor.fetchone()[0] is not None:
+                cursor.execute("LOCK TABLE iwiki.publication_principals IN SHARE MODE")
+                cursor.execute(
+                    "SELECT EXISTS (SELECT FROM iwiki.publication_principals "
+                    "WHERE publisher=to_regrole(quote_ident(%s)) OR "
+                    "(issuer=to_regrole(quote_ident(%s)) AND %s='direct'))",
+                    (principal, principal, runtime),
+                )
+                if cursor.fetchone()[0]:
+                    raise ValueError("publication pair cannot receive this runtime grant")
             cursor.execute(
                 "SELECT slug, domain_id FROM iwiki.domains "
                 "WHERE iwiki_id = %s AND slug = ANY(%s)",
@@ -231,6 +242,16 @@ def provision_runtime_grant(
                     "iwiki.create_domain_for_principal(text, text) TO {}"
                 ).format(role)
             )
+            # Historical rollback fixtures can provision the pre-quota schema.
+            from .publication_schema import AUTHORIZE, CLEAN, SNAPSHOT_VISIBILITY, VISIBILITY
+            cursor.execute("SELECT to_regprocedure(%s)", ("iwiki." + AUTHORIZE,))
+            if cursor.fetchone()[0] is not None:
+                functions = (
+                    AUTHORIZE, *CLEAN, SNAPSHOT_VISIBILITY, VISIBILITY, "publication_now()",
+                )
+                cursor.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {} TO {}").format(
+                    sql.SQL(", ").join(sql.SQL("iwiki." + name) for name in functions), role
+                ))
     return {
         "principal": principal,
         "iwiki": iwiki_id,
