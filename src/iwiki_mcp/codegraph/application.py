@@ -40,6 +40,7 @@ from .publication import (
     PublicationSession,
     SnapshotPublisher,
     iter_snapshot_batches,
+    quota_resource,
 )
 from .query import validate_search_request
 from .store import _is_canonical_revision, code_graph_read_lock
@@ -513,6 +514,7 @@ def create_postgres_publisher(
     lock_timeout_ms: int = 5000,
     domain: str | None = None,
     connection_factory=None,
+    issue_ticket=None,
     schedule_local_cleanup: bool = False,
 ) -> PostgresCodeGraphStore:
     """Build one store for exactly one domain.
@@ -540,8 +542,11 @@ def create_postgres_publisher(
             settings, "superseded_cleanup_limit", 2
         ),
         connection_factory=connection_factory,
-        require_database_principal=True,
+        # Hosted startup verifies both roles. Each ticket consumption checks current grants.
+        require_database_principal=issue_ticket is None,
     )
+    if issue_ticket is not None:
+        kwargs["issue_ticket"] = issue_ticket
     if schedule_local_cleanup:
         kwargs["cleanup_binding"] = binding
         kwargs["cleanup_settings"] = settings
@@ -794,7 +799,8 @@ def publish_snapshot(
         ):
             accepted = publisher.publish_batch(session, batch)
             if accepted.get("accepted") is not True:
-                _abort_preserving_failure(publisher, session)
+                if quota_resource(accepted) is None:
+                    _abort_preserving_failure(publisher, session)
                 return accepted
             if control is not None:
                 control.acknowledge_batch(batch.kind, batch.ordinal, batch.byte_count)

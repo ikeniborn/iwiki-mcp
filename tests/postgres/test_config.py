@@ -808,3 +808,42 @@ def test_load_server_config_rejects_duplicate_normalized_origins(tmp_path):
 
     with pytest.raises(ConfigError, match="allowed_origins"):
         load_server_config(_write_config(tmp_path, text), environ=_runtime_env())
+
+
+@pytest.mark.parametrize(
+    ("name", "default"),
+    [
+        ("max_server_sessions", 64),
+        ("max_publisher_sessions", 8),
+        ("max_server_staged_bytes", 2147483648),
+        ("max_publisher_staged_bytes", 268435456),
+    ],
+)
+def test_hosted_publication_quota_bounds(name, default):
+    from iwiki_mcp.postgres.config import ConfigError, HostedCodeGraphConfig
+
+    assert getattr(HostedCodeGraphConfig(), name) == default
+    assert getattr(HostedCodeGraphConfig.from_mapping({name: 7}), name) == 7
+    for value in (False, 0, -1, 2**63):
+        with pytest.raises(ConfigError, match=name):
+            HostedCodeGraphConfig.from_mapping({name: value})
+
+
+def test_publication_login_uses_configured_database_and_separate_credentials(tmp_path):
+    from psycopg.conninfo import conninfo_to_dict
+    from iwiki_mcp import http
+    from iwiki_mcp.postgres.config import ConfigError, load_server_config
+
+    config = load_server_config(_write_config(tmp_path, _server_toml()), _runtime_env())
+    credentials = {
+        "IWIKI_PUBLICATION_DB_USER": "publisher",
+        "IWIKI_PUBLICATION_DB_PASSWORD": "publication-test-password",
+    }
+    values = conninfo_to_dict(http._publication_dsn(config, credentials))
+    assert (values["dbname"], values["sslmode"], values["user"], values["password"]) == (
+        config.storage.database, config.storage.sslmode, "publisher",
+        credentials["IWIKI_PUBLICATION_DB_PASSWORD"],
+    )
+    for invalid in ({}, {**credentials, "IWIKI_PUBLICATION_DB_USER": config.storage.user}):
+        with pytest.raises(ConfigError, match="separate publication database login"):
+            http._publication_dsn(config, invalid)

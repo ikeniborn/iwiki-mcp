@@ -9,7 +9,7 @@ import time
 from .canonical import canonical_sha256
 from .checkpoint import CodeGraphResumeError
 from .indexer import BuildControl
-from .publication import PublicationSession, SnapshotHeader
+from .publication import PublicationSession, SnapshotHeader, quota_resource
 
 
 class ResumeProgress:
@@ -51,6 +51,9 @@ def require_response(reply):
     if "error" not in reply:
         return
     code = reply.get("code") or reply["error"]
+    resource = quota_resource(reply)
+    if resource is not None:
+        raise CodeGraphResumeError("resume_failed", quota_resource=resource)
     if code == "remote_mcp_failed":
         if reply.get("status") in (401, 403):
             code = "unauthorized"

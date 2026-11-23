@@ -67,15 +67,13 @@ One batch is one delete of at most 10,000 rows from one child table of one snaps
 each batch commits on its own. A kill therefore costs at most that one batch, and the
 next cycle resumes where it stopped. A worker holds one connection for a whole cycle and
 draws it from a maintenance pool of its own, never from the pool the tools and
-authentication share. The server's total PostgreSQL connections are therefore the
-tools-and-auth pool (`pool_max_size`, a required setting with no shipped default — 10 in
-the sample `server.toml` in [deployment.md](deployment.md)) plus the two maintenance
-workers plus, at worst, the tool ceiling (`pool_max_size - 2`, 8 at the sample size) of
-short-lived connections that three hosted per-request paths still open outside both pools
-for principal validation — 20 at the sample size, not twelve. Those connects are transient
-and already bounded by the same tool ceiling as every other tool call, so they never reach
-into the reserved authentication connections; they do mean `max_connections` has to be
-sized against this larger total, not against the pool and workers alone.
+authentication share. When sizing PostgreSQL for a replica, allow up to
+`pool_max_size` connections for authentication and tools, up to `pool_max_size` for the
+separate publication login, and two maintenance connections. The publication pool
+starts empty and reuses connections on demand. Allow up to another `pool_max_size - 2`
+connections for transient principal checks at the normal tool ceiling. With
+`pool_max_size = 10`, the resulting conservative budget is 30 connections per replica.
+Budget separately for direct publishers and database administration.
 
 The direct-PostgreSQL CLI publisher has no hosted server, so no maintenance pool or worker
 set exists for its sweep to queue against; its own `begin` call falls back to one raw
@@ -185,6 +183,42 @@ unbounded result or load a whole graph implicitly.
 
 The first publication into an empty domain is an ordinary session: status reports
 `missing_snapshot` until the first `finalize` succeeds.
+
+## Hosted publication quotas
+
+Configure the following positive integer limits in the hosted operator's `server.toml`.
+The example shows the defaults.
+
+```toml
+[code_graph]
+max_server_sessions = 64
+max_publisher_sessions = 8
+max_server_staged_bytes = 2147483648
+max_publisher_staged_bytes = 268435456
+```
+
+The server limits cover all writers sharing the publication database. Each publisher's
+usage spans its domains. For hosted uploads the publisher is the authenticated token.
+For new direct PostgreSQL uploads the publisher is the database login. Before changing
+limits, coordinate every writer using that database so they resume with the same limits.
+
+A new session consumes one slot until completion, cancellation or effective lease expiry.
+An acknowledged batch consumes its canonical JSON payload size in bytes. Finalization,
+cancellation and cleanup return those bytes when deletion commits. An expired upload
+still consumes bytes during staging retention and until cleanup deletes the data.
+Measure database disk usage and peak finalization memory separately.
+
+When a request would exceed a limit, the server immediately returns
+`publication_quota_exceeded` with resource `sessions` or `staged_bytes`.
+A lock timeout returns `busy`. Lowering a limit preserves existing uploads.
+An identical receipt replay costs zero bytes. The active revision and acknowledged
+receipts survive a refusal. The refused batch does not extend the lease.
+
+The CLI exits with status 1. JSON keeps the existing `error` category
+(`publication_failed` or `resume_failed`) and includes `code` and `resource`.
+For a resumable upload, keep the checkpoint and repeat the original command after
+capacity returns, while its lease and recovery deadline are valid. An ordinary CLI
+retry starts a new upload.
 
 ## Scheduled publisher operation
 

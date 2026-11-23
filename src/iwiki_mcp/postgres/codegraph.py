@@ -99,16 +99,36 @@ _RECEIPT_CURSOR = re.compile(
 
 
 class _AttemptExpired(Exception):
-    """Roll back tentative writes before reporting an expired recoverable upload."""
+    """Roll back tentative writes before reporting an expired upload."""
 
 
-def _report_expiry(operation):
+class _InvalidRecoveryDeadline(Exception):
+    """Roll back tentative writes before reporting an out-of-range deadline."""
+
+
+def _report_publication_error(operation):
     @wraps(operation)
     def wrapped(*args, **kwargs):
         try:
             return operation(*args, **kwargs)
         except _AttemptExpired:
             return dict(_EXPIRED)
+        except _InvalidRecoveryDeadline:
+            return dict(_INVALID_ATTEMPT)
+        except psycopg.Error as error:
+            resource = {"IQ001": "sessions", "IQ002": "staged_bytes"}.get(error.sqlstate)
+            if resource:
+                return _error(
+                    "publication_quota_exceeded", "retry when publication capacity is available",
+                    resource=resource,
+                )
+            if error.sqlstate == "IQ003":
+                return dict(_EXPIRED)
+            if error.sqlstate in {_LOCK_NOT_AVAILABLE, "40001", "40P01"}:
+                return dict(_BUSY)
+            if error.sqlstate == "42501":
+                return dict(_UNAUTHORIZED)
+            raise
     return wrapped
 
 
@@ -161,10 +181,12 @@ class PostgresCodeGraphStore:
         connection_factory: Callable[[], ContextManager[psycopg.Connection]] | None = None,
         require_database_principal: bool = False,
         clock: Callable[[], datetime.datetime] | None = None,
+        issue_ticket: Callable[[str, dict], bytes] | None = None,
         cleanup_binding: object | None = None,
         cleanup_settings: object | None = None,
     ) -> None:
         self._dsn = dsn
+        self._issue_ticket = issue_ticket
         self.iwiki_id = iwiki_id
         self.domain = domain
         self.owner_id = owner_id
@@ -223,6 +245,29 @@ class PostgresCodeGraphStore:
         with self._connection() as connection:
             with self._transaction_on(connection) as cursor:
                 yield cursor
+
+    @contextmanager
+    def _publication_transaction(self, operation, claims):
+        # Issue on the authentication connection before acquiring a publication connection.
+        ticket = self._issue_ticket(operation, claims) if self._issue_ticket else None
+        with self._transaction() as cursor:
+            if operation == "inspect":
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            else:
+                cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            cursor.execute(
+                "SELECT set_config('lock_timeout', %s, true)",
+                (f"{self._lock_timeout_ms}ms",),
+            )
+            domain_id = self._domain_id(cursor)
+            if operation == "begin":
+                self._cleanup_staging(cursor, domain_id)
+            cursor.execute(
+                "SELECT iwiki.authorize_code_publication(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (self.iwiki_id, domain_id, self.owner_id, operation, Jsonb(claims), ticket,
+                 claims.get("generated_session_id"), claims.get("generated_snapshot_id")),
+            )
+            yield cursor, domain_id
 
     def _domain_id(self, cursor) -> int:
         cursor.execute(
@@ -321,8 +366,14 @@ class PostgresCodeGraphStore:
             return dict(_EXPIRED)
         return None
 
-    def _check_commit_deadline(self, deadline, lease_expires_at):
-        if deadline is not None and self._clock() >= min(deadline, lease_expires_at):
+    @staticmethod
+    def _database_now(cursor):
+        cursor.execute("SELECT iwiki.publication_now()")
+        return cursor.fetchone()[0]
+
+    def _check_commit_deadline(self, cursor, deadline, lease_expires_at):
+        expires = min(deadline, lease_expires_at) if deadline is not None else lease_expires_at
+        if self._database_now(cursor) >= expires:
             raise _AttemptExpired
 
     def _renew(self, cursor, domain_id: int, session_id: str, now):
@@ -336,15 +387,13 @@ class PostgresCodeGraphStore:
 
     # -- lifecycle ------------------------------------------------------
 
-    @_report_expiry
+    @_report_publication_error
     def begin(
         self, header: SnapshotHeader, *, attempt_key: str | None = None,
         recovery_deadline: int | None = None, max_batch_rows: int | None = None,
         max_batch_bytes: int | None = None,
     ) -> PublicationSession | dict[str, object]:
         """Stage one owned session after bounded expired-staging cleanup."""
-        now = self._clock()
-        expires = now + datetime.timedelta(seconds=self._session_ttl_seconds)
         deadline = None
         if attempt_key is not None or recovery_deadline is not None:
             if self._legacy_sessions_only:
@@ -354,16 +403,24 @@ class PostgresCodeGraphStore:
                     or type(max_batch_rows) is not int or max_batch_rows <= 0
                     or type(max_batch_bytes) is not int or max_batch_bytes <= 0):
                 return dict(_INVALID_ATTEMPT)
-            if recovery_deadline <= now.timestamp():
-                return dict(_EXPIRED)
-            if recovery_deadline > now.timestamp() + _RECOVERY_SECONDS:
-                return dict(_INVALID_ATTEMPT)
-            deadline = datetime.datetime.fromtimestamp(recovery_deadline, datetime.timezone.utc)
-            expires = min(deadline, expires)
         session_id = secrets.token_hex(16)
         snapshot_id = secrets.token_hex(16)
-        with self._transaction() as cursor:
-            domain_id = self._domain_id(cursor)
+        claims = {
+            "header": header_payload(header), "attempt_key": attempt_key,
+            "recovery_deadline": recovery_deadline,
+            "max_batch_rows": max_batch_rows, "max_batch_bytes": max_batch_bytes,
+            "generated_session_id": session_id, "generated_snapshot_id": snapshot_id,
+        }
+        with self._publication_transaction("begin", claims) as (cursor, domain_id):
+            now = self._database_now(cursor)
+            expires = now + datetime.timedelta(seconds=self._session_ttl_seconds)
+            if recovery_deadline is not None:
+                if recovery_deadline <= now.timestamp():
+                    raise _AttemptExpired
+                if recovery_deadline > now.timestamp() + _RECOVERY_SECONDS:
+                    raise _InvalidRecoveryDeadline
+                deadline = datetime.datetime.fromtimestamp(recovery_deadline, datetime.timezone.utc)
+                expires = min(deadline, expires)
             self._domain_state(cursor, domain_id)
             generation = self._markdown_generation(cursor, domain_id)
             base_revision = self._active_revision(cursor, domain_id)
@@ -375,16 +432,15 @@ class PostgresCodeGraphStore:
                     "header_digest, graph_payload_revision, cursor_key, max_batch_rows, "
                     "max_batch_bytes, initial_lease, base_snapshot_revision, base_markdown_token) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                    "ON CONFLICT (iwiki_id, domain_id, attempt_key) DO NOTHING",
+                    "ON CONFLICT DO NOTHING",
                     (self.iwiki_id, domain_id, self.owner_id, attempt_key, session_id, deadline,
                      digest, header.graph_payload_revision, secrets.token_hex(32),
                      max_batch_rows, max_batch_bytes, expires, base_revision, generation),
                 )
                 if not cursor.rowcount:
                     return self._repeat_begin(
-                        cursor, domain_id, attempt_key, digest, deadline, self._clock()
+                        cursor, domain_id, attempt_key, digest, deadline, self._database_now(cursor)
                     )
-            self._cleanup_staging(cursor, domain_id, now)
             cursor.execute(
                 "INSERT INTO iwiki.code_graph_snapshots "
                 "(iwiki_id, domain_id, snapshot_id, state, header, "
@@ -423,7 +479,13 @@ class PostgresCodeGraphStore:
                     deadline,
                 ),
             )
-            self._check_commit_deadline(deadline, expires)
+            cursor.execute(
+                "SELECT lease_expires_at FROM iwiki.code_graph_publication_sessions "
+                "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
+                (self.iwiki_id, domain_id, session_id),
+            )
+            expires = cursor.fetchone()[0]
+            self._check_commit_deadline(cursor, deadline, expires)
         self._schedule_local_cleanup()
         return PublicationSession(
             session_id=session_id,
@@ -456,13 +518,13 @@ class PostgresCodeGraphStore:
             return dict(_EXPIRED)
         return PublicationSession(row[2], row[3].isoformat(), row[4], row[5], row[6], row[7])
 
+    @_report_publication_error
     def inspect(self, session_id: str, cursor: str | None = None) -> dict[str, object]:
         """Read one stable receipt page or the outcome preserved across snapshot cleanup."""
         if self._legacy_sessions_only:
             return dict(_BIND_REQUIRED)
-        with self._transaction() as db:
-            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            domain_id = self._domain_id(db)
+        claims = {"session_id": session_id, "cursor": cursor}
+        with self._publication_transaction("inspect", claims) as (db, domain_id):
             db.execute(
                 "SELECT a.recovery_deadline, a.header_digest, a.graph_payload_revision, "
                 "a.max_batch_rows, a.max_batch_bytes, a.terminal_result, a.cursor_key, "
@@ -477,7 +539,7 @@ class PostgresCodeGraphStore:
             if row is None:
                 return dict(_UNAUTHORIZED)
             deadline, digest, revision, max_rows, max_bytes, terminal, secret, lease = row
-            now = self._clock()
+            now = self._database_now(db)
             if deadline <= now:
                 return dict(_EXPIRED)
             after = ("", -1)
@@ -550,15 +612,19 @@ class PostgresCodeGraphStore:
                 type(exc).__name__,
             )
 
-    @_report_expiry
+    @_report_publication_error
     def publish_batch(
         self, session: PublicationSession, batch: SnapshotBatch
     ) -> dict[str, object]:
         """Accept one idempotent batch under owner, state, and lease checks."""
-        with self._transaction() as cursor:
-            domain_id = self._domain_id(cursor)
+        claims = {
+            "session_id": session.session_id, "kind": batch.kind, "ordinal": batch.ordinal,
+            "payload_hash": batch.payload_hash, "row_count": batch.row_count,
+            "byte_count": batch.byte_count,
+        }
+        with self._publication_transaction("batch", claims) as (cursor, domain_id):
             record = self._load_session(cursor, domain_id, session.session_id)
-            now = self._clock()
+            now = self._database_now(cursor)
             rejection = self._guard(record, now)
             if rejection is not None:
                 return rejection
@@ -608,93 +674,110 @@ class PostgresCodeGraphStore:
                 )
             self._renew(cursor, domain_id, session.session_id, now)
             # Judge acceptance against the original lease, before this batch's renewal.
-            self._check_commit_deadline(record["recovery_deadline"], record["lease_expires_at"])
+            self._check_commit_deadline(
+                cursor, record["recovery_deadline"], record["lease_expires_at"]
+            )
         return {"accepted": True}
 
-    @_report_expiry
+    @_report_publication_error
     def finalize(self, session: PublicationSession) -> dict[str, object]:
         """Activate one complete snapshot atomically or return an exact code."""
-        now = self._clock()
-        try:
-            with self._transaction() as cursor:
-                domain_id = self._domain_id(cursor)
-                record = self._load_session(
-                    cursor, domain_id, session.session_id
+        claims = {"session_id": session.session_id}
+        with self._publication_transaction("finalize", claims) as (cursor, domain_id):
+            record = self._load_session(cursor, domain_id, session.session_id)
+            now = self._database_now(cursor)
+            if record is None:
+                return self._finalize_attempt(cursor, domain_id, session.session_id, now)
+            rejection = self._guard(record, now)
+            if rejection is not None:
+                return rejection
+            if record["state"] != "staging":
+                terminal = record["terminal_result"]
+                return dict(terminal) if terminal else dict(
+                    _SNAPSHOT_CONFLICT
                 )
-                rejection = self._guard(record, now)
+            rows, failure = self._materialize(
+                cursor, domain_id, session.session_id
+            )
+            if failure is not None:
+                return failure
+            header = self._header(cursor, domain_id, record["snapshot_id"])
+            if graph_payload_revision(rows) != header[
+                "graph_payload_revision"
+            ]:
+                return dict(_REVISION_MISMATCH)
+            pages = self._markdown_pages(cursor, domain_id)
+            if pages is None:
+                return dict(_MARKDOWN_UNAVAILABLE)
+            revision = markdown_revision(
+                tuple(
+                    MarkdownPageSnapshot(slug=slug, markdown=markdown)
+                    for _page_id, slug, markdown in pages
+                )
+            )
+            links = _derive_links(pages, rows, self.domain)
+            lock_id, _active = self._domain_state(cursor, domain_id)
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (_LOCK_NAMESPACE, lock_id),
+            )
+            if self._active_revision(cursor, domain_id) != record[
+                "base_snapshot_revision"
+            ]:
+                return dict(_SNAPSHOT_CONFLICT)
+            if self._markdown_generation(cursor, domain_id) != record[
+                "captured_markdown_generation"
+            ]:
+                return dict(_SNAPSHOT_CONFLICT)
+            if record["recovery_deadline"] is not None:
+                rejection = self._guard(record, self._database_now(cursor))
                 if rejection is not None:
                     return rejection
-                if record["state"] != "staging":
-                    terminal = record["terminal_result"]
-                    return dict(terminal) if terminal else dict(
-                        _SNAPSHOT_CONFLICT
-                    )
-                rows, failure = self._materialize(
-                    cursor, domain_id, session.session_id
-                )
-                if failure is not None:
-                    return failure
-                header = self._header(cursor, domain_id, record["snapshot_id"])
-                if graph_payload_revision(rows) != header[
-                    "graph_payload_revision"
-                ]:
-                    return dict(_REVISION_MISMATCH)
-                pages = self._markdown_pages(cursor, domain_id)
-                if pages is None:
-                    return dict(_MARKDOWN_UNAVAILABLE)
-                revision = markdown_revision(
-                    tuple(
-                        MarkdownPageSnapshot(slug=slug, markdown=markdown)
-                        for _page_id, slug, markdown in pages
-                    )
-                )
-                links = _derive_links(pages, rows, self.domain)
-                lock_id, _active = self._domain_state(cursor, domain_id)
-                cursor.execute(
-                    "SELECT set_config('lock_timeout', %s, true)",
-                    (f"{self._lock_timeout_ms}ms",),
-                )
-                cursor.execute(
-                    "SELECT pg_advisory_xact_lock(%s, %s)",
-                    (_LOCK_NAMESPACE, lock_id),
-                )
-                if self._active_revision(cursor, domain_id) != record[
-                    "base_snapshot_revision"
-                ]:
-                    return dict(_SNAPSHOT_CONFLICT)
-                if self._markdown_generation(cursor, domain_id) != record[
-                    "captured_markdown_generation"
-                ]:
-                    return dict(_SNAPSHOT_CONFLICT)
-                if record["recovery_deadline"] is not None:
-                    rejection = self._guard(record, self._clock())
-                    if rejection is not None:
-                        return rejection
-                result = self._activate(
-                    cursor,
-                    domain_id,
-                    session,
-                    record,
-                    rows,
-                    header,
-                    now,
-                    revision,
-                    links,
-                )
-                self._check_commit_deadline(record["recovery_deadline"], record["lease_expires_at"])
-                return result
-        except psycopg.errors.LockNotAvailable:
-            return dict(_BUSY)
-        except psycopg.Error as exc:
-            if getattr(exc, "sqlstate", None) == _LOCK_NOT_AVAILABLE:
-                return dict(_BUSY)
-            raise
+            result = self._activate(
+                cursor,
+                domain_id,
+                session,
+                record,
+                rows,
+                header,
+                now,
+                revision,
+                links,
+            )
+            self._check_commit_deadline(
+                cursor, record["recovery_deadline"], record["lease_expires_at"]
+            )
+            return result
 
+    def _finalize_attempt(self, cursor, domain_id, session_id, now):
+        cursor.execute(
+            "SELECT recovery_deadline, terminal_result "
+            "FROM iwiki.code_graph_publication_attempts "
+            "WHERE iwiki_id = %s AND domain_id = %s AND owner_id = %s AND session_id = %s",
+            (self.iwiki_id, domain_id, self.owner_id, session_id),
+        )
+        attempt = cursor.fetchone()
+        if attempt is None:
+            return dict(_UNAUTHORIZED)
+        if self._legacy_sessions_only:
+            return dict(_BIND_REQUIRED)
+        if attempt[0] <= now or attempt[1] is None:
+            return dict(_EXPIRED)
+        return dict(attempt[1])
+
+    def _delete_session_batches(self, cursor, domain_id, session_id):
+        cursor.execute(
+            "DELETE FROM iwiki.code_graph_batches "
+            "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
+            (self.iwiki_id, domain_id, session_id),
+        )
+
+    @_report_publication_error
     def abort(self, session: PublicationSession) -> dict[str, object]:
         """Discard one owned staging session and its staged snapshot."""
-        now = self._clock()
-        with self._transaction() as cursor:
-            domain_id = self._domain_id(cursor)
+        claims = {"session_id": session.session_id}
+        with self._publication_transaction("abort", claims) as (cursor, domain_id):
+            now = self._database_now(cursor)
             record = self._load_session(cursor, domain_id, session.session_id)
             rejection = self._session_access(record)
             if rejection is not None:
@@ -714,11 +797,7 @@ class PostgresCodeGraphStore:
                     session.session_id,
                 ),
             )
-            cursor.execute(
-                "DELETE FROM iwiki.code_graph_batches "
-                "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
-                (self.iwiki_id, domain_id, session.session_id),
-            )
+            self._delete_session_batches(cursor, domain_id, session.session_id)
             self._fail_snapshot(cursor, domain_id, record["snapshot_id"])
         return {"state": "aborted"}
 
@@ -726,7 +805,7 @@ class PostgresCodeGraphStore:
         """Drop at most the configured number of expired staging sessions."""
         with self._transaction() as cursor:
             domain_id = self._domain_id(cursor)
-            return self._cleanup_staging(cursor, domain_id, now)
+            return self._cleanup_staging(cursor, domain_id)
 
     def _snapshot_rows(self, cursor, domain_id: int, snapshot_id: str) -> dict:
         """Rehydrate an activated snapshot into the shape derivation expects.
@@ -874,39 +953,13 @@ class PostgresCodeGraphStore:
 
     # -- helpers --------------------------------------------------------
 
-    def _cleanup_attempts(self, cursor, domain_id: int, now) -> None:
+    def _cleanup_staging(self, cursor, domain_id: int) -> int:
         cursor.execute(
-            "WITH expired AS MATERIALIZED ("
-            "SELECT session_id FROM iwiki.code_graph_publication_attempts "
-            "WHERE iwiki_id = %s AND domain_id = %s AND recovery_deadline <= %s "
-            "ORDER BY recovery_deadline LIMIT %s FOR UPDATE SKIP LOCKED) "
-            "DELETE FROM iwiki.code_graph_publication_attempts a USING expired "
-            "WHERE a.iwiki_id = %s AND a.domain_id = %s AND a.session_id = expired.session_id",
-            (self.iwiki_id, domain_id, now, self._staging_cleanup_limit, self.iwiki_id, domain_id),
+            "SELECT iwiki.cleanup_publication_staging(%s,%s,%s,%s)",
+            (self.iwiki_id, domain_id, self._staging_retention_seconds,
+             self._staging_cleanup_limit),
         )
-
-    def _cleanup_staging(self, cursor, domain_id: int, now) -> int:
-        self._cleanup_attempts(cursor, domain_id, now)
-        threshold = now - datetime.timedelta(
-            seconds=self._staging_retention_seconds
-        )
-        cursor.execute(
-            "SELECT session_id, snapshot_id "
-            "FROM iwiki.code_graph_publication_sessions "
-            "WHERE iwiki_id = %s AND domain_id = %s AND state = 'staging' "
-            "AND lease_expires_at <= %s "
-            "ORDER BY lease_expires_at LIMIT %s FOR UPDATE SKIP LOCKED",
-            (self.iwiki_id, domain_id, threshold, self._staging_cleanup_limit),
-        )
-        expired = cursor.fetchall()
-        for session_id, snapshot_id in expired:
-            cursor.execute(
-                "DELETE FROM iwiki.code_graph_publication_sessions "
-                "WHERE iwiki_id = %s AND domain_id = %s AND session_id = %s",
-                (self.iwiki_id, domain_id, session_id),
-            )
-            self._discard_snapshot(cursor, domain_id, snapshot_id)
-        return len(expired)
+        return cursor.fetchone()[0]
 
     # Order matters: `code_graph_files` drains last because it roots the
     # child foreign-key chain (see `_delete_snapshot_row`'s comment below),
@@ -940,7 +993,7 @@ class PostgresCodeGraphStore:
         try:
             with self._transaction_on(connection) as cursor:
                 domain_id = self._domain_id(cursor)
-                self._cleanup_attempts(cursor, domain_id, self._clock())
+                self._cleanup_staging(cursor, domain_id)
             while progress[0] < self._CLEANUP_CYCLE_ROWS:
                 with self._transaction_on(connection) as cursor:
                     candidates = self._superseded_candidates(
@@ -1078,72 +1131,18 @@ class PostgresCodeGraphStore:
         limit: int,
     ) -> int:
         cursor.execute(
-            f"DELETE FROM iwiki.{table} WHERE ctid IN ("
-            f"SELECT ctid FROM iwiki.{table} "
-            "WHERE iwiki_id = %s AND domain_id = %s "
-            "AND snapshot_id = %s LIMIT %s)",
-            (self.iwiki_id, domain_id, snapshot_id, limit),
+            "SELECT iwiki.cleanup_publication_snapshot(%s,%s,%s,%s,%s,%s)",
+            (self.iwiki_id, domain_id, snapshot_id, table,
+             self._superseded_retention_seconds, limit),
         )
-        return cursor.rowcount
+        return cursor.fetchone()[0]
 
-    def _delete_snapshot_row(
-        self, cursor, domain_id: int, snapshot_id: str
-    ) -> int:
-        """Delete the snapshot row once its files are gone -- and only then.
-
-        `code_graph_files` roots the child foreign-key chain this snapshot's
-        rows sit in: `code_graph_symbols.file_id` is `NOT NULL` with a
-        cascading foreign key onto `code_graph_files` (migrations.py:222-226),
-        and `code_graph_relations.source_file_id` is `NOT NULL` with a
-        cascading foreign key onto `code_graph_files` (migrations.py:245-249),
-        and `code_graph_wiki_links` has a cascading foreign key onto
-        `code_graph_relations` (migrations.py:294-298). An empty
-        `code_graph_files` therefore implies every other child table is
-        already empty by referential integrity, not by an assumption about
-        the order `_CLEANUP_CHILD_TABLES` happened to drain in -- which is
-        what lets this guard check one table instead of four. This exact
-        reasoning was read wrong three times on record (issue 104, the
-        intent's first draft, and the spec) and cost a plan-gate reversal;
-        `tests/postgres/test_code_graph_publication.py::
-        test_cleanup_deletes_a_snapshot_row_only_after_every_child_is_gone`
-        pins it -- read that before touching this guard.
-        """
-        cursor.execute(
-            "DELETE FROM iwiki.code_graph_snapshots "
-            "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
-            "AND state = 'ready' "
-            "AND snapshot_id NOT IN ("
-            "SELECT active_snapshot_id FROM iwiki.code_graph_domain_state "
-            "WHERE iwiki_id = %s AND domain_id = %s "
-            "AND active_snapshot_id IS NOT NULL) "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM iwiki.code_graph_files f "
-            "WHERE f.iwiki_id = %s AND f.domain_id = %s "
-            "AND f.snapshot_id = %s)",
-            (
-                self.iwiki_id,
-                domain_id,
-                snapshot_id,
-                self.iwiki_id,
-                domain_id,
-                self.iwiki_id,
-                domain_id,
-                snapshot_id,
-            ),
-        )
-        return cursor.rowcount
+    def _delete_snapshot_row(self, cursor, domain_id: int, snapshot_id: str) -> int:
+        return self._delete_batch(cursor, "code_graph_snapshots", domain_id, snapshot_id, 1)
 
     def _fail_snapshot(self, cursor, domain_id: int, snapshot_id: str):
         cursor.execute(
             "UPDATE iwiki.code_graph_snapshots SET state = 'failed' "
-            "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
-            "AND state = 'staging'",
-            (self.iwiki_id, domain_id, snapshot_id),
-        )
-
-    def _discard_snapshot(self, cursor, domain_id: int, snapshot_id: str):
-        cursor.execute(
-            "DELETE FROM iwiki.code_graph_snapshots "
             "WHERE iwiki_id = %s AND domain_id = %s AND snapshot_id = %s "
             "AND state = 'staging'",
             (self.iwiki_id, domain_id, snapshot_id),
@@ -1312,6 +1311,7 @@ class PostgresCodeGraphStore:
                 session.session_id,
             ),
         )
+        self._delete_session_batches(cursor, domain_id, session.session_id)
         return result
 
 

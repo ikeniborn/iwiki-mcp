@@ -56,7 +56,7 @@ def test_v6_is_append_only_and_separate_from_code_graph_schema():
     from iwiki_mcp.postgres.store import _PROTECTED_TABLES
 
     assert tuple(item.version for item in MIGRATIONS) == (
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     )
     protected = set(_PROTECTED_TABLES)
     assert {
@@ -262,7 +262,7 @@ def test_v6_to_v7_backfills_slug_detaches_rows_and_does_not_invent_state(
             )
 
     result = run_migrations(settings)
-    assert result.applied_versions == (7, 8, 9, 10)
+    assert result.applied_versions == (7, 8, 9, 10, 11)
     with psycopg.connect(clean_postgres) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -445,6 +445,7 @@ def test_v6_compatibility_rollback_drops_only_v6_and_reapplies(clean_postgres):
         rollback_v8_compatibility,
         rollback_v9_compatibility,
         rollback_v10_compatibility,
+        rollback_v11_compatibility,
         run_migrations,
     )
     from iwiki_mcp.postgres.store import provision_runtime_grant
@@ -470,6 +471,7 @@ def test_v6_compatibility_rollback_drops_only_v6_and_reapplies(clean_postgres):
             write_domains=["docs"],
             runtime="direct",
         )
+        rollback_v11_compatibility(settings, confirm=True)
         rollback_v10_compatibility(settings, confirm=True)
         assert rollback_v9_compatibility(settings, confirm=True) == {
             "dry_run": False,
@@ -502,8 +504,8 @@ def test_v6_compatibility_rollback_drops_only_v6_and_reapplies(clean_postgres):
                 assert cursor.fetchone() == (True, True)
 
         reapplied = run_migrations(settings)
-        assert reapplied.applied_versions == (6, 7, 8, 9, 10)
-        require_schema_version(clean_postgres, expected_version=10)
+        assert reapplied.applied_versions == (6, 7, 8, 9, 10, 11)
+        require_schema_version(clean_postgres, expected_version=11)
         provision_runtime_grant(
             clean_postgres,
             principal=role,
@@ -530,7 +532,7 @@ def test_v6_compatibility_rollback_drops_only_v6_and_reapplies(clean_postgres):
                     "WHERE rolname = %s GROUP BY rolbypassrls",
                     (role,),
                 )
-                assert cursor.fetchone() == (10, False)
+                assert cursor.fetchone() == (11, False)
     finally:
         drop_runtime_role(clean_postgres, role)
 
@@ -576,11 +578,13 @@ def test_v7_compatibility_rollback_restores_v6_and_reapplies(clean_postgres):
         rollback_v8_compatibility,
         rollback_v9_compatibility,
         rollback_v10_compatibility,
+        rollback_v11_compatibility,
         run_migrations,
     )
 
     settings = _settings(clean_postgres)
     run_migrations(settings)
+    rollback_v11_compatibility(settings, confirm=True)
     rollback_v10_compatibility(settings, confirm=True)
     rollback_v9_compatibility(settings, confirm=True)
     rollback_v8_compatibility(settings, confirm=True)
@@ -611,8 +615,8 @@ def test_v7_compatibility_rollback_restores_v6_and_reapplies(clean_postgres):
             assert cursor.fetchone() == (0,)
 
     reapplied = run_migrations(settings)
-    assert reapplied.applied_versions == (7, 8, 9, 10)
-    require_schema_version(clean_postgres, expected_version=10)
+    assert reapplied.applied_versions == (7, 8, 9, 10, 11)
+    require_schema_version(clean_postgres, expected_version=11)
 
 
 def test_v7_compatibility_rollback_rejects_detached_rows_without_ddl(
@@ -626,6 +630,7 @@ def test_v7_compatibility_rollback_rejects_detached_rows_without_ddl(
         rollback_v8_compatibility,
         rollback_v9_compatibility,
         rollback_v10_compatibility,
+        rollback_v11_compatibility,
         run_migrations,
     )
 
@@ -658,6 +663,7 @@ def test_v7_compatibility_rollback_rejects_detached_rows_without_ddl(
                 (page_id,),
             )
 
+    rollback_v11_compatibility(settings, confirm=True)
     rollback_v10_compatibility(settings, confirm=True)
     rollback_v9_compatibility(settings, confirm=True)
     rollback_v8_compatibility(settings, confirm=True)

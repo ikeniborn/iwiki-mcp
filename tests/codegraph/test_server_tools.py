@@ -1030,6 +1030,10 @@ def test_postgres_code_store_delegates_to_application_constructor(monkeypatch):
         rerank_model="test-rerank",
         password="secret",
     )
+    monkeypatch.setattr(server, "_HOSTED_POOL", object())
+    from types import SimpleNamespace
+    publisher_pool = SimpleNamespace(connection=lambda: "publisher connection")
+    monkeypatch.setattr(server, "_HOSTED_PUBLICATION_POOL", publisher_pool)
     settings = object()
     store = object()
     calls = []
@@ -1041,10 +1045,11 @@ def test_postgres_code_store_delegates_to_application_constructor(monkeypatch):
     )
 
     assert server._postgres_code_store(binding, "owner-a") is store
-    assert calls == [(
-        (binding, "owner-a", settings),
-        {"lock_timeout_ms": server._CODE_PUBLICATION_LOCK_TIMEOUT_MS},
-    )]
+    [(args, kwargs)] = calls
+    assert args == (binding, "owner-a", settings)
+    assert kwargs["lock_timeout_ms"] == server._CODE_PUBLICATION_LOCK_TIMEOUT_MS
+    assert callable(kwargs["issue_ticket"])
+    assert kwargs["connection_factory"]() == "publisher connection"
 
 
 def test_export_snapshot_reproduces_the_ready_payload_revision(ready_runtime):

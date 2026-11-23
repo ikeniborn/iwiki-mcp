@@ -712,6 +712,8 @@ def test_hosted_runtime_pins_the_schema_guard_before_install_without_database(
             "IWIKI_DB_PASSWORD": "fixture-password",
             "IWIKI_LLM_BASE_URL": "http://example.invalid/v1",
             "IWIKI_LLM_KEY": "fixture-key",
+            "IWIKI_PUBLICATION_DB_USER": "publisher",
+            "IWIKI_PUBLICATION_DB_PASSWORD": "test-publisher-password",
             "IWIKI_EMBED_MODEL": "fixture-model",
             "IWIKI_EMBED_DIMENSIONS": "3",
             "IWIKI_RERANK_MODEL": "",
@@ -729,6 +731,11 @@ def test_hosted_runtime_pins_the_schema_guard_before_install_without_database(
         http,
         "require_hosted_runtime_principal",
         lambda _dsn: calls.append("principal"),
+    )
+
+    monkeypatch.setattr(
+        "iwiki_mcp.postgres.publication_roles.require_publication_pair",
+        lambda *_args, **_kwargs: None,
     )
 
     class Pool:
@@ -759,11 +766,11 @@ def test_hosted_runtime_pins_the_schema_guard_before_install_without_database(
         str(config_path), environ=environ, probe=lambda _cfg: calls.append("probe")
     )
 
-    assert calls[:5] == ["probe", ("schema", 10), "principal", "pool", "install"]
+    assert calls[:6] == ["probe", ("schema", 11), "principal", "pool", "pool", "install"]
     runtime.close()
 
 
-@pytest.mark.parametrize("installed_version", [7, 8, 9, 10])
+@pytest.mark.parametrize("installed_version", [7, 8, 9, 10, 11])
 def test_hosted_runtime_requires_the_exact_schema_before_installing_runtime(
     clean_postgres, tmp_path, monkeypatch, installed_version
 ):
@@ -790,6 +797,8 @@ def test_hosted_runtime_requires_the_exact_schema_before_installing_runtime(
             "IWIKI_DB_PASSWORD": values.get("password", ""),
             "IWIKI_LLM_BASE_URL": "http://example.invalid/v1",
             "IWIKI_LLM_KEY": "fixture-key",
+            "IWIKI_PUBLICATION_DB_USER": "publisher",
+            "IWIKI_PUBLICATION_DB_PASSWORD": "test-publisher-password",
             "IWIKI_EMBED_MODEL": "fixture-model",
             "IWIKI_EMBED_DIMENSIONS": "3",
             "IWIKI_RERANK_MODEL": "",
@@ -807,6 +816,11 @@ def test_hosted_runtime_requires_the_exact_schema_before_installing_runtime(
         lambda *_args, **_kwargs: installed.append("runtime"),
     )
     monkeypatch.setattr(http, "require_hosted_runtime_principal", lambda _dsn: None)
+
+    monkeypatch.setattr(
+        "iwiki_mcp.postgres.publication_roles.require_publication_pair",
+        lambda *_args, **_kwargs: None,
+    )
 
     class Pool:
         def __init__(self, *_args, **_kwargs):
@@ -827,7 +841,7 @@ def test_hosted_runtime_requires_the_exact_schema_before_installing_runtime(
     )
     monkeypatch.setattr(server.mcp, "streamable_http_app", lambda: object())
 
-    if installed_version == 10:
+    if installed_version == 11:
         runtime = http.prepare_runtime(
             str(config_path), environ=environ, probe=lambda _cfg: None
         )
@@ -836,7 +850,7 @@ def test_hosted_runtime_requires_the_exact_schema_before_installing_runtime(
     else:
         with pytest.raises(
             migrations.MigrationError,
-            match="schema version 10 is required",
+            match="schema version 11 is required",
         ):
             http.prepare_runtime(
                 str(config_path), environ=environ, probe=lambda _cfg: None
@@ -904,7 +918,7 @@ def test_hosted_runtime_rejects_an_unprovisioned_session_user(
         drop_runtime_role(clean_postgres, role)
 
 
-@pytest.mark.parametrize("installed_version", [7, 8, 9, 10])
+@pytest.mark.parametrize("installed_version", [7, 8, 9, 10, 11])
 def test_stdio_runtime_requires_the_exact_schema_without_running_migrations(
     clean_postgres, monkeypatch, installed_version
 ):
@@ -959,12 +973,12 @@ def test_stdio_runtime_requires_the_exact_schema_without_running_migrations(
         seed_threshold=0.0,
     )
 
-    if installed_version == 10:
+    if installed_version == 11:
         server._initialize_postgres_storage(cfg)
     else:
         with pytest.raises(
             migrations.MigrationError,
-            match="schema version 10 is required",
+            match="schema version 11 is required",
         ):
             server._initialize_postgres_storage(cfg)
 
