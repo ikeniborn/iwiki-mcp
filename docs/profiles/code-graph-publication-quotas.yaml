@@ -8,6 +8,7 @@ registry:
 context_inputs:
   - docs/superpowers/intents/2026-11-23-code-graph-publication-quotas-intent.md
   - docs/superpowers/specs/2026-11-23-code-graph-publication-quotas-design.md
+  - docs/superpowers/plans/2026-11-23-code-graph-publication-quotas-plan.md
 tasks:
   - id: intent-profile-selection
     requirements:
