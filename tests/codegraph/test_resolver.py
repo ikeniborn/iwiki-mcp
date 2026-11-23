@@ -3447,3 +3447,24 @@ def test_dynamic_class_member_monkeypatch_invalidates_receiver_calls(monkeypatch
                 if monkeypatch.startswith("setattr")
                 else ("type.__setattr__", "unresolved"),
             ]
+
+
+def test_receiver_dispatch_rechecks_subclasses_when_project_index_changes():
+    adapter = PythonAdapter()
+    base = _parse(adapter, "models.py", (
+        "class Base:\n"
+        "    def target(self): pass\n"
+        "    def invoke(self): self.target()\n"
+    ))
+    subclass = _parse(adapter, "use.py", (
+        "from models import Base\n"
+        "class Sub(Base):\n"
+        "    def target(self): pass\n"
+    ))
+    original = SymbolIndex.from_parsed_files((base,))
+    extended = SymbolIndex.from_parsed_files((base, subclass))
+    states = []
+    for index in (original, extended, original):
+        result = adapter.resolve_references(base, index)
+        states.extend(r.resolution_state for r in result.relations if r.relation_type == "CALLS")
+    assert states == ["resolved", "unresolved", "resolved"]

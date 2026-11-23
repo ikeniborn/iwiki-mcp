@@ -142,6 +142,7 @@ class PythonAdapter:
             or "\0" in repository_id
         ):
             raise ValueError("invalid repository id")
+        self._dispatch_cache = None
         self.repository_id = repository_id
         self.parser_version = parser_version
         self._parser: Any | None = None
@@ -322,154 +323,94 @@ class PythonAdapter:
 
     def _project_safe_references(self, parsed, project_index):
         sources = {item.symbol_id: item for item in parsed.symbols}
-        project_symbols = {
-            item.symbol_id: item
-            for candidates in project_index.by_qualified.values()
-            for item in candidates
-        }
-        mutated_class_ids = {
-            item.symbol_id
-            for language, kind, target_kind, target, member
-            in project_index._adapter_evidence
-            if language == self.language
-            and kind == "class_member_mutation"
-            and target_kind == "member"
-            and member == "__getattribute__"
-            for item in project_index.by_qualified.get(target, ())
-            if item.kind == "class"
-            and item.file_id in project_index.module_backed_file_ids
-            and self._metadata(item).get("language") == self.language
-        }
         references = []
         for reference in parsed.references:
             source = sources.get(reference.source_symbol_id)
             target = reference.target_reference or ""
-            owner = (
-                source.qualified_name.rsplit(".", 1)[0]
-                if source is not None and source.kind == "method" else ""
-            )
-            member = target.rsplit(".", 1)[-1]
-            receiver_dispatch = (
-                reference.relation_type == "CALLS"
-                and owner
-                and target.startswith(owner + ".")
-            )
-            owner_symbol_id = (
-                self._metadata(source).get("owner_symbol_id")
-                if source is not None else None
-            )
-            subclass_owner_ids = self._project_subclasses(
-                owner_symbol_id, project_symbols.values()
-            )
-            receiver_owner_ids = set(subclass_owner_ids)
-            if isinstance(owner_symbol_id, str):
-                receiver_owner_ids.add(owner_symbol_id)
-            custom_attribute_lookup = any(
-                item.kind == "class"
-                and item.symbol_id in receiver_owner_ids
-                and (
-                    item.symbol_id in mutated_class_ids
-                    or "__getattribute__" in self._metadata(item).get(
-                        "member_bindings", []
-                    )
-                )
-                for item in project_symbols.values()
-            )
-            has_override = any(
-                item.kind == "method"
-                and item.local_name == member
-                and self._metadata(item).get("owner_symbol_id")
-                in subclass_owner_ids
-                for item in project_symbols.values()
-            )
-            if not has_override:
-                for item in project_symbols.values():
-                    if (item.kind != "class"
-                            or item.symbol_id not in subclass_owner_ids):
-                        continue
-                    metadata = self._metadata(item)
-                    bindings = (
-                        metadata.get("member_bindings", [])
-                        if isinstance(metadata, dict) else []
-                    )
-                    if member in bindings:
-                        has_override = True
-                        break
-            if receiver_dispatch and (
-                has_override or custom_attribute_lookup
-            ):
-                reference = replace(
-                    reference, resolution_hint="unresolved"
-                )
+            if (source is not None and source.kind == "method"
+                    and reference.relation_type == "CALLS"):
+                owner = source.qualified_name.rsplit(".", 1)[0]
+                if owner and target.startswith(owner + "."):
+                    owner_id = self._metadata(source).get("owner_symbol_id")
+                    member = target.rsplit(".", 1)[-1]
+                    if self._dispatch_uncertain(project_index, owner_id, member):
+                        reference = replace(reference, resolution_hint="unresolved")
             references.append(reference)
         return tuple(references)
 
-    @staticmethod
-    def _project_subclasses(owner_symbol_id, symbols):
-        symbols = list(symbols)
-        classes = [item for item in symbols if item.kind == "class"]
-        symbols_by_id = {item.symbol_id: item for item in symbols}
-        classes_by_qualified = {}
-        for item in classes:
-            classes_by_qualified.setdefault(
-                item.qualified_name, []
-            ).append(item)
-        if owner_symbol_id not in symbols_by_id:
-            return frozenset()
-        reachable = {owner_symbol_id}
-        subclasses = set()
-        remaining = classes
-        while remaining:
-            changed = False
-            pending = []
-            for candidate in remaining:
-                metadata = PythonAdapter._metadata(candidate)
-                bases = (
-                    metadata.get("base_references", [])
-                    if isinstance(metadata, dict) else []
-                )
-                local_prefixes = []
-                lexical_owner = symbols_by_id.get(
-                    metadata.get("owner_symbol_id")
-                )
-                if lexical_owner is not None:
-                    local_prefixes.append(lexical_owner.qualified_name)
-                module = metadata.get("module")
-                if isinstance(module, str) and module:
-                    local_prefixes.append(module)
-                parent_ids = set()
-                for base in bases:
-                    if not isinstance(base, str):
-                        continue
-                    if "." in base:
-                        candidates = classes_by_qualified.get(base, [])
-                        parent_ids.update(
-                            item.symbol_id for item in candidates
-                        )
-                        continue
-                    else:
-                        candidates = []
-                        for prefix in local_prefixes:
-                            candidates = [
-                                item for item in classes_by_qualified.get(
-                                    prefix + "." + base, []
-                                )
-                                if item.file_id == candidate.file_id
-                            ]
-                            if candidates:
-                                break
-                    if len(candidates) == 1:
-                        parent_ids.add(candidates[0].symbol_id)
-                if not (parent_ids & reachable):
-                    pending.append(candidate)
+    def _dispatch_uncertain(self, index, owner_id, member):
+        if not isinstance(owner_id, str):
+            return False
+        cache = self._dispatch_cache
+        if cache is None or cache[0] is not index:
+            cache = (index, *self._dispatch_index(index))
+            self._dispatch_cache = cache
+        _, children, members, custom_lookup = cache
+        if owner_id in custom_lookup:
+            return True
+        pending = list(children.get(owner_id, ()))
+        seen = set()
+        while pending:
+            child = pending.pop()
+            if child in seen:
+                continue
+            if child in custom_lookup or member in members.get(child, ()):
+                return True
+            seen.add(child)
+            pending.extend(children.get(child, ()))
+        return False
+
+    def _dispatch_index(self, index):
+        symbols = {
+            item.symbol_id: item
+            for candidates in index.by_qualified.values()
+            for item in candidates
+        }
+        custom_lookup = {
+            item.symbol_id
+            for language, kind, target_kind, target, member in index._adapter_evidence
+            if (language, kind, target_kind, member)
+            == (self.language, "class_member_mutation", "member", "__getattribute__")
+            for item in index.by_qualified.get(target, ())
+            if item.kind == "class" and item.file_id in index.module_backed_file_ids
+            and self._metadata(item).get("language") == self.language
+        }
+        children = {}
+        members = {}
+        for item in symbols.values():
+            if item.kind not in {"method", "class"}:
+                continue
+            metadata = self._metadata(item)
+            owner_id = metadata.get("owner_symbol_id")
+            if item.kind == "method":
+                members.setdefault(owner_id, set()).add(item.local_name)
+                continue
+            bindings = metadata.get("member_bindings", [])
+            members.setdefault(item.symbol_id, set()).update(bindings)
+            if "__getattribute__" in bindings:
+                custom_lookup.add(item.symbol_id)
+            lexical_owner = symbols.get(owner_id)
+            prefixes = (lexical_owner.qualified_name if lexical_owner else None,
+                        metadata.get("module"))
+            for base in metadata.get("base_references", []):
+                if not isinstance(base, str):
                     continue
-                changed = True
-                subclasses.add(candidate.symbol_id)
-                reachable.add(candidate.symbol_id)
-            if not changed:
-                break
-            remaining = pending
-        return frozenset(subclasses)
+                if "." in base:
+                    parents = [p for p in index.by_qualified.get(base, ()) if p.kind == "class"]
+                else:
+                    parents = []
+                    for prefix in prefixes:
+                        if not isinstance(prefix, str) or not prefix:
+                            continue
+                        parents = [p for p in index.by_qualified.get(prefix + "." + base, ())
+                                   if p.kind == "class" and p.file_id == item.file_id]
+                        if parents:
+                            break
+                    if len(parents) != 1:
+                        continue
+                for parent in parents:
+                    children.setdefault(parent.symbol_id, set()).add(item.symbol_id)
+        return children, members, custom_lookup
 
     @staticmethod
     def _metadata(symbol):
