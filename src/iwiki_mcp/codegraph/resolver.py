@@ -274,18 +274,16 @@ def _module_prefix_candidates(
     language: str,
 ) -> tuple[FileRecord, ...]:
     allowed = family_languages(language)
-    names = tuple(
-        name for name, files in index.modules_by_qualified.items()
-        if (target == name or target.startswith(name + "."))
-        and (allowed is None or any(item.language in allowed for item in files))
-    )
-    if not names:
-        return ()
-    longest = max(names, key=lambda name: (len(name), name))
-    return tuple(
-        item for item in index.modules_by_qualified[longest]
-        if allowed is None or item.language in allowed
-    )
+    name = target
+    while name:
+        matches = tuple(
+            item for item in index.modules_by_qualified.get(name, ())
+            if allowed is None or item.language in allowed
+        )
+        if matches:
+            return matches
+        name = name.rpartition(".")[0]
+    return ()
 
 
 def resolve_references(
