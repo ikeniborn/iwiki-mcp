@@ -59,10 +59,24 @@ class HostedCodeGraphConfig:
     staging_cleanup_limit: int = 100
     require_session_binding: bool = False
 
+    max_server_sessions: int = 64
+    max_publisher_sessions: int = 8
+    max_server_staged_bytes: int = 2**31
+    max_publisher_staged_bytes: int = 2**28
+
+    @property
+    def publication_limits(self) -> tuple[int, int, int, int]:
+        return (self.max_server_sessions, self.max_publisher_sessions,
+                self.max_server_staged_bytes, self.max_publisher_staged_bytes)
+
     def __post_init__(self) -> None:
         if not isinstance(self.require_session_binding, bool):
             raise ConfigError("require_session_binding must be a boolean")
         bounds = {
+            "max_server_sessions": (1, 2**63 - 1),
+            "max_publisher_sessions": (1, 2**63 - 1),
+            "max_server_staged_bytes": (1, 2**63 - 1),
+            "max_publisher_staged_bytes": (1, 2**63 - 1),
             "max_snapshot_age_seconds": (0, None),
             "max_batch_rows": (1, 5000),
             "max_batch_bytes": (1, 5_000_000),
@@ -245,6 +259,10 @@ _SERVER_FIELDS = {
     "lock_timeout_ms",
 }
 _HOSTED_CODE_GRAPH_FIELDS = {
+    "max_server_sessions",
+    "max_publisher_sessions",
+    "max_server_staged_bytes",
+    "max_publisher_staged_bytes",
     "max_snapshot_age_seconds",
     "max_batch_rows",
     "max_batch_bytes",
