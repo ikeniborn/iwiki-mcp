@@ -17,7 +17,7 @@ The first implementation exceeded the 15% threshold in both workloads. It opened
 
 A separate single-publisher trial measured peak traced Python heap during finalize, including the in-process client and server. The baseline used 203,146 bytes and the candidate used 202,423 bytes. The measurement excludes PostgreSQL memory, native allocations and process RSS.
 
-A PostgreSQL query probe added 20,000 synthetic zero-charge historical rows in a disposable transaction. With two retained positive balances, the byte aggregate used an index-only scan on publication_usage_owner_idx. The slot aggregate used publication_usage_live_idx. Across 100 warm local queries the median slot/byte round trips were 39.4/37.4 µs before adding the rows and 36.8/36.4 µs afterwards.
+A PostgreSQL query probe added 20,000 synthetic zero-charge historical rows in a disposable transaction. With three retained positive balances, the byte aggregate used an index-only scan on publication_usage_owner_idx. The slot aggregate used publication_usage_live_idx. Across 100 warm local queries the median slot/byte round trips were 39.4/37.4 µs before adding the rows and 36.8/36.4 µs afterwards.
 
 ## Reproduction
 
