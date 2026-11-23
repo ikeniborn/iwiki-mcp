@@ -565,7 +565,8 @@ def _validate_normalized_rows(
             or row["source_end_byte"] > file_row["end_byte"]
         ):
             raise CodeGraphStoreError("code graph relation contract mismatch")
-        if row["source_symbol_id"] not in (None, *symbols_by_id):
+        source_symbol_id = row["source_symbol_id"]
+        if source_symbol_id is not None and source_symbol_id not in symbols_by_id:
             raise CodeGraphStoreError("code graph relation contract mismatch")
         try:
             metadata = json.loads(str(row["metadata_json"]))
