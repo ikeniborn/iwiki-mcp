@@ -23,6 +23,7 @@ import uvicorn
 from . import admin, base
 from .engine.config import Config
 from .engine.embed import probe_embedding_endpoint
+from .postgres import publication_roles
 from .postgres.auth import (
     AccessError,
     AuthContext,
@@ -792,10 +793,8 @@ def prepare_runtime(
     dsn = admin._dsn(config)
     require_schema_version(dsn, expected_version=11)
     require_hosted_runtime_principal(dsn)
-    from .postgres.publication_roles import require_publication_pair
-
     publication_dsn = _publication_dsn(config, env)
-    require_publication_pair(
+    publication_roles.require_publication_pair(
         dsn, publication_dsn, config.code_graph.publication_limits, settings=config.code_graph,
     )
     options = (
