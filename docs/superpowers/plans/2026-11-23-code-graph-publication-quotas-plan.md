@@ -15,6 +15,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: e15619e154dd6c72
+  last_run: 2026-11-23
+  reviewed: true
+  docs_checked: true
 ---
 # Hosted publication quotas implementation plan
 
