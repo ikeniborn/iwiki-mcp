@@ -1137,6 +1137,18 @@ class CodeGraphStore:
                 "cannot update code graph state"
             ) from exc
 
+    def export_rows(self) -> dict[str, list[dict[str, object]]]:
+        """Copy the publication tables from one SQLite read transaction."""
+        try:
+            with closing(self.connect()) as connection:
+                connection.execute("BEGIN")
+                return {
+                    kind: list(_table_rows(connection, kind))
+                    for kind in ("repositories", "files", "symbols", "relations")
+                }
+        except sqlite3.DatabaseError as exc:
+            raise CodeGraphStoreError("cannot read code graph export") from exc
+
     def stable_rows(self, table: str) -> tuple[dict[str, object], ...]:
         """Read one schema table in stable primary-ID order."""
         try:

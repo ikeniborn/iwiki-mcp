@@ -43,7 +43,7 @@ from .publication import (
     quota_resource,
 )
 from .query import validate_search_request
-from .store import _is_canonical_revision, code_graph_read_lock
+from .store import _is_canonical_revision
 from .sqlite_adapter import SqliteCodeGraphReader
 from iwiki_mcp.specifications import (
     UnavailableSpecificationGraphResolver,
@@ -986,12 +986,10 @@ def _prepare_resume(source, env, pin, progress):
         code = "resume_busy" if indexed.get("code") == "busy" else "resume_failed"
         raise CodeGraphResumeError(code)
     progress.control.enter_phase("export")
-    # The exporter reads each table separately. Pin all four under the same
-    # shared writer-exclusion lock, even if another process requests a rebuild.
-    with code_graph_read_lock(runtime.paths.lock):
-        exported = runtime.export_snapshot()
+    exported = runtime.export_snapshot()
     if isinstance(exported, dict):
-        raise CodeGraphResumeError("resume_failed")
+        code = "resume_busy" if exported.get("code") == "busy" else "resume_failed"
+        raise CodeGraphResumeError(code)
     header, rows = exported
     repository = next(row for row in rows["repositories"] if row["repository_id"] == source.primary)
     if repository["revision"] != indexed.get("revision"):

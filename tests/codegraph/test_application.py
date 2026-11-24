@@ -1801,3 +1801,107 @@ def test_published_snapshot_reader_passes_a_ready_answer_through():
 
     assert reader.status() == ready
     assert reader.search("needle") == {**ready, "results": []}
+
+
+def test_local_writer_refuses_export_before_remote_begin(ready_runtime):
+    from iwiki_mcp.codegraph.store import code_graph_write_lock
+
+    runtime = ready_runtime.runtime
+    peer = RecordingPublisher()
+    with code_graph_write_lock(runtime.paths.lock, timeout=0):
+        refusal = application.publish_snapshot(runtime, peer, runtime.config)
+    assert refusal["code"] == "busy"
+    assert peer.calls == []
+
+
+def test_export_keeps_a_while_b_activates_during_transfer(ready_runtime, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from filelock import Timeout
+    from iwiki_mcp.codegraph import store as store_module
+    from tests.codegraph.test_store import canonical_snapshot
+
+    runtime = ready_runtime.runtime
+    store = runtime._store
+    expected_a = runtime.export_snapshot()
+    snapshot_b = canonical_snapshot(repository_id=runtime.binding.primary, variant="next")
+    revision_b = snapshot_b["repositories"][0]["revision"]
+    staging = store.create_staging_path()
+    next_store = CodeGraphStore(staging)
+    next_store.insert_snapshot(snapshot_b)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(runtime, "_store", next_store)
+        expected_b = runtime.export_snapshot()
+    store.prepare_staging(
+        staging, repository_id=runtime.binding.primary, expected_revision=revision_b
+    )
+    assert expected_a != expected_b
+
+    attempts = []
+    original_rows = store_module._table_rows
+    original_hash = codegraph_runtime.graph_payload_revision
+
+    def try_writer():
+        with store_module.code_graph_write_lock(runtime.paths.lock, timeout=0):
+            pass
+
+    def read_rows(connection, table):
+        result = original_rows(connection, table)
+        if table == "repositories":
+            assert connection.in_transaction
+            with pytest.raises(Timeout):
+                try_writer()
+            attempts.append("capture")
+        return result
+
+    def hash_rows(rows):
+        try_writer()
+        assert rows == expected_a[1]
+        attempts.append("hash")
+        return original_hash(rows)
+
+    def activate():
+        with store_module.code_graph_write_lock(runtime.paths.lock, timeout=0):
+            store.replace_staging(staging)
+
+    class Publisher(RecordingPublisher):
+        def begin(self, header):
+            assert header == expected_a[0]
+            return super().begin(header)
+
+        def publish_batch(self, session, batch):
+            if "activation" not in attempts:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    executor.submit(activate).result(timeout=5)
+                attempts.append("activation")
+            return super().publish_batch(session, batch)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store_module, "_table_rows", read_rows)
+        scoped.setattr(codegraph_runtime, "graph_payload_revision", hash_rows)
+        result = application.publish_snapshot(runtime, Publisher(), runtime.config)
+        assert result["state"] == "ready"
+    assert attempts == ["capture", "hash", "activation"]
+    assert runtime.export_snapshot() == expected_b
+
+
+def test_failed_export_releases_reader_and_allows_retry(ready_runtime, monkeypatch):
+    import sqlite3
+    from iwiki_mcp.codegraph import store as store_module
+
+    runtime = ready_runtime.runtime
+    peer = RecordingPublisher()
+    original = store_module._table_rows
+
+    def fail(connection, table):
+        if table == "symbols":
+            raise sqlite3.OperationalError("interrupted export")
+        return original(connection, table)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store_module, "_table_rows", fail)
+        failure = application.publish_snapshot(runtime, peer, runtime.config)
+    assert failure["state"] == "failed"
+    assert peer.calls == []
+    with store_module.code_graph_write_lock(runtime.paths.lock, timeout=0):
+        assert runtime._store.canonical_handles_available()
+    assert application.publish_snapshot(runtime, peer, runtime.config)["state"] == "ready"

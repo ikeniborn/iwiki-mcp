@@ -344,6 +344,7 @@ def _write_code_failure(
     error: str,
     duration_ms: int,
     checkpoint_failure: bool = False,
+    export_busy: bool = False,
     resource: str | None = None,
 ) -> None:
     if json_output:
@@ -356,6 +357,7 @@ def _write_code_failure(
                 "duration_ms": duration_ms,
                 **({"code": "publication_quota_exceeded", "resource": resource}
                    if resource else {}),
+                **({"code": "busy"} if export_busy else {}),
                 **({"reason": "parse_checkpoint_storage_failed"} if checkpoint_failure else {}),
             },
         )
@@ -366,7 +368,7 @@ def _write_code_failure(
         "index_failed": "code graph indexing failed",
         "publication_failed": "code graph publication failed",
         "internal_error": "code graph publication failed",
-        "resume_busy": "another publisher holds this checkpoint",
+        "resume_busy": "code graph or publication checkpoint is busy",
         "resume_expired": "the recovery window expired; check the active snapshot",
         "resume_conflict": "publication state conflicts with the pinned upload",
         "resume_incompatible": "the selected peer or mode does not support recovery",
@@ -378,6 +380,8 @@ def _write_code_failure(
         "resume_failed": "code graph recovery failed",
     }
     line = f"iwiki-mcp: {messages.get(error, 'code graph recovery failed')} (code={error})\n"
+    if export_busy:
+        line = "iwiki-mcp: local code graph is busy (code=publication_failed)\n"
     if resource:
         line = (f"iwiki-mcp: publication_quota_exceeded (resource={resource}, category={error}). "
                 "Retry after capacity is available.\n")
@@ -564,6 +568,8 @@ def _run_code_publish(
             error=error,
             duration_ms=outcome.duration_ms,
             checkpoint_failure=checkpoint_failure,
+            export_busy=(error == "publication_failed" and outcome.publication.get("code") == "busy"
+                         and outcome.publication.get("error") == "code graph is busy"),
             resource=quota_resource(outcome.publication) if error == "publication_failed" else None,
         )
         return 1
