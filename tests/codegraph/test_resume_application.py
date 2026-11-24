@@ -284,3 +284,29 @@ def test_resume_cli_reports_quota_then_completes_the_pinned_upload(project, monk
     out = StringIO()
     assert admin.run(args, environ=ENV, stdout=out, stderr=StringIO()) == 0
     assert json.loads(out.getvalue())["snapshot_revision"] == peer.terminal
+
+
+@pytest.mark.parametrize("busy", [True, False])
+def test_new_pin_refuses_busy_or_superseded_capture(project, monkeypatch, busy):
+    from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
+    from iwiki_mcp.codegraph.store import code_graph_write_lock
+
+    original = CodeGraphRuntime.export_snapshot
+    peer = Peer(None)
+    monkeypatch.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+
+    def capture(runtime):
+        if busy:
+            with code_graph_write_lock(runtime.paths.lock, timeout=0):
+                return original(runtime)
+        header, rows = original(runtime)
+        rows["repositories"][0]["revision"] = "sha256:" + "b" * 64
+        return header, rows
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(CodeGraphRuntime, "export_snapshot", capture)
+        with pytest.raises(application.CodeGraphResumeError,
+                           match="resume_busy" if busy else "resume_conflict"):
+            application.resume_project(str(project), environ=ENV)
+    assert peer.calls == ["capabilities"]
+    assert application.resume_project(str(project), environ=ENV).ready

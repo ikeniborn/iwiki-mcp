@@ -1012,3 +1012,19 @@ def test_checkpoint_storage_failure_exposes_safe_reason(monkeypatch, json_mode):
     if json_mode:
         assert json.loads(stdout)["reason"] == "parse_checkpoint_storage_failed"
         assert json.loads(stdout)["error"] == "index_failed"
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cli_reports_local_export_contention(monkeypatch, json_output):
+    outcome = _outcome(publication_state="failed")
+    outcome.publication.update(code="busy", error="code graph is busy")
+    args = ["code", "publish", "--project", "/repo"]
+    if json_output:
+        args.append("--json")
+    code, stdout, stderr = _run(args, monkeypatch, outcome)
+    assert code == 1
+    if json_output:
+        assert json.loads(stdout)["error"] == "publication_failed"
+        assert json.loads(stdout)["code"] == "busy"
+    else:
+        assert "busy" in stderr

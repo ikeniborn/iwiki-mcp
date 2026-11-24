@@ -184,6 +184,8 @@ unbounded result or load a whole graph implicitly.
 The first publication into an empty domain is an ordinary session: status reports
 `missing_snapshot` until the first `finalize` succeeds.
 
+The local publisher copies the header inputs and all four row sets from one SQLite revision. It releases the graph lock before computing the payload digest, preparing a recovery checkpoint or transferring batches. If a local writer holds the lock at capture, ordinary CLI publication reports `publication_failed` with `code=busy`; a new resumable capture reports `resume_busy`. Retry the original command. An existing valid upload pin remains usable even if a newer local graph is active.
+
 ## Hosted publication quotas
 
 Configure the following positive integer limits in the hosted operator's `server.toml`.

@@ -1262,10 +1262,10 @@ class CodeGraphRuntime:
             return unavailable
         assert self._store is not None
         try:
-            rows = {
-                kind: list(self._store.stable_rows(kind))
-                for kind in ("repositories", "files", "symbols", "relations")
-            }
+            with code_graph_read_lock(self.paths.lock):
+                rows = self._store.export_rows()
+        except Timeout:
+            return self._busy_response()
         except CodeGraphStoreError:
             return self._store_failure_status()
         repository = next(
