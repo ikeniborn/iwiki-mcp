@@ -12,6 +12,13 @@ review:
     consistency: { status: passed }
     alignment: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: intent
+  intent_hash: 411faa887e39ca1f
+  last_run: 2026-11-24
+  reviewed: true
+  docs_checked: true
 ---
 # Intent: code-graph-sqlite-export-consistency
 
