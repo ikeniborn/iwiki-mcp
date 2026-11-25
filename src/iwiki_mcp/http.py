@@ -18,6 +18,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 import psycopg
 from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
+from starlette.responses import JSONResponse
 import uvicorn
 
 from . import admin, base
@@ -74,6 +75,7 @@ _DOMAIN_GRANT_TOOLS = {
     "wiki_set_domain_grant",
     "wiki_revoke_domain_grant",
 }
+_MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 _SESSION_IDLE_SECONDS = 86400.0
 # The SDK reaped idle sessions while the transport was stateful. Stateless mode
 # has no session table to reap, so this bound is the only thing keeping the
@@ -526,14 +528,23 @@ def _authorize_tool(
 
 
 async def _request_messages(receive):
-    messages = []
+    """Coalesce fragments for replay. Return None on the first excess byte."""
+    body = bytearray()
     while True:
         message = await receive()
-        messages.append(message)
-        if message["type"] != "http.request" or not message.get(
-            "more_body", False
-        ):
-            return messages
+        if message["type"] != "http.request":
+            if body:
+                partial = {"type": "http.request", "body": bytes(body), "more_body": True}
+                return [partial, message]
+            return [message]
+        chunk = message.get("body", b"")
+        if len(body) + len(chunk) > _MAX_REQUEST_BODY_BYTES:
+            return None
+        if not message.get("more_body") and not body:
+            return [message]
+        body.extend(chunk)
+        if not message.get("more_body"):
+            return [dict(message, body=bytes(body))]
 
 
 def _request_json(messages) -> Any:
@@ -656,6 +667,10 @@ class AuthenticatedMCPMiddleware:
                 )
                 try:
                     messages = await _request_messages(receive)
+                    if messages is None:
+                        response = JSONResponse({"error": "request body too large"}, status_code=413)
+                        await response(scope, receive, send)
+                        return
                     request_json = _request_json(messages)
                     try:
                         _authorize_tool(

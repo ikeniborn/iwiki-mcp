@@ -523,3 +523,91 @@ def test_refresh_links_without_a_domain_falls_back_to_the_primary():
     with pytest.raises(AccessError) as error:
         http._authorize_tool(readable, call)
     assert error.value.status_code == 403
+
+
+async def test_authenticated_http_body_limit(monkeypatch):
+    import json
+
+    from iwiki_mcp import http, server
+    from iwiki_mcp.codegraph.publication import canonical_batch
+    from iwiki_mcp.postgres.auth import AuthContext
+
+    limit = 16 * 1024 * 1024
+    owner = AuthContext("wiki", "owner", ("docs",), ("docs",), "docs")
+
+    class Auth:
+        def authenticate(self, token):
+            return {"owner": owner, "other": replace(owner, token_id="other")}.get(token)
+
+    dispatched = []
+
+    async def app(scope, receive, send):
+        body = bytearray()
+        while True:
+            message = await receive()
+            body.extend(message["body"])
+            if not message.get("more_body"):
+                break
+        dispatched.append((bytes(body), server._SESSION_BINDING.get().binding_source()))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    middleware = http.AuthenticatedMCPMiddleware(
+        app, config=_server_config(), auth_store=Auth(), project_dir="/not-used"
+    )
+
+    async def request(chunks, *, session=None, token="owner", extra_headers=()):
+        stream = iter(chunks)
+        sent = []
+
+        async def receive():
+            chunk, more = next(stream)  # An extra read fails the test.
+            return {"type": "http.request", "body": chunk, "more_body": more}
+
+        async def send(message):
+            sent.append(message)
+
+        headers = [(b"authorization", b"Bearer " + token.encode()), *extra_headers]
+        if session:
+            headers.append((b"mcp-session-id", session))
+        await middleware(
+            {"type": "http", "method": "POST", "path": "/mcp", "headers": headers},
+            receive, send,
+        )
+        return sent[0]
+
+    init = b'{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+    exact = init.ljust(limit)
+    start = await request([(exact[:5], True), (b"", True), (exact[5:], False)])
+    assert start["status"] == 200
+    session = dict(start["headers"])[b"mcp-session-id"]
+    assert dispatched == [(exact, "token_default")]
+    state = middleware.sessions.resolve(session.decode(), owner)
+    state.set(state.get())
+
+    with monkeypatch.context() as patch:
+        patch.setattr(http, "_request_json", lambda *_: pytest.fail("unexpected decode"))
+        for session_id in (None, session):
+            start = await request([(exact, True), (b" ", True)], session=session_id)
+            assert start["status"] == 413
+            assert b"mcp-session-id" not in dict(start["headers"])
+        start = await request([(exact + b" ", False)])
+        assert start["status"] == 413
+        assert (await request([], token="invalid"))["status"] == 401
+        assert (await request([], extra_headers=[(b"origin", b"https://invalid")]))["status"] == 403
+        assert (await request([], token="other", session=session))["status"] == 404
+    assert len(dispatched) == 1
+
+    rows = [{"file_id": "f", "path": ""}]
+    rows[0]["path"] = "a" * (5_000_000 - canonical_batch("files", 0, rows).byte_count)
+    batch = canonical_batch("files", 0, rows)
+    assert batch.byte_count == 5_000_000
+    envelope = json.dumps({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "wiki_code_publish_batch", "arguments": {
+            "kind": "files", "ordinal": 0, "session_id": "upload",
+            "rows": rows, "payload_hash": batch.payload_hash,
+        }},
+    }).encode()
+    assert (await request([(envelope, False)], session=session))["status"] == 200
+    assert dispatched[-1] == (envelope, "session")
