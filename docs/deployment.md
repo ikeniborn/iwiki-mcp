@@ -4,6 +4,12 @@ This is the supported production path for hosted iwiki MCP with Telegram access.
 hardened application container runs hosted MCP, nginx, and the Telegram bot. PostgreSQL
 and the literal HTTPS CONNECT proxy are external, operator-managed services.
 
+The authenticated hosted MCP endpoint accepts request bodies up to 16 MiB
+(16,777,216 bytes), including the JSON-RPC envelope. It counts bytes across
+chunks. An oversized request receives HTTP 413 before tool dispatch. The
+client can retry a smaller request with its existing session binding. Graph
+publication also enforces the batch limits advertised at session creation.
+
 ## Route and ownership boundaries
 
 The container has three supervised children:
