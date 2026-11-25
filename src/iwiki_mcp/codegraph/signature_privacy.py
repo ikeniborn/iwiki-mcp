@@ -125,6 +125,24 @@ def _parameter(node: Node) -> str:
     return display
 
 
+def project_call_reference(reference: str) -> str:
+    """Hide literal-bearing expressions retained as unresolved Python call labels."""
+    if all(part.isidentifier() and part not in {"None", "True", "False"}
+           for part in reference.split(".")):
+        return reference
+    root = Parser(_PYTHON).parse(reference.encode()).root_node
+    if root.has_error or root.named_child_count != 1:
+        return _HIDDEN
+    nodes = [root]
+    while nodes:
+        node = nodes.pop()
+        if node.type in {"string", "integer", "float", "true", "false", "none", "ellipsis",
+                         "comment"}:
+            return _HIDDEN
+        nodes.extend(node.named_children)
+    return reference
+
+
 def project_python_signature(signature: str) -> str:
     """Return the hosted display, or fail without including the source in diagnostics."""
     for prefix in _PREFIXES:

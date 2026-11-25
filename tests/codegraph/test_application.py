@@ -1905,3 +1905,87 @@ def test_failed_export_releases_reader_and_allows_retry(ready_runtime, monkeypat
     with store_module.code_graph_write_lock(runtime.paths.lock, timeout=0):
         assert runtime._store.canonical_handles_available()
     assert application.publish_snapshot(runtime, peer, runtime.config)["state"] == "ready"
+
+
+def test_publication_projects_cached_rows_preserving_identity(seed_binding):
+    from .conftest import _write_config
+    from iwiki_mcp.codegraph.models import compact_casefold
+    from iwiki_mcp.codegraph.publication import graph_payload_revision
+
+    project = Path(seed_binding.project_dir)
+    _write_config(project, Path(seed_binding.base), languages=["python", "typescript"])
+    (project / "client.ts").write_text('export function client(input = "TS_Only") {}')
+    runtime = application.code_runtime(application.source_context(seed_binding), environ={})
+    source = project / "src/pkg/service.py"
+    source.write_text(
+        'from typing import Literal, overload\n'
+        'class Result: pass\n'
+        '@overload\ndef render(mode: Literal["MiXeD_Alpha"]) -> Result: ...\n'
+        '@overload\ndef render(mode: Literal["MiXeD_Beta"]) -> Result: ...\n'
+        'def render(mode="MiXeD_Default") -> Result: return Result()\n'
+        'def entry(): return render()\n'
+    )
+    assert runtime.index(force=True)["state"] == "ready"
+    local = runtime._store.export_rows()
+    assert any(s["local_name"] == "client" for s in local["symbols"])
+    assert len([s for s in local["symbols"] if "Literal[" in (s["signature"] or "")]) == 2
+    header, rows = runtime.export_snapshot()
+    projected = {s["symbol_id"]: s for s in rows["symbols"]}
+    for original in local["symbols"]:
+        actual = projected[original["symbol_id"]]
+        signature = original["signature"]
+        if "MiXeD" in (signature or ""):
+            for value in ("MiXeD_Alpha", "MiXeD_Beta"):
+                signature = signature.replace(f'Literal["{value}"]', "Literal[…]")
+            signature = signature.replace('"MiXeD_Default"', '...')
+            assert actual == {**original, "signature": signature,
+                              "signature_casefold": compact_casefold(signature)}
+        else:
+            assert actual == original
+    for kind in ("files", "repositories", "relations"):
+        assert rows[kind] == local[kind]
+    assert local["relations"]
+    assert header.graph_payload_revision == graph_payload_revision(rows)
+    assert header.graph_payload_revision != graph_payload_revision(local)
+
+    class Capture(RecordingPublisher):
+        def publish_batch(self, session, batch):
+            assert b"mixed_" not in batch.payload.lower()
+            return super().publish_batch(session, batch)
+
+    assert application.publish_snapshot(runtime, Capture(), runtime.config)["state"] == "ready"
+    assert runtime.index()["state"] == "ready"
+    assert runtime.export_snapshot() == (header, rows)
+    assert runtime._store.export_rows() == local
+
+
+def test_malformed_cached_python_signature_stops_before_begin(ready_runtime, monkeypatch):
+    runtime = ready_runtime.runtime
+    rows = runtime._store.export_rows()
+    symbol = next(row for row in rows["symbols"] if row["signature"] is not None)
+    symbol["signature"] = "function|(MiXeD_Broken"
+    monkeypatch.setattr(runtime._store, "export_rows", lambda: rows)
+    peer = RecordingPublisher()
+    result = application.publish_snapshot(runtime, peer, runtime.config)
+    assert result["state"] == "failed"
+    assert "MiXeD_Broken" not in str(result)
+    assert peer.calls == []
+
+
+def test_private_default_value_is_absent_from_serialized_relation_rows(seed_runtime):
+    source = seed_runtime.project_dir / "src/pkg/service.py"
+    source.write_text('def use(value="PrivateRelationMarker".lower()): pass\n')
+    assert seed_runtime.index(force=True)["state"] == "ready"
+    runtime = seed_runtime.runtime
+    raw = runtime._store.export_rows()["relations"]
+    assert any("PrivateRelationMarker" in (row["target_reference"] or "") for row in raw)
+    captured = []
+
+    class Capture(RecordingPublisher):
+        def publish_batch(self, session, batch):
+            captured.append(batch)
+            return super().publish_batch(session, batch)
+
+    assert application.publish_snapshot(runtime, Capture(), runtime.config)["state"] == "ready"
+    assert any(batch.kind == "relations" for batch in captured)
+    assert all(b"privaterelationmarker" not in batch.payload.lower() for batch in captured)

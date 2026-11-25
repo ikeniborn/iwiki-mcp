@@ -371,7 +371,10 @@ def _write_code_failure(
         "resume_busy": "code graph or publication checkpoint is busy",
         "resume_expired": "the recovery window expired; check the active snapshot",
         "resume_conflict": "publication state conflicts with the pinned upload",
-        "resume_incompatible": "the selected peer or mode does not support recovery",
+        "resume_incompatible": (
+            "check peer and checkpoint compatibility. For an incompatible checkpoint, "
+            "check the active snapshot before using --forget-resume to start a fresh upload"
+        ),
         "resume_invalid_checkpoint": "the local recovery checkpoint failed verification",
         "resume_local_io_failed": "local storage I/O failed. Check storage and retry the command",
         "resume_target_mismatch": "the checkpoint belongs to a different publication target",

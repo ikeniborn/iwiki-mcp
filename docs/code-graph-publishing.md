@@ -186,6 +186,14 @@ The first publication into an empty domain is an ordinary session: status report
 
 The local publisher copies the header inputs and all four row sets from one SQLite revision. It releases the graph lock before computing the payload digest, preparing a recovery checkpoint or transferring batches. If a local writer holds the lock at capture, ordinary CLI publication reports `publication_failed` with `code=busy`; a new resumable capture reports `resume_busy`. Retry the original command. An existing valid upload pin remains usable even if a newer local graph is active.
 
+### Python signatures in hosted snapshots
+
+With publisher 0.7.330 or later, MCP and direct PostgreSQL publication send a navigation view of Python signatures. A default appears as `=...`. For example, `Annotated[UserId, "internal"]` appears as `UserId`, `Literal["prod"]` as `Literal[…]`, and `list["User"]` as `list[User]`. An annotation whose type positions cannot be established appears as `…`. Local SQLite retains the source signature. Overloads can have the same hosted display and distinct symbol IDs.
+
+When an unresolved Python call carries a literal in its target text, hosted graphs display `…` for the target. This also applies to calls in function bodies. Relation IDs and endpoints remain available.
+
+After upgrading, a completed checkpoint returns the recorded revision locally. An unfinished checkpoint created by an older publisher returns `resume_incompatible` and stays on disk. Check the active revision with `wiki_code_status` in the bound hosted session. To start a fresh upload, explicitly discard the selected local checkpoint with `--forget-resume`, then publish again with `--resume`. Forgetting a checkpoint does not retract previously accepted remote data. Existing hosted snapshots retain their original contents.
+
 ## Hosted publication quotas
 
 Configure the following positive integer limits in the hosted operator's `server.toml`.

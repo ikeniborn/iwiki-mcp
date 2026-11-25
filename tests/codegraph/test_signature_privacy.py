@@ -45,3 +45,15 @@ def test_does_not_execute_annotation_or_default(tmp_path):
     call = f'open({str(target)!r},"w")'
     assert project_python_signature(f'function|(x:{call}={call})') == 'function|(x:…=...)'
     assert not target.exists()
+
+
+@pytest.mark.parametrize(("label", "expected"), [
+    ("external.call", "external.call"), ("factory().run", "factory().run"),
+    ("items[key].run", "items[key].run"), ('items["private"].run', "…"),
+    ('f"{name}".strip', "…"), ("bytes([42]).hex", "…"), ("(True).bit_length", "…"),
+    ("(3.5).hex", "…"), ("(None).__str__", "…"), ("(...).__repr__", "…"),
+])
+def test_projects_unresolved_call_labels(label, expected):
+    from iwiki_mcp.codegraph.signature_privacy import project_call_reference
+
+    assert project_call_reference(label) == expected

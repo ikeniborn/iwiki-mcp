@@ -29,6 +29,7 @@ from .store import _is_canonical_revision
 
 # Keep five minutes of clock skew below the server's 24-hour cap.
 _CLIENT_WINDOW_SECONDS = (23 * 60 + 55) * 60
+_SIGNATURE_POLICY_REVISION = 1
 
 
 class CodeGraphResumeError(Exception):
@@ -200,6 +201,13 @@ class Checkpoint:
         if not hmac.compare_digest(self._credential_proof(credential, salt), proof):
             raise CodeGraphResumeError("resume_access_denied")
 
+    def verify_signature_policy(self):
+        if self.record["state"] == "pinned":
+            revision = self.record.get("signature_policy_revision")
+            if type(revision) is not int or revision != _SIGNATURE_POLICY_REVISION:
+                self.verify()
+                raise CodeGraphResumeError("resume_incompatible")
+
     def prepare(self, header: SnapshotHeader, rows, *, credential: str):
         digest = hashlib.sha256()
         with self._atomic("rows") as stream:
@@ -215,6 +223,7 @@ class Checkpoint:
             {
                 "credential": [salt, self._credential_proof(credential, salt)],
                 "state": "pinned",
+                "signature_policy_revision": _SIGNATURE_POLICY_REVISION,
                 "header": header_payload(header),
                 "rows_hash": digest.hexdigest(),
                 "key": secrets.token_hex(32),

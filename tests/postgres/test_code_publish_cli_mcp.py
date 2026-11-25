@@ -1071,3 +1071,22 @@ def test_quota_refusal_through_hosted_mcp_preserves_the_active_revision(
     assert failure["resource"] == "staged_bytes"
     assert set(failure) == {"state", "publish_mode", "error", "code", "resource", "duration_ms"}
     assert hosted_mcp_cli.transport.call("wiki_code_status", {})["snapshot_revision"] == revision
+
+
+def test_mcp_publication_hides_python_signature_values(hosted_mcp_cli):
+    from tests.postgres.test_code_publish_cli import (
+        _assert_published_signatures, _write_private_signatures,
+    )
+
+    project = hosted_mcp_cli.project
+    _write_private_signatures(project)
+    code, stdout, stderr = hosted_mcp_cli.run()
+    assert code == 0, stderr
+    call = hosted_mcp_cli.transport.call
+    status = call("wiki_code_status", {})
+    assert json.loads(stdout)["snapshot_revision"] == status["snapshot_revision"]
+    _assert_published_signatures(
+        project.parent / "wiki",
+        lambda query: call("wiki_code_search", {"query": query}),
+        lambda seeds: call("wiki_code_context", {"seeds": seeds}),
+    )

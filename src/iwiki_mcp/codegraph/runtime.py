@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import atexit
 from dataclasses import asdict
+from functools import lru_cache
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from .query import (
 )
 from .publication import SnapshotHeader, graph_payload_revision
 from .schema import SCHEMA_VERSION, CodeGraphStoreError
+from .signature_privacy import project_call_reference, project_python_signature
 from .store import (
     CodeGraphStore,
     _is_canonical_revision,
@@ -1278,6 +1280,25 @@ class CodeGraphRuntime:
         )
         if repository is None or repository.get("state") != "ready":
             return _not_configured()
+        python_files = {row["file_id"] for row in rows["files"] if row["language"] == "python"}
+        # Repeated signatures share one parse within this export. Bound temporary
+        # storage and keep private source text out of process-wide caches.
+        render_signature = lru_cache(maxsize=256)(project_python_signature)
+        for symbol in rows["symbols"]:
+            if symbol["file_id"] in python_files and symbol["signature"] is not None:
+                try:
+                    display = render_signature(symbol["signature"])
+                except ValueError:
+                    return self._store_failure_status()
+                symbol["signature"] = display
+                symbol["signature_casefold"] = codegraph_models.compact_casefold(display)
+
+        for relation in rows["relations"]:
+            reference = relation["target_reference"]
+            if (reference and relation["relation_type"] == "CALLS"
+                    and relation["source_file_id"] in python_files):
+                relation["target_reference"] = project_call_reference(reference)
+
         header = SnapshotHeader(
             protocol_version=1,
             schema_version=SCHEMA_VERSION,
