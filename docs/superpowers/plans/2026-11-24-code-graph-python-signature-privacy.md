@@ -15,6 +15,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: 894859ddfcca50a3
+  last_run: 2026-11-25
+  reviewed: true
+  docs_checked: true
 ---
 # Hosted Python signature privacy implementation plan
 
