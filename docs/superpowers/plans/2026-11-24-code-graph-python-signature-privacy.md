@@ -6,8 +6,8 @@ chain:
   intent: docs/superpowers/intents/2026-11-24-code-graph-python-signature-privacy-intent.md
   spec: docs/superpowers/specs/2026-11-24-code-graph-python-signature-privacy-design.md
 review:
-  plan_hash: 5a4da30571c5b96f
-  last_run: 2026-11-24
+  plan_hash: 894859ddfcca50a3
+  last_run: 2026-11-25
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -48,13 +48,15 @@ uv run pytest -q tests/codegraph/test_signature_privacy.py tests/codegraph/test_
 
 ## Task 2. Project one captured revision before hashing (R1, R2, R3, R5)
 
-- [ ] Add a failing integration test in `tests/codegraph/test_application.py` using a real ready SQLite fixture, two overloads differentiated by Literal values, and a non-Python control. Capture local symbol rows and relation endpoints. Record ordinary publisher batches and compare every published row kind against its local counterpart, allowing differences in the two Python display fields.
+- [ ] Add a failing integration test in `tests/codegraph/test_application.py` using a real ready SQLite fixture, two overloads differentiated by Literal values, and a non-Python control. Capture local symbol rows and relation endpoints. Record ordinary publisher batches and compare every published row kind against its local counterpart, allowing differences in the two Python signature fields and the projected target text of Python calls.
 - [ ] In `src/iwiki_mcp/codegraph/runtime.py`, call the renderer after `export_rows()` releases its read lock and before `graph_payload_revision(rows)`. Map file ID to its captured language once. For each Python symbol with a signature, replace the display and derive its folded value using `models.compact_casefold`. Leave null signatures and unrelated rows intact. Map a rendering failure to a sanitized export failure before begin or pin preparation.
 - [ ] Prove both overload IDs, all reference endpoints, null signatures, and the original on-disk SQLite signatures survive. Confirm the frozen cache and freshly parsed graph with the same inputs produce identical projected rows. Recompute the header digest from those rows. Assert the marker and its case-folded spelling are absent from all serialized batches. Exercise current SQLite capture/activation interleaving during a stalled transfer and failure before begin.
 
 ```bash
 uv run pytest -q tests/codegraph/test_application.py tests/codegraph/test_publication.py tests/codegraph/test_runtime.py
 ```
+
+- [ ] R3a/R5. Cover literal-bearing call labels in default and body expressions at both publication transports and in pinned bytes. Project detached Python CALLS labels before hashing. Check retained benign labels, IDs and endpoints. Compare full export on the same 20,000-file SQLite fixture against 0.7.329, alternating order with one warm-up and five timed runs per version. Record the median, scope and limitations.
 
 ## Task 3. Refuse incompatible pins before contacting the peer (R4, R5)
 

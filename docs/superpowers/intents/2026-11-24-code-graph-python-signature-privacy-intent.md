@@ -3,8 +3,8 @@ workflow:
   route: chain
   continuation: full
 review:
-  intent_hash: da526f3d30912d00
-  last_run: 2026-11-24
+  intent_hash: eda72817b2e0ebc6
+  last_run: 2026-11-25
   phases:
     structure: { status: passed }
     completeness: { status: passed }
@@ -27,6 +27,7 @@ Let hosted code graph users navigate Python functions without publishing values 
 - Preserve parameter names, kinds and the presence of defaults. Display each default as `...`, including expressions and simple constants.
 - Apply the same annotation rules to parameters and return types, including nested annotations. Display `Literal["prod"]` as `Literal[…]` and `Annotated[UserId, "internal-id"]` as `UserId`. The ellipsis in a literal type is a display marker.
 - Preserve statically understood type references. For example, display `list["User"]` as `list[User]`. Replace unrecognized annotation expressions with a marker without exposing their source text.
+- Hide literal-bearing call target expressions in new hosted Python relation labels, including those originating in function bodies. Keep relation IDs and endpoints. Measure full export time against 0.7.329 on the same snapshot.
 - Keep overloads distinguishable even when their published signatures look identical. Preserve their graph references.
 - On resume of an unfinished pre-policy checkpoint, report `resume_incompatible` before sending any batches. Retain the checkpoint so the operator can check the hosted revision and explicitly start a new publication.
 - For a completed pre-policy checkpoint, return the recorded revision locally. A valid current-policy checkpoint retains its normal recovery behavior.

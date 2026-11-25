@@ -5,8 +5,8 @@ status: approved
 chain:
   intent: docs/superpowers/intents/2026-11-24-code-graph-python-signature-privacy-intent.md
 review:
-  spec_hash: 17f20105eebfbdc5
-  last_run: 2026-11-24
+  spec_hash: 4f4f3cfe67cf6cd6
+  last_run: 2026-11-25
   phases:
     structure: { status: passed }
     coverage: { status: passed }
@@ -37,6 +37,8 @@ R3. Render annotation nodes recursively from a positive list of supported type s
 | UnknownAlias[User, "internal"] | … |
 
 Examples specify the displayed tokens; retain existing canonical spacing elsewhere. Preserve parameter structure when one annotation is unsupported. If the stored declaration itself cannot be safely decomposed, stop export with a sanitized failure before pin creation or remote begin. Do not include source text in diagnostics. Document that this view is for navigation and is intentionally lossy for typing.
+
+R3a. An unresolved Python CALLS row can carry default or body source as its target_reference. In the hosted copy, display a single ellipsis for a literal-bearing label. Retain simple identifiers, dotted names and understood expressions without literals. Hide labels that cannot be classified safely. Preserve all IDs, relation endpoints and local rows. Test ordinary, pinned, direct PostgreSQL and MCP paths with mixed-case markers in default and body call targets. Compare warmed full export time against 0.7.329 on identical data; report dataset composition and measurement limits.
 
 ## Upload recovery
 
