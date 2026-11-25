@@ -1006,6 +1006,7 @@ def resume_project(project_dir, *, environ=None, _observe_job=None) -> CodeGraph
     with Checkpoint.open(source.base, source.project_dir, source.primary, endpoint) as pin:
         if pin.record is not None:
             pin.verify_credential(env[TOKEN_ENV])
+            pin.verify_signature_policy()
         if pin.record is None or pin.record["state"] != "ready":
             publisher = McpSnapshotPublisher(
                 RemoteMcpTransport(environ=env, primary=source.primary, verify_binding=True)

@@ -1,10 +1,13 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from iwiki_mcp.codegraph import application
-from iwiki_mcp.codegraph.canonical import canonical_sha256
-from iwiki_mcp.codegraph.publication import PublicationSession, header_payload
+from iwiki_mcp.codegraph.canonical import canonical_json_bytes, canonical_sha256
+from iwiki_mcp.codegraph.publication import (
+    PublicationSession, graph_payload_revision, header_payload,
+)
 from tests.codegraph.synthetic_wiki import create_sqlite_project
 
 
@@ -310,3 +313,156 @@ def test_new_pin_refuses_busy_or_superseded_capture(project, monkeypatch, busy):
             application.resume_project(str(project), environ=ENV)
     assert peer.calls == ["capabilities"]
     assert application.resume_project(str(project), environ=ENV).ready
+
+
+def pin_files(project):
+    manifest = next((project.parent / "wiki" / ".iwiki").glob("resume-*/manifest-*"))
+    return manifest, manifest.with_name("rows")
+
+
+def set_policy(manifest, policy):
+    envelope = json.loads(manifest.read_bytes())
+    record = envelope["record"]
+    if policy is None:
+        record.pop("signature_policy_revision", None)
+    else:
+        record["signature_policy_revision"] = policy
+    envelope["sha256"] = canonical_sha256(record, prefix=True)
+    manifest.write_bytes(canonical_json_bytes(envelope))
+
+
+MARKERS = ("MiXeD_Default", "MiXeD_Alpha", "MiXeD_Beta", "MiXeD_Body")
+
+
+@pytest.fixture
+def previous_attempt(project, monkeypatch):
+    from dataclasses import replace
+    from iwiki_mcp.codegraph.runtime import CodeGraphRuntime
+
+    service = project / "service.py"
+    service.write_text(service.read_text().replace(
+        "def helper():\n    return 1",
+        'def helper(key: Literal["MiXeD_Alpha", "MiXeD_Beta"]="MiXeD_Default".lower()):\n'
+        '    "MiXeD_Body".upper()\n'
+        "    return notify()",
+    ))
+    original = CodeGraphRuntime.export_snapshot
+
+    def previous_export(runtime):
+        header, _ = original(runtime)
+        raw = runtime._store.export_rows()
+        return replace(header, graph_payload_revision=graph_payload_revision(raw)), raw
+
+    peer = Peer("batch")
+    with monkeypatch.context() as previous:
+        previous.setattr(CodeGraphRuntime, "export_snapshot", previous_export)
+        previous.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+        with pytest.raises(application.CodeGraphResumeError, match="resume_transport_failed"):
+            application.resume_project(str(project), environ=ENV)
+    manifest, rows = pin_files(project)
+    set_policy(manifest, None)
+    assert all(marker.encode() in rows.read_bytes() for marker in MARKERS)
+    assert len(peer.receipts) == 5
+    return manifest, rows
+
+
+@pytest.mark.parametrize("policy", [None, 2, True, "1"])
+def test_incompatible_pin_refuses_locally_and_preserves_bytes(
+    project, previous_attempt, monkeypatch, policy
+):
+    from io import StringIO
+    from iwiki_mcp import admin
+
+    manifest, rows = previous_attempt
+    set_policy(manifest, policy)
+    before = manifest.read_bytes(), rows.read_bytes()
+    monkeypatch.setattr(
+        application, "McpSnapshotPublisher", lambda *args: pytest.fail("built peer")
+    )
+    args = ["code", "publish", "--project", str(project), "--resume"]
+    for extra in (["--json"], []):
+        out, err = StringIO(), StringIO()
+        assert admin.run(args + extra, environ=ENV, stdout=out, stderr=err) == 2
+        if extra:
+            assert json.loads(out.getvalue())["error"] == "resume_incompatible"
+        else:
+            assert "--forget-resume" in err.getvalue()
+            assert "active" in err.getvalue()
+        assert all(marker.lower() not in (out.getvalue() + err.getvalue()).lower()
+                   for marker in MARKERS)
+        assert ENV["IWIKI_CODE_GRAPH_MCP_TOKEN"] not in out.getvalue() + err.getvalue()
+        assert (manifest.read_bytes(), rows.read_bytes()) == before
+
+
+def test_previous_pin_checks_credential_and_integrity(project, previous_attempt, monkeypatch):
+    manifest, _ = previous_attempt
+    monkeypatch.setattr(
+        application, "McpSnapshotPublisher", lambda *args: pytest.fail("built peer")
+    )
+    with pytest.raises(application.CodeGraphResumeError, match="resume_access_denied"):
+        application.resume_project(str(project), environ={**ENV, application.TOKEN_ENV: "other"})
+    envelope = json.loads(manifest.read_bytes())
+    envelope["record"]["key"] = "altered"
+    manifest.write_bytes(canonical_json_bytes(envelope))
+    with pytest.raises(application.CodeGraphResumeError, match="resume_invalid_checkpoint"):
+        application.resume_project(str(project), environ=ENV)
+
+
+def test_forget_previous_pin_then_rebuild_projected_attempt(project, previous_attempt, monkeypatch):
+    manifest, rows = previous_attempt
+    old_key = json.loads(manifest.read_bytes())["record"]["key"]
+    raw_calls = [row for line in rows.read_bytes().splitlines()
+                 if (row := json.loads(line)).get("relation_type") == "CALLS"]
+    for marker in ("MiXeD_Default", "MiXeD_Body"):
+        assert any(marker in row["target_reference"] for row in raw_calls)
+    assert application.forget_resume_project(str(project), environ=ENV)["outcome_unknown"]
+    peer = Peer("batch")
+    monkeypatch.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+    with pytest.raises(application.CodeGraphResumeError, match="resume_transport_failed"):
+        application.resume_project(str(project), environ=ENV)
+    pinned_bytes = rows.read_bytes()
+    assert all(marker.lower().encode() not in pinned_bytes.lower() for marker in MARKERS)
+    calls = [row for line in pinned_bytes.splitlines()
+             if (row := json.loads(line)).get("relation_type") == "CALLS"]
+    assert any(row["target_reference"] == "notify" for row in calls)
+    endpoints = ("relation_id", "source_symbol_id", "source_file_id", "source_module_id",
+                 "target_symbol_id", "target_module_id")
+    assert {tuple(row[k] for k in endpoints) for row in calls} == {
+        tuple(row[k] for k in endpoints) for row in raw_calls
+    }
+    record = json.loads(manifest.read_bytes())["record"]
+    assert record["key"] != old_key
+    assert ("begin", record["key"]) in peer.calls
+    assert record["signature_policy_revision"] == 1
+
+    (project / "service.py").write_text("def changed(): pass\n")
+    source, _ = application._resume_context(str(project), ENV)
+    runtime = application.code_runtime(source, environ=ENV)
+    assert runtime.index()["state"] == "ready"
+    new_header, _ = runtime.export_snapshot()
+    assert new_header.graph_payload_revision != record["header"]["graph_payload_revision"]
+    assert rows.read_bytes() == pinned_bytes
+    acknowledged = set(peer.receipts)
+    previous_calls = len(peer.calls)
+    outcome = application.resume_project(str(project), environ=ENV)
+    assert outcome.ready
+    expected = {(b["kind"], b["ordinal"]): b["hash"] for b in record["batches"]}
+    assert peer.receipts == expected
+    resent = [call[1] for call in peer.calls[previous_calls:] if isinstance(call, tuple)]
+    assert sorted(resent) == sorted(set(expected) - acknowledged)
+
+
+def test_previous_ready_receipt_returns_local_result(project, monkeypatch):
+    peer = Peer(None)
+    monkeypatch.setattr(application, "McpSnapshotPublisher", lambda transport: peer)
+    outcome = application.resume_project(str(project), environ=ENV)
+    manifest, rows = pin_files(project)
+    set_policy(manifest, None)
+    before = manifest.read_bytes()
+    monkeypatch.setattr(
+        application, "McpSnapshotPublisher", lambda *args: pytest.fail("built peer")
+    )
+    receipt = application.resume_project(str(project), environ=ENV)
+    assert receipt.snapshot_revision == outcome.snapshot_revision
+    assert receipt.index["counts"] == outcome.index["counts"]
+    assert manifest.read_bytes() == before and not rows.exists()

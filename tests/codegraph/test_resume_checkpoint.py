@@ -45,7 +45,10 @@ def test_durable_pin_replays_canonical_bounds_and_completion(tmp_path):
     golden = list(iter_snapshot_batches(rows, max_rows=2, max_bytes=72))
     with opened(tmp_path) as pin:
         pin.prepare(header, rows, credential="test")
+        assert type(pin.record["signature_policy_revision"]) is int
+        assert pin.record["signature_policy_revision"] == 1
         pin.save_session(session)
+        assert pin.record["signature_policy_revision"] == 1
         assert [pin.batch(item) for item in pin.record["batches"]] == golden
     with opened(tmp_path) as pin:
         pin.verify()

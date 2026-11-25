@@ -256,3 +256,72 @@ def test_cli_and_application_have_no_direct_postgres_sql_path():
         assert "cursor.execute(" not in text
         assert "psycopg.connect(" not in text
     assert "PostgresCodeGraphStore(" in application_text
+
+
+def _write_private_signatures(project):
+    project.joinpath("service.py").write_text(
+        "from typing import Literal, overload\n"
+        "@overload\n"
+        'def choose(value: Literal["FirstMiXeD"] = "LocalDefault".lower()) -> DisplayType:\n'
+        '    return "BodyMiXeD".upper()\n'
+        "@overload\n"
+        'def choose(value: Literal["SecondMiXeD"] = "LocalDefault".lower()) -> DisplayType:\n'
+        "    return notify()\n",
+        encoding="utf-8",
+    )
+
+
+def _assert_published_signatures(cache_base, search, context):
+    from iwiki_mcp.codegraph.store import CodeGraphStore
+
+    path = cache_base / ".iwiki" / "code-docs.sqlite3"
+    assert path.is_file()
+    local = CodeGraphStore(path).export_rows()
+    symbols = {
+        row["symbol_id"]: row["signature"]
+        for row in local["symbols"] if row["local_name"] == "choose"
+    }
+    assert len(symbols) == 2
+    assert all("LocalDefault" in signature for signature in symbols.values())
+    results = search("displaytype")["results"]
+    assert {row["entity_id"] for row in results} == set(symbols)
+    assert all(row["match"] == "signature" for row in results)
+    for marker in ("FirstMiXeD", "SecondMiXeD", "localdefault"):
+        assert search(marker)["results"] == []
+
+    found = context(list(symbols))
+    signatures = {
+        node["entity_id"]: node["signature"]
+        for node in found["nodes"] if node["entity_id"] in symbols
+    }
+    expected = "function|(value:Literal[…]=...)->DisplayType"
+    assert signatures == dict.fromkeys(symbols, expected)
+    endpoints = ("relation_id", "source_symbol_id", "source_module_id",
+                 "source_file_id", "target_symbol_id", "target_module_id")
+    related = {
+        tuple(row[key] for key in endpoints) for row in local["relations"]
+        if row["source_symbol_id"] in symbols or row["target_symbol_id"] in symbols
+    }
+    local_labels = [
+        row["target_reference"] for row in local["relations"] if row["relation_type"] == "CALLS"
+    ]
+    hosted_labels = [
+        row["target_reference"] for row in found["relations"] if row["relation_type"] == "CALLS"
+    ]
+    for marker in ("LocalDefault", "BodyMiXeD"):
+        assert any(marker in label for label in local_labels)
+        assert marker.casefold() not in json.dumps(hosted_labels).casefold()
+    assert "notify" in hosted_labels
+    assert related
+    assert {tuple(row[key] for key in endpoints) for row in found["relations"]} == related
+
+
+def test_direct_publication_hides_python_signature_values(postgres_project):
+    project = postgres_project.project
+    _write_private_signatures(project)
+    code, stdout, stderr = _run_publish(project)
+    assert code == 0, stderr
+    binding, _reader = _resolved_reader(project)
+    reader = application.code_reader(binding)
+    assert json.loads(stdout)["snapshot_revision"] == reader.status()["snapshot_revision"]
+    _assert_published_signatures(project, reader.search, reader.context)
