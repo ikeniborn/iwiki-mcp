@@ -3,7 +3,7 @@ workflow:
   route: chain
   continuation: full
 review:
-  intent_hash: 2e48d19896da892e
+  intent_hash: 83832f3bf157ff1d
   last_run: 2026-11-26
   phases:
     structure: { status: passed }
@@ -50,6 +50,7 @@ Let readers distinguish verified content from earlier review history. Let mainta
 ### Hard
 
 - Attribute a meaningful edit to a concrete human or identifiable agent. Default to the editing agent when a human author is unspecified. Ask the client for its identity when the agent cannot be identified. Refuse anonymous placeholders.
+- Use the same kind-prefixed identifier syntax for human and agent authors and verifiers in newly written records. Keep existing OKF actor values readable.
 - Require a real review before recording a successful verification. Identify the reviewer and record the time of the check.
 - Keep historical events, optional trust metadata and both standard verification representations readable.
 - Protect a confirmation against concurrent changes to any part of the reviewed document.
