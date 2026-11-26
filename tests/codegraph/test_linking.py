@@ -1197,6 +1197,7 @@ def test_real_wiki_write_completes_while_code_build_is_parsing(
             "project", "during-build",
             "# During Build\n\n## Overview\nWritten concurrently.\n",
             type="concept",
+            author="agent:iwiki-test-editor/1",
         )
         elapsed = codegraph_indexer.time.monotonic() - started
         assert written.get("page") == "project/concept/during-build.md", written

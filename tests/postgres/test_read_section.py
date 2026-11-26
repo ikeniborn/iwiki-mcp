@@ -68,10 +68,11 @@ def test_read_page_with_missing_heading_returns_error_from_postgres(postgres_rea
     assert "not found" in out["error"]
 
 
-def test_read_page_without_heading_is_unchanged_from_postgres(postgres_read_page):
+def test_read_page_without_heading_returns_markdown_revision_and_trust(postgres_read_page):
     out = postgres_read_page.wiki_read_page("docs", "concept/auth")
 
-    assert set(out) == {"domain", "slug", "markdown", "revision", "status"}
+    assert set(out) == {"domain", "slug", "markdown", "revision", "status", "trust_tier"}
+    assert out["trust_tier"] == "unverified"
 
 
 def test_lifecycle_read_declared_metadata(store_factory, monkeypatch):

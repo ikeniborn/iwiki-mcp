@@ -48,6 +48,7 @@ _READ_DOMAIN_TOOLS = {
 _WRITE_DOMAIN_TOOLS = {
     "wiki_write_page",
     "wiki_update_page",
+    "wiki_verify_page",
     "wiki_delete_page",
     "wiki_insert_section",
     "wiki_delete_section",
@@ -727,6 +728,15 @@ class AuthenticatedMCPMiddleware:
                                         )
                                     )
                                     message = dict(message, headers=headers)
+                                if (isinstance(request_json, dict)
+                                        and request_json.get("method") == "initialize"):
+                                    params = request_json.get("params")
+                                    info = (params.get("clientInfo")
+                                            if isinstance(params, dict) else None)
+                                    if isinstance(info, dict):
+                                        state.editing_agent = server.provenance.client_agent(
+                                            info.get("name"), info.get("version")
+                                        )
                                 self.sessions.store(target_session, context, state)
                         await send(message)
 

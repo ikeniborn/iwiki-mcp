@@ -13,7 +13,7 @@ def test_write_page_rejects_ignored_source(tmp_path, monkeypatch):
     open(secret, "w").write("TOKEN=1")
 
     md = "# Auth\n## Overview\no\n## Flow\nx\n"
-    out = server.wiki_write_page("backend", "auth", md, source=secret)
+    out = server.wiki_write_page("backend", "auth", md, source=secret, author="agent:iwiki-test-editor/1")
 
     assert "error" in out
     assert "iwikiignore" in out["error"]
@@ -33,7 +33,7 @@ def test_write_page_rejects_path_anchored_ignored_source(tmp_path, monkeypatch):
     open(secret, "w").write("TOKEN=1")
 
     md = "# Auth\n## Overview\no\n## Flow\nx\n"
-    out = server.wiki_write_page("backend", "auth", md, source=secret)
+    out = server.wiki_write_page("backend", "auth", md, source=secret, author="agent:iwiki-test-editor/1")
 
     assert "error" in out
     assert "iwikiignore" in out["error"]
@@ -47,7 +47,7 @@ def test_write_page_allows_non_ignored_source(tmp_path, monkeypatch):
     open(src, "w").write("x = 1")
 
     md = "# Auth\n## Overview\no\n## Flow\nx\n"
-    out = server.wiki_write_page("backend", "auth", md, source=src)
+    out = server.wiki_write_page("backend", "auth", md, source=src, author="agent:iwiki-test-editor/1")
 
     assert out.get("page") == "backend/concept/auth.md"
     assert os.path.isfile(os.path.join(b, "backend", "concept", "auth.md"))

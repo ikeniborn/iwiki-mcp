@@ -9,6 +9,13 @@ review:
     verifiability: { status: passed }
     consistency: { status: passed }
   findings: []
+result_check:
+  verdict: OK
+  source: plan
+  plan_hash: f2c22cf5a6eb087c
+  last_run: 2026-11-26
+  reviewed: true
+  docs_checked: true
 chain:
   spec: docs/superpowers/specs/2026-11-26-okf-stale-after-lint-design.md
   intent: docs/superpowers/intents/2026-11-26-okf-stale-after-lint-intent.md

@@ -133,7 +133,7 @@ write = ["backend"]
 primary = "backend"
 ```
 
-4. Запишите первую страницу:
+4. Запишите первую страницу, подставив идентификатор автора или агента:
 
 ```text
 wiki_write_page(
@@ -141,7 +141,8 @@ wiki_write_page(
   slug="auth",
   markdown="# Auth\n\n## Purpose\nAuth verifies users and protects private routes.\n",
   description="Token authentication flow.",
-  type="architecture"
+  type="architecture",
+  author="human:alice"
 )
 ```
 
@@ -197,4 +198,4 @@ cat templates/AGENTS.md.snippet >> AGENTS.md   # Codex
 - Git storage использует numpy brute-force поиск по переносимым JSONL-индексам;
   PostgreSQL storage получает tenant/domain-scoped cosine-кандидатов через pgvector,
   затем применяет общие lexical fusion, deduplication и опциональный reranking.
-- Проверки устаревания локальны для проекта и зависят от доступных путей к исходникам и логов ingest.
+- В Git проверка устаревших источников использует пути к файлам и журналы ingest. В Git и PostgreSQL lint также находит страницы, у которых истёк явно заданный срок проверки.

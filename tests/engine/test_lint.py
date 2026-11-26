@@ -514,6 +514,7 @@ def test_explicit_empty_domain_reports_graph_extras_but_legacy_call_is_noop(
         "broken": [],
         "orphans": [],
         "stale": [],
+        "freshness": [],
         "missing_source": [],
         "legacy_wikilink": [],
         "sections": [],

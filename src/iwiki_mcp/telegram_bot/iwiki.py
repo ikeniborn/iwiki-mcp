@@ -7,6 +7,9 @@ from typing import Any
 
 import httpx
 from mcp import ClientSession, McpError
+from mcp.types import Implementation
+
+from .. import __version__
 from mcp.client.streamable_http import streamablehttp_client
 
 try:
@@ -262,7 +265,8 @@ async def open_remote_iwiki(
             sse_read_timeout=300,
             httpx_client_factory=_direct_httpx_client,
         ) as (read_stream, write_stream, _session_id):
-            async with ClientSession(read_stream, write_stream) as session:
+            client_info = Implementation(name="agent:iwiki-telegram-bot", version=__version__)
+            async with ClientSession(read_stream, write_stream, client_info=client_info) as session:
                 await session.initialize()
 
                 async def call_tool(

@@ -154,7 +154,7 @@ def test_git_write_returns_guidance_warning_and_keeps_type(tmp_path, monkeypatch
     monkeypatch.setattr(system1, "_decide", lambda cfg, body: _decision("reference", 0.8))
     body = "# Base binding\n\n## Overview\nHow binding works.\n\n## Detail\nwords here\n"
 
-    result = server.wiki_write_page("d", "base", body, source=None, type="concept")
+    result = server.wiki_write_page("d", "base", body, source=None, type="concept", author="agent:iwiki-test-editor/1")
 
     assert "error" not in result
     assert "System One suggests type 'reference' (p=0.80)" in result["warning"]

@@ -18,6 +18,7 @@ from .. import graph, indexer, retrieval
 from ..engine import frontmatter
 from ..engine.config import Config
 from ..engine.embed import embed_texts
+from ..engine.lint import freshness_findings
 from ..engine.links import parse_link_targets
 from ..engine.related import related
 from ..engine.store import SCHEMA_VERSION, Record, dequantize, make_record
@@ -2308,7 +2309,9 @@ class PostgresStore:
         prepare_projection()
         return publish(_SPECIFICATION_PREPARATION_FAILED)
 
-    def lint_domain(self, domain: str, visible_domains: list[str]) -> dict:
+    def lint_domain(
+        self, domain: str, visible_domains: list[str], *, now: datetime | None = None,
+    ) -> dict:
         domain = _validate_identifier(domain, "domain")
         self._require_read(domain)
         for visible_domain in visible_domains:
@@ -2347,6 +2350,8 @@ class PostgresStore:
                             ),
                         }
                     )
+        page_metadata = {f"{slug}.md": frontmatter.split(markdown)[0]
+                         for slug, markdown in pages}
         return {
             "wiki_present": True,
             "pages": len(pages),
@@ -2356,8 +2361,8 @@ class PostgresStore:
             "missing_source": [],
             "legacy_wikilink": [],
             "sections": sections,
-            "lifecycle": BundleLifecycle({f"{slug}.md": frontmatter.split(md)[0]
-                                          for slug, md in pages}).findings(),
+            "lifecycle": BundleLifecycle(page_metadata).findings(),
+            "freshness": freshness_findings(page_metadata, now),
             "missing_frontmatter": [],
             "tag_drift": [],
             "reserved_target": [],

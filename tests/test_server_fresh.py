@@ -61,7 +61,7 @@ def test_write_refuses_on_diverged_with_zero_side_effects(tmp_path, monkeypatch)
     _git(b, "commit", "-q", "-m", "local")
 
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
-    out = server.wiki_write_page("backend", "auth", md)
+    out = server.wiki_write_page("backend", "auth", md, author="agent:iwiki-test-editor/1")
 
     assert "error" in out and "diverged" in out["error"]
     assert "hint" in out
@@ -74,7 +74,7 @@ def test_write_fast_forwards_when_behind_then_writes(tmp_path, monkeypatch):
     _neighbor_push(remote, tmp_path)  # base is cleanly behind
 
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
-    out = server.wiki_write_page("backend", "auth", md)
+    out = server.wiki_write_page("backend", "auth", md, author="agent:iwiki-test-editor/1")
 
     assert out["page"] == "backend/concept/auth.md"
     assert os.path.isfile(b / "backend" / "concept" / "auth.md")

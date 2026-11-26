@@ -14,6 +14,9 @@ Every page carries a small YAML frontmatter block above the `# Title` H1, writte
 | `status` | OKF v0.3. New pages default to `stable`. An absent status also means `stable`. Current search skips `draft`, `stub`, `developing` and unknown values. |
 | `superseded_by` | For a deprecated page, current search follows this path from the source directory or the bundle root (leading `/`). |
 | `timestamp` | On create (`wiki_write_page`, `wiki_apply_okf`, `wiki_migrate_okf`): the page file's last git-commit date, or today's date if not yet committed. On edit (`wiki_update_page`): always today's date. |
+| `generated` | The `by` and `at` of the last meaningful change. A presentation-only edit preserves both values. |
+| `verified` | Source verification events with a reviewer (`by`) and check time (`at`). A page can contain a single mapping or a sequence. |
+| `stale_after` | Optional absolute review deadline. A date means midnight UTC. A timestamp must include a UTC offset or `Z`. |
 
 The reserved OKF files `index.md` (navigation) and `log.md` (history) are export-only: `wiki_write_page` / `wiki_update_page` / `wiki_delete_page` no longer regenerate them on every change. Run `wiki_export_okf` to (re)generate current `index.md` / `log.md` in the domain root before treating the domain as a complete OKF bundle for an external consumer. `index`/`log` stay reserved only at the domain **root**, and `wiki_write_page` rejects those two full identities specifically — a type-dir slug like `concept/index` is a distinct, ordinary page and is allowed.
 
@@ -42,3 +45,13 @@ Tools for adopting OKF frontmatter on an existing domain:
 | `wiki_export_okf(domain=None)` | Whole-domain, in-place OKF conformance sweep (no copy, no `dest`): converts any residual `[[wikilink]]` to Markdown links and guarantees frontmatter on every page (deterministic `type: concept` where missing; existing `type`/`tags` preserved), then regenerates the reserved `index.md` / `log.md`. Deterministic — never calls the chat model. Returns `fixed_links`, `added_frontmatter`, and `still_missing_frontmatter` / `still_legacy_wikilink`, with a `next_steps` hint to `wiki_migrate_okf` for better `type`/`tags`. The domain directory is itself the OKF bundle. It also migrates each page to the v2 body model: removes `## Overview`, fills missing `description` from that section and preserves the declared status. |
 
 `IWIKI_CHAT_MODEL` (default: empty) is optional; leaving it unset disables server-side classification and `wiki_migrate_okf` falls back to plan mode.
+
+## Author and review a page
+
+1. Identify the author when creating a page, changing factual content, or reordering instructions. Supply `author="agent:<producer>/<version>"` for an agent edit. Use `author="human:<id>"` when that person wrote the text. A request from a person does not establish authorship.
+2. If you omit `author`, the server can use an identified editing client with a concrete producer and version. On `author_required`, retry with the actual editor. A generic host or SDK is insufficient. Use `presentation_only=True` for an existing-page edit only when its facts and instructions stay unchanged.
+3. Read the whole page and compare its claims with the cited resource. After a successful check, call `wiki_verify_page` with the reviewer's identity and the whole-page precondition. Use `human:<id>` only after that person confirms the reviewed text. Automated verifiers use `agent:<producer>/<version>` or `process:<id>`. On a conflict, reread the page and check it again.
+4. Read `trust_tier` from `wiki_read_page`. A valid check at or after `generated.at` yields `human-reviewed` if any qualifying reviewer is human, otherwise `machine-confirmed`. Without a qualifying check, the tier is `unverified`. Prior events remain in the page. In imported pages, an unprefixed `producer/version` also denotes an agent. When `generated` is absent, valid checks count. A malformed generation time leaves the page unverified.
+5. Set `stale_after` on creation or in a metadata update. Omitting it preserves the deadline. Pass `stale_after=""` to clear it. Check each domain's `freshness` list in `wiki_lint`. At or after the deadline it reports `review_due`. A malformed nonempty value produces `invalid_stale_after`. A check records its own time and preserves the deadline. Lint only reports findings.
+
+See the [MCP tool examples](tools-reference.md#record-a-source-verification).

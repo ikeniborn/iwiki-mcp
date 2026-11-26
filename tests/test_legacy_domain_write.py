@@ -39,7 +39,7 @@ def test_write_page_on_legacy_domain_preserves_prior_log_history(tmp_path, monke
     b, _, legacy_records = _seed_legacy_domain(tmp_path, monkeypatch)
 
     md = "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
-    out = server.wiki_write_page("backend", "auth", md)
+    out = server.wiki_write_page("backend", "auth", md, author="agent:iwiki-test-editor/1")
 
     assert "error" not in out, out
     root_log = base.log_path(b, "backend")

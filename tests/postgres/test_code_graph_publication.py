@@ -444,6 +444,7 @@ def test_selector_update_republishes_wiki_context(
         page_slug,
         code={"symbols": [{"qualified_name": symbol["qualified_name"]}]},
         expected_revision=before["revision"],
+        author="agent:iwiki-test-editor/1",
     )
 
     assert set(updated) == {"page", "revision", "indexed_chunks"}

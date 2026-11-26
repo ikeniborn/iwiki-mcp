@@ -1,10 +1,11 @@
-"""OKF frontmatter: split/render a minimal YAML subset (stdlib-only, no pyyaml),
-plus the governed type/tag vocabulary. Importable by validate/lint (config-free).
-"""
+"""Parse and render OKF frontmatter and define its governed vocabulary."""
 from __future__ import annotations
 import json
+import math
 import os
 import re
+
+import yaml
 
 OKF_TYPES = (
     "architecture", "api", "guide", "reference", "runbook", "concept",
@@ -23,15 +24,15 @@ RESERVED_SECTIONS = ("outgoing links", "external links")
 OVERVIEW_HEADING = "overview"   # reserved summary section; consumed by chunk.py / okf.py
 _H1 = re.compile(r"^#\s+(.*?)\s*$", re.MULTILINE)
 _H2 = re.compile(r"^##\s+(.*?)[ \t]*$", re.MULTILINE)
-_FM = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+_FM = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 
 
 class FrontmatterError(ValueError):
     """Raised when supported nested frontmatter is malformed."""
 
 
-class _OpaqueCode(tuple):
-    """Retain malformed authored code lines for fail-soft ordinary Wiki paths."""
+class _SelectorError(FrontmatterError):
+    """Malformed authored code selectors remain errors on section reads."""
 
 
 class _OpaqueMeta(dict):
@@ -78,10 +79,10 @@ def _nested_code(lines: list[str]) -> dict:
             continue
         match = re.fullmatch(r"  ([^:\s][^:]*):\s*(.*)", line)
         if match is None:
-            raise FrontmatterError("invalid nested code frontmatter")
+            raise _SelectorError("invalid nested code frontmatter")
         key, inline = match.group(1).strip(), match.group(2).strip()
         if key in code:
-            raise FrontmatterError("duplicate nested code frontmatter key")
+            raise _SelectorError("duplicate nested code frontmatter key")
         if inline:
             code[key] = _scalar(inline)
             index += 1
@@ -98,7 +99,7 @@ def _nested_code(lines: list[str]) -> dict:
             if continuation is not None and values and isinstance(values[-1], dict):
                 nested_key = continuation.group(1).strip()
                 if nested_key in values[-1]:
-                    raise FrontmatterError(
+                    raise _SelectorError(
                         "duplicate nested code frontmatter key"
                     )
                 values[-1][nested_key] = _scalar(
@@ -108,7 +109,7 @@ def _nested_code(lines: list[str]) -> dict:
                 continue
             item_match = re.fullmatch(r"    -(?:\s+(.*))?", item)
             if item_match is None:
-                raise FrontmatterError("invalid nested code frontmatter")
+                raise _SelectorError("invalid nested code frontmatter")
             payload = (item_match.group(1) or "").strip()
             mapping_match = re.fullmatch(r"([^:\s][^:]*):\s*(.*)", payload)
             if mapping_match is not None:
@@ -124,49 +125,126 @@ def _nested_code(lines: list[str]) -> dict:
     return code
 
 
-def split(content: str, *, strict_code: bool = False) -> tuple[dict, str]:
-    """Strip a leading ``---\\n…\\n---\\n`` block. Fail-soft: no/broken block -> ({}, content)."""
-    m = _FM.match(content)
-    if not m:
-        return {}, content
-    meta: dict = {}
-    lines = m.group(1).splitlines()
+_SCALAR_TAGS = {f"tag:yaml.org,2002:{tag}"
+                for tag in ("str", "null", "int", "float", "bool", "timestamp")}
+_SUPPORTED_TAGS = _SCALAR_TAGS | {"tag:yaml.org,2002:seq", "tag:yaml.org,2002:map"}
+
+
+class _Loader(getattr(yaml, "CSafeLoader", yaml.SafeLoader)):
+    """Reject ambiguous mappings before an edit can discard their earlier keys."""
+
+    def construct_object(self, node, deep=False):
+        if node.tag not in _SUPPORTED_TAGS:
+            raise FrontmatterError("unsupported YAML frontmatter tag")
+        value = super().construct_object(node, deep)
+        if isinstance(value, float) and not math.isfinite(value):
+            raise FrontmatterError("non-finite number in frontmatter")
+        return value
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise FrontmatterError(f"duplicate frontmatter key: {key}")
+            seen.add(key)
+        mapping = super().construct_mapping(node, deep=True)
+        # Check the finished mapping so YAML merge keys cannot bypass this rule.
+        if any(type(key) is not str for key in mapping):
+            raise FrontmatterError("frontmatter keys must be strings")
+        return mapping
+
+
+class _Timestamp(str):
+    """Retain a native YAML timestamp's type, spelling, offset and precision."""
+
+
+_Loader.add_constructor("tag:yaml.org,2002:timestamp",
+                        lambda loader, node: _Timestamp(loader.construct_scalar(node)))
+
+
+def _parse_block(block: str) -> dict:
+    lines = block.splitlines()
+    code = None
     index = 0
-    seen_code = False
     while index < len(lines):
         line = lines[index]
-        line = line.rstrip()
-        if not line or line.startswith((" ", "\t")) or ":" not in line:
-            index += 1
-            continue
-        key, _, val = line.partition(":")
-        key, val = key.strip(), val.strip()
-        if key == "code":
-            if seen_code:
-                if strict_code:
-                    raise FrontmatterError("duplicate code frontmatter key")
-                return _OpaqueMeta(meta, content[:m.end()]), content[m.end():]
-            seen_code = True
-        if key == "code" and not val:
-            nested: list[str] = []
-            index += 1
-            while index < len(lines) and (
-                not lines[index].strip()
-                or lines[index].startswith((" ", "\t"))
-            ):
-                nested.append(lines[index])
-                index += 1
-            try:
-                meta[key] = _nested_code(nested)
-            except FrontmatterError:
-                if strict_code:
-                    raise
-                meta[key] = _OpaqueCode(nested)
-            continue
-        else:
-            meta[key] = _scalar(val)
         index += 1
-    return meta, content[m.end():]
+        if not re.match(r"^code\s*:", line):
+            continue
+        if code is not None:
+            raise _SelectorError("duplicate code frontmatter key")
+        inline = line.partition(":")[2].strip()
+        if inline:
+            code = _scalar(inline)
+            continue
+        start = index
+        while index < len(lines) and (
+            not lines[index].strip() or lines[index].startswith((" ", "\t"))
+        ):
+            index += 1
+        code = _nested_code(lines[start:index])
+        # Selectors have a narrower legacy grammar with opaque literal values.
+        lines[start:index] = [""] * (index - start)
+    loader = _Loader("\n".join(lines))
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return {}
+        if not isinstance(node, yaml.MappingNode):
+            raise FrontmatterError("frontmatter must be a mapping")
+        # Preserve the established string fields, including numeric titles and tags.
+        strings = {"title", "type", "description", "status", "timestamp",
+                   "resource", "superseded_by"}
+        for key, value in node.value:
+            if key.value in strings and isinstance(value, yaml.ScalarNode):
+                if value.tag in _SCALAR_TAGS:
+                    value.tag = "tag:yaml.org,2002:str"
+                    # Legacy emitters wrote plain text such as "Incident #42".
+                    # Quoted scalars and extension fields retain YAML comment semantics.
+                    if (not value.style and key.start_mark.column == 0
+                            and key.start_mark.line == value.start_mark.line
+                            and value.start_mark.line == value.end_mark.line):
+                        line = lines[value.start_mark.line]
+                        raw = line[value.start_mark.column:].rstrip()
+                        if re.search(r"[ \t]#", raw) and not _needs_quote(raw):
+                            value.value = raw
+            if key.value == "tags" and isinstance(value, yaml.SequenceNode):
+                for item in value.value:
+                    if isinstance(item, yaml.ScalarNode) and item.tag in _SCALAR_TAGS:
+                        item.tag = "tag:yaml.org,2002:str"
+        meta = loader.construct_object(node, deep=True)
+    finally:
+        loader.dispose()
+    if code is not None:
+        meta["code"] = code
+    return meta
+
+
+def split(content: str, *, strict_code: bool = False,
+          strict_selectors: bool = False) -> tuple[dict, str]:
+    """Read YAML, optionally requiring valid selectors or a fully writable block."""
+    match = _FM.match(content)
+    if not match:
+        return {}, content
+    block = match.group(1)
+    try:
+        meta = _parse_block(block)
+    except (yaml.YAMLError, ValueError, TypeError, RecursionError) as exc:
+        if strict_code or (strict_selectors and isinstance(exc, _SelectorError)):
+            if isinstance(exc, FrontmatterError):
+                raise
+            raise FrontmatterError("invalid YAML frontmatter") from exc
+        # Keep the original bytes when only the legacy scalar view is readable.
+        values = {}
+        for line in block.splitlines():
+            if line and not line[0].isspace() and ":" in line:
+                key, _, value = line.partition(":")
+                values[key.strip()] = _scalar(value.strip())
+        meta = _OpaqueMeta(values, content[:match.end()])
+    return meta, content[match.end():]
 
 
 def _render_scalar(value: object) -> str:
@@ -178,8 +256,6 @@ def _render_scalar(value: object) -> str:
 
 
 def _render_code(value: object) -> list[str]:
-    if isinstance(value, _OpaqueCode):
-        return ["code:", *value]
     if not isinstance(value, dict):
         raise TypeError("code frontmatter must be a mapping")
     lines = ["code:"]
@@ -203,10 +279,28 @@ def _render_code(value: object) -> list[str]:
     return lines
 
 
+class _Dumper(getattr(yaml, "CSafeDumper", yaml.SafeDumper)):
+    """Keep scalar lists compact and preserve the canonical double-quoted style."""
+
+
+def _dump_string(dumper, value):
+    style = '"' if _needs_quote(value) else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+def _dump_list(dumper, values):
+    return dumper.represent_sequence("tag:yaml.org,2002:seq", values,
+                                     flow_style=all(isinstance(item, str) for item in values))
+
+
+_Dumper.add_representer(_Timestamp, lambda dumper, value:
+                        dumper.represent_scalar("tag:yaml.org,2002:timestamp", str(value)))
+_Dumper.add_representer(str, _dump_string)
+_Dumper.add_representer(list, _dump_list)
+
+
 def render(meta: dict) -> str:
-    """Emit a frontmatter block in a stable key order. Lists render inline;
-    scalar strings are double-quoted (with escaping) when bare emission would
-    be ambiguous or invalid YAML (see ``_needs_quote``)."""
+    """Emit a mapping in stable order using the existing code-selector grammar."""
     if isinstance(meta, _OpaqueMeta):
         return meta.raw_frontmatter
     order = [
@@ -215,14 +309,17 @@ def render(meta: dict) -> str:
     ]
     keys = [k for k in order if k in meta] + [k for k in meta if k not in order]
     lines = ["---"]
-    for k in keys:
-        v = meta[k]
-        if k == "code":
-            lines.extend(_render_code(v))
-        elif isinstance(v, list):
-            lines.append(f"{k}: [{', '.join(_render_scalar(item) for item in v)}]")
+    for key in keys:
+        if key == "code":
+            lines.extend(_render_code(meta[key]))
         else:
-            lines.append(f"{k}: {_render_scalar(v)}")
+            value = meta[key]
+            if key == "timestamp" and isinstance(value, str) and re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value
+            ):
+                value = _Timestamp(value)
+            lines.append(yaml.dump({key: value}, Dumper=_Dumper, allow_unicode=True,
+                                   sort_keys=False, width=2**31-1).rstrip("\n"))
     lines.append("---\n")
     return "\n".join(lines)
 

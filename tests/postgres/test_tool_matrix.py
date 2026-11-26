@@ -13,6 +13,9 @@ from iwiki_mcp.specification_store import ProjectionStatus
 from iwiki_mcp.storage import PostgresBinding
 
 
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
+
+
 TOOLS = {
     "wiki_status": "supported",
     "wiki_code_status": "supported",
@@ -35,6 +38,7 @@ TOOLS = {
     "wiki_related": "supported",
     "wiki_write_page": "supported",
     "wiki_update_page": "supported",
+    "wiki_verify_page": "supported",
     "wiki_delete_page": "supported",
     "wiki_insert_section": "supported",
     "wiki_delete_section": "supported",
@@ -119,7 +123,7 @@ class FakeStore:
     def index_domain(self, domain):
         return {"domain": domain, "indexed_chunks": 1, "reused": 1, "embedded": 0}
 
-    def lint_domain(self, domain, visible_domains):
+    def lint_domain(self, domain, visible_domains, *, now=None):
         return {"domain": domain, "visible_domains": visible_domains, "broken": []}
 
     def specification_status(self, domain):
@@ -173,8 +177,8 @@ def postgres_server(monkeypatch, postgres_binding):
 def test_registered_tools_match_complete_mode_matrix():
     registered = {tool.name for tool in server.mcp._tool_manager.list_tools()}
 
-    assert len(TOOLS) == 37
-    assert len(registered) == 37
+    assert len(TOOLS) == 38
+    assert len(registered) == 38
     assert registered == set(TOOLS)
 
 
@@ -891,3 +895,29 @@ def test_lifecycle_lint(store_factory):
                      "superseded_by: /missing.md\n---\n# Old\n\n## Body\nold\n")
     assert store.lint_domain("docs", ["docs"])["lifecycle"] == [
         {"page": "guide/old.md", "type": "missing_replacement"}]
+
+
+@pytest.mark.postgres_integration
+def test_postgres_lint_checks_review_deadlines_without_edits(
+    store_factory, postgres_binding, monkeypatch,
+):
+    from tests.freshness_workflow import check_deadline_reports, deadline_pages
+
+    store = store_factory()
+    for domain in ("other", "hidden"):
+        store.create_domain(domain)
+    pages = deadline_pages()
+    for slug, markdown in pages.items():
+        store.write_page("docs", slug, markdown)
+    store.write_page("hidden", "secret", pages["past"])
+    binding = replace(postgres_binding, read=("docs", "other"))
+    monkeypatch.setattr(server, "_resolved_binding", lambda: binding)
+    monkeypatch.setattr(server, "_postgres_store_for_binding", lambda _binding: store)
+    monkeypatch.setattr(Config, "load", lambda: store.cfg)
+
+    check_deadline_reports(monkeypatch)
+
+    for slug, markdown in pages.items():
+        page = store.read_page("docs", slug)
+        assert page["markdown"] == markdown
+        assert page["revision"] == 1

@@ -25,6 +25,7 @@ dependencies = [
     "tree-sitter-python>=0.25.0",
     "tree-sitter-bash>=0.25.1",
     "tree-sitter-typescript>=0.23.0",
+    "pyyaml>=6.0.2,<7",
 ]
 
 [project.scripts]

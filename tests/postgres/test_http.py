@@ -573,6 +573,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             disabled,
             "wiki_write_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "concept/blocked",
                 "markdown": "# Blocked\n\n## Body\ntext\n",
@@ -598,6 +599,7 @@ def test_streamable_http_auth_origin_acl_and_pool_contract(hosted_runtime):
             token,
             "wiki_write_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "concept/blocked",
                 "markdown": "# Blocked\n\n## Body\ntext\n",
@@ -1554,6 +1556,7 @@ def test_hosted_bind_before_creating_the_project_domain(
                 creator["token"],
                 "wiki_write_page",
                 {
+                    "author": "agent:iwiki-test-editor/1",
                     "domain": "notes",
                     "slug": "concept/start",
                     "markdown": "# Start\n\n## Overview\nalpha lead.\n",

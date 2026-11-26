@@ -8,7 +8,7 @@ from iwiki_mcp.specification_store import ResolutionAttempt
 from iwiki_mcp.storage import PostgresBinding
 
 
-pytestmark = pytest.mark.postgres_integration
+pytestmark = [pytest.mark.postgres_integration, pytest.mark.usefixtures("identified_test_editor")]
 
 
 def _markdown():

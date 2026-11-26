@@ -128,6 +128,19 @@ def unstage_locked(base: str, pathspec: Pathspec) -> None:
     _run(base, "reset", "--mixed", "HEAD", "--", *paths)
 
 
+def staged_entries(base: str, paths: tuple[str, ...]) -> bytes:
+    """Capture exact index entries, including partially staged content, under the base lock."""
+    return subprocess.check_output(["git", "-C", base, "ls-files", "--stage", "-z", "--", *paths],
+                                   timeout=30)
+
+
+def restore_staged_entries(base: str, paths: tuple[str, ...], entries: bytes) -> None:
+    subprocess.run(["git", "-C", base, "update-index", "--force-remove", "--", *paths],
+                   capture_output=True, check=True, timeout=30)
+    subprocess.run(["git", "-C", base, "update-index", "-z", "--index-info"],
+                   input=entries, capture_output=True, check=True, timeout=30)
+
+
 def auto_commit(
     base: str,
     message: str,

@@ -10,6 +10,9 @@ from iwiki_mcp.specification_store import GitSpecificationStore
 from iwiki_mcp.specifications import PageSnapshot, assemble_projection
 
 
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
+
+
 SPECIFICATION = '''---
 type: specification
 ---

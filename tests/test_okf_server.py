@@ -2,9 +2,14 @@ import os
 import subprocess
 import hashlib
 
+import pytest
+
 from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.store import VectorStore
 from iwiki_mcp.engine.graph_store import GraphStore
+
+
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
 
 
 def _git_init(base_dir):

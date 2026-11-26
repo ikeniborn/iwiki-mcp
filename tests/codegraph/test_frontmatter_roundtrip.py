@@ -11,6 +11,9 @@ from iwiki_mcp.engine.chunk import chunk_markdown
 from iwiki_mcp.engine.validate import validate_page
 
 
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
+
+
 AUTHORED = {
     "symbols": [{"qualified_name": "pkg.Service.run"}],
     "files": ["src/pkg/service.py"],

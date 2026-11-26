@@ -25,7 +25,8 @@ def _seed(tmp_path, monkeypatch):
 
 def _write():
     return server.wiki_write_page(
-        "backend", "auth", "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n"
+        "backend", "auth", "# Auth\n## Overview\nsummary\n## Flow\nlogin then token\n",
+        author="agent:iwiki-test-editor/1",
     )
 
 

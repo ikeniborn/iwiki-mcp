@@ -375,7 +375,9 @@ async def test_remote_stream_uses_direct_http_factory(monkeypatch):
         yield "read", "write", None
 
     class FakeSession:
-        def __init__(self, read_stream, write_stream):
+        def __init__(self, read_stream, write_stream, *, client_info):
+            assert client_info.name == "agent:iwiki-telegram-bot"
+            assert client_info.version
             seen["streams"] = (read_stream, write_stream)
 
         async def __aenter__(self):
