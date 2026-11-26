@@ -9,6 +9,9 @@ from iwiki_mcp.engine.graph_store import GraphStore
 from iwiki_mcp.graph import markdown_fingerprint
 
 
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
+
+
 @pytest.mark.parametrize(
     ("handler", "args"),
     [
@@ -493,7 +496,9 @@ def test_read_page_without_heading_includes_declared_status(tmp_path, monkeypatc
         "---\n## Overview\nsum\n",
     )
     out = server.wiki_read_page("backend", "concept/auth")
-    assert set(out) == {"domain", "slug", "markdown", "status"}
+    assert set(out) == {"domain", "slug", "markdown", "status", "page_hash", "generated", "trust_tier"}
+    assert out["generated"]["by"] == "agent:iwiki-test-editor/1"
+    assert out["trust_tier"] == "unverified"
     assert out["status"] == "stable"
 
 

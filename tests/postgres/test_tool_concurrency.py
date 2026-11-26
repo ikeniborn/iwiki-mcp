@@ -100,6 +100,7 @@ def test_genuinely_overlapping_updates_yield_one_success_and_one_conflict(
         hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765"
     ) as client:
         seeded = _tool_call(client, token, "wiki_write_page", {
+            "author": "agent:iwiki-test-editor/1",
             "domain": "docs",
             "slug": "reference/overlap-probe",
             "type": "reference",
@@ -114,6 +115,7 @@ def test_genuinely_overlapping_updates_yield_one_success_and_one_conflict(
         def update(marker: str):
             barrier.wait(timeout=30)
             response = _tool_call(client, token, "wiki_update_page", {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "reference/overlap-probe",
                 "heading": "Body",

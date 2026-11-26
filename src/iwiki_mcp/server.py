@@ -34,6 +34,8 @@ from .specification_store import (
     ResolutionAttempt,
     semantic_markdown_revision,
 )
+from . import page_provenance as provenance
+from .engine import trust
 from . import http as _http  # noqa: F401
 from .telegram_bot import main as _telegram_bot_main  # noqa: F401
 from .postgres import migrations as _postgres_migrations  # noqa: F401
@@ -87,7 +89,7 @@ from .engine.section import (
 from .engine.store import VectorStore
 from .engine.validate import validate_page
 from .resources import AUTHORING_RULES
-from .storage import expected_revision_required, section_conflict
+from .storage import expected_revision_required, revision_conflict, section_conflict
 
 
 LOGGER = logging.getLogger(__name__)
@@ -253,6 +255,7 @@ class _HostedBindingState:
         self._auth_context: _postgres_auth.AuthContext | None = None
         self._token_context: _postgres_auth.AuthContext | None = None
         self._request_lock = anyio.Lock()
+        self.editing_agent: str | None = None
         self._session_id: str | None = None
         self._requested_primary: str | None = None
         self._primary_substituted = False
@@ -618,6 +621,8 @@ def _safe(fn=None, *, sweep_cleanup=True):
             if sweep_cleanup:
                 _maybe_sweep_code_graph_cleanup()
             return result
+        except provenance.ProvenanceError as e:
+            return {"error": e.code, "hint": e.hint}
         except lifecycle.LifecycleError as e:
             return {"error": str(e)}
         except _codegraph_models.CodeGraphError as e:
@@ -2328,11 +2333,16 @@ def wiki_read_page(domain: str, slug: str, heading: str | None = None) -> dict:
                 "error": f"page '{domain}/{slug}' not found",
                 "hint": "list pages with wiki_list_pages",
             }
-        page = {"domain": domain, "slug": slug, "markdown": Path(path).read_text(encoding="utf-8")}
-    meta, body = _fm.split(page["markdown"], strict_code=heading is not None)
+        raw = Path(path).read_bytes()
+        page = {
+            "domain": domain, "slug": slug, "markdown": raw.decode("utf-8").replace("\r\n", "\n"),
+            "page_hash": sha256(raw).hexdigest(),
+        }
+    meta, body = _fm.split(page["markdown"], strict_selectors=heading is not None)
     result = page if heading is None else _read_section(domain, slug, body, heading)
     if "error" not in result:
-        for field in ("status", "superseded_by"):
+        result["trust_tier"] = trust.tier(meta)
+        for field in ("status", "superseded_by", "generated", "verified", "stale_after"):
             if field in meta:
                 result[field] = meta[field]
     return result
@@ -2965,10 +2975,10 @@ def _has_unrelated_domain_changes(
     return False
 
 
-def _execute_git_specification_transaction(
+def _execute_git_page_transaction(
     binding: base.Binding,
     domain: str,
-    prepared_specification: dict,
+    prepared_specification: dict | None,
     *,
     page_path: str | None,
     mutate_page,
@@ -2976,22 +2986,22 @@ def _execute_git_specification_transaction(
     message: str,
     after_commit=None,
     mutates_log: bool = False,
+    expected_page_hash: str | None = None,
 ) -> dict:
     projection_path = Path(base.specifications_path(binding.base, domain))
     paths = tuple(dict.fromkeys(path for path in (
         Path(page_path) if page_path is not None else None,
         Path(base.index_path(binding.base, domain)),
-        Path(base.log_path(binding.base, domain)),
-        projection_path,
+        Path(base.log_path(binding.base, domain)) if prepared_specification or mutates_log else None,
+        projection_path if prepared_specification else None,
     ) if path is not None))
     commit_files = tuple(
         path for path in paths
         if mutates_log or path != Path(base.log_path(binding.base, domain))
     )
     transaction_paths = _relative_transaction_paths(binding.base, commit_files)
-    commit_pathspec = (
-        domain if prepared_specification.get("rebuild") else transaction_paths
-    )
+    rebuild = bool(prepared_specification and prepared_specification.get("rebuild"))
+    commit_pathspec = domain if rebuild else transaction_paths
     resolved_specification = None
     prepared = None
     published = False
@@ -3006,13 +3016,16 @@ def _execute_git_specification_transaction(
                 if page_path is not None
                 else ()
             )
-            if not prepared_specification.get("rebuild") and _has_unrelated_domain_changes(
+            if prepared_specification and not rebuild and _has_unrelated_domain_changes(
                 binding.base, domain, dirty_allowed
             ):
                 raise RuntimeError("unrelated domain changes present")
-            resolved_specification = _resolve_git_specification_locked(
-                prepared_specification
-            )
+            if expected_page_hash is not None and sha256(
+                Path(page_path).read_bytes()
+            ).hexdigest() != expected_page_hash:
+                return {"error": "conflict"}
+            if prepared_specification:
+                resolved_specification = _resolve_git_specification_locked(prepared_specification)
             if (
                 isinstance(resolved_specification, dict)
                 and "error" in resolved_specification
@@ -3022,6 +3035,9 @@ def _execute_git_specification_transaction(
                 prepared = resolved_specification["prepared"]
             snapshot = _snapshot_files(paths)
             head_before = sync._head_revision(binding.base)
+            staged = (sync.staged_entries(binding.base, transaction_paths)
+                      if expected_page_hash is not None and sync.is_git_repo(binding.base)
+                      else None)
             try:
                 mutate_page()
                 stats = indexer.index_domain(cfg, binding.base, domain)
@@ -3061,14 +3077,19 @@ def _execute_git_specification_transaction(
                             Path(page_path),
                             Path(base.domain_dir(binding.base, domain)),
                         )
-                try:
-                    sync.unstage_locked(binding.base, commit_pathspec)
-                except Exception:
-                    pass
+                if staged is not None:
+                    sync.restore_staged_entries(binding.base, transaction_paths, staged)
+                else:
+                    try:
+                        sync.unstage_locked(binding.base, commit_pathspec)
+                    except Exception:
+                        pass
                 if prepared is not None:
                     prepared.cleanup()
                 raise
     except BaseException:
+        if prepared_specification is None:
+            return {"error": "verification_transaction_failed", "rolled_back": True}
         return {
             "error": "specification transaction failed",
             "rolled_back": True,
@@ -3142,7 +3163,7 @@ def _maybe_execute_specification_page_transaction(
         return None
     if "error" in prepared_specification:
         return prepared_specification
-    transaction = _execute_git_specification_transaction(
+    transaction = _execute_git_page_transaction(
         binding,
         domain,
         prepared_specification,
@@ -3360,12 +3381,36 @@ def _prepare_postgres_page(
     return identity, rendered, "; ".join(warnings) or None
 
 
+def _editing_agent() -> str | None:
+    """Identify a concrete editing agent from this call's MCP handshake."""
+    state = _SESSION_BINDING.get()
+    if state is not None:
+        return state.editing_agent
+    try:
+        params = mcp.get_context().session.client_params
+    except (ValueError, LookupError):
+        return None
+    if params is None:
+        return None
+    return provenance.client_agent(params.clientInfo.name, params.clientInfo.version)
+
+
+def _new_provenance(markdown, authored, author, deadline):
+    meta, body = _fm.split(markdown, strict_code=True)
+    governed = {"type", "title", "description", "resource", "tags", "status", "superseded_by",
+                "code", "timestamp", "stale_after"}
+    meta.update({key: value for key, value in authored.items() if key not in governed})
+    provenance.record_generation(meta, author, _editing_agent)
+    provenance.set_deadline(meta, authored.get("stale_after") if deadline is None else deadline)
+    return _fm.render(meta) + body
+
+
 @_safe
 def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None,
     type: str | None = None, tags: list[str] | None = None,
     description: str | None = None, status: str | None = None,
-    superseded_by: str | None = None,
+    superseded_by: str | None = None, author: str | None = None, stale_after: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -3395,6 +3440,8 @@ def wiki_write_page(
         if isinstance(prepared, dict):
             return prepared
         identity, full_markdown, warning = prepared
+        authored, _ = _fm.split(markdown, strict_code=True)
+        full_markdown = _new_provenance(full_markdown, authored, author, stale_after)
         result = store.write_page(valid_domain, identity, full_markdown)
         if warning and "error" not in result:
             result["warning"] = warning
@@ -3496,7 +3543,7 @@ def wiki_write_page(
             "error": f"page '{valid_domain}/{identity}' exists",
             "hint": "editing an existing page is a guarded op; confirm with the user",
         }
-    full_md = fm_block + markdown
+    full_md = _new_provenance(fm_block + markdown, authored_meta, author, stale_after)
     fm_warning = _compose_warnings(
         fm_warning, _scenario_placement_warning(full_md)
     )
@@ -3553,7 +3600,7 @@ def wiki_write_page(
             )
 
         page_rel = f"{valid_domain}/{page_file}"
-        transaction = _execute_git_specification_transaction(
+        transaction = _execute_git_page_transaction(
             bind,
             valid_domain,
             prepared_specification,
@@ -3964,7 +4011,7 @@ def _prepare_update_page_call(bind, args: tuple, kwargs: dict) -> dict:
     names = (
         "domain", "slug", "heading", "new_body", "source", "description",
         "status", "new_heading", "expected_revision", "expected_section_hash",
-        "code", "superseded_by",
+        "code", "superseded_by", "author", "presentation_only", "stale_after",
     )
     values = {name: kwargs.get(name) for name in names}
     for name, value in zip(names, args):
@@ -3985,6 +4032,7 @@ def _prepare_update_page_call(bind, args: tuple, kwargs: dict) -> dict:
         new_heading=values["new_heading"],
         expected_section_hash=values["expected_section_hash"],
         code=values["code"], superseded_by=values["superseded_by"],
+        stale_after=values["stale_after"],
     )
 
 
@@ -3997,7 +4045,8 @@ def _prepare_update_page_request(
     status: str | None,
     new_heading: str | None,
     expected_section_hash: str | None,
-    code: dict | None, superseded_by: str | None = None,
+    code: dict | None, superseded_by: str | None = None, stale_after: str | None = None,
+    verifier: str | None = None,
 ) -> dict:
     """Classify and validate one update request without side effects."""
     if (heading is None) != (new_body is None):
@@ -4007,7 +4056,9 @@ def _prepare_update_page_request(
         }
     has_section = heading is not None
     has_code = code is not None
-    if not has_section and not has_code and (status is not None or superseded_by is not None):
+    if not has_section and not has_code and any(
+        item is not None for item in (status, superseded_by, stale_after, verifier)
+    ):
         section_fields = (source, description, new_heading, expected_section_hash)
         if any(value is not None for value in section_fields):
             return {"error": "lifecycle-only update cannot change section metadata"}
@@ -4018,7 +4069,7 @@ def _prepare_update_page_request(
             "hint": _UPDATE_PAGE_OPERATION_HINT,
         }
     if not has_section and any(value is not None for value in (
-        source, description, status, new_heading, expected_section_hash, superseded_by,
+        source, description, status, new_heading, expected_section_hash, superseded_by, stale_after,
     )):
         return {
             "error": "code-only update cannot change section metadata",
@@ -4064,6 +4115,7 @@ def wiki_update_page(
     expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
     code: dict | None = None, superseded_by: str | None = None,
+    author: str | None = None, presentation_only: bool = False, stale_after: str | None = None,
 ) -> dict:
     """Update an existing section, its code selectors, or document lifecycle.
 
@@ -4077,6 +4129,43 @@ def wiki_update_page(
     `new_heading`, or `expected_section_hash`. On PostgreSQL storage
     `expected_revision` is required.
     """
+    return _update_page(domain, slug, heading, new_body, source, description, status,
+                        new_heading, expected_revision, expected_section_hash, code,
+                        superseded_by, author, presentation_only, stale_after)
+
+
+@_safe
+def wiki_verify_page(
+    domain: str, slug: str, verifier: str, expected_revision: _ExpectedRevision = None,
+    expected_page_hash: str | None = None,
+) -> dict:
+    """Confirm a source-checked page. Pass the PostgreSQL revision or Git whole-page hash."""
+    return _update_page(domain, slug, expected_revision=expected_revision,
+                        verifier=verifier, expected_page_hash=expected_page_hash)
+
+
+def _edit_provenance(meta, author, presentation_only, meaningful, stale_after=None,
+                     verifier=None):
+    provenance.set_deadline(meta, stale_after)
+    if verifier is not None:
+        provenance.record_review(meta, verifier)
+    elif meaningful and not presentation_only:
+        provenance.record_generation(meta, author, _editing_agent)
+    elif author is not None:
+        provenance.live_actor(author)
+
+
+def _update_page(
+    domain: str, slug: str, heading: str | None = None,
+    new_body: str | None = None, source: str | None = None,
+    description: str | None = None, status: str | None = None,
+    new_heading: str | None = None,
+    expected_revision: _ExpectedRevision = None,
+    expected_section_hash: str | None = None,
+    code: dict | None = None, superseded_by: str | None = None,
+    author: str | None = None, presentation_only: bool = False, stale_after: str | None = None,
+    *, verifier: str | None = None, expected_page_hash: str | None = None,
+) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
     if _is_postgres(bind):
@@ -4091,10 +4180,12 @@ def wiki_update_page(
             status=status,
             new_heading=new_heading,
             expected_section_hash=expected_section_hash,
-            code=code, superseded_by=superseded_by,
+            code=code, superseded_by=superseded_by, stale_after=stale_after, verifier=verifier,
         )
         if "error" in request:
             return request
+        if verifier is not None and expected_page_hash is not None:
+            return {"error": "use_expected_revision"}
         if expected_revision is None:
             return expected_revision_required()
         _slug_parts(slug)
@@ -4115,6 +4206,8 @@ def wiki_update_page(
                 "error": str(exc),
                 "hint": "fix nested code frontmatter before updating",
             }
+        if verifier is not None and page["revision"] != expected_revision:
+            return revision_conflict(page["revision"])
         updated_body = original_body
         if request["mode"] in {"section", "combined"}:
             try:
@@ -4153,6 +4246,9 @@ def wiki_update_page(
                 meta["code"] = request["code"]
             else:
                 meta.pop("code", None)
+        meaningful = updated_body != original_body or (
+            description is not None and description != meta.get("description"))
+        _edit_provenance(meta, author, presentation_only, meaningful, stale_after, verifier)
         if description is not None:
             meta["description"] = description
         lifecycle.update_metadata(meta, status, superseded_by)
@@ -4186,7 +4282,7 @@ def wiki_update_page(
         status=status,
         new_heading=new_heading,
         expected_section_hash=expected_section_hash,
-        code=code, superseded_by=superseded_by,
+        code=code, superseded_by=superseded_by, stale_after=stale_after, verifier=verifier,
     )
     if "error" in request:
         return request
@@ -4222,7 +4318,14 @@ def wiki_update_page(
         }
     page_file = PurePosixPath(*_slug_parts(slug)).as_posix() + ".md"
     original_bytes = Path(path).read_bytes()
-    original_full = open(path, encoding="utf-8").read()
+    if verifier is not None:
+        if expected_revision is not None:
+            return {"error": "use_expected_page_hash"}
+        if not expected_page_hash:
+            return {"error": "expected_page_hash_required"}
+        if expected_page_hash != sha256(original_bytes).hexdigest():
+            return {"error": "conflict"}
+    original_full = original_bytes.decode("utf-8").replace("\r\n", "\n")
     try:
         meta, original_body = _fm.split(original_full, strict_code=True)
     except _fm.FrontmatterError as exc:
@@ -4264,6 +4367,9 @@ def wiki_update_page(
         else:
             meta.pop("code", None)
     lifecycle.update_metadata(meta, status, superseded_by)
+    meaningful = updated_body != original_body or (
+        description is not None and description != meta.get("description"))
+    _edit_provenance(meta, author, presentation_only, meaningful, stale_after, verifier)
     if meta:
         if description is not None:
             meta["description"] = description
@@ -4315,7 +4421,7 @@ def wiki_update_page(
         and "error" in prepared_specification
     ):
         return prepared_specification
-    if prepared_specification is not None:
+    if prepared_specification is not None or (verifier is not None and sync.is_git_repo(bind.base)):
         def mutate_specification_page() -> None:
             Path(path).write_bytes(new_md.encode("utf-8"))
             if source:
@@ -4328,7 +4434,7 @@ def wiki_update_page(
                 )
 
         page_rel = f"{valid_domain}/{page_file}"
-        transaction = _execute_git_specification_transaction(
+        transaction = _execute_git_page_transaction(
             bind,
             valid_domain,
             prepared_specification,
@@ -4340,6 +4446,7 @@ def wiki_update_page(
                 graph_mutation, refresh_files=(page_file,)
             ),
             mutates_log=source is not None,
+            expected_page_hash=expected_page_hash,
         )
         if "error" in transaction:
             return transaction
@@ -4356,8 +4463,9 @@ def wiki_update_page(
                 fresh.get("warning"),
                 graph_warning=transaction["specification_warning"],
             ),
-            "specifications": transaction["specifications"],
         }
+        if transaction["specifications"] is not None:
+            result["specifications"] = transaction["specifications"]
         if request["mode"] in {"section", "combined"}:
             result["heading"] = heading.lstrip("#").strip()
         return result
@@ -4403,6 +4511,7 @@ def wiki_insert_section(
     after_heading: str | None = None, before_heading: str | None = None,
     source: str | None = None, description: str | None = None,
     status: str | None = None, expected_revision: _ExpectedRevision = None,
+    author: str | None = None, presentation_only: bool = False,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -4454,6 +4563,9 @@ def wiki_insert_section(
                 "findings": blocking,
                 "hint": "body must use only ## headings; no ###+, no pre-## text",
             }
+        meaningful = updated_body != original_body or (
+            description is not None and description != meta.get("description"))
+        _edit_provenance(meta, author, presentation_only, meaningful)
         if description is not None:
             meta["description"] = description
         if status is not None:
@@ -4531,6 +4643,9 @@ def wiki_insert_section(
             "hint": "body must use only ## headings; no ###+, no pre-## text",
         }
     cfg = Config.load()
+    meaningful = new_body != original_body or (
+        description is not None and description != meta.get("description"))
+    _edit_provenance(meta, author, presentation_only, meaningful)
     if meta:
         if description is not None:
             meta["description"] = description
@@ -4620,6 +4735,7 @@ def wiki_delete_section(
     domain: str, slug: str, heading: str,
     expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
+    author: str | None = None, presentation_only: bool = False,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -4663,6 +4779,8 @@ def wiki_delete_section(
                 "findings": blocking,
                 "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
             }
+        meaningful = updated_body != original_body
+        _edit_provenance(meta, author, presentation_only, meaningful)
         if meta:
             meta["timestamp"] = _dt.date.today().isoformat()
             updated_markdown = _fm.render(meta) + updated_body
@@ -4716,6 +4834,8 @@ def wiki_delete_section(
             "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
         }
     cfg = Config.load()
+    meaningful = new_body != original_body
+    _edit_provenance(meta, author, presentation_only, meaningful)
     if meta:
         meta["timestamp"] = _dt.date.today().isoformat()
         new_md = _fm.render(meta) + new_body
@@ -4781,6 +4901,7 @@ def wiki_move_section(
     after_heading: str | None = None, before_heading: str | None = None,
     expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
+    author: str | None = None, presentation_only: bool = False,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -4826,6 +4947,8 @@ def wiki_move_section(
                 "findings": blocking,
                 "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
             }
+        meaningful = updated_body != original_body
+        _edit_provenance(meta, author, presentation_only, meaningful)
         if meta:
             meta["timestamp"] = _dt.date.today().isoformat()
             updated_markdown = _fm.render(meta) + updated_body
@@ -4881,6 +5004,8 @@ def wiki_move_section(
             "hint": "resulting page must use only ## headings; no ###+, no pre-## text",
         }
     cfg = Config.load()
+    meaningful = new_body != original_body
+    _edit_provenance(meta, author, presentation_only, meaningful)
     if meta:
         meta["timestamp"] = _dt.date.today().isoformat()
         new_md = _fm.render(meta) + new_body
@@ -5078,7 +5203,7 @@ def wiki_index(domain: str | None = None) -> dict:
     else:
         specification_warning = None
     if prepared_specification is not None:
-        transaction = _execute_git_specification_transaction(
+        transaction = _execute_git_page_transaction(
             bind,
             valid_domain,
             prepared_specification,
@@ -5397,16 +5522,15 @@ def wiki_bind(
 @_safe
 def wiki_lint(domain: str | None = None) -> dict:
     bind = _resolved_binding()
-    if _is_postgres(bind):
-        targets = [domain] if domain else list(bind.read)
-        valid_targets = [
-            _validate_domain(target)
-            for target in targets
-            if target in bind.read
-        ]
+    now = _dt.datetime.now(_dt.timezone.utc)
+    postgres = _is_postgres(bind)
+    readable = list(bind.read) if postgres else base.resolve_scope(bind, "project", None)
+    targets = [domain] if domain else readable
+    valid_targets = [_validate_domain(target) for target in targets if target in readable]
+    if postgres:
         store = _postgres_store_for_binding(bind)
         reports = {
-            target: store.lint_domain(target, list(bind.read))
+            target: store.lint_domain(target, readable, now=now)
             for target in valid_targets
         }
         for target, report in reports.items():
@@ -5414,8 +5538,6 @@ def wiki_lint(domain: str | None = None) -> dict:
                 bind, target
             )
         return {"domains": list(reports), "reports": reports}
-    targets = [domain] if domain else base.resolve_scope(bind, "project", None)
-    valid_targets = [_validate_domain(target) for target in targets]
     visible_domains = {
         target: str(_domain_path(bind.base, target)) for target in valid_targets
     }
@@ -5427,7 +5549,9 @@ def wiki_lint(domain: str | None = None) -> dict:
             domain=target,
             base_dir=bind.base,
             visible_domains=visible_domains,
+            now=now,
         )
+        report.setdefault("freshness", [])
         try:
             if target != bind.primary:
                 code_report = {
@@ -5751,7 +5875,7 @@ def _apply_okf_page_move(
         explicit_status=existing_meta.get("status"),
         timestamp_path=f"{domain}/{current_file}",
         preserve_absent_status=True, superseded_by=existing_meta.get("superseded_by"),
-        authored_code=existing_meta.get("code"),
+        existing_meta=existing_meta,
     )
 
     edits = {(edit.domain, edit.file): edit for edit in prepared.edits}
@@ -5905,7 +6029,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
     identity = new_identity
     page_file = identity + ".md"
     path = _page_path(bind.base, valid_domain, identity)
-    original = open(path, encoding="utf-8").read()
+    original = Path(path).read_bytes().decode("utf-8")
     existing_meta, body = _fm.split(original, strict_code=True)
     apply_tags = tags if tags is not None else (existing_meta.get("tags") or None)
     apply_desc = existing_meta.get("description")
@@ -5924,14 +6048,12 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         # a type change instead of resetting to today.
         timestamp_path=f"{valid_domain}/{current_identity}.md",
         preserve_absent_status=True, superseded_by=existing_meta.get("superseded_by"),
-        authored_code=existing_meta.get("code"))
+        existing_meta=existing_meta)
     try:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(fm_block + body)
+        Path(path).write_bytes((fm_block + body).encode("utf-8"))
         stats = indexer.index_domain(cfg, bind.base, valid_domain)
     except Exception:
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(original)
+        Path(path).write_bytes(original.encode("utf-8"))
         raise
     page_rel = f"{valid_domain}/{page_file}"
     refresh_files = tuple(sorted({*move_change.refresh_files, page_file}))
@@ -6023,6 +6145,7 @@ wiki_sync = _postgres_unsupported_guard(wiki_sync)
 # Every overlapping mutation recovers journals before any other side effect.
 wiki_write_page = _mutation_guard(wiki_write_page)
 wiki_update_page = _mutation_guard(wiki_update_page)
+wiki_verify_page = _mutation_guard(wiki_verify_page)
 wiki_insert_section = _mutation_guard(wiki_insert_section)
 wiki_delete_section = _mutation_guard(wiki_delete_section)
 wiki_move_section = _mutation_guard(wiki_move_section)
@@ -6082,6 +6205,7 @@ mcp.tool()(_threaded(wiki_spec_resolve))
 mcp.tool()(_threaded(wiki_related))
 mcp.tool()(_threaded(wiki_write_page))
 mcp.tool()(_threaded(wiki_update_page))
+mcp.tool()(_threaded(wiki_verify_page))
 
 
 mcp.tool()(_threaded(wiki_insert_section))

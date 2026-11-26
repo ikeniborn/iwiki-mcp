@@ -131,7 +131,7 @@ write = ["backend"]
 primary = "backend"
 ```
 
-4. Write the first page:
+4. Write the first page with the actual author or agent identity:
 
 ```text
 wiki_write_page(
@@ -139,7 +139,8 @@ wiki_write_page(
   slug="auth",
   markdown="# Auth\n\n## Purpose\nAuth verifies users and protects private routes.\n",
   description="Token authentication flow.",
-  type="architecture"
+  type="architecture",
+  author="human:alice"
 )
 ```
 
@@ -196,4 +197,4 @@ sibling named `<page>.ru.md`.
 - Git storage uses numpy brute-force vector search over portable JSONL indexes;
   PostgreSQL storage uses tenant/domain-scoped pgvector cosine candidates before the
   shared lexical fusion, deduplication, and optional reranking stages.
-- Staleness checks are project-local and depend on available source paths and ingest logs.
+- Git checks source paths and ingest logs for stale sources. On both Git and PostgreSQL, lint also reports pages whose explicit review deadline has passed.

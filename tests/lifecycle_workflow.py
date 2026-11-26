@@ -8,6 +8,7 @@ async def check_lifecycle(call, domain, *, postgres):
         ("active-task", "Active", ["task"]),
     ]:
         created = await call("wiki_write_page", {
+            "author": "agent:iwiki-test-editor/1",
             "domain": domain, "slug": slug, "type": "guide", "tags": tags,
             "markdown": f"# {slug}\n\n## {heading}\nSharedword {heading} content.\n",
         })
@@ -45,6 +46,7 @@ async def check_lifecycle(call, domain, *, postgres):
     for slug, replacement in [("cyclepath", "cyclepath.md"), ("missingpath", "missing.md"),
                               ("externalpath", "../../private/secret.md")]:
         created = await call("wiki_write_page", {
+            "author": "agent:iwiki-test-editor/1",
             "domain": domain, "slug": slug, "type": "guide", "status": "deprecated",
             "superseded_by": replacement, "markdown": f"# {slug}\n\n## Old\n{slug} text.\n",
         })

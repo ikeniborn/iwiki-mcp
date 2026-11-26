@@ -10,6 +10,9 @@ from iwiki_mcp import base, indexer, server
 from iwiki_mcp.engine.graph_store import GraphStore
 
 
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
+
+
 def _seed(tmp_path, monkeypatch):
     b = tmp_path / "wiki"
     b.mkdir()
@@ -67,7 +70,7 @@ def test_update_edits_section_and_returns_pushed_key(tmp_path, monkeypatch):
     assert "rewritten_pages" not in out
 
 
-def test_update_public_signature_keeps_section_positionals_and_adds_trailing_code():
+def test_update_public_signature_preserves_legacy_positionals():
     signature = inspect.signature(server.wiki_update_page)
     assert list(signature.parameters) == [
         "domain",
@@ -82,12 +85,18 @@ def test_update_public_signature_keeps_section_positionals_and_adds_trailing_cod
         "expected_section_hash",
         "code",
         "superseded_by",
+        "author",
+        "presentation_only",
+        "stale_after",
     ]
     assert signature.parameters["heading"].default is None
     assert signature.parameters["new_body"].default is None
     assert signature.parameters["new_heading"].default is None
     assert signature.parameters["expected_section_hash"].default is None
     assert signature.parameters["code"].default is None
+    assert signature.parameters["author"].default is None
+    assert signature.parameters["presentation_only"].default is False
+    assert signature.parameters["stale_after"].default is None
 
 
 @pytest.mark.parametrize(

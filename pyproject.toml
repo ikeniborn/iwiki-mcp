@@ -1,6 +1,6 @@
 [project]
 name = "iwiki-mcp"
-version = "0.7.335"
+version = "0.7.336"
 description = "MCP server for a shared Git or PostgreSQL wiki split into domains"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,7 @@ dependencies = [
     "tree-sitter-python>=0.25.0",
     "tree-sitter-bash>=0.25.1",
     "tree-sitter-typescript>=0.23.0",
+    "pyyaml>=6.0.2,<7",
 ]
 
 [project.scripts]

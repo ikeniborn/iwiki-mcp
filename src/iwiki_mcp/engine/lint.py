@@ -1,7 +1,6 @@
 """Deterministic, config-free wiki health checks — no embedding call.
 
-Mirrors the `status` subcommand's contract: stdlib only (plus the in-package
-link/heading parsers), so it imports without httpx and runs in any project.
+Like the `status` subcommand, lint runs without an embedding service.
 An absent or empty docs/wiki/ is a clean no-op ({"wiki_present": false}), never
 an error — this is the fix for the exit-2 seen in foreign projects.
 """
@@ -14,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .lifecycle import BundleLifecycle
@@ -24,6 +24,7 @@ from .links import (
     parse_link_targets,
 )
 from .okf_artifacts import RESERVED_OKF
+from .trust import instant_key
 from .validate import validate_page
 
 
@@ -543,6 +544,22 @@ def _graph_report(base_dir: str, domain: str, expected: dict) -> dict:
     return report
 
 
+def freshness_findings(pages: dict[str, dict], now: datetime | None) -> list[dict]:
+    """Check declared review deadlines against a single UTC instant."""
+    reference = (now if now is not None else datetime.now(timezone.utc), "")
+    findings = []
+    for page in sorted(pages):
+        value = pages[page].get("stale_after")
+        if value is None or value == "":
+            continue
+        deadline = instant_key(value)
+        if deadline is None:
+            findings.append({"page": page, "type": "invalid_stale_after"})
+        elif reference >= deadline:
+            findings.append({"page": page, "type": "review_due"})
+    return findings
+
+
 def lint(
     wiki_dir: str,
     project_dir: str | None = None,
@@ -550,6 +567,7 @@ def lint(
     domain: str | None = None,
     base_dir: str | None = None,
     visible_domains: dict[str, str] | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """Health report over one domain without mutating its derived graph."""
     explicit_graph = domain is not None and base_dir is not None
@@ -609,13 +627,15 @@ def lint(
     legacy_wikilink = sorted(p for p, c in content.items() if has_legacy_wikilink(c))
     sections = [{"page": p, **f} for p in pages
                 for f in validate_page(raw[p])]
+    page_metadata = {os.path.relpath(file, wiki_dir): meta
+                     for file, (meta, _) in meta_body.items()}
     return {"wiki_present": True, "pages": len(pages),
             "broken": broken, "orphans": orphans, "stale": _stale(wiki_dir),
             "missing_source": _missing_source(wiki_dir, project_dir),
             "legacy_wikilink": legacy_wikilink,
             "sections": sections,
-            "lifecycle": BundleLifecycle({os.path.relpath(file, wiki_dir): meta
-                                          for file, (meta, _) in meta_body.items()}).findings(),
+            "lifecycle": BundleLifecycle(page_metadata).findings(),
+            "freshness": freshness_findings(page_metadata, now),
             "missing_frontmatter": missing_frontmatter,
             "tag_drift": _tag_drift(all_tags),
             "reserved_target": reserved_target,

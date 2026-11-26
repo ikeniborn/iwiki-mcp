@@ -22,7 +22,7 @@ def test_search_write_intent_returns_single_target(tmp_path, monkeypatch):
     server.wiki_write_page("d", "retrieval",
                            "# Retrieval\n\n## Purpose\n\nBody.\n", type="architecture",
                            description="Explains the purpose of retrieval and how "
-                                       "search locates a precise write target.")
+                                       "search locates a precise write target.", author="agent:iwiki-test-editor/1")
     res = server.wiki_search("purpose of retrieval", intent="write", heading="Purpose")
     assert "target" in res
     assert res["target"]["exists"] is True
@@ -45,6 +45,7 @@ def test_search_write_intent_ignores_search_mode_and_reranker(tmp_path, monkeypa
     server.wiki_write_page(
         "d", "retrieval", "# Retrieval\n\n## Purpose\nBody.\n",
         type="architecture", description="purpose of retrieval",
+        author="agent:iwiki-test-editor/1",
     )
     result = server.wiki_search(
         "purpose of retrieval", intent="write", mode="semantic", heading="Purpose"

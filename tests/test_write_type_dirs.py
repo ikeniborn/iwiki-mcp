@@ -19,7 +19,7 @@ def _bind(tmp_path, monkeypatch, dom):
 def test_write_places_page_under_type_dir(tmp_path, monkeypatch):
     _bind(tmp_path, monkeypatch, "d")              # local harness (see Global Constraints)
     res = server.wiki_write_page("d", "retrieval",
-                                 "# Retrieval\n\n## Purpose\n\nBody.\n", type="architecture")
+                                 "# Retrieval\n\n## Purpose\n\nBody.\n", type="architecture", author="agent:iwiki-test-editor/1")
     assert res["page"] == "d/architecture/retrieval.md"
     assert (tmp_path / "d" / "architecture" / "retrieval.md").is_file()
 
@@ -27,12 +27,12 @@ def test_write_places_page_under_type_dir(tmp_path, monkeypatch):
 def test_write_rejects_type_segment_mismatch(tmp_path, monkeypatch):
     _bind(tmp_path, monkeypatch, "d")
     res = server.wiki_write_page("d", "guide/retrieval",
-                                 "# R\n\n## Purpose\n\nBody.\n", type="architecture")
+                                 "# R\n\n## Purpose\n\nBody.\n", type="architecture", author="agent:iwiki-test-editor/1")
     assert "error" in res and "type" in res["error"].lower()
 
 
 def test_write_rejects_unsafe_type_segment(tmp_path, monkeypatch):
     _bind(tmp_path, monkeypatch, "d")
     res = server.wiki_write_page("d", "retrieval",
-                                 "# R\n\n## Purpose\n\nBody.\n", type="a/b")
+                                 "# R\n\n## Purpose\n\nBody.\n", type="a/b", author="agent:iwiki-test-editor/1")
     assert "error" in res and "type" in res["error"].lower()

@@ -15,7 +15,7 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 
 EXPECTED_TOOLS = {
     "wiki_status", "wiki_list_domains", "wiki_list_pages", "wiki_read_page",
-    "wiki_search", "wiki_related", "wiki_write_page", "wiki_update_page",
+    "wiki_search", "wiki_related", "wiki_write_page", "wiki_update_page", "wiki_verify_page",
     "wiki_insert_section", "wiki_delete_section", "wiki_move_section",
     "wiki_delete_page", "wiki_index", "wiki_create_domain", "wiki_bind",
     "wiki_list_domain_grants", "wiki_set_domain_grant",
@@ -129,7 +129,7 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                 await session.initialize()
                 listed = (await session.list_tools()).tools
                 tools = {tool.name: tool for tool in listed}
-                assert len(listed) == 37
+                assert len(listed) == 38
                 assert set(tools) == EXPECTED_TOOLS
                 search_schema = tools["wiki_search"].inputSchema
                 assert "mode" not in search_schema.get("required", [])

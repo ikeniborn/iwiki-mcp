@@ -694,6 +694,7 @@ def test_hosted_mcp_matrix_write_replay_and_conflicts(full_stack):
             session_id,
             "wiki_write_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "write-once",
                 "markdown": markdown,
@@ -707,6 +708,7 @@ def test_hosted_mcp_matrix_write_replay_and_conflicts(full_stack):
             session_id,
             "wiki_write_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "write-once",
                 "markdown": markdown,
@@ -738,6 +740,7 @@ def test_hosted_mcp_matrix_write_replay_and_conflicts(full_stack):
             session_id,
             "wiki_update_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "concept/write-once",
                 "heading": "Body",
@@ -753,6 +756,7 @@ def test_hosted_mcp_matrix_write_replay_and_conflicts(full_stack):
             session_id,
             "wiki_update_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "concept/write-once",
                 "heading": "Body",
@@ -937,6 +941,7 @@ def test_full_stack_failure_boundaries_do_not_persist_private_markers(full_stack
             session_id,
             "wiki_write_page",
             {
+                "author": "agent:iwiki-test-editor/1",
                 "domain": "docs",
                 "slug": "privacy-context",
                 "markdown": "# Context\n\n## Body\nacceptance context\n",

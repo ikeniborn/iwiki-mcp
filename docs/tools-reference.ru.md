@@ -5,10 +5,11 @@
 | Инструмент | Что делает |
 |---|---|
 | `wiki_search` | Режимы чтения — только `hybrid`, `lexical` и `semantic`; явный режим переопределяет `IWIKI_SEARCH_MODE` (по умолчанию `hybrid`), а публичный `vector` отклоняется. Summary-семантика страниц, lexical-совпадения страниц, graph-страницы, глобальные semantic-чанки и lexical-секции ранжируются независимо и объединяются RRF до финального top-k. Результаты содержат `hit` (`semantic`/`lexical`/`both`) и `source` (`seed`/`graph`/`global`/`lexical`). При заданном `IWIKI_RERANK_MODEL` точные актуальные чанки полного пула отправляются одним аутентифицированным LiteLLM batch с timeout 60 секунд, а provider `top_n` ограничивается запрошенным финальным `k`; сбой сохраняет предварительный порядок и возвращает только очищенные метаданные `rerank`. `scope`, `domains`, `k`, `threshold`, `type` и `tags` ограничивают read-поиск. `intent="write"` остаётся изолированным summary-vector поиском write-target и игнорирует read-режим/reranking; его target — bound primary, а первый названный домен используется только когда primary не привязан, и hosted-гейт авторизует тот же домен. На hosted-сервере каждый ответ дополнительно несёт `binding_source`, а ответ, чей scope пришёл из биндинга, а не из вызова — read без `domains` или любой write-intent lookup, — добавляет `binding_defaulted` в `warnings`. |
-| `wiki_read_page` | Прочитать одну Markdown-страницу по домену и slug. С `heading` вернуть только одну секцию `##` (вместе с её `section_hash`) вместо всей страницы. |
+| `wiki_read_page` | Прочитать одну Markdown-страницу по домену и slug. С `heading` вернуть только одну секцию `##` (вместе с её `section_hash`) вместо всей страницы. При чтении всей страницы ответ содержит `trust_tier`, а также `revision` для PostgreSQL или `page_hash` для Git. |
 | `wiki_list_pages` | Перечислить slug-и и файлы страниц в домене. |
 | `wiki_related` | Вернуть связанные секции для id секции в пределах одного домена; форма `{"vector": [], "graph": []}` и domain-local fallback не меняются. |
 | `wiki_write_page` | Проверить и записать новую страницу, проиндексировать домен и вернуть, удался ли авто-коммит базы. |
+| `wiki_verify_page` | Записать результат сверки всей страницы с источником. Передайте `verifier` и условие для прочитанной версии — `expected_revision` в PostgreSQL или `expected_page_hash` в Git. |
 | `wiki_update_page` | Обновить существующую страницу: обновление только секции (`heading` + `new_body`), обновление только метаданных `code` или совмещённое атомарное обновление. С `new_heading` переименовать заголовок и атомарно переписать точные видимые входящие ссылки, если их домены доступны для записи. Принимает `expected_section_hash` для оптимистичной конкурентности. |
 | `wiki_insert_section` | Вставить новую секцию `##` (позиция задаётся `after_heading` / `before_heading`) без переписывания остальной страницы. |
 | `wiki_delete_section` | Удалить одну существующую секцию `##` без переписывания остальной страницы. Принимает `expected_section_hash`. |
@@ -19,7 +20,7 @@
 | `wiki_create_domain` | Создать пустой каталог домена и вернуть, удался ли авто-коммит базы; `index.jsonl` / `log.jsonl` домена создаются лениво в его корне при первой записи или переиндексации. |
 | `wiki_bind` | Сузить PostgreSQL-область и в hosted HTTP-сессии опционально передать проектный объект `project_policy` (`specification_mode`, `max_snapshot_age_seconds`) для этой сессии — либо один `specification_mode` через устаревший одноимённый параметр, но никогда оба сразу; последующий вызов `wiki_bind` **заменяет** объект `project_policy` целиком, а не сливает его, поэтому bind, опустивший ранее заданное поле, возвращает это поле к hosted default; local PostgreSQL stdio отклоняет оба параметра, а для Git возвращается `project_config_manual_edit_required`, изменения выполняются вручную. |
 | `wiki_status` | Показать разрешённую базу, каталог проекта, домены read, домен write и доступные домены. |
-| `wiki_lint` | Read-only Markdown-authoritative отчёт: битые/reserved/unavailable-domain ссылки, сироты, stale-страницы, `missing_source` и пробелы секций, а также независимый per-domain SQLite graph parity (`state`, fingerprint, страницы, рёбра, anchors). Он не создаёт и не пересобирает кэш; non-ready или mismatch добавляет подсказку `wiki_index`. |
+| `wiki_lint` | Read-only Markdown-authoritative отчёт: битые/reserved/unavailable-domain ссылки, сироты, stale-страницы, `missing_source` и пробелы секций, а также независимый per-domain SQLite graph parity (`state`, fingerprint, страницы, рёбра, anchors). Он не создаёт и не пересобирает кэш; non-ready или mismatch добавляет подсказку `wiki_index`. В обоих хранилищах список `freshness` каждого домена содержит находки `review_due` и `invalid_stale_after`. |
 | `wiki_remediation_plan` | Сгруппировать текущие lint-находки в read-only план update/delete действий. |
 | `wiki_migrate_okf` | Добавить OKF-фронтматтер и нормализовать type-каталоги автономно либо вернуть план для ревью. |
 | `wiki_apply_okf` | Применить подтверждённые OKF-метаданные и решения по layout; при переносе страницы между type-каталогами атомарно переписать точные видимые входящие ссылки. |
@@ -69,4 +70,29 @@ wiki_search(query="deploy", lifecycle="all", tags=["task"])
 page = wiki_read_page(domain="docs", slug="guide/old")
 wiki_update_page(domain="docs", slug="guide/old", status="deprecated", superseded_by="/guide/current.md", expected_revision=page["revision"])
 wiki_read_page(domain="docs", slug="guide/old")
+```
+
+## Как записать проверку по источнику
+
+Примеры показывают отдельные операции. Регистрируйте проверку, только когда указанный проверяющий сверил эту версию с источником.
+
+Для редактирования в PostgreSQL сначала прочтите текущую ревизию. Здесь срок проверки задаётся отдельным обновлением метаданных.
+
+```text
+page = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_update_page(domain="docs", slug="guide/backup", heading="Recovery", new_body="Restore from the latest verified backup.", author="agent:release-editor/2.3", expected_revision=page["revision"])
+page = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_update_page(domain="docs", slug="guide/backup", stale_after="2027-04-01", expected_revision=page["revision"])
+```
+
+```text
+reviewed = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_verify_page(domain="docs", slug="guide/backup", verifier="human:alice", expected_revision=reviewed["revision"])
+```
+
+При проверке в Git передайте хеш всей страницы. Если хранилище отклонит условие, перечитайте страницу и повторите сверку перед новым вызовом.
+
+```text
+reviewed = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_verify_page(domain="docs", slug="guide/backup", verifier="process:backup-audit", expected_page_hash=reviewed["page_hash"])
 ```

@@ -1,10 +1,15 @@
 import httpx
 
+import pytest
+
 import iwiki_mcp.server as server
 import iwiki_mcp.indexer as indexer
 from iwiki_mcp.engine import frontmatter as fm
 from iwiki_mcp.engine import system1
 from iwiki_mcp.engine.config import Config
+
+
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
 
 
 def _bind(tmp_path):

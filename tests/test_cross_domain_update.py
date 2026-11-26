@@ -4,8 +4,13 @@ from pathlib import Path
 import json
 import subprocess
 
+import pytest
+
 from iwiki_mcp import base, indexer, server, sync
 from iwiki_mcp.engine.lint import lint
+
+
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
 
 
 def _git(cwd: Path, *args: str) -> str:

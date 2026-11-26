@@ -19,7 +19,7 @@ def _bind(tmp_path, monkeypatch, dom):
 def test_read_update_delete_by_type_slug(tmp_path, monkeypatch):
     _bind(tmp_path, monkeypatch, "d")
     write_res = server.wiki_write_page(
-        "d", "cfg", "# Cfg\n\n## Purpose\n\nBody.\n", type="reference")
+        "d", "cfg", "# Cfg\n\n## Purpose\n\nBody.\n", type="reference", author="agent:iwiki-test-editor/1")
     assert write_res["page"] == "d/reference/cfg.md"
     assert (tmp_path / "d" / "reference" / "cfg.md").is_file()
 
@@ -28,7 +28,7 @@ def test_read_update_delete_by_type_slug(tmp_path, monkeypatch):
     assert "error" not in read_res
     assert "Body." in read_res["markdown"]
 
-    server.wiki_update_page("d", "reference/cfg", "Purpose", "New body.\n")
+    server.wiki_update_page("d", "reference/cfg", "Purpose", "New body.\n", author="agent:iwiki-test-editor/1")
     assert "New body." in server.wiki_read_page("d", "reference/cfg")["markdown"]
 
     server.wiki_delete_page("d", "reference/cfg")

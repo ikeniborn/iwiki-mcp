@@ -20,7 +20,7 @@ def _bind(tmp_path, monkeypatch, dom):
 
 def test_write_emits_no_okf_artifacts_but_export_does(tmp_path, monkeypatch):
     _bind(tmp_path, monkeypatch, "d")
-    server.wiki_write_page("d", "x", "# X\n\n## Purpose\n\nBody.\n", type="guide")
+    server.wiki_write_page("d", "x", "# X\n\n## Purpose\n\nBody.\n", type="guide", author="agent:iwiki-test-editor/1")
     assert not (tmp_path / "d" / "index.md").exists()
     assert not (tmp_path / "d" / "log.md").exists()
     server.wiki_export_okf("d")

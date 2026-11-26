@@ -58,7 +58,8 @@ def domain_tag_vocab(base_dir: str, domain: str) -> list:
 def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
                       explicit_type, explicit_tags, timestamp_path,
                       explicit_description=None, explicit_status=None, tag_vocab=None,
-                      authored_code=None, superseded_by=None, preserve_absent_status=False):
+                      authored_code=None, superseded_by=None, preserve_absent_status=False,
+                      existing_meta=None):
     """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default.
     description: explicit param -> transitional ## Overview derive -> empty (+warning).
     status: explicit param -> DEFAULT_STATUS. type: stored as authored (open, normalized)."""
@@ -78,7 +79,8 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
         mtags = fm.normalize_tags(explicit_tags or [])
         warnings.append("type not given and IWIKI_CHAT_MODEL unset; defaulted to concept")
 
-    meta: dict = {"type": mtype, "title": fm.derive_title(body, slug)}
+    meta = dict(existing_meta or {})
+    meta.update(type=mtype, title=fm.derive_title(body, slug))
     desc = (explicit_description if explicit_description is not None
             else fm.derive_description(body))
     if desc:
@@ -89,6 +91,8 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
         meta["resource"] = source
     if mtags:
         meta["tags"] = mtags
+    elif explicit_tags is not None:
+        meta.pop("tags", None)
     if explicit_status is not None or not preserve_absent_status:
         lifecycle.update_metadata(meta, fm.normalize_status(explicit_status), superseded_by)
     if authored_code is not None:

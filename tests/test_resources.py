@@ -17,6 +17,24 @@ def test_agent_contract_preserves_configured_domain_case():
         assert "`familyTraffic`" in contract
 
 
+def test_agent_contract_identifies_editors_and_protects_the_reviewed_page():
+    root = Path(__file__).parents[1]
+    for contract in (
+        AUTHORING_RULES,
+        (root / "templates/AGENTS.md.snippet").read_text(encoding="utf-8"),
+        (root / "templates/CLAUDE.md.snippet").read_text(encoding="utf-8"),
+        user_docs(),
+        user_docs(".ru"),
+    ):
+        for term in (
+            "author_required", "agent:<producer>/<version>", "human:<id>",
+            "presentation_only=True", "wiki_verify_page", "expected_revision",
+            "expected_page_hash", "trust_tier", "stale_after", "freshness",
+            "review_due", "invalid_stale_after",
+        ):
+            assert term in contract, term
+
+
 def test_authoring_rules_cover_section_format():
     text = AUTHORING_RULES.lower()
     assert "description" in text          # description is the authored summary

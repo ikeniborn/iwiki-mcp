@@ -15,6 +15,9 @@ from iwiki_mcp.specification_store import (
 )
 
 
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
+
+
 VALID_SPECIFICATION = '''# Account behavior
 
 ## Open account

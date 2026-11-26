@@ -38,3 +38,9 @@ def hosted_session():
     finally:
         for token in reversed(tokens):
             server._SESSION_BINDING.reset(token)
+
+
+@pytest.fixture
+def identified_test_editor(monkeypatch):
+    """Provide a versioned editing client for direct handler calls in legacy workflow tests."""
+    monkeypatch.setattr(server, "_editing_agent", lambda: "agent:iwiki-test-editor/1")

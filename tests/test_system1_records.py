@@ -112,7 +112,7 @@ def test_git_write_assigns_type_and_logs(tmp_path, monkeypatch):
     _enable(monkeypatch, log)
     monkeypatch.setattr(system1, "_decide", lambda cfg, body: _decision("architecture", 0.8))
 
-    result = server.wiki_write_page("d", "layout", BODY, source=None)
+    result = server.wiki_write_page("d", "layout", BODY, source=None, author="agent:iwiki-test-editor/1")
 
     assert "error" not in result
     assert "assigned by System One" in result["warning"]

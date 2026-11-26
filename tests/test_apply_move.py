@@ -3,9 +3,14 @@ import os
 import subprocess
 from hashlib import sha256
 
+import pytest
+
 from iwiki_mcp import base, indexer, okf, server
 from iwiki_mcp.engine.lint import lint
 from iwiki_mcp.engine.graph_store import GraphStore
+
+
+pytestmark = pytest.mark.usefixtures("identified_test_editor")
 
 
 def _bind(tmp_path, monkeypatch, dom):
@@ -220,3 +225,34 @@ def test_apply_okf_move_rekeys_log_and_lint_still_flags_stale(tmp_path, monkeypa
     report = lint(str(dom))
     stale_pages = [os.path.relpath(s["page"], str(dom)) for s in report.get("stale", [])]
     assert "guide/a.md" in stale_pages
+
+
+@pytest.mark.parametrize("reclassify", [False, True])
+def test_apply_okf_preserves_imported_evidence_and_body(tmp_path, monkeypatch, reclassify):
+    from iwiki_mcp.engine import frontmatter
+
+    _bind(tmp_path, monkeypatch, "d")
+    _init_git_base(tmp_path, "d")
+    page = tmp_path / "d/concept/x.md"
+    page.parent.mkdir()
+    source = (
+        "---\ntype: concept\ntags: [old]\n"
+        "generated: {by: editor/1, at: 2025-01-01}\n"
+        "verified: {by: human:alice, at: 2025-01-02, notes: {source: abc}}\n"
+        "stale_after: 2027-01-01\nx-evidence: {ids: [1, 2]}\n---\n"
+    )
+    body = "# X\r\n\r\n## Purpose\r\nOriginal.\r\n"
+    page.write_bytes((source + body).encode())
+    _git(tmp_path, "add", "d/concept/x.md")
+    _git(tmp_path, "commit", "-qm", "Import reviewed page")
+    kind = "guide" if reclassify else "concept"
+    result = server.wiki_apply_okf("d", "concept/x", type=kind, tags=[])
+    assert result.get("error") is None, result
+    rewritten = (tmp_path / result["page"]).read_bytes().decode()
+    meta, actual_body = frontmatter.split(rewritten)
+    original, _ = frontmatter.split(source)
+    assert {k: meta.get(k) for k in ("generated", "verified", "stale_after", "x-evidence")} == {
+        k: original[k] for k in ("generated", "verified", "stale_after", "x-evidence")
+    }
+    assert "tags" not in meta
+    assert actual_body == body

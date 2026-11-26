@@ -97,6 +97,8 @@ def replace_section(
             raise SectionError(
                 f"section heading '{replacement_heading}' collides with another anchor"
             )
+    if replacement_heading == target and sections[idx].body.strip("\n") == new_body.strip("\n"):
+        return content
     heads = list(_H2.finditer(content))
     heading_start = heads[idx].start(1)
     heading_end = heads[idx].end(1)
@@ -182,6 +184,8 @@ def move_section(
     block = content[sections[idx].start:sections[idx].body_end]
     remainder = content[:sections[idx].start] + content[sections[idx].body_end:]
     point = _anchor_point(remainder, after=after, before=before)
+    if point == sections[idx].start:
+        return content
     prefix = remainder[:point]
     if prefix and not prefix.endswith("\n\n"):
         prefix = prefix.rstrip("\n") + "\n\n"

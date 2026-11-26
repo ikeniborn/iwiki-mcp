@@ -5,10 +5,11 @@
 | Tool | What it does |
 |---|---|
 | `wiki_search` | Read modes are exactly `hybrid`, `lexical`, and `semantic`; an explicit mode overrides `IWIKI_SEARCH_MODE` (default `hybrid`), while `vector` is rejected as a public mode. Semantic page descriptions, lexical page matches, graph pages, global semantic chunks, and lexical sections are ranked independently and fused with RRF before final top-k. Results contain `hit` (`semantic`/`lexical`/`both`) and `source` (`seed`/`graph`/`global`/`lexical`). When `IWIKI_RERANK_MODEL` is set, exact current chunks from the full candidate ceiling are sent in one authenticated 60-second LiteLLM batch, while provider `top_n` is limited to requested final `k`; failure preserves preliminary order and returns only sanitized `rerank` metadata. `scope`, `domains`, `k`, `threshold`, `type`, and `tags` constrain read search. `intent="write"` remains the isolated summary-vector write-target lookup and ignores read mode/reranking; its target is the bound primary and falls back to the first named domain only when no primary is bound, and the hosted gate authorizes that same domain. On a hosted server every answer additionally carries `binding_source`, and one whose scope came from the binding rather than the call — a read without `domains`, or any write-intent lookup — adds `binding_defaulted` to `warnings`. |
-| `wiki_read_page` | Read one Markdown page by domain and slug. With `heading`, return only that one `##` section (including its `section_hash`) instead of the whole page. |
+| `wiki_read_page` | Read one Markdown page by domain and slug. With `heading`, return only that one `##` section (including its `section_hash`) instead of the whole page. Whole-page reads include `trust_tier` and the PostgreSQL `revision` or Git `page_hash`. |
 | `wiki_list_pages` | List page slugs and files in a domain. |
 | `wiki_related` | Return related sections for a section id within one domain; its `{"vector": [], "graph": []}` shape and domain-local fallback stay unchanged. |
 | `wiki_write_page` | Validate and write a new page, index the domain, commit and push. |
+| `wiki_verify_page` | Record a source check for the reviewed whole page. Pass `verifier` and the observed PostgreSQL `expected_revision` or Git `expected_page_hash`. |
 | `wiki_update_page` | Update one existing page: section-only (`heading` + `new_body`), code-only (`code`), or combined atomically. With `new_heading`, rename that heading and atomically rewrite exact visible incoming links when their domains are writable. Accepts `expected_section_hash` for optimistic concurrency. |
 | `wiki_insert_section` | Insert one new `##` section (positioned with `after_heading` / `before_heading`) without rewriting the rest of the page. |
 | `wiki_delete_section` | Delete one existing `##` section without rewriting the rest of the page. Accepts `expected_section_hash`. |
@@ -19,7 +20,7 @@
 | `wiki_create_domain` | Create an empty domain directory and return whether the base auto-commit succeeded; the domain's `index.jsonl` / `log.jsonl` are created lazily at the domain root on first write or index. |
 | `wiki_bind` | Narrow PostgreSQL scope and, in a hosted HTTP session, optionally carry a project `project_policy` object (`specification_mode`, `max_snapshot_age_seconds`) for that session — `specification_mode` alone via the deprecated `specification_mode` parameter, never both; a later `wiki_bind` call **replaces** the whole `project_policy` object rather than merging it, so a bind that omits a field it previously set drops that field back to the hosted default; local PostgreSQL stdio rejects both parameters, while Git configuration changes return `project_config_manual_edit_required` and must be made manually. |
 | `wiki_status` | Show resolved base, project directory, read domains, write domain, and available domains. |
-| `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. |
+| `wiki_lint` | Read-only Markdown-authoritative health report: broken/reserved/unavailable-domain links, orphans, stale pages, `missing_source`, and section gaps, plus an independent per-domain SQLite graph parity report (`state`, fingerprint, pages, edges, anchors). It never creates or rebuilds the cache; non-ready or mismatched graph state includes a `wiki_index` remediation hint. The per-domain `freshness` list reports `review_due` and `invalid_stale_after` on both backends. |
 | `wiki_remediation_plan` | Group current lint findings into read-only update/delete remediation actions. |
 | `wiki_migrate_okf` | Backfill OKF frontmatter and normalize type-directory layout, autonomously with a chat model or as a review plan without one. |
 | `wiki_apply_okf` | Apply reviewed OKF metadata and layout decisions; a type-directory move atomically rewrites exact visible incoming links. |
@@ -72,4 +73,29 @@ wiki_search(query="deploy", lifecycle="all", tags=["task"])
 page = wiki_read_page(domain="docs", slug="guide/old")
 wiki_update_page(domain="docs", slug="guide/old", status="deprecated", superseded_by="/guide/current.md", expected_revision=page["revision"])
 wiki_read_page(domain="docs", slug="guide/old")
+```
+
+## Record a source verification
+
+The examples show separate operations. Record verification only after the named verifier has checked that version against its source.
+
+For a PostgreSQL edit, read the current revision first. This example sets the deadline in a separate metadata update.
+
+```text
+page = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_update_page(domain="docs", slug="guide/backup", heading="Recovery", new_body="Restore from the latest verified backup.", author="agent:release-editor/2.3", expected_revision=page["revision"])
+page = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_update_page(domain="docs", slug="guide/backup", stale_after="2027-04-01", expected_revision=page["revision"])
+```
+
+```text
+reviewed = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_verify_page(domain="docs", slug="guide/backup", verifier="human:alice", expected_revision=reviewed["revision"])
+```
+
+For a Git review, pass the hash of the whole page. If either backend rejects the precondition, reread and review the current text before retrying.
+
+```text
+reviewed = wiki_read_page(domain="docs", slug="guide/backup")
+wiki_verify_page(domain="docs", slug="guide/backup", verifier="process:backup-audit", expected_page_hash=reviewed["page_hash"])
 ```
