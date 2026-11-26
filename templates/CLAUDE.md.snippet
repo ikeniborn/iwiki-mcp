@@ -8,6 +8,13 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
 - For example, pass `familyTraffic` exactly; `familytraffic` is a different identifier.
 - Normalize only the scope representation, such as a legacy scalar `write` into a list.
 - Before diagnosing `domain_not_granted`, compare submitted names with `.iwiki.toml` character for character.
+- Check that `tools/list` advertises `wiki_search.lifecycle`, `wiki_search.exclude_tags`, and `wiki_update_page.superseded_by`.
+- Search for working guidance with `wiki_search(query=topic, lifecycle="current", exclude_tags=["task", "task-history"])`.
+- Read the returned page and heading, including when the query used an obsolete name.
+- Find task records with `wiki_search(query=topic, lifecycle="all", tags=["task"])`.
+- Read the original slug directly to inspect its historical text and declared replacement.
+- To retire a page on PostgreSQL, read its revision immediately before the update.
+- Pass `status="deprecated"`, the same-bundle `superseded_by` path, and `expected_revision` to `wiki_update_page`.
 - **Before starting a task:** call `wiki_search` with the topic to recall existing
   knowledge (scope `project` for the read-set, `all` for the whole base).
 - **Binding changes are manual setup:** do not create domains, call `wiki_bind`, or
@@ -24,7 +31,7 @@ search, `write` = domain to author into). Use the `iwiki` MCP tools:
   is a local rebuildable cache excluded from Git; keep domain `index.jsonl` and
   `log.jsonl` portable and let the server rebuild the graph after clone or pull.
 - **Periodically / at end of session:** call `wiki_sync` to pull/push the base.
-- Editing an existing page is section-scoped through `wiki_update_page`;
+- Edit an existing section or its document lifecycle through `wiki_update_page`;
   `wiki_write_page` still refuses to overwrite a page.
 - Cross-domain page moves and heading renames rewrite exact links automatically only
   when all visible referrers are writable; a read-only visible referrer blocks before

@@ -485,7 +485,7 @@ def test_read_page_with_missing_heading_returns_error(tmp_path, monkeypatch):
     assert "not found" in out["error"]
 
 
-def test_read_page_without_heading_is_unchanged(tmp_path, monkeypatch):
+def test_read_page_without_heading_includes_declared_status(tmp_path, monkeypatch):
     _seed(tmp_path, monkeypatch)
     server.wiki_write_page(
         "backend", "concept/auth",
@@ -493,7 +493,8 @@ def test_read_page_without_heading_is_unchanged(tmp_path, monkeypatch):
         "---\n## Overview\nsum\n",
     )
     out = server.wiki_read_page("backend", "concept/auth")
-    assert set(out) == {"domain", "slug", "markdown"}
+    assert set(out) == {"domain", "slug", "markdown", "status"}
+    assert out["status"] == "stable"
 
 
 def test_insert_section_adds_new_section_after_target(tmp_path, monkeypatch):

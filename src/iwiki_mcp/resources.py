@@ -101,7 +101,18 @@ AUTHORING_RULES: str = """\
   If both, split the page; otherwise pick the question most readers arrive with.
   A write may return "System One suggests type ..." as a second opinion; keep your
   type when this rule supports it.
-- `status` is one of `stub` (default), `developing`, `stable`, `deprecated`.
+- New pages default to `stable`. The current view includes `stable` and absent status.
+  It follows `deprecated` replacements and excludes `draft`, `stub` and `developing`.
+- Check that `tools/list` advertises `wiki_search.lifecycle`, `wiki_search.exclude_tags`, and
+  `wiki_update_page.superseded_by`.
+- Search for working guidance with `wiki_search(query=topic, lifecycle="current",
+  exclude_tags=["task", "task-history"])`.
+- Read the returned page and heading, including when the query used an obsolete name.
+- Find task records with `wiki_search(query=topic, lifecycle="all", tags=["task"])`.
+- Read the original slug directly to inspect its historical text and declared replacement.
+- To retire a page on PostgreSQL, read its revision immediately before the update.
+- Pass `status="deprecated"`, the same-bundle `superseded_by` path, and `expected_revision` to
+  `wiki_update_page`.
 - `tags` are lowercase kebab-case, <=5 per page; reuse an existing domain tag first.
 - Put relationship links in two reserved sections, `## Outgoing links` (Markdown links
   to other pages) and `## External links` (bare URLs). Both are EXCLUDED from search

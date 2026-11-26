@@ -1741,3 +1741,31 @@ def test_delete_releases_the_callers_binding_and_not_a_strangers(
         )
         assert after.status_code == 200
         assert _tool_result(after)["binding_source"] == "token_default"
+
+
+def test_lifecycle_search_bound_http(hosted_runtime, monkeypatch):
+    import asyncio
+    from iwiki_mcp import server
+    from tests.lifecycle_workflow import check_lifecycle
+
+    original = server._postgres_store_for_binding
+    def fixture_store(bind):
+        return original(bind).with_embedder(lambda cfg, texts: [[1., 0., 0.] for _ in texts])
+
+    monkeypatch.setattr(server, "_postgres_store_for_binding", fixture_store)
+    token = hosted_runtime.token
+    with TestClient(hosted_runtime.runtime.app, base_url="http://127.0.0.1:8765") as client:
+        session_id = _initialize(client, token).headers["mcp-session-id"]
+        listed = _request(client, token, {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+                          session_id=session_id).json()["result"]["tools"]
+        schemas = {tool["name"]: tool["inputSchema"]["properties"] for tool in listed}
+        assert schemas["wiki_search"]["lifecycle"]["default"] == "current"
+        assert "exclude_tags" in schemas["wiki_search"]
+        assert "superseded_by" in schemas["wiki_update_page"]
+
+        async def call(name, arguments):
+            return _tool_result(_tool_call(client, token, name, arguments, session_id=session_id))
+
+        asyncio.run(call("wiki_bind", {"read": ["docs"], "write": ["docs"], "primary": "docs"}))
+        assert asyncio.run(call("wiki_status", {}))["binding_source"] == "session"
+        asyncio.run(check_lifecycle(call, "docs", postgres=True))

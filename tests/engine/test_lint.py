@@ -518,6 +518,7 @@ def test_explicit_empty_domain_reports_graph_extras_but_legacy_call_is_noop(
         "legacy_wikilink": [],
         "sections": [],
         "missing_frontmatter": [],
+        "lifecycle": [],
         "tag_drift": [],
         "reserved_target": [],
         "unavailable_domain": [],

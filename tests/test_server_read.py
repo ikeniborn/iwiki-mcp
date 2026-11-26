@@ -81,3 +81,14 @@ def test_status_no_base(monkeypatch):
     monkeypatch.setenv("IWIKI_PROJECT_DIR", "/tmp/does-not-exist-iwiki")
     out = server.wiki_status()
     assert "error" in out
+
+
+def test_read_lifecycle_without_following(tmp_path, monkeypatch):
+    from pathlib import Path
+    root = Path(_seed(tmp_path, monkeypatch))
+    page = root / "backend/auth.md"
+    page.write_text("---\nstatus: deprecated\nsuperseded_by: /new.md\n---\n" + page.read_text())
+    for heading in (None, "Flow"):
+        result = server.wiki_read_page("backend", "auth", heading)
+        assert (result["status"], result["superseded_by"]) == ("deprecated", "/new.md")
+        assert result["slug"] == "auth"

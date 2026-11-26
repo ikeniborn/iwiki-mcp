@@ -53,8 +53,8 @@ def test_normalize_status_open_with_default():
     assert fm.normalize_status("Stable") == "stable"
     assert fm.normalize_status("  weird ") == "weird"     # kept as-is (advisory)
     assert fm.normalize_status(None) == fm.DEFAULT_STATUS
-    assert fm.DEFAULT_STATUS == "stub"
-    assert fm.STATUS_VOCAB == ("stub", "developing", "stable", "deprecated")
+    assert fm.DEFAULT_STATUS == "stable"
+    assert set(fm.STATUS_VOCAB) == {"draft", "stable", "deprecated", "stub", "developing"}
 
 
 def test_reserved_sections_constant():

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .engine import classify, frontmatter as fm
+from .engine import classify, frontmatter as fm, lifecycle
 from .engine import okf_artifacts as _oa
 from .engine.store import VectorStore
 from . import base as _base
@@ -58,7 +58,7 @@ def domain_tag_vocab(base_dir: str, domain: str) -> list:
 def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
                       explicit_type, explicit_tags, timestamp_path,
                       explicit_description=None, explicit_status=None, tag_vocab=None,
-                      authored_code=None):
+                      authored_code=None, superseded_by=None, preserve_absent_status=False):
     """Return (frontmatter_block, warning). Precedence: explicit -> classify -> default.
     description: explicit param -> transitional ## Overview derive -> empty (+warning).
     status: explicit param -> DEFAULT_STATUS. type: stored as authored (open, normalized)."""
@@ -89,7 +89,8 @@ def build_frontmatter(cfg, base_dir, domain, slug, body, *, source,
         meta["resource"] = source
     if mtags:
         meta["tags"] = mtags
-    meta["status"] = fm.normalize_status(explicit_status) if explicit_status else fm.DEFAULT_STATUS
+    if explicit_status is not None or not preserve_absent_status:
+        lifecycle.update_metadata(meta, fm.normalize_status(explicit_status), superseded_by)
     if authored_code is not None:
         meta["code"] = authored_code
     meta["timestamp"] = (git_last_commit_date(base_dir, timestamp_path)
@@ -360,7 +361,7 @@ def batch_sweep(cfg, base_dir, domain) -> dict:
     """Deterministic whole-domain in-place OKF conformance sweep (no chat model).
     Converts residual [[...]] links, migrates the body to the v2 model (strips a
     first-section ## Overview, backfilling frontmatter ``description`` from it when
-    empty and defaulting ``status`` to stub), and guarantees frontmatter on every
+    empty while preserving the declared status), and guarantees frontmatter on every
     page, preserving existing type/tags. Writes back only changed files (idempotent)."""
     from .engine.links import to_markdown_links
     dom = Path(base_dir) / domain
@@ -384,15 +385,13 @@ def batch_sweep(cfg, base_dir, domain) -> dict:
                 meta["tags"] = fm.normalize_tags(meta["tags"])
             if not meta.get("description") and overview_text:
                 meta["description"] = overview_text
-            if not meta.get("status"):
-                meta["status"] = fm.DEFAULT_STATUS
             new_full = fm.render(meta) + new_body
         else:
             src = latest_source(base_dir, domain, page_file)
             block, _ = build_frontmatter(
                 cfg, base_dir, domain, slug, new_body,
                 source=src, explicit_type=fm.DEFAULT_TYPE, explicit_tags=None,
-                explicit_description=(overview_text or None),
+                explicit_description=(overview_text or None), preserve_absent_status=True,
                 timestamp_path=f"{domain}/{page_file}")
             new_full = block + new_body
             added_frontmatter.append(slug)

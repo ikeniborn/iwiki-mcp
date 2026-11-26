@@ -54,7 +54,8 @@ def embedding_server():
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             requests.append({"path": self.path, "payload": payload})
             body = json.dumps(
-                {"data": [{"embedding": [0.1, 0.2]}]}
+                {"data": [{"embedding": [0.1, 0.2], "index": i}
+                               for i in range(len(payload["input"]))]}
             ).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -251,7 +252,20 @@ async def test_lists_tools_and_status(tmp_path, monkeypatch):
                         ),
                     }
 
-        assert requests == [
+                from tests.lifecycle_workflow import check_lifecycle
+
+                assert search_schema["properties"]["lifecycle"]["default"] == "current"
+                assert "exclude_tags" in search_schema["properties"]
+                assert "superseded_by" in tools["wiki_update_page"].inputSchema["properties"]
+
+                async def call(name, arguments):
+                    result = await session.call_tool(name, arguments)
+                    assert not result.isError, result
+                    return json.loads(result.content[0].text)
+
+                await check_lifecycle(call, "backend", postgres=False)
+
+        assert requests[:1] == [
             {
                 "path": "/v1/embeddings",
                 "payload": {

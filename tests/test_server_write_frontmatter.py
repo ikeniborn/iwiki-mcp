@@ -188,13 +188,13 @@ def test_write_with_description_and_status(tmp_path, monkeypatch):
     assert meta["status"] == "stable"
 
 
-def test_write_missing_status_defaults_stub(tmp_path, monkeypatch):
+def test_write_missing_status_defaults_stable(tmp_path, monkeypatch):
     _patch(monkeypatch, tmp_path)
     body = "# Alice\n\n## Role\nwork.\n"
     server.wiki_write_page("d", "alice", body, source=None, type="person",
                            description="d")
     meta, _ = fm.split((tmp_path / "d" / "person" / "alice.md").read_text(encoding="utf-8"))
-    assert meta["status"] == "stub"
+    assert meta["status"] == "stable"
 
 
 def test_write_missing_description_warns(tmp_path, monkeypatch):
@@ -251,3 +251,14 @@ def test_freshness_warning_composes_with_frontmatter_warning(tmp_path, monkeypat
         "freshness warning; "
         "no description given and no ## Overview to derive from"
     )
+
+
+def test_lifecycle_create_authored(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path)
+    body = "---\nstatus: deprecated\nsuperseded_by: ./new.md\n---\n# Old\n\n## Detail\ntext\n"
+    res = server.wiki_write_page("d", "old", body, type="guide")
+    assert "error" not in res
+    meta, rest = fm.split((tmp_path / "d" / "guide" / "old.md").read_text())
+    assert meta["superseded_by"] == "./new.md"
+    assert meta["status"] == "deprecated"
+    assert rest.startswith("# Old")

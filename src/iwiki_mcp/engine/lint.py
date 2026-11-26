@@ -16,6 +16,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+from .lifecycle import BundleLifecycle
 from . import frontmatter as _fm
 from .links import (
     has_legacy_wikilink,
@@ -613,6 +614,8 @@ def lint(
             "missing_source": _missing_source(wiki_dir, project_dir),
             "legacy_wikilink": legacy_wikilink,
             "sections": sections,
+            "lifecycle": BundleLifecycle({os.path.relpath(file, wiki_dir): meta
+                                          for file, (meta, _) in meta_body.items()}).findings(),
             "missing_frontmatter": missing_frontmatter,
             "tag_drift": _tag_drift(all_tags),
             "reserved_target": reserved_target,
