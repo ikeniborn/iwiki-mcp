@@ -251,7 +251,97 @@ def _relation_heavy_rows(rows, count):
     }
 
 
-def test_activation_cost_is_bounded_by_row_kinds_not_row_count(pg_graph):
+def _stage_relation_graph(graph, count):
+    import json
+
+    from iwiki_mcp.codegraph.publication import iter_snapshot_batches
+
+    rows = _relation_heavy_rows(graph.rows, count)
+    header = graph.header_with_counts(rows)
+    session = graph.begin(header)
+    expected = []
+    for batch in iter_snapshot_batches(rows, max_rows=1000, max_bytes=1_000_000):
+        assert graph.publish_batch(session, batch) == {"accepted": True}
+        if batch.kind == "relations":
+            expected.extend(json.loads(batch.payload))
+    return session, header, expected
+
+
+@pytest.mark.parametrize(("count", "sizes"), [(0, []), (1000, [1000]), (1001, [1000, 1])])
+def test_finalize_relation_insert_bound(pg_graph, monkeypatch, count, sizes):
+    import psycopg
+
+    from iwiki_mcp.codegraph.canonical import canonical_sha256
+
+    session, header, expected = _stage_relation_graph(pg_graph, count)
+    execute = psycopg.Cursor.execute
+    observed = []
+
+    def observe(cursor, query, params=None, **kwargs):
+        if isinstance(query, str) and query.startswith("INSERT INTO iwiki.code_graph_relations "):
+            observed.append(len(params[-1].obj))
+        return execute(cursor, query, params, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", observe)
+    result = pg_graph.finalize(session)
+    assert observed == sizes
+    assert result["counts"] == header.expected_counts
+    revision = canonical_sha256({
+        "graph_payload_revision": header.graph_payload_revision,
+        "markdown_revision": result["markdown_revision"],
+        "repository_id": header.repository_id,
+    }, prefix=True)
+    assert result["snapshot_revision"] == pg_graph.reader_status()["snapshot_revision"] == revision
+    stored = pg_graph._query(
+        "SELECT row_data FROM iwiki.code_graph_relations WHERE snapshot_id = %s",
+        (result["snapshot_id"],), admin=True,
+    )
+    assert {row["relation_id"]: row for row, in stored} == {
+        row["relation_id"]: row for row in expected
+    }
+
+
+def test_finalize_relation_error_rolls_back_and_same_upload_retries(pg_graph, monkeypatch):
+    import psycopg
+
+    previous = pg_graph.finalize(pg_graph.complete_session())
+    session, header, _ = _stage_relation_graph(pg_graph, 1001)
+    receipts = pg_graph.batch_count(session)
+    execute = psycopg.Cursor.execute
+    inserted = []
+
+    def fail_second_insert(cursor, query, params=None, **kwargs):
+        if isinstance(query, str) and query.startswith("INSERT INTO iwiki.code_graph_relations "):
+            if inserted:
+                return execute(cursor, "SELECT 1 / 0")
+            result = execute(cursor, query, params, **kwargs)
+            inserted.append(cursor.rowcount)
+            return result
+        return execute(cursor, query, params, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(psycopg.Cursor, "execute", fail_second_insert)
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            pg_graph.finalize(session)
+
+    assert inserted == [1000]
+    assert pg_graph.reader_status()["snapshot_revision"] == previous["snapshot_revision"]
+    assert pg_graph.session(session)["state"] == pg_graph.snapshot_state(session) == "staging"
+    assert pg_graph.batch_count(session) == receipts
+    for kind in ("files", "symbols", "relations"):
+        assert pg_graph._query(
+            f"SELECT count(*) FROM iwiki.code_graph_{kind} WHERE snapshot_id = "
+            "(SELECT snapshot_id FROM iwiki.code_graph_publication_sessions WHERE session_id = %s)",
+            (session.session_id,), admin=True,
+        ) == [(0,)]
+    result = pg_graph.finalize(session)
+    assert result["state"] == "ready"
+    assert result["counts"] == header.expected_counts
+    assert pg_graph.active_rows()["relations"] == 1001
+    assert pg_graph.reader_status()["snapshot_revision"] == result["snapshot_revision"]
+
+
+def test_small_activation_uses_bulk_inserts_for_rows_and_links(pg_graph):
     """Activation must not execute one SQL command per published row or link."""
     import psycopg
 
