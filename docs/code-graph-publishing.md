@@ -218,6 +218,8 @@ cancellation and cleanup return those bytes when deletion commits. An expired up
 still consumes bytes during staging retention and until cleanup deletes the data.
 Measure database disk usage and peak finalization memory separately.
 
+From server 0.7.337, PostgreSQL inserts up to 1,000 relations per statement during finalization. All inserts commit together. If an insert fails, readers keep the previous snapshot and the publisher can retry finalization on the same valid upload.
+
 When a request would exceed a limit, the server immediately returns
 `publication_quota_exceeded` with resource `sessions` or `staged_bytes`.
 A lock timeout returns `busy`. Lowering a limit preserves existing uploads.

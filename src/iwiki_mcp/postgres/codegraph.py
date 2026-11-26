@@ -50,6 +50,7 @@ from .store import validate_direct_principal
 
 LOGGER = logging.getLogger(__name__)
 
+_RELATION_INSERT_BATCH_SIZE = 1000
 _LOCK_NAMESPACE = 0x4957494B
 _LOCK_NOT_AVAILABLE = "55P03"
 _ROW_KINDS = ("repositories", "files", "symbols", "relations")
@@ -1224,9 +1225,6 @@ class PostgresCodeGraphStore:
             },
             prefix=True,
         )
-        # One RLS-compatible INSERT per row kind, never one SQL execution per
-        # row: even pipelined single-row INSERTs can exhaust the remote
-        # publication deadline for a snapshot with tens of thousands of rows.
         cursor.execute(
             "INSERT INTO iwiki.code_graph_files "
             "(iwiki_id, domain_id, snapshot_id, file_id, repository_id, "
@@ -1253,21 +1251,24 @@ class PostgresCodeGraphStore:
                 Jsonb(rows["symbols"]),
             ),
         )
-        cursor.execute(
-            "INSERT INTO iwiki.code_graph_relations "
-            "(iwiki_id, domain_id, snapshot_id, relation_id, "
-            "source_file_id, source_symbol_id, target_symbol_id, row_data) "
-            "SELECT %s, %s, %s, row_data->>'relation_id', "
-            "row_data->>'source_file_id', row_data->>'source_symbol_id', "
-            "row_data->>'target_symbol_id', row_data "
-            "FROM jsonb_array_elements(%s) AS payload(row_data)",
-            (
-                self.iwiki_id,
-                domain_id,
-                snapshot_id,
-                Jsonb(rows["relations"]),
-            ),
-        )
+        relations = rows["relations"]
+        for start in range(0, len(relations), _RELATION_INSERT_BATCH_SIZE):
+            batch = relations[start:start + _RELATION_INSERT_BATCH_SIZE]
+            cursor.execute(
+                "INSERT INTO iwiki.code_graph_relations "
+                "(iwiki_id, domain_id, snapshot_id, relation_id, "
+                "source_file_id, source_symbol_id, target_symbol_id, row_data) "
+                "SELECT %s, %s, %s, row_data->>'relation_id', "
+                "row_data->>'source_file_id', row_data->>'source_symbol_id', "
+                "row_data->>'target_symbol_id', row_data "
+                "FROM jsonb_array_elements(%s) AS payload(row_data)",
+                (
+                    self.iwiki_id,
+                    domain_id,
+                    snapshot_id,
+                    Jsonb(batch),
+                ),
+            )
         _insert_wiki_links(cursor, self.iwiki_id, domain_id, snapshot_id, links)
         cursor.execute(
             "UPDATE iwiki.code_graph_snapshots "
