@@ -12,7 +12,8 @@ import numpy as np
 
 from . import graph
 from .base import domain_dir, index_path, migrate_store_location
-from .engine import fusion, hier
+from .engine import frontmatter, fusion, hier
+from .engine.lifecycle import BundleLifecycle
 from .engine.chunk import Chunk, chunk_markdown
 from .engine.config import Config
 from .engine.embed import embed_texts
@@ -81,6 +82,137 @@ def _facet_ok(rtype, rtags, want_type, want_tags) -> bool:
     if want_tags and not (set(want_tags) & set(rtags or [])):
         return False
     return True
+
+
+class _TerminalSections:
+    """Resolve eligible result sections within one already authorized domain."""
+
+    def __init__(self, metadata, records, lifecycle, want_type, tags, exclude_tags, heading):
+        self.files = metadata.keys()
+        self.bundle = BundleLifecycle(metadata) if lifecycle == "current" else None
+        self.sections = {}
+        self.by_heading = {}
+        self.record_ids = set()
+        excluded = set(exclude_tags or ())
+        for rec in sorted(records, key=lambda r: (r.file, r.ordinal, r.chunk)):
+            if rec.file not in metadata or (heading is not None and rec.heading != heading):
+                continue
+            if (_facet_ok(rec.type, rec.tags, want_type, tags)
+                    and not excluded.intersection(rec.tags or ())):
+                self.sections.setdefault(rec.file, []).append(rec)
+                self.by_heading.setdefault((rec.file, rec.heading), rec)
+                self.record_ids.add(id(rec))
+
+    def target(self, file, heading=None):
+        terminal = self.bundle.resolve(file) if self.bundle is not None else file
+        records = self.sections.get(terminal)
+        if records:
+            return self.by_heading.get((terminal, heading), records[0])
+        return None
+
+
+def _search_metadata(markdown, file):
+    meta, body = frontmatter.split(markdown)
+    if meta.get("status") == "deprecated" and not meta.get("title"):
+        meta["title"] = frontmatter.derive_title(body, file)
+    return meta
+
+
+def _add_alias_name_scores(scores, metadata, query):
+    from .engine.grep import _score, _terms
+    terms = _terms(query)
+    for file, meta in metadata.items():
+        if meta.get("status") == "deprecated":
+            score = _score(terms, file + " " + str(meta.get("title", "")))
+            if score:
+                scores[file] = scores.get(file, 0) + score
+
+
+def _project_evidence(selector, page_lists, section_lists):
+    """Project each ranked signal before truncation; direct evidence wins."""
+    direct = {
+        file for rows in page_lists for file, _ in rows
+        if (target := selector.target(file)) is not None and target.file == file
+    }
+    direct.update(
+        rec.file for rows in section_lists for rec, _ in rows
+        if (target := selector.target(rec.file)) is not None
+        and target.file == rec.file and id(rec) in selector.record_ids
+    )
+
+    aliases = {}
+    for rows in section_lists:
+        for rec, _ in rows:
+            target = selector.target(rec.file, rec.heading)
+            if target and target.file != rec.file and target.file not in direct:
+                aliases.setdefault(target.file, target)
+
+    def projected(file, section=None):
+        target = selector.target(file, section.heading if section else None)
+        if target is None:
+            return None
+        if target.file != file:
+            if target.file in direct:
+                return None
+            return aliases.setdefault(target.file, target)
+        if section is not None:
+            return section if id(section) in selector.record_ids else None
+        return target
+
+    def project(rows, sections):
+        seen = set()
+        selected = []
+        for value, score in rows:
+            target = projected(value.file, value) if sections else projected(value)
+            if target is None:
+                continue
+            key = (target.file, target.heading, target.chunk) if sections else target.file
+            if key not in seen:
+                seen.add(key)
+                selected.append((target if sections else target.file, score))
+        return selected
+
+    pages = [project(rows, False) for rows in page_lists]
+    sections = [project(rows, True) for rows in section_lists]
+    visible = {}
+    for file in selector.files:
+        target = selector.target(file)
+        if target is None:
+            continue
+        if file == target.file:
+            visible[file] = ([aliases[file]] if file in aliases else selector.sections[file])
+        elif target.file not in direct:
+            visible[file] = [aliases.get(target.file, target)]
+    return pages, sections, visible
+
+
+def _graph_candidates(pages, section_maps, cap, location_for):
+    """Count distinct eligible destinations and prefer native graph evidence."""
+    native = set()
+    candidates = []
+    for page in pages:
+        location = location_for(page["file"])
+        if location is None:
+            continue
+        domain, file = location
+        records = section_maps.get(domain, {}).get(file)
+        if records:
+            key = (domain, records[0].file)
+            if file == key[1]:
+                native.add(key)
+            candidates.append((page, domain, file, key, records))
+
+    seen = set()
+    expanded = 0
+    for page, domain, file, key, records in candidates:
+        if key in seen or (key in native and file != key[1]):
+            continue
+        if page["source"] != "seed":
+            if cap > 0 and expanded >= cap:
+                break
+            expanded += 1
+        seen.add(key)
+        yield page, domain, records
 
 
 def _file_stamp(fd: int) -> FileStamp | None:
@@ -373,6 +505,7 @@ def prepare_storage_candidates(
     mode: str = "hybrid",
     type: str | None = None,
     tags: list | None = None,
+    lifecycle: str = "current", exclude_tags: list | None = None, heading: str | None = None,
 ) -> list[dict]:
     """Rank materialized backend data with the Git search contract."""
     if mode not in _VALID_MODES:
@@ -394,20 +527,9 @@ def prepare_storage_candidates(
     lexical_seeds: dict[str, list[tuple[str, int]]] = {}
 
     for domain in domains:
-        records = [
-            record for record in records_by_domain.get(domain, [])
-            if _facet_ok(record.type, record.tags, type, tags)
-        ]
+        records = records_by_domain.get(domain, [])
         summaries = [record for record in records if record.kind == "summary"]
         sections = [record for record in records if record.kind == "section"]
-        sections_by_file: dict[str, list] = {}
-        for record in sorted(
-            sections,
-            key=lambda item: (item.file, item.ordinal, item.chunk, item.heading),
-        ):
-            sections_by_file.setdefault(record.file, []).append(record)
-        sections_by_domain[domain] = sections_by_file
-
         page_seeds = []
         semantic_chunks = []
         if mode in ("semantic", "hybrid"):
@@ -418,7 +540,6 @@ def prepare_storage_candidates(
                     if score >= cfg.seed_threshold:
                         page_seeds.append((record.file, score))
             page_seeds.sort(key=lambda item: (-item[1], item[0]))
-            page_seeds = page_seeds[:cfg.seed_top_k]
             for record in sections:
                 key = (domain, record.file, record.heading, record.chunk)
                 if key in semantic_scores:
@@ -430,8 +551,6 @@ def prepare_storage_candidates(
                     -item[1], item[0].file, item[0].ordinal, item[0].chunk
                 )
             )
-            semantic_chunks = semantic_chunks[:limit]
-        semantic_seeds[domain] = page_seeds
 
         page_scores: dict[str, int] = {}
         lexical_hits = []
@@ -467,8 +586,21 @@ def prepare_storage_candidates(
                         chunks.append(chunk)
                         lexical_map[identity] = record
             lexical_hits = score_chunks(chunks, query, None)
+        metadata = {file: _search_metadata(md, file)
+                    for file, md in markdown_by_domain.get(domain, {}).items()}
+        selector = _TerminalSections(
+            metadata, sections, lifecycle, type, tags, exclude_tags, heading)
+        if mode in ("lexical", "hybrid") and lifecycle == "current":
+            _add_alias_name_scores(page_scores, metadata, query)
         ranked_pages = sorted(page_scores.items(), key=lambda item: (-item[1], item[0]))
-        lexical_seeds[domain] = ranked_pages[:cfg.seed_top_k]
+        lexical_records = [(lexical_map[(hit["file"], hit["heading"], hit["chunk"])], hit["score"])
+                           for hit in lexical_hits]
+        page_rows, chunk_rows, sections_by_file = _project_evidence(
+            selector, [page_seeds, ranked_pages], [lexical_records, semantic_chunks])
+        page_seeds, lexical_seeds[domain] = (rows[:cfg.seed_top_k] for rows in page_rows)
+        semantic_seeds[domain] = page_seeds
+        sections_by_domain[domain] = sections_by_file
+        lexical_records, semantic_chunks = chunk_rows
 
         for rank, (file, _score) in enumerate(page_seeds):
             for record in sections_by_file.get(file, []):
@@ -492,7 +624,7 @@ def prepare_storage_candidates(
                         ["lexical"],
                     )
                 )
-        for record, score in semantic_chunks:
+        for record, score in semantic_chunks[:limit]:
             signals["semantic_chunk"].append(
                 _internal_hit(
                     domain,
@@ -502,8 +634,7 @@ def prepare_storage_candidates(
                     ["semantic"],
                 )
             )
-        for rank, hit in enumerate(lexical_hits):
-            record = lexical_map[(hit["file"], hit["heading"], hit["chunk"])]
+        for rank, (record, _) in enumerate(lexical_records):
             signals["lexical_section"].append(
                 _internal_hit(
                     domain,
@@ -531,23 +662,18 @@ def prepare_storage_candidates(
         for file in pages
     }
     if graph_seeds:
-        for page_rank, page in enumerate(
-            graph.rank_storage_graph(
-                graph_seeds,
-                neighbor_provider,
-                cfg.graph_depth,
-                cfg.bfs_top_k,
-                allowed_pages,
-            )
-        ):
-            domain, file = page["file"].split("/", 1)
-            for record in sections_by_domain.get(domain, {}).get(file, []):
+        pages = graph.rank_storage_graph(
+            graph_seeds, neighbor_provider, cfg.graph_depth, 0, allowed_pages)
+        for page_rank, (page, domain, records) in enumerate(
+                _graph_candidates(pages, sections_by_domain, cfg.bfs_top_k,
+                                  lambda path: path.split("/", 1))):
+            for record in records:
                 signals["graph_page"].append(
                     _internal_hit(
                         domain,
                         record,
                         page["source"],
-                        (page_rank, record.ordinal, record.chunk, domain, file),
+                        (page_rank, record.ordinal, record.chunk, domain, record.file),
                         page["seed_origins"],
                     )
                 )
@@ -599,7 +725,8 @@ def prepare_storage_candidates(
 def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                     query_vec: list[float] | None, mode: str, limit: int,
                     threshold: float, type: str | None,
-                    tags: list | None, page_cache: PageCache
+                    tags: list | None, page_cache: PageCache, lifecycle="current",
+                    exclude_tags=None, heading=None
                     ) -> _DomainContext:
     migrate_store_location(base, domain)
     loaded_records = VectorStore(index_path(base, domain)).load()
@@ -607,16 +734,10 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
     records = [
         rec for rec in loaded_records
         if _domain_file_path(base, domain, rec.file) is not None
-        and _facet_ok(rec.type, rec.tags, type, tags)
         and (query_vec is None or rec.dim == len(query_vec))
     ]
     summaries = [rec for rec in records if rec.kind == "summary"]
     sections = [rec for rec in records if rec.kind == "section"]
-    sections_by_file: dict[str, list] = {}
-    for rec in sorted(sections, key=lambda item: (
-            item.file, item.ordinal, item.chunk, item.heading)):
-        sections_by_file.setdefault(rec.file, []).append(rec)
-
     semantic_seeds: list[tuple[str, float]] = []
     semantic_chunks: list[tuple[object, float]] = []
     if mode in ("semantic", "hybrid"):
@@ -629,7 +750,7 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
         scored_summaries.sort(key=lambda item: (
             -item[1], item[0].file, item[0].ordinal, item[0].chunk))
         semantic_seeds = [
-            (rec.file, score) for rec, score in scored_summaries[:cfg.seed_top_k]
+            (rec.file, score) for rec, score in scored_summaries
         ]
 
         semantic_chunks = [
@@ -638,7 +759,6 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
         semantic_chunks = [item for item in semantic_chunks if item[1] >= threshold]
         semantic_chunks.sort(key=lambda item: (
             -item[1], item[0].file, item[0].ordinal, item[0].chunk))
-        semantic_chunks = semantic_chunks[:limit]
 
     lexical_hits: list[dict] = []
     lexical_seeds: list[tuple[str, int]] = []
@@ -653,7 +773,7 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
         verified_chunks: list[Chunk] = []
         lexical_map = {}
         page_scores: dict[str, int] = {}
-        for file in sorted(sections_by_file):
+        for file in sorted(headings_by_file):
             page = _materialize_page(cfg, base, domain, file, page_cache)
             if page is None:
                 continue
@@ -661,8 +781,8 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
             for hit in score_sections(file, page.markdown, query):
                 if hit["heading"] in eligible_headings:
                     page_scores[file] = page_scores.get(file, 0) + hit["score"]
-            for (heading, chunk_index), chunk in page.chunks.items():
-                identity = file, heading, chunk_index
+            for (chunk_heading, chunk_index), chunk in page.chunks.items():
+                identity = file, chunk_heading, chunk_index
                 if identity not in eligible_identities:
                     continue
                 rec = indexed.get(identity)
@@ -672,9 +792,26 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                 lexical_map[identity] = rec
         lexical_hits = score_chunks(verified_chunks, query, None)
         ranked_pages = sorted(page_scores.items(), key=lambda item: (-item[1], item[0]))
-        lexical_seeds = ranked_pages[:cfg.seed_top_k]
+        lexical_seeds = ranked_pages
     else:
         lexical_map = {}
+
+    metadata = {}
+    for file in {r.file for r in records}:
+        page = _materialize_page(cfg, base, domain, file, page_cache)
+        if page is not None:
+            metadata[file] = _search_metadata(page.markdown, file)
+    selector = _TerminalSections(metadata, sections, lifecycle, type, tags, exclude_tags, heading)
+    if mode in ("lexical", "hybrid") and lifecycle == "current":
+        _add_alias_name_scores(page_scores, metadata, query)
+        lexical_seeds = sorted(page_scores.items(), key=lambda item: (-item[1], item[0]))
+    lexical_records = [(lexical_map[(hit["file"], hit["heading"], hit["chunk"])], hit["score"])
+                       for hit in lexical_hits]
+    page_rows, chunk_rows, sections_by_file = _project_evidence(
+        selector, [semantic_seeds, lexical_seeds], [lexical_records, semantic_chunks])
+    semantic_seeds, lexical_seeds = (rows[:cfg.seed_top_k] for rows in page_rows)
+    lexical_records, semantic_chunks = chunk_rows
+    semantic_chunks = semantic_chunks[:limit]
 
     signals: dict[str, list[dict]] = {
         "semantic_page": [],
@@ -701,8 +838,7 @@ def _domain_signals(cfg: Config, base: str, domain: str, query: str,
                 ["semantic"],
             )
         )
-    for rank, hit in enumerate(lexical_hits):
-        rec = lexical_map[(hit["file"], hit["heading"], hit["chunk"])]
+    for rank, (rec, _) in enumerate(lexical_records):
         signals["lexical_section"].append(
             _internal_hit(
                 domain, rec, "lexical", (rank, rec.file, rec.ordinal, rec.chunk),
@@ -722,7 +858,8 @@ def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: s
                             top_k: int, threshold: float, mode: str = "hybrid",
                             type: str | None = None,
                             tags: list | None = None,
-                            page_cache: PageCache | None = None) -> list[dict]:
+                            page_cache: PageCache | None = None, lifecycle="current",
+                            exclude_tags=None, heading=None) -> list[dict]:
     if mode not in _VALID_MODES:
         allowed = ", ".join(sorted(_VALID_MODES))
         raise ValueError(f"invalid search mode: {mode}; allowed values: {allowed}")
@@ -746,7 +883,7 @@ def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: s
     for domain in domains:
         context = _domain_signals(
             cfg, base, domain, query, query_vec, mode, limit, threshold, type, tags,
-            page_cache,
+            page_cache, lifecycle, exclude_tags, heading,
         )
         contexts.append(context)
         for name, hits in context.signals.items():
@@ -765,25 +902,19 @@ def prepare_read_candidates(cfg: Config, base: str, domains: list[str], query: s
             if (page_id := _qualified_page(context.domain, file)) is not None
         )
     if graph_seeds:
-        contexts_by_domain = {context.domain: context for context in contexts}
+        section_maps = {ctx.domain: ctx.sections_by_file for ctx in contexts}
         graph_hits: list[dict] = []
         graph_pages = _rank_scoped_graph(
             base,
             domains,
             graph_seeds,
             cfg.graph_depth,
-            cfg.bfs_top_k,
+            0,
             page_cache,
         )
-        for page_rank, page in enumerate(graph_pages):
-            location = _page_location(page["file"])
-            if location is None:
-                continue
-            domain, file = location
-            context = contexts_by_domain.get(domain)
-            if context is None:
-                continue
-            for rec in context.sections_by_file.get(file, []):
+        for page_rank, (page, domain, records) in enumerate(
+                _graph_candidates(graph_pages, section_maps, cfg.bfs_top_k, _page_location)):
+            for rec in records:
                 rank_key = (
                     page_rank, rec.ordinal, rec.chunk, domain, rec.file
                 )

@@ -81,6 +81,7 @@ def test_update_public_signature_keeps_section_positionals_and_adds_trailing_cod
         "expected_revision",
         "expected_section_hash",
         "code",
+        "superseded_by",
     ]
     assert signature.parameters["heading"].default is None
     assert signature.parameters["new_body"].default is None
@@ -447,3 +448,29 @@ def test_update_page_surfaces_safe_push_failure_metadata(tmp_path, monkeypatch):
         "hint": "run wiki_sync",
         "warning": "commit saved locally; push failed",
     }
+
+
+def test_git_lifecycle_retirement_preserves_body(tmp_path, monkeypatch):
+    from pathlib import Path
+    root, _ = _seed(tmp_path, monkeypatch)
+    _write(BASE_MD)
+    path = Path(root, "backend/concept/auth.md")
+    original = path.read_bytes().replace(b"\n", b"\r\n")
+    path.write_bytes(original)
+
+    def call(**fields):
+        return server.wiki_update_page("backend", "concept/auth", **fields)
+
+    assert "error" not in call(status="deprecated", superseded_by="/new.md")
+    assert server._raw_frontmatter_body(original) == server._raw_frontmatter_body(path.read_bytes())
+    assert "superseded_by: /new.md" in path.read_text()
+    assert "error" not in call(heading="Flow", new_body="new body")
+    assert "superseded_by: /new.md" in path.read_text()
+    assert "error" not in call(superseded_by="")
+    assert "superseded_by:" not in path.read_text()
+    assert "error" not in call(superseded_by="./other.md")
+    assert "error" not in call(status="stable")
+    assert "superseded_by:" not in path.read_text()
+    unchanged = path.read_bytes()
+    assert "error" in call(status="stable", superseded_by="/other.md")
+    assert path.read_bytes() == unchanged

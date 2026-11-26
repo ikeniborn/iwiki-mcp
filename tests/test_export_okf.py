@@ -94,7 +94,7 @@ def test_export_okf_migrates_overview_and_status(tmp_path, monkeypatch):
     text = open(os.path.join(dom, "a.md"), encoding="utf-8").read()
     assert "## Overview" not in text                 # section removed
     assert "description: summary text" in text       # backfilled from Overview
-    assert "status: stub" in text                    # defaulted
+    assert "status:" not in text  # preserve absent lifecycle metadata
     assert "type: api" in text                        # preserved
     # idempotent on re-run
     first = text

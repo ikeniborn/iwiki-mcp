@@ -361,3 +361,13 @@ def test_embedding_error_remains_visible_when_reranker_is_configured(
         lambda *args: (_ for _ in ()).throw(AssertionError("reranker called")),
     )
     assert server.wiki_search("token") == {"error": "embedding unavailable"}
+
+
+@pytest.mark.parametrize("mode", ["lexical", "semantic", "hybrid"])
+def test_lifecycle_search_public_arguments(tmp_path, monkeypatch, mode):
+    _seed(tmp_path, monkeypatch)
+    assert server.wiki_search("token", mode=mode) == server.wiki_search(
+        "token", mode=mode, lifecycle="current")
+    assert server.wiki_search("token", heading="Absent", mode=mode)["results"] == []
+    assert server.wiki_search("token", mode=mode, lifecycle="all")["results"]
+    assert "error" in server.wiki_search("token", lifecycle="archived")

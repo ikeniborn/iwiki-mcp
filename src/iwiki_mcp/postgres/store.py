@@ -22,6 +22,7 @@ from ..engine.links import parse_link_targets
 from ..engine.related import related
 from ..engine.store import SCHEMA_VERSION, Record, dequantize, make_record
 from ..engine.validate import validate_page
+from ..engine.lifecycle import BundleLifecycle
 from ..storage import expected_revision_required, revision_conflict
 from ..specification_store import (
     BindingRecord,
@@ -1956,25 +1957,26 @@ class PostgresStore:
             v=2,
         )
 
-    def _search_material(self, domains: list[str], query_vector: list[float]):
+    def _search_material(self, domains: list[str], query_vector: list[float] | None):
+        vector = None if query_vector is None else np.asarray(query_vector, dtype=np.float32)
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT d.slug, p.slug, p.markdown, c.section_id, c.heading, "
                     "c.quantization_scale, c.quantized_embedding, "
                     "1 - (c.embedding <=> %s) AS score "
-                    "FROM iwiki.chunks c "
-                    "JOIN iwiki.pages p ON p.iwiki_id = c.iwiki_id "
+                    "FROM iwiki.pages p "
+                    "LEFT JOIN iwiki.chunks c ON p.iwiki_id = c.iwiki_id "
                     "AND p.page_id = c.page_id "
                     "JOIN iwiki.domains d ON d.iwiki_id = p.iwiki_id "
                     "AND d.domain_id = p.domain_id "
-                    "WHERE c.iwiki_id = %s AND d.slug = ANY(%s) "
+                    "WHERE p.iwiki_id = %s AND d.slug = ANY(%s) "
                     "ORDER BY c.embedding <=> %s, d.slug, p.slug, c.ordinal",
                     (
-                        np.asarray(query_vector, dtype=np.float32),
+                        vector,
                         self.iwiki_id,
                         domains,
-                        np.asarray(query_vector, dtype=np.float32),
+                        vector,
                     ),
                 )
                 rows = cursor.fetchall()
@@ -1997,12 +1999,15 @@ class PostgresStore:
         scores = {}
         for domain, slug, content, section_id, heading, scale, quantized, score in rows:
             file = f"{slug}.md"
+            markdown[domain][file] = content
+            if section_id is None:
+                continue
             decoded = self._decode_record(
                 file, section_id, heading, scale, quantized
             )
             records[domain].append(decoded)
-            markdown[domain][file] = content
-            scores[(domain, file, heading, decoded.chunk)] = float(score)
+            if score is not None:
+                scores[(domain, file, heading, decoded.chunk)] = float(score)
         adjacency: dict[str, set[str]] = {}
         for source_domain, source_slug, target_domain, target_slug in edges:
             source = f"{source_domain}/{source_slug}.md"
@@ -2021,13 +2026,16 @@ class PostgresStore:
         mode: str = "hybrid",
         type: str | None = None,
         tags: list | None = None,
+        lifecycle: str = "current", exclude_tags: list | None = None, heading: str | None = None,
     ) -> list[dict]:
         domains = [_validate_identifier(domain, "domain") for domain in domains]
         for domain in domains:
             self._require_read(domain)
-        query_vector = self._embedder(self.cfg, [query])[0]
-        if len(query_vector) != self.cfg.dimensions:
-            raise ValueError("embedding dimension mismatch")
+        query_vector = None
+        if mode != "lexical":
+            query_vector = self._embedder(self.cfg, [query])[0]
+            if len(query_vector) != self.cfg.dimensions:
+                raise ValueError("embedding dimension mismatch")
         records, markdown, scores, adjacency = self._search_material(
             domains, query_vector
         )
@@ -2043,7 +2051,7 @@ class PostgresStore:
             threshold,
             mode,
             type,
-            tags,
+            tags, lifecycle, exclude_tags, heading,
         )
 
     def search(
@@ -2056,6 +2064,7 @@ class PostgresStore:
         mode: str = "hybrid",
         type: str | None = None,
         tags: list | None = None,
+        lifecycle: str = "current", exclude_tags: list | None = None, heading: str | None = None,
     ) -> list[dict]:
         return self.prepare_read_candidates(
             domains,
@@ -2064,7 +2073,7 @@ class PostgresStore:
             threshold=threshold,
             mode=mode,
             type=type,
-            tags=tags,
+            tags=tags, lifecycle=lifecycle, exclude_tags=exclude_tags, heading=heading,
         )[:top_k]
 
     def hydrate_candidates(self, candidates: list[dict]) -> list[dict]:
@@ -2347,6 +2356,8 @@ class PostgresStore:
             "missing_source": [],
             "legacy_wikilink": [],
             "sections": sections,
+            "lifecycle": BundleLifecycle({f"{slug}.md": frontmatter.split(md)[0]
+                                          for slug, md in pages}).findings(),
             "missing_frontmatter": [],
             "tag_drift": [],
             "reserved_target": [],

@@ -60,7 +60,7 @@ from .codegraph import store as _codegraph_store  # noqa: F401
 from .codegraph import languages as _codegraph_languages  # noqa: F401
 from .lock import base_lock, mutation_lock
 from .engine import classify, rerank, system1
-from .engine import frontmatter as _fm
+from .engine import frontmatter as _fm, lifecycle
 from .engine.config import Config, ConfigError
 from .engine.embed import EmbedError, probe_embedding_endpoint
 from .engine.idle import IdleTracker
@@ -618,6 +618,8 @@ def _safe(fn=None, *, sweep_cleanup=True):
             if sweep_cleanup:
                 _maybe_sweep_code_graph_cleanup()
             return result
+        except lifecycle.LifecycleError as e:
+            return {"error": str(e)}
         except _codegraph_models.CodeGraphError as e:
             return _codegraph_runtime.sanitized_error(e)
         except base.BaseError as e:
@@ -2319,21 +2321,21 @@ def wiki_read_page(domain: str, slug: str, heading: str | None = None) -> dict:
                 "error": f"page '{valid_domain}/{slug}' not found",
                 "hint": "list pages with wiki_list_pages",
             }
-        if heading is None:
-            return page
-        _, body = _fm.split(page["markdown"], strict_code=True)
-        return _read_section(domain, slug, body, heading)
-    path = _page_path(bind.base, domain, slug)
-    if not os.path.isfile(path):
-        return {
-            "error": f"page '{domain}/{slug}' not found",
-            "hint": "list pages with wiki_list_pages",
-        }
-    markdown = open(path, encoding="utf-8").read()
-    if heading is None:
-        return {"domain": domain, "slug": slug, "markdown": markdown}
-    _, body = _fm.split(markdown, strict_code=True)
-    return _read_section(domain, slug, body, heading)
+    else:
+        path = _page_path(bind.base, domain, slug)
+        if not os.path.isfile(path):
+            return {
+                "error": f"page '{domain}/{slug}' not found",
+                "hint": "list pages with wiki_list_pages",
+            }
+        page = {"domain": domain, "slug": slug, "markdown": Path(path).read_text(encoding="utf-8")}
+    meta, body = _fm.split(page["markdown"], strict_code=heading is not None)
+    result = page if heading is None else _read_section(domain, slug, body, heading)
+    if "error" not in result:
+        for field in ("status", "superseded_by"):
+            if field in meta:
+                result[field] = meta[field]
+    return result
 
 
 def _read_section(domain: str, slug: str, body: str, heading: str) -> dict:
@@ -2382,7 +2384,14 @@ def wiki_search(
     tags: list[str] | None = None,
     intent: str = "read",
     heading: str | None = None,
+    lifecycle: Literal["current", "all"] = "current",
+    exclude_tags: list[str] | None = None,
 ) -> dict:
+    """Search current sections, following same-domain deprecated replacements.
+
+    Use lifecycle="all" for original historical locators. Apply type, tags,
+    exclude_tags and heading to the returned page. Write intent locates originals.
+    """
     bind = _resolved_binding()
     cfg = Config.load()
     write_intent = intent.strip().lower() == "write"
@@ -2412,6 +2421,8 @@ def wiki_search(
         return answer(
             {"target": retrieval.locate_target(cfg, bind.base, target, query, heading)}
         )
+    if lifecycle not in ("current", "all"):
+        return {"error": "invalid lifecycle; allowed values: current, all"}
     resolved_mode = cfg.search_mode if mode is None else mode.strip().lower()
     allowed_modes = ("hybrid", "lexical", "semantic")
     if resolved_mode not in allowed_modes:
@@ -2430,6 +2441,7 @@ def wiki_search(
     q_type = (type.strip().lower() or None) if type else None
     q_tags = _fm.normalize_tags(tags) if tags else None
     q_tags = q_tags or None
+    excluded = [_fm.normalize_tag(tag) for tag in (exclude_tags or ())]
     requested_top_k = cfg.top_k if k is None else k
     page_cache = {}
     try:
@@ -2442,6 +2454,9 @@ def wiki_search(
                 mode=resolved_mode,
                 type=q_type,
                 tags=q_tags,
+                lifecycle=lifecycle,
+                exclude_tags=excluded,
+                heading=heading,
             )
         else:
             candidates = retrieval.prepare_read_candidates(
@@ -2454,6 +2469,9 @@ def wiki_search(
                 mode=resolved_mode,
                 type=q_type,
                 tags=q_tags,
+                lifecycle=lifecycle,
+                exclude_tags=excluded,
+                heading=heading,
                 page_cache=page_cache,
             )
     except EmbedError as exc:
@@ -3214,7 +3232,7 @@ def _prepare_postgres_page(
     type: str | None,
     tags: list[str] | None,
     description: str | None,
-    status: str | None,
+    status: str | None, superseded_by: str | None = None,
 ) -> tuple[str, str, str | None] | dict:
     """Build canonical PostgreSQL Markdown without touching local storage."""
     try:
@@ -3328,8 +3346,9 @@ def _prepare_postgres_page(
         meta["resource"] = source
     if page_tags:
         meta["tags"] = page_tags
-    meta["status"] = _fm.normalize_status(
-        status or authored_meta.get("status") or _fm.DEFAULT_STATUS
+    lifecycle.update_metadata(
+        meta, status or authored_meta.get("status") or _fm.DEFAULT_STATUS,
+        authored_meta.get("superseded_by") if superseded_by is None else superseded_by,
     )
     if authored_code is not None:
         meta["code"] = authored_code
@@ -3346,6 +3365,7 @@ def wiki_write_page(
     domain: str, slug: str, markdown: str, source: str | None = None,
     type: str | None = None, tags: list[str] | None = None,
     description: str | None = None, status: str | None = None,
+    superseded_by: str | None = None,
 ) -> dict:
     bind = _resolved_binding()
     valid_domain = _validate_domain(domain)
@@ -3370,7 +3390,7 @@ def wiki_write_page(
             type=type,
             tags=tags,
             description=description,
-            status=status,
+            status=status, superseded_by=superseded_by,
         )
         if isinstance(prepared, dict):
             return prepared
@@ -3407,7 +3427,7 @@ def wiki_write_page(
                 "error": str(exc),
                 "hint": "use only code.symbols, code.files, and code.source_globs",
             }
-        markdown = authored_body
+    markdown = authored_body
     markdown = to_markdown_links(markdown)
     blocking = [f for f in validate_page(markdown) if f.get("type") in _BLOCKING]
     if blocking:
@@ -3436,11 +3456,17 @@ def wiki_write_page(
                     "hint": "pass a source path inside the bound project"}
     cfg = Config.load()
     decision = system1.classify_page_type(cfg, markdown)
-    system1_type = system1.assigned_type(cfg, decision) if type is None else None
+    requested_type = type or authored_meta.get("type")
+    system1_type = system1.assigned_type(cfg, decision) if requested_type is None else None
     fm_block, fm_warning = okf.build_frontmatter(
         cfg, bind.base, valid_domain, _slug_parts(slug)[-1], markdown,
-        source=source, explicit_type=type or system1_type, explicit_tags=tags,
-        explicit_description=description, explicit_status=status,
+        source=source, explicit_type=requested_type or system1_type,
+        explicit_tags=tags if tags is not None else authored_meta.get("tags"),
+        explicit_description=(description if description is not None
+                              else authored_meta.get("description")),
+        explicit_status=status or authored_meta.get("status"),
+        superseded_by=(authored_meta.get("superseded_by")
+                       if superseded_by is None else superseded_by),
         timestamp_path=f"{valid_domain}/{slug}.md",
         authored_code=authored_code)
     meta, _ = _fm.split(fm_block)
@@ -3938,7 +3964,7 @@ def _prepare_update_page_call(bind, args: tuple, kwargs: dict) -> dict:
     names = (
         "domain", "slug", "heading", "new_body", "source", "description",
         "status", "new_heading", "expected_revision", "expected_section_hash",
-        "code",
+        "code", "superseded_by",
     )
     values = {name: kwargs.get(name) for name in names}
     for name, value in zip(names, args):
@@ -3958,7 +3984,7 @@ def _prepare_update_page_call(bind, args: tuple, kwargs: dict) -> dict:
         status=values["status"],
         new_heading=values["new_heading"],
         expected_section_hash=values["expected_section_hash"],
-        code=values["code"],
+        code=values["code"], superseded_by=values["superseded_by"],
     )
 
 
@@ -3971,7 +3997,7 @@ def _prepare_update_page_request(
     status: str | None,
     new_heading: str | None,
     expected_section_hash: str | None,
-    code: dict | None,
+    code: dict | None, superseded_by: str | None = None,
 ) -> dict:
     """Classify and validate one update request without side effects."""
     if (heading is None) != (new_body is None):
@@ -3981,13 +4007,18 @@ def _prepare_update_page_request(
         }
     has_section = heading is not None
     has_code = code is not None
+    if not has_section and not has_code and (status is not None or superseded_by is not None):
+        section_fields = (source, description, new_heading, expected_section_hash)
+        if any(value is not None for value in section_fields):
+            return {"error": "lifecycle-only update cannot change section metadata"}
+        return {"mode": "lifecycle", "code": None}
     if not has_section and not has_code:
         return {
             "error": "no update operation requested",
             "hint": _UPDATE_PAGE_OPERATION_HINT,
         }
     if not has_section and any(value is not None for value in (
-        source, description, status, new_heading, expected_section_hash,
+        source, description, status, new_heading, expected_section_hash, superseded_by,
     )):
         return {
             "error": "code-only update cannot change section metadata",
@@ -4032,9 +4063,12 @@ def wiki_update_page(
     new_heading: str | None = None,
     expected_revision: _ExpectedRevision = None,
     expected_section_hash: str | None = None,
-    code: dict | None = None,
+    code: dict | None = None, superseded_by: str | None = None,
 ) -> dict:
-    """Update one existing page: a section, its code selectors, or both.
+    """Update an existing section, its code selectors, or document lifecycle.
+
+    To retire the page, pass status="deprecated" and optionally superseded_by.
+    Omit the replacement to preserve it. An empty replacement clears it.
 
     Pass `heading` with `new_body` for a section-only update, `code` for a
     code-only update, or all three for a combined update. `heading` and
@@ -4057,7 +4091,7 @@ def wiki_update_page(
             status=status,
             new_heading=new_heading,
             expected_section_hash=expected_section_hash,
-            code=code,
+            code=code, superseded_by=superseded_by,
         )
         if "error" in request:
             return request
@@ -4121,8 +4155,7 @@ def wiki_update_page(
                 meta.pop("code", None)
         if description is not None:
             meta["description"] = description
-        if status is not None:
-            meta["status"] = _fm.normalize_status(status)
+        lifecycle.update_metadata(meta, status, superseded_by)
         if source is not None:
             meta["resource"] = source
         if meta:
@@ -4153,7 +4186,7 @@ def wiki_update_page(
         status=status,
         new_heading=new_heading,
         expected_section_hash=expected_section_hash,
-        code=code,
+        code=code, superseded_by=superseded_by,
     )
     if "error" in request:
         return request
@@ -4230,22 +4263,21 @@ def wiki_update_page(
             meta["code"] = request["code"]
         else:
             meta.pop("code", None)
+    lifecycle.update_metadata(meta, status, superseded_by)
     if meta:
         if description is not None:
             meta["description"] = description
-        if status is not None:
-            meta["status"] = _fm.normalize_status(status)
         meta["timestamp"] = _dt.date.today().isoformat()
         candidate_body = (
             _raw_frontmatter_body(original_bytes).decode("utf-8")
-            if request["mode"] == "code"
+            if request["mode"] in {"code", "lifecycle"}
             else updated_body
         )
         new_md = _fm.render(meta) + candidate_body
     else:
         new_md = (
             _raw_frontmatter_body(original_bytes).decode("utf-8")
-            if request["mode"] == "code"
+            if request["mode"] in {"code", "lifecycle"}
             else updated_body
         )
     if new_heading is not None and sync.is_git_repo(bind.base):
@@ -4268,7 +4300,7 @@ def wiki_update_page(
     graph_mutation = indexer.prepare_graph_mutation(bind.base, valid_domain)
     specification_candidate = (
         new_md.replace("\r\n", "\n").replace("\r", "\n")
-        if request["mode"] == "code"
+        if request["mode"] in {"code", "lifecycle"}
         else new_md
     )
     prepared_specification = _prepare_git_specification(
@@ -5603,7 +5635,8 @@ def wiki_migrate_okf(domain: str | None = None) -> dict:
             fm_block, warn = okf.build_frontmatter(
                 cfg, bind.base, target, slug, body,
                 source=src, explicit_type=None, explicit_tags=None,
-                timestamp_path=f"{target}/{page_file}", tag_vocab=vocab)
+                timestamp_path=f"{target}/{page_file}", tag_vocab=vocab,
+                preserve_absent_status=True)
             (dom_path / page_file).write_text(fm_block + body, encoding="utf-8")
             migrated.append(slug)
             if warn:
@@ -5717,6 +5750,7 @@ def _apply_okf_page_move(
         explicit_description=existing_meta.get("description"),
         explicit_status=existing_meta.get("status"),
         timestamp_path=f"{domain}/{current_file}",
+        preserve_absent_status=True, superseded_by=existing_meta.get("superseded_by"),
         authored_code=existing_meta.get("code"),
     )
 
@@ -5889,6 +5923,7 @@ def wiki_apply_okf(domain: str, slug: str, type: str,
         # PRE-move identity so an existing page's original timestamp survives
         # a type change instead of resetting to today.
         timestamp_path=f"{valid_domain}/{current_identity}.md",
+        preserve_absent_status=True, superseded_by=existing_meta.get("superseded_by"),
         authored_code=existing_meta.get("code"))
     try:
         with open(path, "w", encoding="utf-8") as fh:

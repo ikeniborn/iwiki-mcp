@@ -845,3 +845,49 @@ def test_real_postgres_handlers_preserve_revision_and_conflict(
     assert linted["reports"]["docs"]["broken"] == []
     assert status["storage"] == "postgres"
     assert "fixture-secret" not in repr(status)
+
+
+def test_lifecycle_create(store_factory, postgres_binding, monkeypatch):
+    store = store_factory()
+    monkeypatch.setattr(server, "_resolved_binding", lambda: postgres_binding)
+    monkeypatch.setattr(server, "_postgres_store_for_binding", lambda binding: store)
+    monkeypatch.setattr(Config, "load", lambda: store.cfg)
+    body = "# Old\n\n## Detail\ntext\n"
+    bad = server.wiki_write_page("docs", "old", body, type="guide", superseded_by="./new.md")
+    assert "error" in bad and store.list_pages("docs") == []
+    res = server.wiki_write_page("docs", "old", body, type="guide", status="deprecated",
+                                 superseded_by="./new.md")
+    assert "error" not in res, res
+    assert "superseded_by: ./new.md" in store.read_page("docs", "guide/old")["markdown"]
+
+
+def test_lifecycle_retirement_cas(store_factory, postgres_binding, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    store = store_factory()
+    monkeypatch.setattr(server, "_resolved_binding", lambda: postgres_binding)
+    monkeypatch.setattr(server, "_postgres_store_for_binding", lambda binding: store)
+    body = "# Old\n\n## Detail\ntext\n"
+    store.write_page("docs", "guide/old", "---\ntype: guide\n---\n" + body)
+
+    def retire(path):
+        return server.wiki_update_page("docs", "guide/old", expected_revision=1,
+                                       status="deprecated", superseded_by=path)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(retire, ["/a.md", "/b.md"]))
+    assert sorted(r.get("revision", 0) for r in results) == [0, 2], results
+    assert any(r.get("error") == "conflict" for r in results)
+    page = store.read_page("docs", "guide/old")
+    meta, actual = fm.split(page["markdown"])
+    assert meta["superseded_by"] in ("/a.md", "/b.md")
+    assert actual == body
+    missing = server.wiki_update_page("docs", "guide/old", status="stable")
+    assert "error" in missing
+    assert page == store.read_page("docs", "guide/old")
+
+
+def test_lifecycle_lint(store_factory):
+    store = store_factory()
+    store.write_page("docs", "guide/old", "---\ntype: guide\nstatus: deprecated\n"
+                     "superseded_by: /missing.md\n---\n# Old\n\n## Body\nold\n")
+    assert store.lint_domain("docs", ["docs"])["lifecycle"] == [
+        {"page": "guide/old.md", "type": "missing_replacement"}]

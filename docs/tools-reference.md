@@ -42,7 +42,7 @@
 | `wiki_spec_context` | Read one scenario plus its persisted resolution evidence and freshness (`fresh`/`stale_spec`/`stale_graph`), without resolving or mutating it. See [specifications.md](specifications.md). Read-only; requires the domain be in read scope and its specification mode not `disabled`. |
 | `wiki_spec_resolve` | Resolve one scenario's declared code bindings against the code graph and persist sanitized evidence (`resolved`/`ambiguous`/`unresolved`/`graph_unavailable`). See [specifications.md](specifications.md). Requires write scope and never expands binding or code-publication authority; hosted, the scenario's domain must be the bound primary — a refusal names which binding relation failed (`invalid_domain`, `primary_not_selected`, `primary_not_writable`, `not_bound_primary`). |
 
-`wiki_write_page` refuses to overwrite an existing page in v1. `wiki_update_page` has three modes: section-only requires paired `heading` and `new_body`; code-only uses `code` and preserves the page body byte-for-byte; combined atomically performs both. The published root JSON Schema stays a plain object with `domain` and `slug` root-required: client tool validation rejects a root combinator, so a root `anyOf` would make clients drop the tool. Runtime validation enforces the mutually exclusive operations instead and rejects partial, no-op, or unsafe selectors before mutation. `new_heading` is optional with a section update: it rewrites exact incoming relative links in the page domain and exact `iwiki://` links from visible read domains. A nonempty valid `code` mapping completely replaces selectors (`code.symbols`, `code.files`, `code.source_globs`); `{}` or all-empty lists clears them; omitted or `null` `code` preserves them on a section update. A code-only response omits `heading` and adds no fields; section and combined responses retain `heading`.
+`wiki_write_page` refuses to overwrite an existing page in v1. `wiki_update_page` also supports content edits: section-only requires paired `heading` and `new_body`; code-only uses `code` and preserves the page body byte-for-byte; combined atomically performs both. The published root JSON Schema stays a plain object with `domain` and `slug` root-required: client tool validation rejects a root combinator, so a root `anyOf` would make clients drop the tool. Runtime validation enforces the mutually exclusive operations instead and rejects partial, no-op, or unsafe selectors before mutation. `new_heading` is optional with a section update: it rewrites exact incoming relative links in the page domain and exact `iwiki://` links from visible read domains. A nonempty valid `code` mapping completely replaces selectors (`code.symbols`, `code.files`, `code.source_globs`); `{}` or all-empty lists clears them; omitted or `null` `code` preserves them on a section update. A code-only response omits `heading` and adds no fields; section and combined responses retain `heading`.
 
 ```json
 {"domain":"engineering","slug":"api/auth","code":{"symbols":[{"qualified_name":"auth.login"}],"files":[],"source_globs":[]}}
@@ -61,3 +61,15 @@ Project-relative stale-source resolution remains a separate audited follow-up; t
 release does not silently change that behavior.
 
 The server also exposes the MCP resource `iwiki://authoring-rules` for page-structure rules.
+
+## Current guidance and historical documents
+
+Check `tools/list` for `lifecycle`, `exclude_tags` and `superseded_by`. Search defaults to `current`. An obsolete name can locate a section on its successor. Read the original address to retrieve historical text. Omitting the replacement preserves it during edits. An empty string clears it. On PostgreSQL, read the revision immediately before the update.
+
+```python
+wiki_search(query="deploy", lifecycle="current", exclude_tags=["task", "task-history"])
+wiki_search(query="deploy", lifecycle="all", tags=["task"])
+page = wiki_read_page(domain="docs", slug="guide/old")
+wiki_update_page(domain="docs", slug="guide/old", status="deprecated", superseded_by="/guide/current.md", expected_revision=page["revision"])
+wiki_read_page(domain="docs", slug="guide/old")
+```

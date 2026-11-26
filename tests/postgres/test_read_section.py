@@ -71,4 +71,19 @@ def test_read_page_with_missing_heading_returns_error_from_postgres(postgres_rea
 def test_read_page_without_heading_is_unchanged_from_postgres(postgres_read_page):
     out = postgres_read_page.wiki_read_page("docs", "concept/auth")
 
-    assert set(out) == {"domain", "slug", "markdown", "revision"}
+    assert set(out) == {"domain", "slug", "markdown", "revision", "status"}
+
+
+def test_lifecycle_read_declared_metadata(store_factory, monkeypatch):
+    store = store_factory()
+    from iwiki_mcp import server
+    from types import SimpleNamespace
+    monkeypatch.setattr(server, "_resolved_binding", lambda: SimpleNamespace(read=("docs",)))
+    monkeypatch.setattr(server, "_is_postgres", lambda bind: True)
+    monkeypatch.setattr(server, "_postgres_store_for_binding", lambda bind: store)
+    store.write_page("docs", "guide/old", "---\ntype: guide\nstatus: deprecated\n"
+                     "superseded_by: /new.md\n---\n# Old\n\n## Body\ntext")
+    for heading in (None, "Body"):
+        result = server.wiki_read_page("docs", "guide/old", heading)
+        assert result["status"] == "deprecated"
+        assert result["superseded_by"] == "/new.md"

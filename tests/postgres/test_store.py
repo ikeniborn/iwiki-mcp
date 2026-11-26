@@ -579,3 +579,30 @@ def test_update_page_drops_rows_for_removed_sections(store_factory):
     moved = {row[1]: row for row in after}
     assert moved["Beta"][0] == before["Beta"][0]
     assert moved[""][0] == before[""][0]
+
+
+def test_lifecycle_search_alias_to_terminal(store_factory):
+    store = store_factory(embedder=_embed)
+    for name in ("previous", "previous-two"):
+        store.write_page("docs", "guide/" + name, _markdown(
+            "Previous", "historical", "Former", "oldterm").replace(
+                "status: stable", "status: deprecated\nsuperseded_by: /guide/current.md"))
+    store.write_page("docs", "guide/current", _markdown("Current", "now", "New", "today"))
+    for mode in ("lexical", "hybrid", "semantic"):
+        args = dict(top_k=2, threshold=-1.0, mode=mode)
+        hits = store.prepare_read_candidates(["docs"], "oldterm", **args)
+        assert {(r["file"], r["heading"]) for r in hits} == {("guide/current.md", "New")}
+        history = store.prepare_read_candidates(["docs"], "oldterm", lifecycle="all", **args)
+        assert any(row["heading"] == "Former" for row in history)
+
+
+def test_lexical_lifecycle_lookup_does_not_call_model(store_factory):
+    store = store_factory(embedder=_embed)
+    store.write_page("docs", "guide/current", _markdown("Guide", "now", "New", "today"))
+
+    def unexpected_model_call(cfg, texts):
+        raise AssertionError("lexical search requested a query embedding")
+
+    result = store.with_embedder(unexpected_model_call).prepare_read_candidates(
+        ["docs"], "today", top_k=1, threshold=0, mode="lexical")
+    assert result[0]["file"] == "guide/current.md"

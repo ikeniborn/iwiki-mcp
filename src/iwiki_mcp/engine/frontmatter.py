@@ -13,8 +13,8 @@ OKF_TYPES = (
 CLASSIFIABLE_TYPES = tuple(item for item in OKF_TYPES if item != "specification")
 DEFAULT_TYPE = "concept"
 MAX_TAGS = 5
-STATUS_VOCAB = ("stub", "developing", "stable", "deprecated")
-DEFAULT_STATUS = "stub"
+STATUS_VOCAB = ("draft", "stable", "deprecated", "stub", "developing")
+DEFAULT_STATUS = "stable"
 # Reserved ## sections: authored link lists, excluded from chunking/embedding and
 # exempt from lead checks. Lower-case; compared case-insensitively. Referenced by
 # chunk.py and validate.py so the set lives in one config-free place.

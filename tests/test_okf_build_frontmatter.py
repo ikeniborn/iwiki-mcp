@@ -25,9 +25,9 @@ def test_explicit_description_and_status():
     assert warning is None
 
 
-def test_status_defaults_to_stub():
+def test_status_defaults_to_stable():
     meta, _ = _build("# X\n\n## Role\nprose\n", explicit_description="d")
-    assert meta["status"] == "stub"
+    assert meta["status"] == "stable"
 
 
 def test_open_type_kept():

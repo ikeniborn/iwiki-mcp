@@ -40,3 +40,10 @@ def test_lint_sections_surface_frontmatter_advisories(tmp_path):
     rep = lint(wiki)
     kinds = {s["type"] for s in rep["sections"] if "a.md" in s["page"]}
     assert "unknown_type" in kinds
+
+
+def test_git_lifecycle_lint(tmp_path):
+    from iwiki_mcp.engine.lint import lint
+    (tmp_path / "old.md").write_text(
+        "---\ntype: guide\nstatus: deprecated\nsuperseded_by: /missing.md\n---\n# Old\n")
+    assert lint(str(tmp_path))["lifecycle"] == [{"page": "old.md", "type": "missing_replacement"}]
